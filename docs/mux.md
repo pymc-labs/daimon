@@ -515,6 +515,8 @@ to the existing session administration driver.
 The optional Session native snapshot supports a temporary host codec that retains
 SDK response extras, fields-set semantics and exception types. Host preparation
 policy, billing checkpoints, recovery order and first feedback remain unchanged.
+Retrieval can bind a partial reply to its already authorized requested identity;
+the opaque provider snapshot retains only fields present in that reply.
 Tenant-aware creation also forwards its scope through vault bootstrap, credential
 mirroring and rollback; vault discovery retains its existing exact-name inventory
 check. Tenantless established creation uses a named legacy host capability.

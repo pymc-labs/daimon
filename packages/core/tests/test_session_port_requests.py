@@ -14,9 +14,49 @@ import pytest
 from anthropic import APIStatusError, AsyncAnthropic, omit
 from anthropic.types.beta import BetaManagedAgentsSessionAgent
 from daimon.core.session_ports_compat import create_session_record, session_scope
+from daimon.core.session_seal import inherited_seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+
+@pytest.mark.parametrize("tenant_seals_anything", [False, True])
+@pytest.mark.parametrize("lightweight", [False, True])
+async def test_predecessor_seal_read_accepts_a_partial_reply_without_identity(
+    tenant_seals_anything: bool, lightweight: bool
+) -> None:
+    if lightweight:
+        retrieve = AsyncMock()
+        client = cast(
+            AsyncAnthropic,
+            SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(retrieve=retrieve))),
+        )
+        result = await inherited_seal_ids(
+            client,
+            predecessor_session_id="sess_predecessor",
+            own_thread_id="thread_1",
+            tenant_seals_anything=tenant_seals_anything,
+        )
+        retrieve.assert_awaited_once_with("sess_predecessor")
+    else:
+        old, new = ScriptedTransport(), ScriptedTransport()
+        for transport in (old, new):
+            transport.queue(
+                ScriptedReply("GET", "/v1/sessions/sess_predecessor", httpx.Response(200, json={}))
+            )
+        async with old.client() as legacy, new.client() as client:
+            original = await legacy.beta.sessions.retrieve("sess_predecessor")
+            assert original.metadata is None
+            result = await inherited_seal_ids(
+                client,
+                predecessor_session_id="sess_predecessor",
+                own_thread_id="thread_1",
+                tenant_seals_anything=tenant_seals_anything,
+            )
+        old.assert_consumed()
+        new.assert_consumed()
+        assert old.requests == new.requests
+    assert result == (frozenset({"thread_1"}) if tenant_seals_anything else frozenset())
 
 
 @pytest.mark.parametrize(

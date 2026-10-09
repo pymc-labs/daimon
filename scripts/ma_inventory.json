@@ -5077,8 +5077,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 38,
-      "end": 38,
+      "line": 78,
+      "end": 78,
       "scope": "test_partial_sdk_response_keeps_original_parser_semantics",
       "category": "test",
       "resource": "sessions.create",
@@ -5090,8 +5090,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 209,
-      "end": 211,
+      "line": 249,
+      "end": 251,
       "scope": "test_repository_tokens_stay_opaque_until_the_single_wire_request",
       "category": "test",
       "resource": "sessions.create",
@@ -5101,8 +5101,21 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 110,
-      "end": 115,
+      "line": 48,
+      "end": 48,
+      "scope": "test_predecessor_seal_read_accepts_a_partial_reply_without_identity",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "legacy.beta.sessions.retrieve('sess_predecessor')",
+      "request_keys": [],
+      "response_access": [
+        "original.metadata"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 150,
+      "end": 155,
       "scope": "test_session_create_matches_legacy_wire_request",
       "category": "test",
       "resource": "sessions.create",
@@ -5114,8 +5127,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 125,
-      "end": 131,
+      "line": 165,
+      "end": 171,
       "scope": "test_session_create_matches_legacy_wire_request",
       "category": "test",
       "resource": "sessions.create",
@@ -5127,8 +5140,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 258,
-      "end": 260,
+      "line": 298,
+      "end": 300,
       "scope": "test_repository_create_errors_keep_sdk_type_and_redact_every_token",
       "category": "test",
       "resource": "sessions.create",
@@ -6114,8 +6127,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 384,
-      "end": 384,
+      "line": 398,
+      "end": 398,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.list",
@@ -6125,8 +6138,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 369,
-      "end": 369,
+      "line": 383,
+      "end": 383,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -6136,8 +6149,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 334,
-      "end": 334,
+      "line": 346,
+      "end": 346,
       "scope": "send",
       "category": "production",
       "resource": "sessions.create",
@@ -6147,8 +6160,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 341,
-      "end": 341,
+      "line": 353,
+      "end": 353,
       "scope": "create",
       "category": "production",
       "resource": "sessions.create",
@@ -6158,8 +6171,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 348,
-      "end": 348,
+      "line": 361,
+      "end": 361,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6169,8 +6182,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 478,
-      "end": 480,
+      "line": 492,
+      "end": 494,
       "scope": "apply_update",
       "category": "production",
       "resource": "sessions.update",
@@ -14742,7 +14755,7 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 175,
+      "line": 215,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Resource"

@@ -54,7 +54,9 @@ def _native_json(value: object) -> JsonValue:
         }
     if isinstance(value, (list, tuple)):
         return [_native_json(item) for item in cast(list[object] | tuple[object, ...], value)]
-    return _native_json(vars(value))
+    # SDK-compatible lightweight replies may contain internal client state.
+    # Preserve their public response fields, as the SDK parser does.
+    return _native_json({key: item for key, item in vars(value).items() if not key.startswith("_")})
 
 
 class MCPServer(NativeConfig):
@@ -208,36 +210,46 @@ class AnthropicSessions:
         authorize(self._authorization, scope, kind, ref.id)
         check_ref(scope, ref, self._account_scope_id, kind)
 
-    def _session(self, scope: Scope, native: BetaManagedAgentsSession) -> Session:
-        metadata = cast(dict[str, str], getattr(native, "metadata", None) or {})
-        check_record(scope, native.id, metadata)
-        version = getattr(getattr(native, "agent", None), "version", None)
+    def _session(
+        self, scope: Scope, native: BetaManagedAgentsSession, *, requested_id: str | None = None
+    ) -> Session:
+        snapshot = _native_json(native)
+        fields = snapshot if isinstance(snapshot, dict) else {}
+        native_id = fields.get("id")
+        session_id = native_id if isinstance(native_id, str) else requested_id
+        if session_id is None:
+            raise ValueError("a created session response must include its identity")
+        metadata = cast(dict[str, str], fields.get("metadata") or {})
+        check_record(scope, session_id, metadata)
+        agent = fields.get("agent")
+        version = agent.get("version") if isinstance(agent, dict) else None
+        version = version if isinstance(version, int) else None
         revision = Revision(
             local=version or 0, native=str(version) if version is not None else None
         )
         # The host's durable thread binding remains authoritative. This record
         # adopts the native session identity without writing/rebinding any slot.
         binding = ProviderBinding(
-            id=native.id,
+            id=session_id,
             thread=ThreadRef(
                 channel=ChannelRef(
                     tenant_id=scope.tenant_id,
                     platform="anthropic",
-                    channel_id=metadata.get("daimon_channel", native.id),
+                    channel_id=metadata.get("daimon_channel", session_id),
                 ),
-                thread_id=metadata.get("daimon_thread", native.id),
+                thread_id=metadata.get("daimon_thread", session_id),
             ),
             provider="anthropic",
             profile="anthropic.managed_agents",
-            native_refs={"session": native.id},
+            native_refs={"session": session_id},
             generation=0,
             config_revision=0,
             legacy_account_id=scope.account_id,
         )
-        status = getattr(native, "status", None) or "provisioning"
+        status = fields.get("status") or "provisioning"
         state = status if status in ("running", "idle", "terminated") else "provisioning"
         return Session(
-            ref=self._ref(scope, "session", native.id),
+            ref=self._ref(scope, "session", session_id),
             binding=binding,
             continuity=Continuity(
                 conversation="native_session",
@@ -247,7 +259,7 @@ class AnthropicSessions:
             requested_revision=revision,
             effective_revision=revision,
             state=state,
-            native=_native_json(native),
+            native=snapshot,
         )
 
     def _create_request(self, scope: Scope, spec: SessionSpec) -> SessionCreateRequest:
@@ -345,7 +357,9 @@ class AnthropicSessions:
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         self._check(scope, ref, "session")
         return self._session(
-            scope, await provider_call(self._client.beta.sessions.retrieve(ref.id))
+            scope,
+            await provider_call(self._client.beta.sessions.retrieve(ref.id)),
+            requested_id=ref.id,
         )
 
     async def list(
