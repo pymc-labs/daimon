@@ -585,3 +585,9 @@ token revocation, vault archive and local session retirement retain their
 existing order, duplicate-session handling, operator output and SDK errors.
 Repeated vault cleanup keeps its existing missing, conflict and already-archived
 responses. Grant edits that can rotate tokens in place keep that path.
+
+### Adapter-declared conformance gaps
+
+Adapters can declare individual fixtures PENDING with a typed capability,
+live-key or dependency reason. The declaration remains visible and blocks
+certification; undeclared capability errors still fail their probes.

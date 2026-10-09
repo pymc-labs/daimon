@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Literal, Protocol
 
 from mux.contracts.ids import ResourceRef, Scope
@@ -80,11 +82,34 @@ class ScriptedTransport(Protocol):
         ...
 
 
+class PendingKind(StrEnum):
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    LIVE_KEY_REQUIRED = "live_key_required"
+    ADAPTER_DEPENDENCY = "adapter_dependency"
+
+
+@dataclass(frozen=True)
+class PendingReason:
+    """Adapter-authored explanation, never a native exception message."""
+
+    kind: PendingKind
+    detail: str
+
+    def __post_init__(self) -> None:
+        if type(self.kind) is not PendingKind or not self.detail.strip():
+            raise ValueError("pending declarations require a typed kind and nonempty reason")
+
+
 @dataclass(frozen=True)
 class Result:
     fixture_id: str
     status: Literal["pass", "fail", "pending"]
     evidence: tuple[str, ...]
+    pending_reason: PendingReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.pending_reason is not None and self.status != "pending":
+            raise ValueError("pending declarations cannot certify a probe")
 
 
 @dataclass(frozen=True)
@@ -92,6 +117,17 @@ class Adapter:
     driver: ManagedAgents
     store: StateStore | None
     transport: ScriptedTransport
+    pending: Mapping[str, PendingReason] = field(default_factory=dict[str, PendingReason])
+
+    def __post_init__(self) -> None:
+        declarations = dict(self.pending)
+        ids = {f"C{i:02}" for i in range(1, 19)}
+        if any(
+            key not in ids or type(reason) is not PendingReason
+            for key, reason in declarations.items()
+        ):
+            raise ValueError("pending declarations need valid fixture IDs and typed reasons")
+        object.__setattr__(self, "pending", MappingProxyType(declarations))
 
 
 Factory = Callable[[], Adapter]
@@ -121,14 +157,30 @@ async def run(registry: Registry, name: str) -> tuple[Result, ...]:
     from mux.conformance.fixtures import FIXTURES
 
     results: list[Result] = []
-    for fixture_id, probe in FIXTURES.items():
+    for fixture_id in FIXTURES:
         adapter = registry.create(name)
-        try:
-            result = await probe(adapter.driver, adapter.store, adapter.transport)
-        except ConformanceFailure as exc:
-            result = Result(fixture_id, "fail", (f"check failed: {exc}",))
-        except Exception as exc:
-            # Do not serialize provider exception text, which can contain credentials.
-            result = Result(fixture_id, "fail", (f"probe raised {type(exc).__name__}",))
-        results.append(result)
+        results.append(await run_fixture(fixture_id, adapter))
     return tuple(results)
+
+
+async def run_fixture(fixture_id: str, adapter: Adapter) -> Result:
+    """Declared gaps defer execution; undeclared provider errors still fail."""
+    from mux.conformance.fixtures import FIXTURES
+
+    if fixture_id not in FIXTURES:
+        raise ValueError("unknown conformance fixture")
+    reason = adapter.pending.get(fixture_id)
+    if reason is not None:
+        return Result(
+            fixture_id,
+            "pending",
+            (f"adapter pending ({reason.kind.value}): {reason.detail}",),
+            pending_reason=reason,
+        )
+    try:
+        return await FIXTURES[fixture_id](adapter.driver, adapter.store, adapter.transport)
+    except ConformanceFailure as exc:
+        return Result(fixture_id, "fail", (f"check failed: {exc}",))
+    except Exception as exc:
+        # Do not serialize provider exception text, which can contain credentials.
+        return Result(fixture_id, "fail", (f"probe raised {type(exc).__name__}",))
