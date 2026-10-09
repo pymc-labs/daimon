@@ -26,7 +26,7 @@ DEFAULT_BACKEND: Provider = "anthropic"
 
 DEFAULT_PROFILES: Mapping[Provider, str] = {
     "anthropic": "anthropic.managed_agents",
-    "openai": "openai.persistent_workspace",
+    # OpenAI is re-added in PR3 when persistent_workspace is core again.
 }
 """The core profile a backend gets when the config names none.
 

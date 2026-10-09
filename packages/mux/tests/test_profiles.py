@@ -16,7 +16,7 @@ from pydantic import ValidationError
 def test_declared_profiles_and_their_core_status() -> None:
     assert {pid: p.core for pid, p in PROFILES.items()} == {
         "anthropic.managed_agents": True,
-        "openai.persistent_workspace": True,
+        "openai.persistent_workspace": False,
         "openai.conversation_only": False,
         "gemini.inline_reuse": False,
     }

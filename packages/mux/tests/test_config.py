@@ -39,10 +39,12 @@ def test_shared_threads_are_opt_in() -> None:
     assert resolve_default(BackendConfig(thread_mode="shared")).thread_mode == "shared"
 
 
-def test_openai_gets_its_core_profile_but_needs_a_model() -> None:
+def test_openai_explicit_profile_needs_a_model() -> None:
     with pytest.raises(InvalidConfig, match="explicit model"):
-        resolve_default(BackendConfig(backend="openai"))
-    resolved = resolve_default(BackendConfig(backend="openai", model="gpt-6"))
+        resolve_default(BackendConfig(backend="openai", profile="openai.persistent_workspace"))
+    resolved = resolve_default(
+        BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6")
+    )
     assert resolved.profile == "openai.persistent_workspace"
 
 
@@ -68,9 +70,15 @@ def test_profile_must_belong_to_its_backend(config: BackendConfig) -> None:
 
 
 def test_default_profiles_exist_and_are_core() -> None:
+    assert "openai" not in DEFAULT_PROFILES
     for backend, profile_id in DEFAULT_PROFILES.items():
         assert PROFILES[profile_id].provider == backend
         assert PROFILES[profile_id].core
+
+
+def test_openai_without_profile_is_refused_until_resources_land() -> None:
+    with pytest.raises(InvalidConfig, match="no default profile"):
+        resolve_default(BackendConfig(backend="openai", model="gpt-6"))
 
 
 def test_optional_requirement_needs_a_fallback() -> None:
@@ -113,7 +121,9 @@ def test_contradictory_selection_is_rejected_on_direct_construction(
 
 def test_blank_model_is_rejected_by_resolution() -> None:
     with pytest.raises(InvalidConfig, match="blank"):
-        resolve_default(BackendConfig(backend="openai", model="  "))
+        resolve_default(
+            BackendConfig(backend="openai", profile="openai.persistent_workspace", model="  ")
+        )
 
 
 def test_unknown_profile_is_rejected_by_resolution() -> None:

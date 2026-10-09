@@ -561,3 +561,18 @@ shared root are separate observations, rather than a claimed root-turn aggregate
 The host accounting bridge must establish coverage before summing overlapping
 grains. Production metadata storage is still injected: its transaction mechanism
 must avoid retaining database connections during provider I/O.
+
+## OpenAI driver core
+
+The unwired `mux.drivers.openai` implementation uses OpenAI Agents API sessions
+with a hosted environment for `openai.persistent_workspace`, or no environment for
+explicit `openai.conversation_only`. Root turn outcomes are authoritative;
+subagent completion, idle and EOF are not. Recovery merges saved work with a
+buffered live stream and discloses unreplayable event gaps. Usage counts remain
+nullable and corrections retain one observation identity with higher revisions.
+The host supplies authorization and durable snapshot/revision state. This package
+does not enable OpenAI in Daimon or change Anthropic defaults. The driver README
+lists the implemented surface and refused operations.
+The persistent profile remains non-core until the skills and artifacts resource
+slice is proved. Required vault and multiagent capabilities refuse admission;
+complete workspace export/import has no verified mapping and is unknown.
