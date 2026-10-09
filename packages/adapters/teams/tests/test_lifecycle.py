@@ -458,10 +458,10 @@ async def test_a_completion_ping_with_support_on_posts_the_button_below_the_answ
     lifecycle = await _posted(sender, completion_ping=True, ask_human=True)
     await lifecycle.on_terminal_success(_answer("Done."))
 
-    answer, button, closed = sender.activities[1:]
+    answer, closed, button = sender.activities[1:]
     assert answer.id is None and answer.text == "Done." and not answer.attachments
-    assert button.id is None and _asks(sender, 2), "the button follows the answer"
-    assert closed.id == "m-1" and card.ANSWERED_BELOW in closed.model_dump_json(), "then retired"
+    assert closed.id == "m-1" and card.ANSWERED_BELOW in closed.model_dump_json(), "card retired"
+    assert button.id is None and _asks(sender, 3), "then the button follows the answer"
 
 
 async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() -> None:

@@ -304,10 +304,10 @@ class TeamsTurnLifecycle:
                     self._answer_id, replaced = current, True
                 self._shown[current] = (chunk, is_last)
             self.final_message_id = current
+            if fresh:  # retire before the best-effort button so a lost post can't strand it
+                await self._retire_card()
             if self._ask_human:
                 await self._offer_ask_human()
-            if fresh:
-                await self._retire_card()
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
