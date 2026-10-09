@@ -123,6 +123,7 @@ async def test_slack_connect_link_uses_ephemeral_actions() -> None:
         thread_id="123.456",
         user_id="U123",
         url="https://example.test/link",
+        app_root_url="https://mcp.test",
     )
     client.chat_postMessage.assert_not_awaited()
     client.chat_postEphemeral.assert_awaited_once()
@@ -133,6 +134,12 @@ async def test_slack_connect_link_uses_ephemeral_actions() -> None:
     assert "https://example.test/link" not in posted["text"]
     attachment = posted["attachments"][0]
     assert attachment["color"] == "#0C1F40"
+    assert attachment["blocks"][0]["elements"][0]["image_url"] == (
+        "https://mcp.test/web/daimon-face.png"
+    )
+    assert attachment["blocks"][2]["accessory"]["image_url"] == (
+        "https://mcp.test/web/github-mark.png"
+    )
     assert [block["type"] for block in attachment["blocks"]] == [
         "context",
         "header",

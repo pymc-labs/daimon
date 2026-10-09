@@ -60,6 +60,9 @@ async def send_pending_notice(
             user_id=user_id,
             url=url,
             line=f"GitHub connection to {notice.account_login} was removed. Reconnect GitHub here.",
+            app_root_url=str(runtime.settings.mcp.app_root_url)
+            if runtime.settings.mcp.app_root_url
+            else None,
         )
     except Exception:
         async with runtime.sessionmaker.begin() as session:

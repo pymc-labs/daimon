@@ -6,7 +6,6 @@ import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
 from daimon.core.config import Settings
@@ -46,7 +45,7 @@ def safe_agent_name(name: str | None) -> str | None:
     try:
         uuid.UUID(shown)
     except ValueError:
-        return shown
+        return shown[:80].rstrip()
     return None
 
 
@@ -115,17 +114,9 @@ async def resolve_connect_card(
 def connect_button_blocks(
     url: str,
     *,
-    card: ConnectCard | None = None,
+    card: ConnectCard,
 ) -> list[dict[str, Any]]:
     """One branded Slack card, with the link only in the button action."""
-    if card is None:
-        parts = urlsplit(url)
-        card = build_connect_card(
-            agent_name=None,
-            identity_enabled=False,
-            avatar_url=None,
-            public_base_url=f"{parts.scheme}://{parts.netloc}",
-        )
     blocks: list[dict[str, Any]] = [
         {
             "type": "context",

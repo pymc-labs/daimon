@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
@@ -32,14 +31,17 @@ async def send_link(
     url: str,
     line: str = CONNECT_COPY,
     card: ConnectCard | None = None,
+    app_root_url: str | None = None,
 ) -> None:
-    parts = urlsplit(url)
-    card = card or build_connect_card(
-        agent_name=None,
-        identity_enabled=False,
-        avatar_url=None,
-        public_base_url=f"{parts.scheme}://{parts.netloc}",
-    )
+    if card is None:
+        if app_root_url is None:
+            raise ValueError("GitHub connection page is unavailable")
+        card = build_connect_card(
+            agent_name=None,
+            identity_enabled=False,
+            avatar_url=None,
+            public_base_url=app_root_url,
+        )
     kwargs: dict[str, Any] = {
         "channel": channel_id,
         "user": user_id,
