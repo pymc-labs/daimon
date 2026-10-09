@@ -152,6 +152,7 @@ class AnthropicManagedAgents:
                 "anthropic.session_create",
                 "anthropic.session_resource_create",
                 "anthropic.session_update",
+                "anthropic.session_system_message",
             )
         )
         extra = tuple(

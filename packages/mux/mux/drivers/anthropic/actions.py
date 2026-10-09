@@ -1,4 +1,4 @@
-"""Input translation. Native input is deliberately closed until a typed port lands."""
+"""Neutral input translation and the closed privileged system-message extension."""
 
 from collections.abc import Sequence
 from typing import cast
@@ -8,14 +8,35 @@ from anthropic.types.beta.sessions.beta_managed_agents_event_params import (
 )
 from pydantic import JsonValue
 
+from mux.contracts._base import Contract
 from mux.contracts.actions import (
     InputEvent,
+    NativeInput,
     UserMessage,
     UserToolConfirmation,
     UserToolResult,
 )
 from mux.contracts.events import ContentPart, ImagePart, NativePart, TextPart
-from mux.errors import UnsupportedCapability
+from mux.errors import ExtensionVersionError, UnsupportedCapability
+
+
+class SystemMessageConfig(Contract):
+    """Anthropic-only privileged text framing; no arbitrary event or SDK kwargs."""
+
+    content: tuple[TextPart, ...]
+
+
+def _system_message(event: NativeInput) -> dict[str, JsonValue]:
+    extension = event.extension
+    if extension.namespace != "anthropic.session_system_message":
+        raise UnsupportedCapability((extension.namespace,), "anthropic.managed_agents")
+    if extension.version != 1:
+        raise ExtensionVersionError(extension.namespace, extension.version, (1,))
+    config = SystemMessageConfig.model_validate(extension.value)
+    return {
+        "type": "system.message",
+        "content": [part.model_dump(mode="json") for part in config.content],
+    }
 
 
 def _content(parts: tuple[ContentPart, ...]) -> list[JsonValue]:
@@ -43,7 +64,7 @@ def _content(parts: tuple[ContentPart, ...]) -> list[JsonValue]:
 
 def translate_inputs(events: Sequence[InputEvent]) -> list[BetaManagedAgentsEventParams]:
     translated: list[dict[str, JsonValue]] = []
-    for event in events:
+    for index, event in enumerate(events):
         if isinstance(event, UserMessage):
             if event.mode == "steer":
                 raise UnsupportedCapability(("steer",), "anthropic.managed_agents")
@@ -69,5 +90,15 @@ def translate_inputs(events: Sequence[InputEvent]) -> list[BetaManagedAgentsEven
                 }
             )
         else:
-            raise UnsupportedCapability((event.extension.namespace,), "anthropic.managed_agents")
+            native = _system_message(event)
+            # The API requires exactly one privileged event at the end,
+            # immediately after the input it frames. Validate the whole batch
+            # before the caller starts provider I/O.
+            if (
+                not translated
+                or translated[-1]["type"] not in {"user.message", "user.custom_tool_result"}
+                or index != len(events) - 1
+            ):
+                raise ValueError("system.message must be final and immediately follow user input")
+            translated.append(native)
     return cast(list[BetaManagedAgentsEventParams], translated)

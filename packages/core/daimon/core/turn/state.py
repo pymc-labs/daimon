@@ -24,8 +24,10 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
     StopReason,
 )
 from daimon.core.errors import TurnError
+from daimon.core.pricing import uncached_input_tokens
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.termination import TerminationReason
+from mux.contracts.usage import UsageObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +101,21 @@ class UsageTotals:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     output_tokens: int = 0
+
+    def add_observation(self, usage: UsageObservation) -> UsageTotals:
+        """Sum reported request stages; unknown buckets add no measurement."""
+        if usage.grain != "model_request" or usage.basis != "increment":
+            raise ValueError("turn totals require disjoint model-request increments")
+        uncached = uncached_input_tokens(usage)
+        return UsageTotals(
+            input_tokens=self.input_tokens + (uncached if uncached is not None else 0),
+            output_tokens=self.output_tokens
+            + (usage.output_tokens if usage.output_tokens is not None else 0),
+            cache_creation_input_tokens=self.cache_creation_input_tokens
+            + (usage.input_cache_write_tokens if usage.input_cache_write_tokens is not None else 0),
+            cache_read_input_tokens=self.cache_read_input_tokens
+            + (usage.input_cached_tokens if usage.input_cached_tokens is not None else 0),
+        )
 
 
 @dataclass(frozen=True, slots=True)

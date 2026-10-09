@@ -35,6 +35,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
+from mux.contracts.events import Event, TurnEndedPayload
 
 __all__ = ["TerminationReason", "denial_termination_reason", "termination_reason"]
 
@@ -153,3 +154,32 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
             return TerminationReason.SESSION_AGENT_MISMATCH
         case _:
             return TerminationReason.UNKNOWN
+
+
+def normalized_stop_reason(event: Event) -> str | None:
+    """Only authoritative root boundaries stop the neutral live consume loop."""
+    if event.authority not in {"record", "reconciled"}:
+        return None
+    if event.type == "session.requires_action":
+        return "requires_action"
+    if event.type == "session.turn_ended":
+        payload = TurnEndedPayload.model_validate(event.payload)
+        return payload.native_reason or payload.outcome
+    return None
+
+
+def normalized_termination_reason(event: Event) -> TerminationReason | None:
+    """Map the neutral root outcome; host failure refinements still take precedence."""
+    if event.authority not in {"record", "reconciled"}:
+        return None
+    if event.type == "session.status_terminated":
+        return TerminationReason.SESSION_TERMINATED
+    if event.type != "session.turn_ended":
+        return None
+    payload = TurnEndedPayload.model_validate(event.payload)
+    return {
+        "completed": TerminationReason.COMPLETED,
+        "interrupted": TerminationReason.INTERRUPTED,
+        "errored": TerminationReason.UPSTREAM,
+        "terminated": TerminationReason.SESSION_TERMINATED,
+    }[payload.outcome]

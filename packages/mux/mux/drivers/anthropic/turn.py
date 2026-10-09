@@ -6,7 +6,14 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
 import httpx
-from anthropic import APIConnectionError, APITimeoutError, AsyncAnthropic, AsyncStream, omit
+from anthropic import (
+    NOT_GIVEN,
+    APIConnectionError,
+    APITimeoutError,
+    AsyncAnthropic,
+    AsyncStream,
+    omit,
+)
 from anthropic.types.beta.sessions import BetaManagedAgentsStreamSessionEvents
 
 from mux.contracts.actions import InputEvent
@@ -87,10 +94,13 @@ class AnthropicEvents:
         client: AsyncAnthropic,
         account_scope_id: str,
         authorization: ResourceAuthorization | None = None,
+        *,
+        stream_read_timeout_s: float | None = None,
     ) -> None:
         self._client = client
         self._account_scope_id = account_scope_id
         self._authorization = authorization
+        self._stream_read_timeout_s = stream_read_timeout_s
 
     def _check(self, scope: Scope, session: ResourceRef) -> None:
         check_ref(scope, session, self._account_scope_id, "session")
@@ -136,7 +146,11 @@ class AnthropicEvents:
             raise UnsupportedCapability(("stream_cursor",), "anthropic.managed_agents")
         stream = await provider_call(
             self._client.beta.sessions.events.stream(
-                session.id, event_deltas=["agent.message"] if previews else omit
+                session_id=session.id,
+                event_deltas=["agent.message"] if previews else omit,
+                timeout=httpx.Timeout(self._stream_read_timeout_s, connect=5.0)
+                if self._stream_read_timeout_s is not None
+                else NOT_GIVEN,
             )
         )
         return _NormalizedStream(stream, session, previews)

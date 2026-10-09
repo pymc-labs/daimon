@@ -683,3 +683,37 @@ content corruption, premature root release/stop, admission/scope bypass,
 successful unsupported migration, public handles and undeclared extensions.
 The registration context closes streams and SDK clients. This adds no provider
 discovery or host activation and makes no live calls.
+
+### Experimental turn bridge
+
+`DAIMON_TURN__PATH=legacy` remains the default, including an empty value.
+Setting `mux` opts into Events/Sessions ports for turn input, confirmed stream
+opening and status checks. The host keeps its existing authorization, billing,
+rendering and lifecycle policies. Prepared turns derive the scope from the
+admitted tenant and account; direct callers must supply their authorized scope.
+An injected backend also requires the session's bound ResourceRef. Ancillary
+Messages calls retain a separate client injection point in TurnDeps.
+
+The bridge waits for GET stream to open before POST input, independently of the
+first SSE event. It closes abandoned streams on cancellation and preserves the
+existing per-call read timeout. A temporary host edge decodes the opaque native
+JSON snapshot for existing reducers and hooks; SDK objects never cross neutral
+ports. Normalized root outcomes select the host termination reason after its
+existing failure refinements. Replay/cancel/orphan helpers move in the next
+turn unit. No StateStore journal or additional database writes are introduced.
+
+The Anthropic-only `anthropic.session_system_message@1` config carries privileged
+text framing for the initial handoff batch. Its closed schema accepts text
+blocks only, and the driver requires exactly one system event at the end,
+immediately following user input. It cannot send arbitrary native event types
+or SDK kwargs. The unchanged empty framing path omits the event entirely.
+
+Mux live model spans carry the owned UsageObservation into turn telemetry.
+N8's input projection retains the existing four stage totals and event-ID
+deduplication; unknown buckets remain unknown on the observation and contribute
+no measurement to totals. Overlapping turn/session or cumulative meters are
+rejected rather than combined with disjoint model-request increments.
+
+Unknown native root-idle reasons remain opaque in the normalized contract. The
+Anthropic M0 compatibility edge retains legacy terminal handling for those
+records, without adding a neutral outcome or a replay request.
