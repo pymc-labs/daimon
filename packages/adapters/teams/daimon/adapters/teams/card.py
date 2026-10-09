@@ -5,8 +5,8 @@ The status card says what Discord's and Slack's say, in the words of
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
 The answer replaces the card as plain markdown messages: a card TextBlock
 renders no code blocks, a message does. A card follows it with the
-summary line, Ask a human's button when support is on, and Teams' 👍/👎
-(`rated`, answered by `feedback`): Teams refuses an edit carrying both text
+summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
+Ask a human's when support is on: Teams refuses an edit carrying both text
 and a card. A tool-only or failed turn's notice card carries them itself.
 """
 
@@ -50,6 +50,8 @@ CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
 TOOLS_DONE_NOTICE = "Done."
 ASK_HUMAN = f"{ESCALATE} {ASK_THE_TEAM}"
 ASK_HUMAN_DIALOG = "ask_human"
+VOTE_UP_DIALOG = "feedback_up"
+VOTE_DOWN_DIALOG = "feedback_down"
 _FALLBACK_MAX_CHARS = 100
 
 
@@ -172,22 +174,22 @@ def ask_human_action() -> SubmitAction:
     return SubmitAction(title=ASK_HUMAN, data=OpenDialogData(ASK_HUMAN_DIALOG))
 
 
-def rated(message: MessageActivityInput) -> MessageActivityInput:
-    """Teams' 👍/👎 on `message`. Custom mode: a click asks daimon for the dialog,
-    so a 👎 gets the reasons Teams' built-in form has no room for."""
-    return message.add_feedback("custom")
+def vote_actions() -> list[Action]:
+    """Emoji-only 👍/👎: a click opens daimon's dialog, so a 👎 gets the reasons form."""
+    return [
+        SubmitAction(title="\N{THUMBS UP SIGN}", data=OpenDialogData(VOTE_UP_DIALOG)),
+        SubmitAction(title="\N{THUMBS DOWN SIGN}", data=OpenDialogData(VOTE_DOWN_DIALOG)),
+    ]
 
 
 def controls_card(summary: str, *, ask_human: bool) -> MessageActivityInput:
-    """Posted just below the answer: its summary line, Ask a human, and 👍/👎.
+    """Posted just below the answer: its summary line, 👍/👎 and Ask a human.
 
     A click names this message (`replyToId`), so a vote or request links to
     it, the answer's next message, and a request is made once per answer.
     """
-    body: list[CardElement] = [_summary_line(summary)]
-    if ask_human:
-        body.append(ActionSet(actions=[ask_human_action()]))
-    return rated(_card(body, fallback=summary))
+    actions = [*vote_actions(), *([ask_human_action()] if ask_human else [])]
+    return _card([_summary_line(summary), ActionSet(actions=actions)], fallback=summary)
 
 
 def answer_message(text: str, *, mention: Account | None = None) -> MessageActivityInput:
