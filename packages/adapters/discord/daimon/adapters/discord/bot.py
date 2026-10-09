@@ -18,10 +18,7 @@ import sentry_sdk
 import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
-from daimon.adapters.discord.agent_setup.stale_picture import (
-    StalePictureChangeButton,
-    refuse_stale_picture_submit,
-)
+from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
@@ -1717,12 +1714,6 @@ class DaimonBot(commands.Bot):
         """Remember the clicker's name for /billing; the command tree handles the rest."""
         remember_guild_user(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
-        )
-        # discord.py drops a submit from a form this process never opened.
-        # An old picture upload form gets the refusal rather than silence.
-        await refuse_stale_picture_submit(
-            interaction,
-            live_modal_ids=self._connection._view_store._modals,  # pyright: ignore[reportPrivateUsage]
         )
 
     async def on_message(self, message: discord.Message) -> None:

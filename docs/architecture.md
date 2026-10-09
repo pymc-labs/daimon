@@ -1194,7 +1194,7 @@ admission before any of this runs.
 
 - **Agent setup picture controls** show the current agent picture in Details.
   Admins get **Use default**, which restores the generated face. Custom
-  uploads are turned off: a Change button, upload form or Discord
+  uploads are turned off: a Change button, Slack upload form or Discord
   `/agent-setup` picture option from before answers with the refusal and
   writes nothing. Details keeps
   visibility and cache guidance off the main row.

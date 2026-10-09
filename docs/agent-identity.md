@@ -220,10 +220,12 @@ Named-agent routing is tracked separately from this identity work.
 - Setup panel: a Picture row on the agent's detail screen with **Use default**
   (back to the generated face) and **Details**. Admin only, recorded in the
   panel audit. Custom uploads are turned off: there is no Change button and no
-  attachment option on Discord's agent setup command. A Change button, upload
-  form or `/agent-setup` picture option left over from before answers "Custom
-  pictures are turned off." and writes nothing. An agent that already has an
-  uploaded picture keeps showing it until an admin uses **Use default**.
+  attachment option on Discord's agent setup command. A Change button, Slack
+  upload form or `/agent-setup` picture option left over from before answers
+  "Custom pictures are turned off." and writes nothing. A Discord upload form
+  left open across a restart shows Discord's "interaction failed". An agent
+  that already has an uploaded picture keeps showing it until an admin uses
+  **Use default**.
 
 ## Permissions and app changes
 
