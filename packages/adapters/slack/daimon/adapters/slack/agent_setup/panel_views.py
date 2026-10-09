@@ -70,8 +70,6 @@ __all__ = [
     "ACTION_AVATAR_DETAILS",
     "ACTION_AVATAR_RESET",
     "CALLBACK_AVATAR_UPLOAD",
-    "AVATAR_FILE_INPUT_ID",
-    "build_avatar_upload_form",
     "build_avatar_status_view",
     "ACTION_ENVIRONMENT",
     "ACTION_EXPAND_KEYS",
@@ -118,11 +116,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ACTION_DETAILS: Final = "agent_setup__details"
-ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"
+ACTION_AVATAR_CHANGE: Final = "agent_setup__avatar_change"  # stale panels only; refused
 ACTION_AVATAR_RESET: Final = "agent_setup__avatar_reset"
 ACTION_AVATAR_DETAILS: Final = "agent_setup__avatar_details"
-CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"
-AVATAR_FILE_INPUT_ID: Final = "agent_setup__avatar_file"
+CALLBACK_AVATAR_UPLOAD: Final = "agent_setup__avatar_upload"  # stale forms only; refused
 """Open one agent's Details. The button's `value` is the agent name."""
 
 ACTION_ROUTING: Final = "agent_setup__routing"
@@ -635,7 +632,6 @@ def build_details_view(
             {
                 "type": "actions",
                 "elements": [
-                    _button(action_id=ACTION_AVATAR_CHANGE, label="Change", value=details.name),
                     reset_button,
                     _button(action_id=ACTION_AVATAR_DETAILS, label="Details", value=details.name),
                 ],
@@ -672,33 +668,6 @@ def build_details_view(
     )
 
 
-def build_avatar_upload_form(*, meta: PanelMetadata) -> dict[str, Any]:
-    """A single image upload for the agent in the details view."""
-    return finish_modal(
-        title="Change picture",
-        blocks=[
-            _section("Choose a picture. Up to 2 MB."),
-            {
-                "type": "input",
-                "block_id": AVATAR_FILE_INPUT_ID,
-                "label": {"type": "plain_text", "text": "Picture"},
-                "element": {
-                    "type": "file_input",
-                    "action_id": AVATAR_FILE_INPUT_ID,
-                    "filetypes": ["png", "jpg", "jpeg", "gif", "webp"],
-                    "max_files": 1,
-                },
-            },
-            {"type": "divider"},
-            _context("File types: PNG, JPG, GIF or WebP."),
-        ],
-        private_metadata=encode_panel_metadata(meta),
-        callback_id=CALLBACK_AVATAR_UPLOAD,
-        close="Cancel",
-        submit="Save",
-    )
-
-
 def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
     """Keep public-image and cache guidance behind Details."""
     return finish_modal(
@@ -715,41 +684,20 @@ def build_avatar_details_view(*, meta: PanelMetadata) -> dict[str, Any]:
     )
 
 
-def build_avatar_status_view(
-    *, meta: PanelMetadata, message: str, external_id: str | None = None, retry: bool = False
-) -> dict[str, Any]:
-    """Show upload progress or a result in the submitted modal itself."""
+def build_avatar_status_view(*, meta: PanelMetadata, message: str) -> dict[str, Any]:
+    """Show a picture result in the modal it came from."""
     title, separator, next_step = message.partition(". ")
-    view = finish_modal(
+    return finish_modal(
         title="Picture",
         blocks=[
             _section(title + ("." if separator else "")),
             *([_section(next_step)] if next_step else []),
             {"type": "divider"},
-            *(
-                [
-                    {
-                        "type": "actions",
-                        "elements": [
-                            _button(
-                                action_id=ACTION_AVATAR_CHANGE,
-                                label="Choose picture",
-                                value=meta.agent_name or "",
-                            )
-                        ],
-                    },
-                ]
-                if retry
-                else []
-            ),
             _context("Agent setup"),
         ],
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_AVATAR_UPLOAD,
     )
-    if external_id is not None:
-        view["external_id"] = external_id
-    return view
 
 
 def _answers_text(details: AgentDetails) -> str:

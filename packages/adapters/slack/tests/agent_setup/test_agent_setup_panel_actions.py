@@ -64,6 +64,7 @@ from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
+from daimon.core.stores import agent_avatars
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
@@ -991,7 +992,7 @@ async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy
     assert (policy.channel_rules, policy.agent_rules) == ({}, {}), "all lifted"
 
 
-async def test_avatar_buttons_dispatch_to_upload_and_reset(
+async def test_stale_change_click_is_refused_and_use_default_still_runs(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -1005,6 +1006,8 @@ async def test_avatar_buttons_dispatch_to_upload_and_reset(
     agent_lookup = AsyncMock(return_value=True)
     monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(avatar_module, "may_edit_avatar", agent_lookup)
+    write = AsyncMock()
+    monkeypatch.setattr(agent_avatars, "replace_avatar", write)
     reset = AsyncMock()
     monkeypatch.setattr(avatar_module, "reset_agent_avatar", reset)
     meta = _meta(view="details", agent_name=_OTHER_AGENT)
@@ -1014,10 +1017,10 @@ async def test_avatar_buttons_dispatch_to_upload_and_reset(
     )
     (pushed,) = _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
     assert pushed["view"]["callback_id"] == CALLBACK_AVATAR_UPLOAD
-    upload_meta = decode_panel_metadata(pushed["view"]["private_metadata"])
-    assert upload_meta is not None
-    assert (upload_meta.agent_name, upload_meta.root_view_id) == (_OTHER_AGENT, "V_DETAILS")
+    assert "file_input" not in json.dumps(pushed["view"])
+    assert "Custom pictures are turned off." in json.dumps(pushed["view"])
     agent_lookup.assert_not_awaited()
+    write.assert_not_awaited()
 
     await handle_agent_setup_action(
         runtime, _action_payload(ACTION_AVATAR_RESET, meta=meta, view_id="V_DETAILS")
@@ -1042,7 +1045,7 @@ async def test_picture_details_button_routes_to_its_modal(
     assert "Anyone who sees a message can open the picture." in str(pushed["view"]["blocks"])
 
 
-async def test_picture_retry_replaces_status_modal_instead_of_pushing(
+async def test_stale_retry_on_status_modal_shows_the_refusal_in_place(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -1063,9 +1066,8 @@ async def test_picture_retry_replaces_status_modal_instead_of_pushing(
     assert not _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
     (updated,) = _sent(fake_slack_web_client.mock, _VIEWS_UPDATE_KEY)
     assert updated["view_id"] == "V_STATUS"
-    assert updated["view"]["callback_id"] == CALLBACK_AVATAR_UPLOAD
-    upload_meta = decode_panel_metadata(updated["view"]["private_metadata"])
-    assert upload_meta is not None and upload_meta.root_view_id == "V_DETAILS"
+    assert "Custom pictures are turned off." in json.dumps(updated["view"])
+    assert "file_input" not in json.dumps(updated["view"])
 
 
 async def test_add_skill_opens_the_form_or_refuses_by_where_the_agent_answers(

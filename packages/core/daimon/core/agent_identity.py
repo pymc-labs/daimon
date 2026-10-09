@@ -29,6 +29,9 @@ _MAX_FACE_ATTEMPTS = 3
 # runs from the render's start, so a stuck render costs later turns nothing.
 _FIRST_FACE_WAIT_S = 3.0
 
+# Shown wherever a stale control or form tries to upload an agent picture.
+CUSTOM_PICTURES_OFF = "Custom pictures are turned off. Each agent uses its generated face."
+
 
 @dataclass(frozen=True)
 class AgentIdentity:
