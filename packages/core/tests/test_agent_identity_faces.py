@@ -44,6 +44,7 @@ async def test_slow_face_render_does_not_block_turn_past_the_wait(
             public_base_url="https://example.test",
             enabled=True,
             background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
+            wait_for_face=True,
         ),
         timeout=0.1,
     )
@@ -79,8 +80,69 @@ async def test_new_agent_first_answer_waits_for_its_face(
         public_base_url="https://example.test",
         enabled=True,
         background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
+        wait_for_face=True,
     )
     assert identity.avatar_url == "https://example.test/avatars/face-token/abcdef123456.png"
+
+
+@pytest.mark.asyncio
+async def test_panels_do_not_wait_for_a_new_face(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = asyncio.Event()
+
+    async def lookup(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def generate(*_args: object, **_kwargs: object) -> None:
+        await release.wait()
+
+    monkeypatch.setattr(agent_identity, "get_agent_avatar", lookup)
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
+    factory = MagicMock()
+    factory.kw = {"bind": None}
+    identity = await asyncio.wait_for(
+        resolve_agent_identity(
+            cast(AsyncSession, object()),
+            tenant_id=uuid.uuid4(),
+            agent_name="Panel",
+            is_builtin=False,
+            public_base_url="https://example.test",
+            enabled=True,
+            background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
+        ),
+        timeout=0.1,
+    )
+    assert identity.avatar_url is None
+    release.set()
+    await asyncio.gather(*agent_identity._face_tasks.values())
+
+
+@pytest.mark.asyncio
+async def test_failed_face_render_skips_the_second_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads = 0
+
+    async def lookup(*_args: object, **_kwargs: object) -> None:
+        nonlocal reads
+        reads += 1
+
+    async def generate(*_args: object, **_kwargs: object) -> None:
+        raise OSError("missing face layer")
+
+    monkeypatch.setattr(agent_identity, "get_agent_avatar", lookup)
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
+    factory = MagicMock()
+    factory.kw = {"bind": None}
+    identity = await resolve_agent_identity(
+        cast(AsyncSession, object()),
+        tenant_id=uuid.uuid4(),
+        agent_name="Broken",
+        is_builtin=False,
+        public_base_url="https://example.test",
+        enabled=True,
+        background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
+        wait_for_face=True,
+    )
+    assert identity.avatar_url is None
+    assert reads == 1
 
 
 @pytest.mark.asyncio
@@ -186,9 +248,10 @@ async def test_face_generation_error_does_not_escape_background_task(
 
 @pytest.mark.asyncio
 async def test_background_face_generation_uses_independent_database_sessions(
-    db_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_clean: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del db_clean
+    monkeypatch.setattr(agent_identity, "_FIRST_FACE_WAIT_S", 30.0)
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     async with factory.begin() as session:
         tenant = await make_tenant(session)
@@ -201,6 +264,7 @@ async def test_background_face_generation_uses_independent_database_sessions(
             public_base_url="https://example.test",
             enabled=True,
             background_sessionmaker=factory,
+            wait_for_face=True,
         )
     async with factory() as session:
         avatar = await get_agent_avatar(
@@ -243,6 +307,7 @@ async def test_face_generation_backs_off_and_stops_after_three_failures(
             enabled=True,
             background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
         )
+        await agent_identity._face_tasks[key]
         await asyncio.sleep(0)
         assert calls == expected
         assert agent_identity._face_failures[key][0] == expected

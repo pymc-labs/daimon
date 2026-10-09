@@ -2122,6 +2122,7 @@ class SlackApp:
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "slack", team_id),
                     background_sessionmaker=self.runtime.sessionmaker,
+                    wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
             log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
@@ -3036,6 +3037,7 @@ class SlackApp:
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "slack", team_id),
                     background_sessionmaker=self.runtime.sessionmaker,
+                    wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
             log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)

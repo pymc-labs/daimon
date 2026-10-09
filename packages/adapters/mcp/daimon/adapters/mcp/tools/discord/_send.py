@@ -181,6 +181,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             public_base_url=runtime.settings.mcp.app_root_url,
                             enabled=identity_enabled_for(runtime.settings, "discord", guild_id),
                             background_sessionmaker=runtime.session_factory,
+                            wait_for_face=True,
                         )
             except Exception as exc:
                 _log.warning(
