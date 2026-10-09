@@ -91,12 +91,22 @@ async def test_pending_installation_request_matches_signed_in_person(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await oauth_github.has_pending_installation_request(
-            client, app_id="42", private_key="pem", github_user_id=17
+        assert (
+            await oauth_github.has_pending_installation_request(
+                client, app_id="42", private_key="pem", github_user_id=17
+            )
+            == "example"
         )
         assert not await oauth_github.has_pending_installation_request(
             client, app_id="42", private_key="pem", github_user_id=20
         )
+
+
+def test_pending_page_names_verified_organization_safely() -> None:
+    page = oauth_github._pending_page("#check", "#cancel", "team<one>")
+    text = page.body.decode()
+    assert "An owner of team&lt;one&gt; must approve Daimon." in text
+    assert "team<one>" not in text
 
 
 @pytest.mark.asyncio
@@ -256,9 +266,9 @@ async def test_connection_happy_path_and_rechecks(
         page = await browser.get("/oauth/github/confirm", params={"state": state})
         assert page.status_code == 200
         assert "Choose repos" in page.text
-        assert "Select at least one repo" in page.text
+        assert "0 selected" in page.text
         assert 'id="github-connect-form"' in page.text
-        assert 'submit.textContent = "Connecting…"' in page.text
+        assert "Connecting…" in page.text
         assert "submit.disabled = true" in page.text
         assert "if (connecting || !boxes.some(box => box.checked))" in page.text
         assert 'name="access" value="write" checked' in page.text
@@ -297,7 +307,7 @@ async def test_connection_happy_path_and_rechecks(
         approval_pending = True
         waiting = await browser.get("/oauth/github/confirm", params={"state": state})
         assert "Waiting for GitHub approval" in waiting.text
-        assert "GitHub has the request." in waiting.text
+        assert "A GitHub owner must approve Daimon." in waiting.text
         assert "Check again" in waiting.text
         assert waiting.text.count('class="gh-primary"') == 1
         approval_pending = False

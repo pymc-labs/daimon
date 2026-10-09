@@ -52,12 +52,16 @@ def _page(
     link = f"<p>{back}</p>" if back else ""
     if action is not None:
         label, url = action
-        link = f'<p><a href="{html.escape(url, quote=True)}">{html.escape(label)}</a></p>' + link
+        link = (
+            '<div class="gh-actions"><a class="gh-primary" '
+            f'href="{html.escape(url, quote=True)}">{html.escape(label)}</a></div>' + link
+        )
     return branded_page(
         title="GitHub",
         state_bar=" status-bar--rose" if status >= 400 else "",
         body_html=f"<h1>{html.escape(message)}</h1>{link}",
         status=status,
+        context="GitHub",
     )
 
 

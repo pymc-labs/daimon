@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from decimal import Decimal
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
+from daimon.adapters.mcp.checkout import billing_cancel, billing_success
 from daimon.adapters.mcp.oauth_github import (
     _already_connected_page,
     _cancelled_page,
@@ -18,8 +22,18 @@ from daimon.adapters.mcp.oauth_github import (
     _pending_page,
     _Repo,
 )
+from daimon.adapters.mcp.oauth_github_personal import _page as personal_page
+from daimon.adapters.mcp.oauth_mcp import _success_page as mcp_success_page
+from daimon.adapters.mcp.oauth_slack import (
+    _install_landing_html as slack_install_page,
+)
+from daimon.adapters.mcp.oauth_slack import (
+    _success_html as slack_success_page,
+)
 from playwright.sync_api import Route, sync_playwright
 from starlette.responses import Response
+
+STATIC = Path(__file__).resolve().parents[1] / "packages/adapters/mcp/daimon/adapters/mcp/static"
 
 ROOT = Path(os.environ.get("GITHUB_CAPTURE_OUT", "/tmp/daimon-github-app/real-pages"))
 VIEWPORTS = ((390, 844), (768, 1024), (1280, 900))
@@ -84,12 +98,26 @@ def pages() -> dict[str, Response]:
         "picker_empty": confirmation(agent=True),
         "picker_many": confirmation(agent=True),
         "picker_search": confirmation(agent=True),
+        "picker_no_results": confirmation(agent=True),
+        "picker_error": _confirmation_page(
+            root="https://mcp.test",
+            state="review",
+            invitation_hash="review",
+            secret="review",
+            cancel_url="https://mcp.test/cancel",
+            installations=[INSTALLATION],
+            clients_present=True,
+            platform="discord",
+            workspace="Example Lab",
+            agent_name="ResearchBot",
+            selection_error="Select at least one repo",
+        ),
         "picker_selected": confirmation(agent=True),
         "picker_read_only": confirmation(agent=True),
         "picker_connecting": confirmation(agent=True),
         "picker_workspace": confirmation(agent=False),
         "install": _install_page("https://github.com/apps/example/installations/new", "#cancel"),
-        "pending": _pending_page("#check", "#cancel"),
+        "pending": _pending_page("#check", "#cancel", "example-org"),
         "no_repos": _no_repos_page("https://mcp.test/connect/example", "#another"),
         "done_agent": _done_page(
             count=12,
@@ -152,6 +180,19 @@ def pages() -> dict[str, Response]:
             "Ask an admin for a new link."
         ),
         "selection_invalid": _error("Selection could not be verified.", 400, "#retry"),
+        "slack_install": slack_install_page(
+            authorize_url="https://slack.com/oauth/v2/authorize",
+            signup_credit=Decimal("5"),
+        ),
+        "slack_done": slack_success_page(workspace="Example Lab", signup_credit=Decimal("5")),
+        "personal_link": personal_page(
+            "Linked as @reviewer",
+            status=200,
+            back='<a href="#back">Back to Discord</a>',
+        ),
+        "mcp_done": mcp_success_page(server_name="Analytics MCP", agent_name="ResearchBot"),
+        "billing_done": asyncio.run(billing_success(None)),  # type: ignore[arg-type]
+        "billing_cancel": asyncio.run(billing_cancel(None)),  # type: ignore[arg-type]
     }
 
 
@@ -160,6 +201,24 @@ def route_html(content: str):
         route.fulfill(status=200, content_type="text/html", body=content)
 
     return fulfill
+
+
+def route_asset(route: Route) -> None:
+    name = Path(urlparse(route.request.url).path).name
+    content_type = (
+        "text/css"
+        if name.endswith(".css")
+        else ("image/png" if name.endswith(".png") else "font/ttf")
+    )
+    route.fulfill(status=200, content_type=content_type, body=(STATIC / name).read_bytes())
+
+
+def collect_form(posted: list[dict[str, list[str]]]):
+    def accept_form(route: Route) -> None:
+        posted.append(parse_qs(route.request.post_data or ""))
+        route.fulfill(status=200, content_type="text/html", body="Connected")
+
+    return accept_form
 
 
 def main() -> None:
@@ -176,6 +235,7 @@ def main() -> None:
                 page = context.new_page()
                 content = response.body.decode()
                 page.route("https://mcp.test/preview", route_html(content))
+                page.route("https://mcp.test/web/*", route_asset)
                 page.goto("https://mcp.test/preview")
                 if state in {"picker_selected", "picker_read_only", "picker_connecting"}:
                     for box in page.locator("input[name=repo]").all()[:12]:
@@ -185,10 +245,24 @@ def main() -> None:
                 if state == "picker_search":
                     page.locator("#search-repos").fill("research")
                     assert page.locator(".repo-choice:visible").count() == 4
-                    assert page.locator("#select-all-repos").inner_text() == "Select 4 results"
+                    assert page.locator("#select-all-repos").inner_text() == "Select all 4"
                     assert page.locator("#clear-search").count() == 0
+                if state == "picker_no_results":
+                    page.locator("#search-repos").fill("no-such-repo")
+                    assert page.locator(".gh-empty").is_visible()
+                    assert page.locator("#repo-count").inner_text() == "0 matching repos"
+                if state == "picker_error":
+                    assert (
+                        page.locator(".gh-inline-error").inner_text() == "Select at least one repo"
+                    )
                 if state == "picker_many":
-                    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+                    page.locator(".gh-repo-list").evaluate(
+                        "element => element.scrollTop = element.scrollHeight"
+                    )
+                    page.evaluate(
+                        "window.scrollTo({top: document.documentElement.scrollHeight, "
+                        "behavior: 'instant'})"
+                    )
                     last = page.locator(".repo-choice").last.bounding_box()
                     footer = page.locator(".gh-finish").bounding_box()
                     assert last is not None and footer is not None
@@ -203,18 +277,22 @@ def main() -> None:
                         "12 selected. Read and write."
                     )
                     assert page.locator("#change-access").is_visible()
+                    page.locator(".gh-repo-list").evaluate("element => element.scrollTop = 0")
+                    page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
                     page.screenshot(path=ROOT / "screenshots" / f"{state}-{width}.png")
                     page.locator("#change-access").click()
                     assert page.locator('input[name="access"][value="write"]').evaluate(
                         "element => document.activeElement === element"
                     )
                 if state == "done_agent":
-                    assert page.locator("h1").inner_text() == "Connected 12 repos to ResearchBot"
+                    assert page.locator("h1").inner_text() == "Connected 12 repos"
                     assert (
                         "ResearchBot can use them from your next message."
                         in page.locator("main").inner_text()
                     )
                 if state == "picker_connecting":
+                    page.locator(".gh-repo-list").evaluate("element => element.scrollTop = 0")
+                    page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
                     page.locator("#github-connect-form").evaluate(
                         "form => form.addEventListener('submit', "
                         "e => e.preventDefault(), {capture:true})"
@@ -239,7 +317,7 @@ def main() -> None:
                     assert page.locator("input[name=repo]:checked").count() == 0
                     assert page.locator("#connect-repos").is_disabled()
                     assert page.locator(".gh-repo-list").evaluate(
-                        "element => element.scrollHeight === element.clientHeight"
+                        "element => element.scrollHeight > element.clientHeight"
                     )
                     page.locator("#search-repos").fill("research")
                     page.locator("#select-all-repos").click()
@@ -266,6 +344,34 @@ def main() -> None:
                 if state not in {"picker_empty", "picker_selected"}:
                     page.screenshot(path=ROOT / "screenshots" / f"{state}-{width}.png")
                 page.close()
+            if width == 390:
+                no_js = browser.new_context(
+                    viewport={"width": width, "height": height}, java_script_enabled=False
+                )
+                page = no_js.new_page()
+                page.route(
+                    "https://mcp.test/preview", route_html(confirmation(agent=True).body.decode())
+                )
+                page.route("https://mcp.test/web/*", route_asset)
+                posted: list[dict[str, list[str]]] = []
+
+                page.route("https://mcp.test/oauth/github/confirm", collect_form(posted))
+                page.goto("https://mcp.test/preview")
+                radio = page.locator('input[name="access"][value="write"]')
+                assert radio.is_checked()
+                radio.focus()
+                page.keyboard.press("ArrowDown")
+                assert page.locator('input[name="access"][value="read"]').is_checked()
+                page.keyboard.press("ArrowUp")
+                assert radio.is_checked()
+                first = page.locator('input[name="repo"]').first
+                first.focus()
+                page.keyboard.press("Space")
+                assert first.is_checked()
+                page.locator("#connect-repos").click()
+                assert posted and posted[0]["repo"] == ["101"]
+                assert posted[0]["access"] == ["write"]
+                no_js.close()
             context.close()
         browser.close()
 

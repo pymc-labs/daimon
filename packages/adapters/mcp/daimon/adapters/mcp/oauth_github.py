@@ -81,8 +81,13 @@ class _UserPayload(BaseModel):
     id: int
 
 
+class _AccountLoginPayload(BaseModel):
+    login: str = ""
+
+
 class _InstallationRequestPayload(BaseModel):
     requester: _UserPayload
+    account: _AccountLoginPayload | None = None
 
 
 def _error(
@@ -170,9 +175,7 @@ def _done_page(
                 f"{html.escape(agent_name)}. You can close this tab.</p>"
             )
         )
-        return github_page(
-            title=f"Connected {_repo_count(count)} to {agent_name}", body_html=ready + body
-        )
+        return github_page(title=f"Connected {_repo_count(count)}", body_html=ready + body)
     if same_person:
         body = (
             "<p>The repos are connected. Choose which agents use them in GitHub setup.</p>"
@@ -185,7 +188,7 @@ def _done_page(
             f"<p>{html.escape(requester_label)} can now choose which agents use them. "
             "You can close this tab.</p>"
         )
-    return github_page(title=f"Connected {_repo_count(count)}.", body_html=body)
+    return github_page(title=f"Connected {_repo_count(count)}", body_html=body)
 
 
 def _install_page(install_url: str, cancel_url: str) -> Response:
@@ -201,13 +204,16 @@ def _install_page(install_url: str, cancel_url: str) -> Response:
     )
 
 
-def _pending_page(check_url: str, cancel_url: str) -> Response:
+def _pending_page(check_url: str, cancel_url: str, organization: str | None = None) -> Response:
+    who = (
+        f"An owner of {html.escape(organization)} must approve Daimon."
+        if organization
+        else "A GitHub owner must approve Daimon."
+    )
     return github_page(
         title="Waiting for GitHub approval",
         body_html=(
-            "<p>An owner of this GitHub account must approve Daimon. "
-            "GitHub has the request. Check again after they approve.</p>"
-            "<p>Cancel closes this check. The approval request stays on GitHub.</p>"
+            f"<p>{who} Check again after they approve.</p>"
             '<div class="gh-actions">'
             f'<a class="gh-primary" href="{check_url}">Check again</a>'
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div>'
@@ -266,7 +272,6 @@ _PICKER_SCRIPT = """
   const changeAccess = document.getElementById("change-access");
   const bulk = document.getElementById("select-all-repos");
   const count = document.getElementById("repo-count");
-  const selectedCount = document.getElementById("selected-count");
   const showSelected = document.getElementById("show-selected");
   const status = document.getElementById("selection-status");
   const submit = document.getElementById("connect-repos");
@@ -288,20 +293,18 @@ _PICKER_SCRIPT = """
       owner.hidden = !owner.querySelector(".gh-choice:not([hidden])");
     }
     const results = !!query || selectedOnly;
-    count.textContent = results ? `${visible} results` : `${boxes.length} repos available`;
-    selectedCount.textContent = `${selected} selected`;
+    count.textContent = query ? `${visible} matching ${plural(visible)}` :
+      selectedOnly ? `${visible} selected ${plural(visible)}` : `${boxes.length} repos available`;
     showSelected.hidden = selected === 0;
     showSelected.textContent = selectedOnly ? "Show all" : "Show selected";
     changeAccess.hidden = selected === 0;
     const visibleBoxes = boxes.filter(box => !box.closest(".gh-choice").hidden);
     const allVisibleChecked = visibleBoxes.length > 0 && visibleBoxes.every(box => box.checked);
-    bulk.textContent = allVisibleChecked ? "Clear selection" :
-      results ? `Select ${visible} results` : `Select all ${boxes.length}`;
+    bulk.textContent = allVisibleChecked ? "Clear selection" : `Select all ${visible}`;
     bulk.hidden = visible === 0;
     const access = form.querySelector('input[name="access"]:checked').value;
     const accessLabel = access === "write" ? "Read and write" : "Read only";
-    status.textContent = selected ? `${selected} selected. ${accessLabel}.` :
-      "Select at least one repo";
+    status.textContent = selected ? `${selected} selected. ${accessLabel}.` : "0 selected";
     submit.disabled = selected === 0;
     submit.textContent = selected ? `Connect ${selected} ${plural(selected)}` : "Connect repos";
     form.querySelector(".gh-empty").hidden = visible !== 0;
@@ -324,10 +327,26 @@ _PICKER_SCRIPT = """
     if (connecting || !boxes.some(box => box.checked)) { event.preventDefault(); return; }
     connecting = true;
     const selected = boxes.filter(box => box.checked).length;
+    for (const box of boxes.filter(box => box.checked)) {
+      const input = document.createElement("input");
+      input.type = "hidden"; input.name = "repo"; input.value = box.value;
+      form.appendChild(input);
+    }
+    const selectedAccess = form.querySelector('input[name="access"]:checked');
+    const accessInput = document.createElement("input");
+    accessInput.type = "hidden"; accessInput.name = "access";
+    accessInput.value = selectedAccess.value; form.appendChild(accessInput);
+    form.querySelectorAll('input[type="checkbox"], input[type="radio"]').forEach(input => {
+      input.disabled = true;
+    });
+    search.disabled = true;
+    bulk.disabled = true;
+    showSelected.disabled = true;
+    changeAccess.disabled = true;
     flow.classList.add("is-connecting");
     status.textContent = `Connecting ${selected} ${plural(selected)}…`;
     submit.disabled = true;
-    submit.textContent = "Connecting…";
+    submit.innerHTML = '<span class="gh-spinner" aria-hidden="true"></span>Connecting…';
     form.setAttribute("aria-busy", "true");
   });
   render();
@@ -341,11 +360,11 @@ def _access_choices() -> str:
         '<section class="gh-side-card gh-access" id="github-access" '
         'aria-label="Access"><h2>Access</h2>'
         '<label><input type="radio" name="access" value="write" checked>'
-        "<strong>Read and write</strong>"
-        "<small>Push branches, open issues and pull requests.</small></label>"
+        "<span><strong>Read and write</strong>"
+        "<small>Push branches, open issues and pull requests.</small></span></label>"
         '<label><input type="radio" name="access" value="read">'
-        "<strong>Read only</strong>"
-        "<small>Read code, issues and pull requests.</small></label></section>"
+        "<span><strong>Read only</strong>"
+        "<small>Read code, issues and pull requests.</small></span></label></section>"
     )
 
 
@@ -364,13 +383,8 @@ def _confirmation_page(
     selection_error: str | None = None,
 ) -> Response:
     """Render the same picker used by the live route and screenshot capture."""
-    destination = f"For {agent_name}" if agent_name else "For your server"
     place = "Server" if platform == "discord" else "Workspace"
-    context = (
-        '<div class="gh-context">'
-        f"<span>{html.escape(destination)}</span>"
-        f"<span>{place}: {html.escape(workspace)}</span></div>"
-    )
+    context = f'<div class="gh-context"><span>{place}: {html.escape(workspace)}</span></div>'
     parts = [
         f'<form id="github-connect-form" method="post" '
         f'action="{html.escape(root, quote=True)}/oauth/github/confirm">',
@@ -381,12 +395,6 @@ def _confirmation_page(
         f'value="{_receipt_signature(state, invitation_hash, secret)}">',
         context,
     ]
-    if selection_error:
-        parts.append(f'<p class="gh-warning" role="alert">{html.escape(selection_error)}</p>')
-    if clients_present:
-        parts.append(
-            '<p class="gh-warning">Clients use this server. Pick only the repos they may see.</p>'
-        )
     parts.extend(
         [
             '<div class="gh-picker-grid"><section class="gh-results">',
@@ -394,6 +402,8 @@ def _confirmation_page(
             'id="search-repos" placeholder="Search repos" aria-label="Search repos" '
             'autocomplete="off"></div>',
             '<div class="gh-list-toolbar"><span id="repo-count" aria-live="polite"></span>'
+            '<button class="gh-link-button" id="show-selected" type="button" hidden>'
+            "Show selected</button>"
             '<button class="gh-link-button" type="button" '
             'id="select-all-repos" hidden></button></div>',
             '<div class="gh-repo-list" aria-label="Repos you manage">',
@@ -420,14 +430,23 @@ def _confirmation_page(
             '<p class="gh-empty" hidden>No repos match this search.</p></div></section>',
             '<aside class="gh-side">',
             _access_choices(),
-            '<section class="gh-side-card"><h2>Selection</h2>'
-            '<p class="gh-selection-count" id="selected-count" aria-live="polite">0 selected</p>'
-            '<button class="gh-link-button" id="show-selected" type="button" hidden>'
-            "Show selected</button></section></aside></div>",
+            "</aside></div>",
             '<div class="gh-finish"><div class="gh-finish-status">'
-            '<p id="selection-status" aria-live="polite">Select at least one repo</p>'
+            '<p id="selection-status" aria-live="polite">0 selected</p>'
             '<button class="gh-link-button" id="change-access" type="button" hidden>'
-            'Change</button></div><div class="gh-finish-actions">'
+            "Change</button>"
+            + (
+                '<p class="gh-client-note">Clients use this server. '
+                "Pick only the repos they may see.</p>"
+                if clients_present
+                else ""
+            )
+            + (
+                f'<p class="gh-inline-error" role="alert">{html.escape(selection_error)}</p>'
+                if selection_error
+                else ""
+            )
+            + '</div><div class="gh-finish-actions">',
             '<button class="gh-primary" id="connect-repos" type="submit">'
             "Connect repos</button>"
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div></div>',
@@ -435,7 +454,11 @@ def _confirmation_page(
             _PICKER_SCRIPT,
         ]
     )
-    return github_page(title="Choose repos", body_html="".join(parts), kind="picker")
+    return github_page(
+        title=f"Choose repos for {agent_name}" if agent_name else "Choose repos for your server",
+        body_html="".join(parts),
+        kind="picker",
+    )
 
 
 def _github_headers(token: str) -> dict[str, str]:
@@ -480,15 +503,20 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
 
 async def has_pending_installation_request(
     client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
-) -> bool:
+) -> bool | str:
     app_token = build_app_jwt(private_key, app_id, now=int(time.time()))
     requests = await list_github_pages(
         client, "/app/installation-requests", app_token, "installation_requests"
     )
-    return any(
-        _InstallationRequestPayload.model_validate(request).requester.id == github_user_id
+    matching = [
+        parsed
         for request in requests
-    )
+        if (parsed := _InstallationRequestPayload.model_validate(request)).requester.id
+        == github_user_id
+    ]
+    if len(matching) == 1 and matching[0].account and matching[0].account.login:
+        return matching[0].account.login
+    return bool(matching)
 
 
 def build_oauth_github_routes(
@@ -929,7 +957,11 @@ def build_oauth_github_routes(
             except (httpx.HTTPError, ValueError, KeyError, TypeError):
                 return _error("Couldn't reach GitHub", 502, retry_confirm_url)
         if pending:
-            return _pending_page(html.escape(retry_confirm_url, quote=True), cancel_url)
+            return _pending_page(
+                html.escape(retry_confirm_url, quote=True),
+                cancel_url,
+                pending if isinstance(pending, str) else None,
+            )
         if not installations:
             return _install_page(install_url, cancel_url)
         if not admin_repos:

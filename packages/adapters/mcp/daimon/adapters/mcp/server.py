@@ -87,6 +87,7 @@ from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
+from daimon.adapters.mcp.web_shell import STATIC_DIR
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
@@ -115,6 +116,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
+from starlette.staticfiles import StaticFiles
 
 if TYPE_CHECKING:
     from stripe._http_client import HTTPClient as StripeHTTPClient
@@ -472,6 +474,7 @@ def create_mcp_app(
         middleware=[Middleware(StripSessionIdMiddleware)],
     )
     app.state.mcp = mcp
+    app.mount("/web", StaticFiles(directory=STATIC_DIR), name="web")
     app.add_route(
         "/uploads/{token}",
         build_upload_route(effective_sessionmaker),

@@ -24,6 +24,7 @@ import aiohttp
 import httpx
 import structlog
 from cryptography.fernet import MultiFernet
+from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import SlackOAuthError
@@ -59,247 +60,22 @@ HttpxClientFactory = Callable[[], httpx.AsyncClient]
 # Shared branded template helper
 # ---------------------------------------------------------------------------
 
-_FONTS_PRECONNECT = (
-    '<link rel="preconnect" href="https://fonts.googleapis.com">'
-    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
-    "family=Bricolage+Grotesque:wght@400;600&amp;"
-    "family=Hanken+Grotesk:wght@400;600;700&amp;"
-    "family=Spline+Sans+Mono:wght@400&amp;"
-    'display=swap">'
-)
 
-_CSS = """
-:root {
-  --stage: #0b110e;
-  --stage-raised: #141d19;
-  --accent: #44a171;
-  --accent-press: #2f8e60;
-  --text: #ebf0ed;
-  --text-dim: #9fa7a3;
-  --border: #28302c;
-  --slate: #43586a;
-  --rose: #c68d8c;
-  --radius-pill: 999px;
-  --radius-card: 16px;
-  --shadow-glow: 0 0 12px var(--accent);
-  --shadow-card: 0 8px 28px -8px #000502b3;
-}
-
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-  background: var(--stage);
-  color: var(--text);
-  font-family: "Hanken Grotesk", system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.5;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 64px 16px;
-}
-
-.card {
-  background: var(--stage-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  box-shadow: var(--shadow-card);
-  max-width: 480px;
-  width: 100%;
-  overflow: hidden;
-}
-
-.status-bar {
-  height: 4px;
-  background: var(--accent);
-}
-
-.status-bar--rose {
-  background: var(--rose);
-}
-
-.card-body {
-  padding: 32px;
-}
-
-h1 {
-  font-family: "Bricolage Grotesque", system-ui, sans-serif;
-  font-size: 32px;
-  font-weight: 600;
-  line-height: 1.2;
-  color: var(--text);
-  margin-bottom: 8px;
-}
-
-h2 {
-  font-family: "Bricolage Grotesque", system-ui, sans-serif;
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1.3;
-  color: var(--text);
-  margin-top: 24px;
-  margin-bottom: 12px;
-}
-
-.subtitle {
-  color: var(--text-dim);
-  margin-bottom: 16px;
-}
-
-p {
-  color: var(--text);
-  margin-bottom: 16px;
-}
-
-p.dim {
-  color: var(--text-dim);
-}
-
-.scope-list {
-  list-style: none;
-  margin: 0 0 24px 0;
-  padding: 0;
-}
-
-.scope-list li {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  margin-bottom: 12px;
-  color: var(--text);
-}
-
-.scope-list li code {
-  color: var(--text-dim);
-}
-
-code {
-  font-family: "Spline Sans Mono", ui-monospace, monospace;
-  font-size: 14px;
-  line-height: 1.5;
-  background: var(--stage);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0 4px;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: 0 24px;
-  background: var(--accent);
-  color: var(--stage);
-  font-family: "Hanken Grotesk", system-ui, sans-serif;
-  font-size: 16px;
-  font-weight: 600;
-  text-decoration: none;
-  border-radius: var(--radius-pill);
-  box-shadow: var(--shadow-glow);
-  margin-top: 24px;
-  margin-bottom: 24px;
-  transition: background 0.15s ease;
-}
-
-.btn:hover {
-  background: var(--accent-press);
-}
-
-.btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.btn--full {
-  width: 100%;
-}
-
-.footer {
-  color: var(--text-dim);
-  font-size: 16px;
-  margin-top: 24px;
-  margin-bottom: 0;
-}
-
-.emphasis {
-  font-weight: 600;
-  color: var(--text);
-}
-
-@media (max-width: 520px) {
-  body {
-    padding: 0;
-    justify-content: flex-start;
-  }
-
-  .card {
-    border-radius: 0;
-    max-width: 100%;
-    min-height: 100vh;
-  }
-
-  .card-body {
-    padding: 24px;
-  }
-
-  .btn {
-    width: 100%;
-  }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .btn {
-    box-shadow: var(--shadow-glow);
-  }
-}
-"""
-
-
-def _page(
-    *,
-    title: str,
-    state_bar: str,
-    body_html: str,
-    status: int = 200,
-) -> HTMLResponse:
-    """Render a complete branded daimon HTML document.
-
-    Args:
-        title: The <title> text for this page.
-        state_bar: CSS class suffix for the top status stripe —
-            "" for accent (success/install), "--rose" for rejection/error.
-        body_html: Pre-escaped inner HTML for the card body.
-        status: HTTP status code (default 200).
-    """
-    doc = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(title, quote=False)}</title>
-{_FONTS_PRECONNECT}
-<style>{_CSS}</style>
-</head>
-<body>
-<div class="card">
-  <div class="status-bar{state_bar}"></div>
-  <div class="card-body">
-    {body_html}
-  </div>
-</div>
-</body>
-</html>"""
-    return HTMLResponse(doc, status_code=status)
+def _page(*, title: str, state_bar: str, body_html: str, status: int = 200) -> HTMLResponse:
+    """Render Slack authorization content inside the shared MCP page shell."""
+    return render_page(
+        title=title,
+        body_html=body_html,
+        status=status,
+        context="Slack",
+        error="rose" in state_bar or status >= 400,
+    )
 
 
 def render_branded_page(
     *, title: str, state_bar: str, body_html: str, status: int = 200
 ) -> HTMLResponse:
-    """Public page renderer shared by browser authorization flows."""
+    """Compatibility entry point for Slack authorization page rendering."""
     return _page(title=title, state_bar=state_bar, body_html=body_html, status=status)
 
 
@@ -309,14 +85,13 @@ def render_branded_page(
 
 _SCOPES_HTML = """
 <ul class="scope-list">
-  <li>see when you @mention the bot <code>app_mentions:read</code></li>
-  <li>post replies and status updates <code>chat:write</code></li>
-  <li>run setup commands (e.g. <code>/agent-setup</code>) <code>commands</code></li>
-  <li>check who&#39;s an admin before admin actions <code>users:read</code></li>
-  <li>read recent messages in public channels it&#39;s added to <code>channels:history</code></li>
-  <li>read recent messages in private channels it&#39;s added to <code>groups:history</code></li>
-  <li>see which channels exist and who&#39;s in them, to enforce your channel permissions
-  <code>channels:read</code> <code>groups:read</code></li>
+  <li>Read mentions <code>app_mentions:read</code></li>
+  <li>Post replies <code>chat:write</code></li>
+  <li>Run setup commands <code>commands</code></li>
+  <li>Check admin status <code>users:read</code></li>
+  <li>Read invited public channels <code>channels:history</code></li>
+  <li>Read invited private channels <code>groups:history</code></li>
+  <li>List channels and members <code>channels:read</code> <code>groups:read</code></li>
 </ul>
 """
 
@@ -348,17 +123,15 @@ def _install_landing_html(
     credit = _format_credit(signup_credit)
     safe_name = html.escape(display_name, quote=False)
     body = f"""
-<h1>your server just hired a data scientist</h1>
-<p class="subtitle">· by daimon</p>
-<p>add {safe_name} to your Slack workspace and get {credit} of credit on us — data
-analysis, code review, and research, all from Slack.</p>
-<h2>what {safe_name} will be able to do</h2>
+<h1>Add Daimon to Slack</h1>
+<p>Get {credit} in credit for analysis, code review and research.</p>
+<h2>Slack access</h2>
 {_SCOPES_HTML}
 <a class="btn" href="{safe_href}">Add to Slack</a>
-<p class="footer">{safe_name} reads channels you invite it to — and, for members who
-connect their account, whatever they can already see.</p>
+<p class="footer">{safe_name} reads invited channels. Members can connect their own
+accounts for personal access.</p>
 """
-    return _page(title="add daimon to Slack", state_bar="", body_html=body)
+    return _page(title="Add Daimon to Slack", state_bar="", body_html=body)
 
 
 def _success_html(
@@ -384,13 +157,12 @@ def _success_html(
         else ""
     )
     body = f"""
-<h1>installed in {safe}</h1>
-<p>next: @mention <code>@{safe_name}</code> in a channel you have invited it to,
-or run <code>/agent-setup</code> to see who answers where and set up an agent with Daimon.</p>
-<p>you get {credit} of credit on us.</p>
-{promo}<p class="dim">you can close this tab and head back to Slack.</p>
+<h1>Installed in {safe}</h1>
+<p>Mention <code>@{safe_name}</code> in an invited channel, or run <code>/agent-setup</code>.</p>
+<p>{credit} in credit is ready.</p>
+{promo}<p class="dim">You can close this tab and return to Slack.</p>
 """
-    return _page(title="daimon installed", state_bar="", body_html=body)
+    return _page(title="Daimon installed", state_bar="", body_html=body)
 
 
 def _enterprise_rejection_html() -> HTMLResponse:
