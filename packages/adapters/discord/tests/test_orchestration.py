@@ -283,15 +283,18 @@ class TestNewThreadCreation:
         message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
         message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
         message.create_thread = AsyncMock(side_effect=RuntimeError("Discord unavailable"))  # pyright: ignore[reportAttributeAccessIssue]
+        # Typing is best effort: a dropped connection must not stop the open.
+        message.channel.typing = MagicMock(side_effect=ConnectionResetError("reset"))
 
         await bot.on_message(message)
 
-        # The failure is answered with exactly one visible error, never a
-        # channel-level "opening your chat" notice.
-        message.reply.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "rid:" in error_text
+        # The failure is answered with exactly one plain reply, never a
+        # channel-level "opening your chat" notice or a second error.
+        message.create_thread.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        message.reply.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            "Couldn't open a thread. @mention Daimon again.", mention_author=False
+        )
+        message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot.turn_queue.in_flight() == 0
         assert bot.turn_queue.depth() == 0
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]

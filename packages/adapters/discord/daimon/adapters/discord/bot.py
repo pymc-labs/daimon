@@ -194,6 +194,7 @@ def log_anthropic_overload(
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
 GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
 TENANT_CAP_NOTICE = "This server has too many chats in flight right now — try again in a moment."
+THREAD_OPEN_FAILED_NOTICE = "Couldn't open a thread. @mention Daimon again."
 
 # Grace window for graceful shutdown drain. Must match the deployment's
 # container kill/stop timeout of 60s. The drain polls _processing up to this
@@ -225,8 +226,8 @@ async def _open_thread_with_notice(
 
     The acknowledgment is a reaction on the mention, never a channel message: a
     channel-level "your chat is ready" post outlives the wait and reads as a stray
-    reply. A failed opening propagates to `_handle_mention`, which renders the error
-    as a visible reply, so the mention is never left without an answer."""
+    reply. A failed opening propagates to `_open_thread_or_explain`, which answers
+    it with one plain reply, so the mention is never left without an answer."""
     task = asyncio.create_task(opening)
     reacted = False
     try:
@@ -251,6 +252,39 @@ async def _open_thread_with_notice(
                 await message.remove_reaction(THREAD_OPENING_REACTION, message.guild.me)
             except discord.HTTPException as exc:
                 log.warning("discord.thread_open_notice_clear_failed", error=str(exc))
+
+
+def _capture_turn_error(
+    exc: BaseException, *, rid: str, tenant_id: uuid.UUID, guild_id: str
+) -> None:
+    """Report a failed mention turn to Sentry with the tags that find it again."""
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("rid", rid)
+        scope.set_tag("tenant_id", str(tenant_id))
+        scope.set_tag("guild_id", guild_id)
+        sentry_sdk.capture_exception(exc)
+
+
+class _ThreadOpenFailed(Exception):
+    """The opening mention's thread could not be created; the person was told.
+
+    Raised from the creation error, so the turn boundary logs it without
+    posting a second error message.
+    """
+
+
+async def _open_thread_or_explain(
+    message: discord.Message, opening: Coroutine[Any, Any, discord.Thread]
+) -> discord.Thread:
+    """Open the turn's thread; reply in the channel only if that fails."""
+    try:
+        return await opening
+    except Exception as exc:
+        try:
+            await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+        except discord.HTTPException as reply_exc:
+            log.warning("discord.thread_open_failed_notice_failed", error=str(reply_exc))
+        raise _ThreadOpenFailed(str(exc)) from exc
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -2111,6 +2145,14 @@ class DaimonBot(commands.Bot):
                 attachments_override=attachments_override,
                 unprompted=unprompted,
             )
+        except _ThreadOpenFailed as exc:
+            # Already answered in the channel; only record it.
+            log.warning(
+                "turn.thread_open_failed", error=str(exc), channel_id=str(message.channel.id)
+            )
+            _capture_turn_error(
+                exc.__cause__ or exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id
+            )
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log_anthropic_overload(
                 exc,
@@ -2140,11 +2182,7 @@ class DaimonBot(commands.Bot):
         exc: Exception,
     ) -> None:
         """Sentry-tag + post a rendered error for a turn failure caught in _handle_mention."""
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("rid", rid)
-            scope.set_tag("tenant_id", str(tenant_id))
-            scope.set_tag("guild_id", guild_id)
-            sentry_sdk.capture_exception(exc)
+        _capture_turn_error(exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id)
         error_text = render_error(exc, request_id=rid)
         target = message.channel
         transport = DiscordPostTransport(
@@ -3023,7 +3061,11 @@ class DaimonBot(commands.Bot):
                 naming = self.runtime.settings.thread_naming
                 opening_text = strip_mentions(message.content)
                 if naming.enabled and opening_text:
-                    async with message.channel.typing():
+                    async with contextlib.AsyncExitStack() as typing:
+                        try:
+                            await typing.enter_async_context(message.channel.typing())
+                        except Exception as exc:  # best effort: typing never stops the open
+                            log.warning("discord.thread_open_typing_failed", error=str(exc))
                         thread_name = await generate_thread_name(
                             fallback=thread_name,
                             message_text=opening_text,
@@ -3048,10 +3090,13 @@ class DaimonBot(commands.Bot):
 
             discord_settings = self.runtime.settings.discord
             assert discord_settings is not None
-            thread = await _open_thread_with_notice(
+            thread = await _open_thread_or_explain(
                 message,
-                _open_thread(),
-                after_s=discord_settings.thread_open_notice_after_s,
+                _open_thread_with_notice(
+                    message,
+                    _open_thread(),
+                    after_s=discord_settings.thread_open_notice_after_s,
+                ),
             )
 
         # --- Wire lifecycle with send/edit callables ---
