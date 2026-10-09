@@ -243,12 +243,18 @@ ordinary "Working on it…" card with Stop, and waits after the card and before
 `bind_session` (`wait_for_slot` in `packages/core/daimon/core/turn/slots.py`).
 Nothing on the card says it is queued. A released slot goes, in the same
 synchronous span, to the first tenant in round-robin order that has a waiting
-turn and a free tenant slot; within a tenant the queue is FIFO. Stop removes a
-waiting turn and ends its card as Stopped. After `max_wait_s` (300 s) the turn
-leaves the queue and its card ends with "Something went wrong. Mention me to
-try again." A turn that waited runs the balance gate again once it has a slot,
-since `admit()` ran before the wait. The per-turn ceiling starts after the
-wait. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
+turn and a free tenant slot; within a tenant the queue is FIFO. A slot covers
+one turn: it is returned when the turn ends (`release_turn_slot`), and each
+follow-up drained in the same thread takes a fresh ticket through admission,
+so a busy thread queues behind other tenants instead of keeping its slot.
+Stop removes a waiting turn and ends its card as Stopped. After `max_wait_s`
+(300 s) the turn leaves the queue, whether its own timer or the dispatcher
+notices first, and its card ends with "Something went wrong. Mention me to
+try again." A turn that waited runs the balance gate again once it has a
+slot, since `admit()` ran before the wait. The per-turn ceiling starts after
+the wait. A Discord wizard submit waits before it binds its session, so
+session preparation never runs outside the caps; its card appears once the
+slot is granted. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
 capacity notice and the existing `turn.skipped.*concurrency_shed` logs, now
 with a `reason`. Discord DMs have no card and wait under the typing indicator;
 Slack DMs are not limited. Unprompted replies and Teams continuation wakes

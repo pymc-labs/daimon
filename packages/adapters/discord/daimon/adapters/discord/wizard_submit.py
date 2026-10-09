@@ -526,8 +526,25 @@ async def run_wizard_submit_turn_observed(
                 )
             return
 
+        # Over a cap the turn waits here for its slot, before it binds a
+        # session: preparation never runs outside the caps. The submit was
+        # already acknowledged (the form collapsed), and its card can only
+        # be posted after the bind, so the card appears once the slot is
+        # granted; with no card there is no Stop to click while it waits.
+        slot = await wait_for_ticket(
+            ticket, asyncio.Event(), sessionmaker=bot.runtime.sessionmaker, tenant_id=row.tenant_id
+        )
+        if slot != "started":
+            await channel.send(
+                QUEUE_TIMED_OUT_TEXT
+                if slot == "timed_out"
+                else admission_refusal_message("balance_depleted", bot.runtime.settings)
+            )
+            return
+
         # D-03 boundary, mirroring bot.py's mention path: the per-turn
-        # ceiling clock starts here, once admission has passed, and covers
+        # ceiling clock starts here, once admission has passed and the turn
+        # holds its slot, and covers
         # session bind (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget. This call site had NO timeout of any kind
         # before this phase -- the old 45-minute wait_for lived only in
@@ -599,31 +616,6 @@ async def run_wizard_submit_turn_observed(
             make_lifecycle=_make_lifecycle,
         )
         bot._track_live_turn_card(turn_card_intent.id)  # pyright: ignore[reportPrivateUsage]
-
-        # Over a cap the turn waits here, behind its ordinary card (see
-        # bot.py's _orchestrate).
-        slot = await wait_for_ticket(
-            ticket, cancel, sessionmaker=bot.runtime.sessionmaker, tenant_id=row.tenant_id
-        )
-        if slot != "started":
-            ended = {
-                "cancelled": "Stopped.\nSend a message to start again.",
-                "timed_out": QUEUE_TIMED_OUT_TEXT,
-                "balance_depleted": admission_refusal_message(
-                    "balance_depleted", bot.runtime.settings
-                ),
-            }[slot]
-            if lifecycle.message_ref is not None:
-                await _edit_message(lifecycle.message_ref, content=ended, embed=None, view=None)
-            else:
-                await channel.send(ended)
-            await retire_terminal_turn_card(
-                bot.runtime.sessionmaker,
-                intent_id=turn_card_intent.id,
-                expected_message_id=lifecycle.card_message_id,
-                no_post_confirmed=not lifecycle.first_post_attempted,
-            )
-            return
 
         # lifecycle_holder tracks whichever DiscordTurnLifecycle actually
         # completed the turn -- recovery_lifecycle rebuilds a fresh one

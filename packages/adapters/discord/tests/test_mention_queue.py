@@ -1155,3 +1155,46 @@ async def test_mention_queued_during_a_raising_continuation_dispatch_still_gets_
     )
     assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
     assert 789 not in queued_bot._processing  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_a_drained_follow_up_re_queues_behind_another_tenants_waiting_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    """Global cap 1. A thread's follow-up must not inherit its first turn's
+    slot: when the first turn ends, another tenant's waiting turn runs, and
+    the follow-up queues behind it (review #4), with a fresh ticket (#2)."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="123456")
+    queued_bot.turn_queue.global_cap = 1
+    order: list[str] = []
+    first_running = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def stub(message: discord.Message, *_args: object, **_kwargs: object) -> None:
+        slot = await wait_for_slot(
+            asyncio.Event(), sessionmaker=queued_bot.runtime.sessionmaker, tenant_id=tenant_id
+        )
+        assert slot == "started"
+        order.append("A-first" if not order else "A-follow-up")
+        if len(order) == 1:
+            first_running.set()
+            await release_first.wait()
+
+    queued_bot._orchestrate = stub  # type: ignore[method-assign]
+    first = asyncio.create_task(queued_bot.on_message(_make_thread_message(content="one")))
+    await first_running.wait()
+    await queued_bot.on_message(_make_thread_message(content="two"))  # queues in the thread
+    other = queued_bot.turn_queue.admit(uuid.uuid4(), cap=1)  # another server's turn
+    assert other is not None and other.queued
+
+    release_first.set()
+    async with asyncio.timeout(5):
+        while not queued_bot.turn_queue.depth(tenant_id):
+            await asyncio.sleep(0.01)
+    assert other.state == "running", "the other server's turn got the freed slot"
+    assert order == ["A-first"], "the follow-up waits its turn in the queue"
+    other.release()
+    async with asyncio.timeout(5):
+        await first
+    assert order == ["A-first", "A-follow-up"]
+    assert queued_bot.turn_queue.in_flight() == 0 and queued_bot.turn_queue.depth() == 0

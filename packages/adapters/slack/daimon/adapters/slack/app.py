@@ -258,7 +258,12 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, wait_for_slot
+from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_TEXT,
+    holding,
+    release_turn_slot,
+    wait_for_slot,
+)
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
@@ -283,6 +288,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
+TENANT_CAP_NOTICE = "This workspace has too many chats in flight right now — try again in a moment."
 
 # Grace window for graceful shutdown drain. Must be strictly less
 # than the deployment's 60s kill timeout to leave headroom for client.close()
@@ -1677,9 +1683,7 @@ class SlackApp:
                 user=str(event.get("user") or ""),
                 # Real thread only — a shed root mention has no thread yet.
                 thread_ts=event.get("thread_ts"),
-                text=(
-                    "This workspace has too many chats in flight right now — try again in a moment."
-                ),
+                text=TENANT_CAP_NOTICE,
             )
             return
 
@@ -1894,23 +1898,28 @@ class SlackApp:
         content_override: str | None = None,
         files: list[SlackFile] | None = None,
     ) -> None:
-        with observe_turn(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="slack",
-            channel_id=channel,
-            thread_id=thread_id,
-        ):
-            return await self._run_thread_turn_observed(
-                event,
-                channel=channel,
-                web_client=web_client,
+        try:
+            with observe_turn(
+                self.runtime.sessionmaker,
                 tenant_id=tenant_id,
+                platform="slack",
+                channel_id=channel,
                 thread_id=thread_id,
-                team_id=team_id,
-                content_override=content_override,
-                files=files,
-            )
+            ):
+                return await self._run_thread_turn_observed(
+                    event,
+                    channel=channel,
+                    web_client=web_client,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    team_id=team_id,
+                    content_override=content_override,
+                    files=files,
+                )
+        finally:
+            # One slot per turn: a drained follow-up re-enters admission
+            # instead of keeping the slot (wait_for_slot).
+            release_turn_slot()
 
     async def _run_thread_turn_observed(
         self,
@@ -2239,9 +2248,12 @@ class SlackApp:
             if slot != "started":
                 await lifecycle.end_unstarted(
                     stopped=slot == "cancelled",
-                    text=admission_refusal_message("balance_depleted", self.runtime.settings)
-                    if slot == "balance_depleted"
-                    else QUEUE_TIMED_OUT_TEXT,
+                    text={
+                        "balance_depleted": admission_refusal_message(
+                            "balance_depleted", self.runtime.settings
+                        ),
+                        "queue_full": TENANT_CAP_NOTICE,
+                    }.get(slot, QUEUE_TIMED_OUT_TEXT),
                 )
                 intent_terminal = True
                 return

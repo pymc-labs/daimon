@@ -44,6 +44,7 @@ from daimon.core.stores.thread_sessions import get_live_thread_session, list_orp
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.wizard_session import get_wizard_session
 from daimon.core.turn.deps import build_turn_deps
+from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
@@ -565,11 +566,13 @@ async def test_a_submit_over_the_per_tenant_cap_with_a_full_queue_runs_no_turn_a
     assert usage_rows == [], "an over-cap refusal must write zero usage_events rows"
 
 
-async def test_a_submit_over_the_per_tenant_cap_waits_behind_its_card_then_runs(
+async def test_a_submit_over_the_per_tenant_cap_waits_for_its_slot_before_binding(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Someone clicked submit and is waiting: over the cap the turn queues like
-    a mention, posts its ordinary card, and runs once the slot frees."""
+    """Someone clicked submit and is waiting: over the cap the turn queues
+    instead of being refused. It never binds a session while queued (session
+    preparation stays inside the caps), so its card, which can only be posted
+    after the bind, appears once the slot is granted; then the turn runs."""
     tenant = await _seed_funded_tenant(db_session, workspace_id="800007003")
     row = await _seed_review_row(db_session_factory, tenant=tenant)
     channel = _make_channel(thread_id=5027, parent_id=4027)
@@ -580,8 +583,16 @@ async def test_a_submit_over_the_per_tenant_cap_waits_behind_its_card_then_runs(
     bot = _make_bot(runtime)
     held = bot.turn_queue.claim(tenant.id)  # a mention turn holds the only slot
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
+    bound_while: list[tuple[int, int]] = []
 
-    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
+    async def _recording_bind(*args: Any, **kwargs: Any) -> Any:
+        bound_while.append((bot.turn_queue.depth(), bot.turn_queue.in_flight()))
+        return await bind_session(*args, **kwargs)
+
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch("daimon.adapters.discord.wizard_submit.bind_session", side_effect=_recording_bind),
+    ):
         mock_create_session.return_value = ma_session(
             id="sess_queued_submit", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
         )
@@ -590,21 +601,17 @@ async def test_a_submit_over_the_per_tenant_cap_waits_behind_its_card_then_runs(
         )
         assert await item.interaction_check(interaction) is True
         await item.callback(interaction)
-        for _ in range(300):
-            if bot.turn_queue.depth(tenant.id) and channel.send.await_count:
-                break
-            await asyncio.sleep(0.01)
-        assert bot.turn_queue.depth(tenant.id) == 1, "the submit waits for a slot"
+        async with asyncio.timeout(5):
+            while not bot.turn_queue.depth(tenant.id):
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert bound_while == [], "no session is bound while the submit waits for a slot"
         assert stream_hits == [], "no turn runs while it waits"
-        posted = [
-            call.args[0]
-            for call in channel.send.call_args_list
-            if call.args and isinstance(call.args[0], str)
-        ]
-        assert not any("in flight" in text for text in posted), "no capacity notice"
+        channel.send.assert_not_called()  # no card yet, and no capacity notice
         held.release()
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
+    assert bound_while == [(0, 1)], "bound once, holding the slot, with nobody queued"
     assert stream_hits, "the queued submit turn ran once the slot freed"
     assert bot.turn_queue.in_flight() == 0 and bot.turn_queue.depth() == 0
 
@@ -612,10 +619,9 @@ async def test_a_submit_over_the_per_tenant_cap_waits_behind_its_card_then_runs(
 async def test_a_submit_that_times_out_in_the_queue_leaves_nothing_behind(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The submit binds its session before it waits (its card posts after the
-    bind). Timing out there ends it like a turn that failed before its first
-    send: the ordinary error on the card, no active-turn marker (that is
-    written only after the wait), the card intent retired, the slot returned."""
+    """A submit that outwaits the queue never bound a session and never posted
+    a card: it says the ordinary error, leaves no active-turn marker and no
+    card intent, and the slot it never got stays with the other turn."""
     tenant = await _seed_funded_tenant(db_session, workspace_id="800007004")
     row = await _seed_review_row(db_session_factory, tenant=tenant)
     channel = _make_channel(thread_id=5037, parent_id=4037)
@@ -628,27 +634,25 @@ async def test_a_submit_that_times_out_in_the_queue_leaves_nothing_behind(
     held = bot.turn_queue.claim(tenant.id)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 
-    with patch("daimon.core.turn.prepare.create_session") as mock_create_session:
-        mock_create_session.return_value = ma_session(
-            id="sess_timed_out_submit", agent_id=_AGENT_ID, model=_MODEL_ID, environment_id=_ENV_ID
-        )
+    with (
+        patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+        patch("daimon.adapters.discord.wizard_submit.bind_session") as mock_bind,
+    ):
         item = await WizardSubmitButton.from_custom_id(
             interaction, MagicMock(), _submit_match(row.id)
         )
         assert await item.interaction_check(interaction) is True
         await item.callback(interaction)
         await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+        mock_bind.assert_not_called()
+        mock_create_session.assert_not_called()
 
     assert stream_hits == [], "a timed-out submit never reaches the turn stream"
-    card = channel.send.return_value
-    edits = [str(call.kwargs.get("content")) for call in card.edit.await_args_list]
-    assert edits == ["Something went wrong. Mention me to try again."], "the ordinary error"
-    assert await list_orphaned_turns(db_session, platform="discord") == [], (
-        "no active-turn marker is left on the bound session"
-    )
+    channel.send.assert_awaited_once_with("Something went wrong. Mention me to try again.")
+    assert await list_orphaned_turns(db_session, platform="discord") == []
     async with db_session_factory() as session:
         intents = await list_recoverable_turn_card_intents(session, platform="discord")
-    assert intents == [], "the card intent is retired, not left for the boot sweep"
+    assert intents == [], "no card was posted, so no intent is left"
     assert bot.turn_queue.depth() == 0
     assert bot.turn_queue.in_flight() == 1, "only the other turn holds a slot"
     held.release()

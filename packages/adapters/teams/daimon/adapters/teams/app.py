@@ -137,7 +137,12 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import protection_state
 from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, wait_for_slot
+from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_TEXT,
+    holding,
+    release_turn_slot,
+    wait_for_slot,
+)
 from daimon.core.turn.state import ToolUseBlock, daimon_tool_arguments
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
@@ -843,18 +848,25 @@ class TeamsApp:
         reraise: bool = False,
         continuation: TaskContinuationRow | None = None,
     ) -> None:
-        """The turn inside one outcome observation, so a failure before bind still records."""
-        with observe_turn(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="teams",
-            channel_id=inbound.channel_id,
-            thread_id=inbound.thread_id,
-            origin="chat" if continuation is None else "handoff",
-        ):
-            await self._run_turn_observed(
-                inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
-            )
+        """The turn inside one outcome observation, so a failure before bind still records.
+
+        One slot per turn: when it ends, the next turn in the chat (a drained
+        follow-up or a continuation) re-enters admission (`wait_for_slot`).
+        """
+        try:
+            with observe_turn(
+                self.runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="teams",
+                channel_id=inbound.channel_id,
+                thread_id=inbound.thread_id,
+                origin="chat" if continuation is None else "handoff",
+            ):
+                await self._run_turn_observed(
+                    inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
+                )
+        finally:
+            release_turn_slot()
 
     async def _run_turn_observed(
         self,
@@ -988,6 +1000,7 @@ class TeamsApp:
                             "balance_depleted": admission_refusal_text(
                                 "balance_depleted", TEAMS_REFUSAL_NOUNS
                             ),
+                            "queue_full": _SHED,
                         }[slot]
                     )
                     return

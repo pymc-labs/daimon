@@ -53,6 +53,10 @@ log = structlog.get_logger(__name__)
 WaitResult = Literal["started", "cancelled", "timed_out"]
 
 _live_queues: weakref.WeakSet[TurnQueue] = weakref.WeakSet()
+# Waits kept for the heartbeat's percentiles between two windows.
+_WAIT_SAMPLE = 4096
+# The cap a follow-up re-admits with when its first turn claimed past the caps.
+_UNCAPPED = 1_000_000
 
 
 class QueueWindow(TypedDict):
@@ -74,7 +78,12 @@ def _percentile(values: list[float], fraction: float) -> float:
 
 
 class TurnTicket:
-    """One turn's claim on a slot: queued, running, or done."""
+    """One turn's claim on a slot: queued, running, or done.
+
+    A ticket covers one turn. A follow-up turn in the same thread takes a
+    fresh one (`TurnQueue.readmit`), so it queues behind other tenants like
+    any new turn and never inherits a ticket that already ended.
+    """
 
     def __init__(
         self,
@@ -83,18 +92,22 @@ class TurnTicket:
         *,
         state: Literal["queued", "running"],
         now: float,
+        cap: int | None,
         fields: dict[str, object],
     ) -> None:
         self._queue = queue
         self.tenant_id = tenant_id
+        self.cap = cap
         self.state: Literal["queued", "running", "done"] = state
         # Whether this turn ever waited: its admission gates ran before the wait.
         self.waited = state == "queued"
         self.queued_at = now
-        self._granted = asyncio.Event()
+        self._granted = state == "running"
+        # Set when the ticket stops waiting: granted a slot, or expired by dispatch.
+        self._settled = asyncio.Event()
         self._fields = fields
         if state == "running":
-            self._granted.set()
+            self._settled.set()
 
     @property
     def queued(self) -> bool:
@@ -103,39 +116,47 @@ class TurnTicket:
     def waited_ms(self) -> float:
         return round((self._queue.clock() - self.queued_at) * 1000, 1)
 
+    def overdue(self) -> bool:
+        return self._queue.clock() - self.queued_at >= self._queue.max_wait_s
+
     async def wait(self, cancel: asyncio.Event) -> WaitResult:
         """Wait for a slot; returns at once for a ticket that already holds one.
 
         "cancelled" when Stop came first, including a Stop that raced the
         grant: the slot is then still held, and `release` returns it.
-        "timed_out" after the queue's max wait; the ticket has left the queue.
+        "timed_out" after the queue's max wait, whether this waiter's timer or
+        the dispatcher noticed first; the ticket has left the queue.
         """
-        if self._granted.is_set() and not cancel.is_set():
+        if self._granted and not cancel.is_set():
             return "started"
         if self.state == "queued":
             remaining = self.queued_at + self._queue.max_wait_s - self._queue.clock()
-            granted = asyncio.ensure_future(self._granted.wait())
+            settled = asyncio.ensure_future(self._settled.wait())
             stopped = asyncio.ensure_future(cancel.wait())
             try:
                 await asyncio.wait(
-                    {granted, stopped},
+                    {settled, stopped},
                     timeout=max(0.0, remaining),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
-                granted.cancel()
+                settled.cancel()
                 stopped.cancel()
         if cancel.is_set():
             if self.state == "queued":
                 log.info("turn.queue.cancelled", waited_ms=self.waited_ms(), **self._fields)
                 self._queue.leave(self)
             return "cancelled"
-        if self._granted.is_set():
+        if self._granted:
             return "started"
         if self.state == "queued":
             log.warning("turn.queue.timed_out", waited_ms=self.waited_ms(), **self._fields)
             self._queue.leave(self)
         return "timed_out"
+
+    def successor(self) -> TurnTicket | None:
+        """A fresh ticket for the next turn in this thread (`TurnQueue.readmit`)."""
+        return self._queue.readmit(self)
 
     def release(self) -> None:
         """Return the slot, or leave the queue. Safe to call more than once."""
@@ -172,7 +193,9 @@ class TurnQueue:
         # Tenants with a waiting turn, in round-robin order.
         self._rotation: deque[uuid.UUID] = deque()
         self._depth = 0
-        self._waits_ms: list[float] = []
+        # A bounded sample: an adapter with no heartbeat never drains it.
+        self._waits_ms: deque[float] = deque(maxlen=_WAIT_SAMPLE)
+        self._started = 0
         _live_queues.add(self)
 
     @classmethod
@@ -206,11 +229,13 @@ class TurnQueue:
         return len(self._queues.get(tenant_id, ()))
 
     def take_window(self) -> QueueWindow:
-        waits, self._waits_ms = self._waits_ms, []
+        waits = list(self._waits_ms)
+        started, self._started = self._started, 0
+        self._waits_ms.clear()
         return {
             "global_depth": self._depth,
             "per_tenant_max": max((len(q) for q in self._queues.values()), default=0),
-            "started": len(waits),
+            "started": started,
             "wait_ms_p50": _percentile(waits, 0.5),
             "wait_ms_p95": _percentile(waits, 0.95),
             "wait_ms_max": max(waits, default=0.0),
@@ -232,13 +257,13 @@ class TurnQueue:
         if not self._can_run(tenant_id):
             return None
         return self._start(
-            TurnTicket(self, tenant_id, state="running", now=self.clock(), fields={})
+            TurnTicket(self, tenant_id, state="running", now=self.clock(), cap=cap, fields={})
         )
 
     def claim(self, tenant_id: uuid.UUID, /) -> TurnTicket:
         """A slot now, past both caps: for a turn whose admission ignores them
         (a Teams continuation wake) but must still count as running."""
-        ticket = TurnTicket(self, tenant_id, state="running", now=self.clock(), fields={})
+        ticket = TurnTicket(self, tenant_id, state="running", now=self.clock(), cap=None, fields={})
         return self._start(ticket)
 
     def admit(self, tenant_id: uuid.UUID, /, *, cap: int, **fields: object) -> TurnTicket | None:
@@ -262,7 +287,9 @@ class TurnQueue:
                 **fields,
             )
             return None
-        ticket = TurnTicket(self, tenant_id, state="queued", now=self.clock(), fields=fields)
+        ticket = TurnTicket(
+            self, tenant_id, state="queued", now=self.clock(), cap=cap, fields=fields
+        )
         self._queues.setdefault(tenant_id, deque()).append(ticket)
         if tenant_id not in self._rotation:
             self._rotation.append(tenant_id)
@@ -279,13 +306,24 @@ class TurnQueue:
         )
         return ticket
 
+    def readmit(self, previous: TurnTicket) -> TurnTicket | None:
+        """A fresh ticket for the next turn in `previous`'s thread, through the
+        same admission as a new turn: a slot now, else the back of the queue."""
+        cap = previous.cap if previous.cap is not None else self._caps.get(previous.tenant_id)
+        return self.admit(
+            previous.tenant_id,
+            cap=cap if cap is not None else _UNCAPPED,
+            **previous._fields,  # pyright: ignore[reportPrivateUsage]
+        )
+
     # --- slot hand-off (one synchronous span each) ----------------------
 
     def _start(self, ticket: TurnTicket) -> TurnTicket:
         ticket.state = "running"
         self._running[ticket.tenant_id] = self._running.get(ticket.tenant_id, 0) + 1
         self._running_total += 1
-        ticket._granted.set()  # pyright: ignore[reportPrivateUsage]
+        ticket._granted = True  # pyright: ignore[reportPrivateUsage]
+        ticket._settled.set()  # pyright: ignore[reportPrivateUsage]
         return ticket
 
     def _dispatch(self) -> None:
@@ -299,14 +337,24 @@ class TurnQueue:
                 return
             waiting = self._queues[tenant_id]
             ticket = waiting.popleft()
+            self._depth -= 1
+            if ticket.overdue():
+                # Past its max wait: it times out here rather than starting
+                # late, and the slot goes to the next waiting turn. The tenant
+                # keeps its place in the rotation; it was not served.
+                if not waiting:
+                    del self._queues[tenant_id]
+                    self._rotation.remove(tenant_id)
+                self._expire(ticket)
+                continue
             self._rotation.remove(tenant_id)
             if waiting:
                 self._rotation.append(tenant_id)
             else:
                 del self._queues[tenant_id]
-            self._depth -= 1
             waited = ticket.waited_ms()
             self._waits_ms.append(waited)
+            self._started += 1
             self._start(ticket)
             log.info(
                 "turn.queue.started",
@@ -325,6 +373,16 @@ class TurnQueue:
             self._running.pop(tenant_id, None)
         self._running_total -= 1
         self._dispatch()
+
+    def _expire(self, ticket: TurnTicket) -> None:
+        """End a popped ticket that outwaited the max wait; its waiter wakes timed out."""
+        log.warning(
+            "turn.queue.timed_out",
+            waited_ms=ticket.waited_ms(),
+            **ticket._fields,  # pyright: ignore[reportPrivateUsage]
+        )
+        ticket.state = "done"
+        ticket._settled.set()  # pyright: ignore[reportPrivateUsage]
 
     def leave(self, ticket: TurnTicket) -> None:
         """Take a waiting `ticket` out of the queue without a slot."""

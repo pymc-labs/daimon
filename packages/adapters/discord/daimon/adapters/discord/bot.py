@@ -131,7 +131,12 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
-from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, wait_for_slot
+from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_TEXT,
+    holding,
+    release_turn_slot,
+    wait_for_slot,
+)
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
@@ -183,6 +188,7 @@ def log_anthropic_overload(
 
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
 GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
+TENANT_CAP_NOTICE = "This server has too many chats in flight right now — try again in a moment."
 
 # Grace window for graceful shutdown drain. Must match the deployment's
 # container kill/stop timeout of 60s. The drain polls _processing up to this
@@ -1668,24 +1674,24 @@ class DaimonBot(commands.Bot):
                 )
             return
         self._processing.add(thread_id)
-        try:
-            # The ledger row is written when the turn is admitted, not when it
-            # answers: spend starts here, and a turn the agent ends in silence
-            # (or one that fails) must still count against the hourly cap.
+        with holding(ticket):
             try:
-                await responder.record(
-                    tenant_id=tenant_id, thread_id=thread_id, message_id=str(trigger.id)
-                )
-            except Exception:  # best-effort ledger: a miss loosens the cap by one
-                log.exception("thread_participation.record_failed", thread_id=str(thread_id))
-            # The newest message is the trigger; the delta context carries the
-            # rest of the batch, since they all landed after the watermark.
-            await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
-            await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
-        finally:
-            self._release_thread(thread_id)
-            self._pending.pop(thread_id, None)
-            ticket.release()
+                # The ledger row is written when the turn is admitted, not when it
+                # answers: spend starts here, and a turn the agent ends in silence
+                # (or one that fails) must still count against the hourly cap.
+                try:
+                    await responder.record(
+                        tenant_id=tenant_id, thread_id=thread_id, message_id=str(trigger.id)
+                    )
+                except Exception:  # best-effort ledger: a miss loosens the cap by one
+                    log.exception("thread_participation.record_failed", thread_id=str(thread_id))
+                # The newest message is the trigger; the delta context carries the
+                # rest of the batch, since they all landed after the watermark.
+                await self._handle_mention(trigger, guild_id, tenant_id, unprompted=True)
+                await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
+            finally:
+                self._release_thread(thread_id)
+                self._pending.pop(thread_id, None)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Remember the clicker's name for /billing; the command tree handles the rest."""
@@ -1897,10 +1903,7 @@ class DaimonBot(commands.Bot):
                         cap=cap,
                         reason="queue_full",
                     )
-                    await message.channel.send(
-                        "This server has too many chats in flight right now — "
-                        "try again in a moment."
-                    )
+                    await message.channel.send(TENANT_CAP_NOTICE)
                     return
                 log.info(
                     "turn.skipped.global_concurrency_shed",
@@ -2105,6 +2108,9 @@ class DaimonBot(commands.Bot):
             )
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
         finally:
+            # One slot per turn: a follow-up drained after this re-enters
+            # admission instead of keeping the slot (wait_for_slot).
+            release_turn_slot()
             structlog.contextvars.unbind_contextvars("rid")
 
     async def _render_turn_error(
@@ -3062,6 +3068,7 @@ class DaimonBot(commands.Bot):
                 "balance_depleted": admission_refusal_message(
                     "balance_depleted", self.runtime.settings
                 ),
+                "queue_full": TENANT_CAP_NOTICE,
             }[slot]
             if lifecycle.message_ref is not None:
                 await _edit_message(lifecycle.message_ref, content=ended, embed=None, view=None)

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daimon.core.config import TurnQueueSettings
-from daimon.core.turn.slots import holding, wait_for_slot
+from daimon.core.turn.slots import holding, release_turn_slot, wait_for_slot
 from daimon.core.turn_queue import TurnQueue, TurnTicket, take_queue_window
 from structlog.testing import capture_logs
 
@@ -363,3 +363,162 @@ def test_the_heartbeat_window_reports_depth_and_waits() -> None:
     assert window["wait_ms_max"] >= 1500.0
     for ticket in waiting:
         ticket.release()
+
+
+# --- review fixes: overdue at dispatch, fresh ticket per turn, fairness ----
+
+
+async def test_dispatch_times_out_a_ticket_past_its_max_wait_instead_of_starting_it() -> None:
+    """Enqueued at t=0 and the slot frees at t=301 (max wait 300): the turn
+    times out; the slot goes to the next waiting turn, which is in time."""
+    clock = Clock()
+    queue = make_queue(global_cap=1, max_wait_s=300, clock=clock)
+    running = admit(queue, A)
+    late = admit(queue, A)
+    clock.now += 200
+    in_time = admit(queue, B)
+    clock.now += 101
+    with capture_logs() as logs:
+        running.release()
+    assert late.state == "done", "dispatch expired it rather than granting it"
+    assert in_time.state == "running"
+    assert await late.wait(asyncio.Event()) == "timed_out"
+    (timed_out,) = [e for e in logs if e["event"] == "turn.queue.timed_out"]
+    assert timed_out["waited_ms"] == 301_000.0
+    assert queue.depth() == 0 and queue.in_flight() == 1
+
+
+async def test_an_overdue_ticket_wakes_its_waiter_at_once() -> None:
+    clock = Clock()
+    queue = make_queue(global_cap=1, max_wait_s=300, clock=clock)
+    running = admit(queue, A)
+    late = admit(queue, A)
+    waiter = asyncio.create_task(late.wait(asyncio.Event()))
+    await asyncio.sleep(0)
+    clock.now += 301
+    running.release()
+    assert await asyncio.wait_for(waiter, 1) == "timed_out"
+
+
+def test_an_overdue_head_keeps_its_tenant_in_rotation_for_the_next_turn() -> None:
+    clock = Clock()
+    queue = make_queue(global_cap=1, max_wait_s=300, clock=clock)
+    running = admit(queue, A)
+    late = admit(queue, A)
+    clock.now += 299
+    fresh = admit(queue, A)
+    clock.now += 2
+    running.release()
+    assert late.state == "done" and fresh.state == "running"
+
+
+async def test_a_follow_up_after_a_stopped_turn_takes_a_fresh_ticket() -> None:
+    """Stop removed the first turn's ticket from the queue; the thread's
+    drained follow-up must not inherit that finished ticket."""
+    queue = make_queue(global_cap=1)
+    running = admit(queue, B)
+    first = admit(queue, A)
+    sm = MagicMock()
+    with (
+        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)),
+        holding(first),
+    ):
+        stop = asyncio.Event()
+        stop.set()
+        assert await wait_for_slot(stop, sessionmaker=sm, tenant_id=A) == "cancelled"
+        release_turn_slot()  # the stopped turn ends
+        follow_up = asyncio.create_task(
+            wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A)
+        )
+        async with asyncio.timeout(1):
+            while not queue.depth(A):
+                await asyncio.sleep(0)
+        running.release()
+        assert await follow_up == "started"
+        assert queue.in_flight(A) == 1
+    assert queue.in_flight() == 0
+
+
+async def test_a_follow_up_after_a_timed_out_turn_takes_a_fresh_ticket() -> None:
+    clock = Clock()
+    queue = make_queue(global_cap=1, max_wait_s=300, clock=clock)
+    running = admit(queue, B)
+    first = admit(queue, A)
+    clock.now += 301
+    sm = MagicMock()
+    with (
+        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)),
+        holding(first),
+    ):
+        assert await wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A) == "timed_out"
+        release_turn_slot()
+        running.release()
+        assert await wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A) == "started", (
+            "the follow-up waits its own max wait, not the first turn's"
+        )
+    assert queue.in_flight() == 0
+
+
+async def test_a_follow_up_in_a_full_queue_is_refused_not_run() -> None:
+    queue = make_queue(global_cap=1, per_tenant=0)
+    first = admit(queue, A)
+    blocker: TurnTicket | None = None
+    sm = MagicMock()
+    with holding(first):
+        assert await wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A) == "started"
+        release_turn_slot()
+        blocker = admit(queue, B)  # another tenant takes the freed slot
+        assert await wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A) == "queue_full"
+    assert blocker.state == "running" and queue.in_flight() == 1
+
+
+async def test_follow_ups_release_and_re_queue_so_another_tenant_is_not_starved() -> None:
+    """Global cap 1: tenant A's thread keeps sending follow-ups while tenant
+    B waits. Each A turn returns its slot when it ends, so B runs before A's
+    next follow-up instead of timing out behind it."""
+    queue = make_queue(global_cap=1)
+    sm = MagicMock()
+    order: list[str] = []
+    first = admit(queue, A)
+
+    async def thread_a() -> None:
+        with holding(first):
+            for turn in range(3):
+                assert await wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A) == (
+                    "started"
+                )
+                order.append(f"A{turn + 1}")
+                await asyncio.sleep(0.01)
+                release_turn_slot()
+
+    async def turn_b(ticket: TurnTicket) -> None:
+        assert await ticket.wait(asyncio.Event()) == "started"
+        order.append("B1")
+        await asyncio.sleep(0.01)
+        ticket.release()
+
+    with patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=False)):
+        a_task = asyncio.create_task(thread_a())
+        async with asyncio.timeout(1):
+            while not order:
+                await asyncio.sleep(0)
+        b = admit(queue, B)
+        assert b.queued
+        await asyncio.wait_for(asyncio.gather(a_task, turn_b(b)), 2)
+    assert order == ["A1", "B1", "A2", "A3"]
+    assert queue.in_flight() == 0 and queue.depth() == 0
+
+
+def test_the_wait_sample_is_bounded_without_a_heartbeat() -> None:
+    clock = Clock()
+    queue = make_queue(global_cap=1, clock=clock)
+    holder = admit(queue, A)
+    for _ in range(5000):
+        waiting = admit(queue, B)
+        clock.now += 0.001
+        holder.release()
+        holder = waiting
+    assert len(queue._waits_ms) <= 4096  # pyright: ignore[reportPrivateUsage]
+    window = queue.take_window()
+    assert window["started"] == 5000, "the started count is exact; only the sample is capped"
+    holder.release()

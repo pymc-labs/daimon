@@ -30,17 +30,31 @@ CONSTANTS
     WithMaxWait,      \* the max-wait safeguard may expire a queued turn
     RoundRobin,       \* TRUE: round-robin over tenants; FALSE: one global FIFO by arrival
     ReleaseOnFailure, \* FALSE: the failure end path forgets to return its slot
-    AtomicGrant       \* FALSE: dispatch starts the head and pops it after an await
+    AtomicGrant,      \* FALSE: dispatch starts the head and pops it after an await
+    FollowUps,        \* the busy tenant's last FollowUps turns are follow-ups in one thread
+    ExpireAtDispatch, \* FALSE: dispatch starts a turn already past its max wait
+    FollowUpKeepsSlot,   \* TRUE: a follow-up runs on its predecessor's slot, no admission
+    FollowUpReusesTicket \* TRUE: a follow-up inherits a predecessor ticket that left the queue
 
 ASSUME GlobalCap >= 1 /\ FlooderCap >= 1 /\ OtherCap >= 1
 ASSUME TenantQueueMax >= 0 /\ GlobalQueueMax >= 0
 ASSUME Flooder \in Tenants
+ASSUME FollowUps < FloodLoad
 
 Load(t) == IF t = Flooder THEN FloodLoad ELSE OtherLoad
 Cap(t) == IF t = Flooder THEN FlooderCap ELSE OtherCap
 Turns == UNION {{<<t, i>> : i \in 1..Load(t)} : t \in Tenants}
 Tenant(x) == x[1]
 None == "none"
+\* A thread: the busy tenant's turn i is a follow-up of turn i - 1 when it is
+\* one of its last FollowUps turns. A follow-up arrives only once the turn
+\* before it in the thread has ended (the thread's _processing/_pending
+\* serialisation; formal/thread_queue models that part).
+IsFollowUp(x) == Tenant(x) = Flooder /\ FloodLoad - FollowUps < x[2] /\ x[2] <= FloodLoad
+Pred(x) == <<Tenant(x), x[2] - 1>>
+\* Turns in the thread (follow-ups and the turn each follows): the only ones
+\* whose queue history a property reads.
+InThread(x) == IsFollowUp(x) \/ IsFollowUp(<<Tenant(x), x[2] + 1>>)
 
 \* st: where the turn is in this process. "dead": it was queued or running
 \* when the process restarted. "ended": it left the queue or finished.
@@ -62,10 +76,12 @@ VARIABLES
     unpopped,   \* turns started by dispatch but still at their queue head (AtomicGrant = FALSE)
     owed,       \* a slot was released and its dispatch has not run yet
     overtaken,  \* [Tenants -> Nat]: other tenants started while this one was eligible
-    restarts
+    restarts,
+    late,       \* queued turns whose max wait has passed (cleared when they leave)
+    everQueued  \* thread turns that ever waited in the queue (history)
 
 vars == <<st, card, cancelReq, queue, order, used, starts, arrival, clock,
-          unpopped, owed, overtaken, restarts>>
+          unpopped, owed, overtaken, restarts, late, everQueued>>
 
 RECURSIVE SumOver(_, _)
 SumOver(f, S) ==
@@ -110,6 +126,8 @@ Init ==
     /\ owed = FALSE
     /\ overtaken = [t \in Tenants |-> 0]
     /\ restarts = 0
+    /\ late = {}
+    /\ everQueued = {}
 
 (***************************************************************************)
 (* Admission. A turn runs at once when its tenant and the process both    *)
@@ -121,48 +139,92 @@ Arrive(x) ==
     LET t == Tenant(x) IN
     /\ ~owed
     /\ st[x] = "new"
+    /\ IsFollowUp(x) => st[Pred(x)] \in {"ended", "refused", "dead"}
     \* Only the global-FIFO variant reads arrival order.
     /\ arrival' = IF RoundRobin THEN arrival ELSE [arrival EXCEPT ![x] = clock]
     /\ clock' = IF RoundRobin THEN clock ELSE clock + 1
-    /\ IF used[t] < Cap(t) /\ GlobalFree /\ queue[t] = <<>>
+    /\ IF FollowUpReusesTicket /\ IsFollowUp(x)
+          /\ Pred(x) \in everQueued /\ starts[Pred(x)] = 0
+       \* Unsafe: the follow-up inherits its predecessor's ticket, which left
+       \* the queue (stopped or timed out), and ends at once with the error.
+       THEN /\ st' = [st EXCEPT ![x] = "ended"]
+            /\ card' = [card EXCEPT ![x] = "failed"]
+            /\ UNCHANGED <<queue, order, used, starts, overtaken, everQueued>>
+       ELSE IF used[t] < Cap(t) /\ GlobalFree /\ queue[t] = <<>>
        THEN /\ st' = [st EXCEPT ![x] = "running"]
             /\ card' = [card EXCEPT ![x] = "working"]
             /\ used' = [used EXCEPT ![t] = @ + 1]
             /\ starts' = [starts EXCEPT ![x] = @ + 1]
             /\ overtaken' = OvertakeAfter(t)
-            /\ UNCHANGED <<queue, order>>
+            /\ UNCHANGED <<queue, order, everQueued>>
        ELSE IF Len(queue[t]) < TenantQueueMax /\ QueueDepth < GlobalQueueMax
        THEN /\ st' = [st EXCEPT ![x] = "queued"]
             /\ card' = [card EXCEPT ![x] = "working"]
             /\ queue' = [queue EXCEPT ![t] = Append(@, x)]
             /\ order' = IF t \in Range(order) THEN order ELSE Append(order, t)
+            /\ everQueued' = IF InThread(x) THEN everQueued \cup {x} ELSE everQueued
             /\ UNCHANGED <<used, starts, overtaken>>
        ELSE /\ st' = [st EXCEPT ![x] = "refused"]
             /\ card' = [card EXCEPT ![x] = "refused"]
-            /\ UNCHANGED <<queue, order, used, starts, overtaken>>
-    /\ UNCHANGED <<cancelReq, unpopped, owed, restarts>>
+            /\ UNCHANGED <<queue, order, used, starts, overtaken, everQueued>>
+    /\ UNCHANGED <<cancelReq, unpopped, owed, restarts, late>>
+
+(***************************************************************************)
+(* Unsafe (FollowUpKeepsSlot): the thread's drain runs its next turn on    *)
+(* the slot the finished turn held, without going back through admission. *)
+(***************************************************************************)
+ChainFollowUp(x, y) ==
+    LET t == Tenant(x) IN
+    /\ FollowUpKeepsSlot
+    /\ ~owed
+    /\ IsFollowUp(y) /\ Pred(y) = x
+    /\ st[x] = "running" /\ st[y] = "new"
+    /\ st' = [st EXCEPT ![x] = "ended", ![y] = "running"]
+    /\ card' = [card EXCEPT ![x] = "answered", ![y] = "working"]
+    /\ cancelReq' = [cancelReq EXCEPT ![x] = FALSE]
+    /\ starts' = [starts EXCEPT ![y] = @ + 1]
+    /\ overtaken' = OvertakeAfter(t)
+    /\ UNCHANGED <<queue, order, used, arrival, clock, unpopped, owed, restarts, late,
+                   everQueued>>
 
 (***************************************************************************)
 (* Dispatch: the synchronous span after a slot release. Starts the picked *)
-(* tenant's head and moves that tenant to the back of the rotation.       *)
+(* tenant's head and moves that tenant to the back of the rotation. A head *)
+(* already past its max wait is timed out instead (ExpireAtDispatch); the *)
+(* tenant keeps its place and the dispatch is still owed for the slot.     *)
 (***************************************************************************)
 Dispatch ==
     /\ owed
-    /\ owed' = FALSE
     /\ LET t == Pick IN
        IF GlobalFree /\ t # None
        THEN LET x == queue[t][1]
                 rest == IF AtomicGrant THEN Tail(queue[t]) ELSE queue[t]
                 rotated == Remove(order, t)
-            IN /\ st' = [st EXCEPT ![x] = "running"]
-               /\ used' = [used EXCEPT ![t] = @ + 1]
-               /\ starts' = [starts EXCEPT ![x] = @ + 1]
-               /\ overtaken' = OvertakeAfter(t)
-               /\ queue' = [queue EXCEPT ![t] = rest]
-               /\ order' = IF rest = <<>> THEN rotated ELSE Append(rotated, t)
-               /\ unpopped' = IF AtomicGrant THEN unpopped ELSE unpopped \cup {x}
-       ELSE UNCHANGED <<st, used, starts, overtaken, queue, order, unpopped>>
-    /\ UNCHANGED <<card, cancelReq, arrival, clock, restarts>>
+            IN IF ExpireAtDispatch /\ x \in late /\ st[x] = "queued"
+               THEN /\ st' = [st EXCEPT ![x] = "ended"]
+                    /\ card' = [card EXCEPT ![x] = "failed"]
+                    /\ cancelReq' = [cancelReq EXCEPT ![x] = FALSE]
+                    /\ queue' = [queue EXCEPT ![t] = Tail(@)]
+                    /\ order' = IF Tail(queue[t]) = <<>> THEN rotated ELSE order
+                    /\ overtaken' = IF Tail(queue[t]) = <<>>
+                                    THEN [overtaken EXCEPT ![t] = 0] ELSE overtaken
+                    /\ owed' = TRUE
+                    /\ late' = late \ {x}
+                    /\ UNCHANGED <<used, starts, unpopped>>
+               ELSE /\ st' = [st EXCEPT ![x] = "running"]
+                    /\ used' = [used EXCEPT ![t] = @ + 1]
+                    /\ starts' = [starts EXCEPT ![x] = @ + 1]
+                    /\ overtaken' = OvertakeAfter(t)
+                    /\ queue' = [queue EXCEPT ![t] = rest]
+                    /\ order' = IF rest = <<>> THEN rotated ELSE Append(rotated, t)
+                    /\ unpopped' = IF AtomicGrant THEN unpopped ELSE unpopped \cup {x}
+                    /\ owed' = FALSE
+                    \* A late start keeps x in `late`, so NoLateStart sees it.
+                    /\ UNCHANGED <<card, cancelReq, late>>
+       ELSE /\ owed' = FALSE
+            /\ UNCHANGED <<st, card, cancelReq, used, starts, overtaken, queue, order, unpopped,
+                           late>>
+    /\ UNCHANGED <<arrival, clock, restarts, everQueued>>
 
 \* AtomicGrant = FALSE only: the started head is popped after an await.
 Pop(x) ==
@@ -172,7 +234,8 @@ Pop(x) ==
     /\ unpopped' = unpopped \ {x}
     /\ queue' = [queue EXCEPT ![t] = IF @ # <<>> THEN Tail(@) ELSE @]
     /\ order' = IF queue'[t] = <<>> THEN Remove(order, t) ELSE order
-    /\ UNCHANGED <<st, card, cancelReq, used, starts, arrival, clock, owed, overtaken, restarts>>
+    /\ UNCHANGED <<st, card, cancelReq, used, starts, arrival, clock, owed, overtaken, restarts,
+                   late, everQueued>>
 
 \* The Stop button: sets the turn's cancel event, queued or running.
 Stop(x) ==
@@ -181,7 +244,18 @@ Stop(x) ==
     /\ ~cancelReq[x]
     /\ cancelReq' = [cancelReq EXCEPT ![x] = TRUE]
     /\ UNCHANGED <<st, card, queue, order, used, starts, arrival, clock, unpopped, owed,
-                   overtaken, restarts>>
+                   overtaken, restarts, late, everQueued>>
+
+\* Time passes: a queued turn's max wait runs out. Whichever notices first
+\* times it out: its own waiter (Expire) or the dispatcher (Dispatch).
+PassMaxWait(x) ==
+    /\ WithMaxWait
+    /\ ~owed
+    /\ st[x] = "queued"
+    /\ x \notin late
+    /\ late' = late \cup {x}
+    /\ UNCHANGED <<st, card, cancelReq, queue, order, used, starts, arrival, clock, unpopped,
+                   owed, overtaken, restarts, everQueued>>
 
 \* Leave the queue without a slot: the waiter woke on Stop, or the max
 \* wait passed. Removal and the card's end happen in one span.
@@ -197,15 +271,17 @@ Leave(x, how) ==
     /\ queue' = [queue EXCEPT ![t] = rest]
     /\ order' = IF rest = <<>> THEN Remove(order, t) ELSE order
     /\ overtaken' = IF rest = <<>> THEN [overtaken EXCEPT ![t] = 0] ELSE overtaken
-    /\ UNCHANGED <<used, starts, arrival, clock, unpopped, owed, restarts>>
+    /\ late' = late \ {x}
+    /\ UNCHANGED <<used, starts, arrival, clock, unpopped, owed, restarts, everQueued>>
 
 Withdraw(x) == cancelReq[x] /\ Leave(x, "stopped")
-Expire(x) == WithMaxWait /\ Leave(x, "failed")
+Expire(x) == x \in late /\ Leave(x, "failed")
 
 (***************************************************************************)
 (* Every end path of a running turn: an answer, a failure, the turn       *)
 (* ceiling, and Stop. Each returns the slot (unless the unsafe switch     *)
-(* drops it on failure) and owes a dispatch.                               *)
+(* drops it on failure) and owes a dispatch. A follow-up in the thread    *)
+(* then arrives through admission like any turn (Arrive).                 *)
 (***************************************************************************)
 EndPaths == {"answered", "failed", "ceiling", "stopped"}
 
@@ -221,7 +297,8 @@ Finish(x, how) ==
     /\ used' = IF returns THEN [used EXCEPT ![t] = @ - 1] ELSE used
     /\ owed' = returns
     /\ cancelReq' = [cancelReq EXCEPT ![x] = FALSE]
-    /\ UNCHANGED <<queue, order, starts, arrival, clock, unpopped, overtaken, restarts>>
+    /\ UNCHANGED <<queue, order, starts, arrival, clock, unpopped, overtaken, restarts, late,
+                   everQueued>>
 
 (***************************************************************************)
 (* Restart: the in-process queue and counters are gone; queued and        *)
@@ -239,7 +316,8 @@ Restart ==
     /\ unpopped' = {}
     /\ overtaken' = [t \in Tenants |-> 0]
     /\ restarts' = restarts + 1
-    /\ UNCHANGED <<card, cancelReq, starts, arrival, clock, owed>>
+    /\ late' = {}
+    /\ UNCHANGED <<card, cancelReq, starts, arrival, clock, owed, everQueued>>
 
 Recover(x) ==
     /\ ~owed
@@ -247,11 +325,14 @@ Recover(x) ==
     /\ card[x] = "working"
     /\ card' = [card EXCEPT ![x] = "restarted"]
     /\ UNCHANGED <<st, cancelReq, queue, order, used, starts, arrival, clock, unpopped, owed,
-                   overtaken, restarts>>
+                   overtaken, restarts, late, everQueued>>
 
 Next ==
-    \/ \E x \in Turns : Arrive(x) \/ Stop(x) \/ Withdraw(x) \/ Expire(x) \/ Recover(x) \/ Pop(x)
+    \/ \E x \in Turns :
+        Arrive(x) \/ Stop(x) \/ Withdraw(x) \/ Expire(x) \/ Recover(x) \/ Pop(x)
+        \/ PassMaxWait(x)
     \/ \E x \in Turns, how \in EndPaths : Finish(x, how)
+    \/ \E x, y \in Turns : ChainFollowUp(x, y)
     \/ Dispatch
     \/ Restart
 
@@ -316,6 +397,16 @@ WorkConserving == ~owed => ~(GlobalFree /\ \E t \in Tenants : Eligible(t))
 \* Round-robin fairness: while a tenant has an eligible queued turn, at most
 \* one start per other tenant happens before it is served.
 NoStarvation == \A t \in Tenants : overtaken[t] <= Cardinality(Tenants) - 1
+
+\* A turn never starts after its max wait passed: the dispatcher times it
+\* out instead of granting it a slot late. (`late` holds only queued turns
+\* in the safe design; a late start leaves the started turn in it.)
+NoLateStart == \A x \in late : starts[x] = 0
+
+\* A follow-up gets its own admission: it never ends with the error unless
+\* it waited in the queue itself or ran.
+FollowUpWaitsItself ==
+    \A x \in Turns : (IsFollowUp(x) /\ card[x] = "failed") => (x \in everQueued \/ starts[x] > 0)
 
 \* Reachability witness: a config whose run violates this shows that the
 \* plain refusal is reachable (only from a full queue, by Arrive).
