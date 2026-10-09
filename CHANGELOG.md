@@ -334,7 +334,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the event journal and the usage-revision outbox) with a restartable
   in-memory store. Daimon has no Postgres implementation of it yet, so
   nothing a user sees changes.
-- Migration `0074_neutral_state` adds the Postgres tables behind the mux
+- Migration `0075_neutral_state` adds the Postgres tables behind the mux
   state store (`daimon.core.stores.mux_state`) and nullable `binding_id` and
   `binding_generation` columns on `thread_sessions`, and backfills bindings
   for callers' threads with a live session from one snapshot of
