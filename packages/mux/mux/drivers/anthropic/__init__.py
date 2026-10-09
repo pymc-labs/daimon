@@ -50,6 +50,7 @@ from mux.drivers.anthropic.sessions_lifecycle import (
     WorkspaceTransfer,
 )
 from mux.drivers.anthropic.turn import AnthropicEvents
+from mux.drivers.anthropic.usage import AnthropicUsage, UsageWalk
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
 
@@ -92,7 +93,6 @@ class AnthropicManagedAgents:
         native_versions = AnthropicSkillVersions(client, authorization)
         self._skills = skills or native_skills
         self._models = models
-        self._usage = usage
         native_vaults = AnthropicVaults(client, self.account_scope_id, secrets, authorization)
         self.session_admin = AnthropicSessionAdmin(
             client, self.account_scope_id, secrets, authorization
@@ -105,6 +105,8 @@ class AnthropicManagedAgents:
             secrets=secrets,
         )
         self._sessions = sessions or native_sessions
+        native_usage = AnthropicUsage(client, self.account_scope_id, authorization)
+        self._usage = usage if usage is not None else native_usage
         native_memory = AnthropicMemoryStores(client, self.account_scope_id, authorization)
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
@@ -130,6 +132,7 @@ class AnthropicManagedAgents:
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
             (SkillVersions, "anthropic.skills_versions", 1): native_versions,
             (NativeSkillVersions, "anthropic.skills_versions", 1): native_versions,
+            (UsageWalk, "anthropic.usage_walk", 1): native_usage,
         }
 
     @property

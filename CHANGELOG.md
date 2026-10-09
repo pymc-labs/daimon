@@ -80,6 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route vault bootstrap, credential mirroring, MCP OAuth writes and secret file
   upload through resource ports while preserving request order, locking, retries
   and cleanup; keep credential material out of SDK errors and DEBUG logs.
+- Route the usage sweep's workspace session inventory and billed and exempt model spans through scoped neutral ports with existing requests and debit keys.
+
+- Add a scoped Anthropic model-span usage port that retains native pagination, event identities and meters.
+
+- Route headless agent and environment retrieval through the neutral resource ports with the existing requests and SDK error behavior.
+
 - Accept provider-neutral usage observations while preserving historical usage rows, debit keys, prices and timestamps.
 
 - Verify legacy skill upload filenames, media types and archive bytes at import and repository-sync call sites.

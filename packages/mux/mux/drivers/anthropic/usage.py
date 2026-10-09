@@ -1,13 +1,21 @@
-"""One pure Anthropic usage translation, shared by turn and accounting ports."""
+"""Anthropic model-span usage ports and their shared pure translation."""
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
-from typing import cast
+from typing import Protocol, cast
 
+from anthropic import AsyncAnthropic
+from anthropic.types.beta.sessions.event_list_params import EventListParams
 from pydantic import JsonValue
 
-from mux.contracts.ids import ModelRef, ResourceRef
+from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Scope
 from mux.contracts.usage import UsageObservation
+from mux.drivers.anthropic.resources._authorization import (
+    ResourceAuthorization,
+    authorize,
+    check_ref,
+)
+from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 
 
 def observation_from_event(
@@ -66,3 +74,81 @@ def observation_from_event(
         else "partial",
         observed_at=observed_at,
     )
+
+
+class UsageWalk(Protocol):
+    def model_requests(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        *,
+        model_id: str | None = None,
+        exclude_ids: frozenset[str] = frozenset(),
+    ) -> AsyncIterator[UsageObservation]: ...
+
+
+class AnthropicUsage:
+    """Read only model spans, using the existing SDK paginator and normalizer."""
+
+    def __init__(
+        self,
+        client: AsyncAnthropic,
+        account_scope_id: str,
+        authorization: ResourceAuthorization | None = None,
+    ) -> None:
+        self._client = client
+        self._account_scope_id = account_scope_id
+        self._authorization = authorization
+
+    def _check(self, scope: Scope, session: ResourceRef) -> None:
+        authorize(self._authorization, scope, "session", session.id)
+        check_ref(scope, session, self._account_scope_id, "session")
+
+    async def model_requests(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        *,
+        model_id: str | None = None,
+        exclude_ids: frozenset[str] = frozenset(),
+    ) -> AsyncIterator[UsageObservation]:
+        self._check(scope, session)
+        async for event in provider_iter(
+            self._client.beta.sessions.events.list(
+                session.id, order="asc", types=["span.model_request_end"]
+            )
+        ):
+            if event.type == "span.model_request_end" and event.id not in exclude_ids:
+                yield observation_from_event(
+                    event.model_dump(mode="json"),
+                    session,
+                    observed_at=event.processed_at,
+                    model_id=model_id,
+                )
+
+    async def reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
+        return tuple([observation async for observation in self.model_requests(scope, session)])
+
+    async def list(
+        self, scope: Scope, session: ResourceRef, *, page: PageRequest
+    ) -> Page[UsageObservation]:
+        self._check(scope, session)
+        kwargs: EventListParams = {"types": ["span.model_request_end"]}
+        if page.cursor is not None:
+            kwargs["page"] = page.cursor
+        if page.limit is not None:
+            kwargs["limit"] = page.limit
+        if page.order is not None:
+            kwargs["order"] = page.order
+        result = await provider_call(self._client.beta.sessions.events.list(session.id, **kwargs))
+        return Page(
+            data=tuple(
+                observation_from_event(
+                    event.model_dump(mode="json"), session, observed_at=event.processed_at
+                )
+                for event in result.data
+                if event.type == "span.model_request_end"
+            ),
+            has_more=result.has_next_page(),
+            next_cursor=result.next_page if result.has_next_page() else None,
+        )

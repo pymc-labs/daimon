@@ -705,3 +705,10 @@ cache reads and writes; billing projects them back into the existing disjoint
 token stages before pricing. Unknown counts remain unknown. Anthropic model
 events retain their native event IDs, immutable revision 1 and provider
 timestamps, so replaying historical events leaves usage and ledger rows unchanged.
+
+Usage backfill reads billed and exempt model-request spans through the neutral
+usage port, retaining the ascending model-request filter and native paginator.
+Its complete session inventory uses an explicitly authorized workspace scope
+and preserves native pagination and session snapshots. The host validates
+tenant metadata before span reads and preserves historical
+event IDs, debit keys, timestamps, markup and absorbed-spend log totals.
