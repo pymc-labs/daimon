@@ -104,6 +104,7 @@ delegated to session administration. Closed `anthropic.session_create@1` and
 `anthropic.session_resource_create@1` configs preserve omitted and explicit empty
 fields, agent overrides and mount ordering. Session specs carry extensions and
 records carry an opaque optional native snapshot for the temporary host codec.
+
 Anthropic model spans convert to `UsageObservation` in the usage driver,
 retaining event IDs, timestamps and the untouched native meter. Neutral input
 counts include cache stages; the host projects them into its existing billing
@@ -172,3 +173,23 @@ pass; thirteen declare typed pending dependencies or unsupported capabilities.
 Broken driver variants must fail shared fixture checks. Registration adds no
 provider discovery, host wiring or live certification; see the driver README
 for the complete matrix and cleanup context.
+`anthropic.memory_stores@1` supplies memory store creation, reads, archival and
+deletion, plus a native prefix walk for the temporary host compatibility edge.
+Memory paths and prefixes are distinct owned records; SDK objects remain inside
+the driver. The existing client supplies retries and its agent-memory beta
+header. Operation keys pass through without caching or deduplication, and
+conditional writes fail before I/O. Tenant and account checks apply to every
+store reference, with tagged-record and authorized-list checks after native
+reads.
+
+Environment identity reads retain omitted or null native configuration fields,
+including the SDK snapshot and field-presence semantics used by host caches.
+
+M0 memory listing/content reads and environment identity retrieval preserve the
+SDK's partial native response snapshots through operation-specific driver
+extensions (`anthropic.memory_stores@1` native reads/walks and
+`anthropic.environment_reads@1`). The compatibility edge reconstructs SDK records without requiring
+unused paths, identifiers, configuration or timestamps. Prefix and unknown list
+rows retain their original discriminator and pagination behavior. Tenant and
+account checks still run before requests, and environment metadata checks still
+run after the existing response. Neutral resource records remain validated.

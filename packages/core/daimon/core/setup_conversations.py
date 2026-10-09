@@ -14,6 +14,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
+from mux.errors import ScopeViolation
 
 # Copy for the surfaces that open or describe a setup conversation. It lives
 # here so the Discord panel, the Slack panel and the MCP outcome cannot drift:
@@ -56,14 +59,19 @@ async def get_setup_agent(
     anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
 ) -> BetaManagedAgentsAgent:
     """Retrieve the exact live identity; never substitute an agent with the same name."""
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     try:
-        agent = await anthropic.beta.agents.retrieve(ma_agent_id)
+        agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope)
     except APIStatusError as error:
         if error.status_code in (400, 404):
             raise DaimonError(
                 "That agent no longer exists. Choose another agent for setup."
             ) from error
         raise
+    except ScopeViolation:
+        raise DaimonError(
+            "That agent is no longer available in this workspace. Choose another agent."
+        ) from None
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
         tenant_id
     ):

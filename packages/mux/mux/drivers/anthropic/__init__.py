@@ -18,6 +18,7 @@ from mux.contracts.ports import (
     SkillVersions,
     Usage,
 )
+from mux.contracts.ports import MemoryStores as CoreMemoryStores
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
@@ -27,7 +28,9 @@ from mux.drivers.anthropic.resources._secrets import SecretResolver
 from mux.drivers.anthropic.resources.agents import AnthropicAgents
 from mux.drivers.anthropic.resources.artifacts import AnthropicArtifacts
 from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
-from mux.drivers.anthropic.resources.environments import AnthropicEnvironments
+from mux.drivers.anthropic.resources.environments import AnthropicEnvironments, EnvironmentReads
+from mux.drivers.anthropic.resources.memory_stores import AnthropicMemoryStores
+from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
 from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
 from mux.drivers.anthropic.resources.sessions_admin import (
@@ -97,12 +100,16 @@ class AnthropicManagedAgents:
             secrets=secrets,
         )
         self._sessions = sessions or native_sessions
+        native_memory = AnthropicMemoryStores(client, self.account_scope_id, authorization)
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
             (Outputs, "anthropic.outputs", 1): AnthropicOutputs(
                 client, self.account_scope_id, authorization, secrets
             ),
+            (EnvironmentReads, "anthropic.environment_reads", 1): self.environments,
+            (CoreMemoryStores, "anthropic.memory_stores", 1): native_memory,
+            (NativeMemoryStores, "anthropic.memory_stores", 1): native_memory,
             (NativeArtifacts, "anthropic.artifacts", 1): native_artifacts,
             (Vaults, "anthropic.vaults", 1): native_vaults,
             (CoreVaults, "anthropic.vaults", 1): native_vaults,

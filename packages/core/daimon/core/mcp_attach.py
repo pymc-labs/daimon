@@ -40,6 +40,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.mux_compat import update_agent
 from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
@@ -48,6 +49,7 @@ from daimon.core.operation_policy import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_mcp_credentials as cred_store
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULT_MCP_TOOLSET_CONFIG: Final[dict[str, Any]] = {
@@ -232,6 +234,7 @@ async def attach_mcp_server_to_agent(
     replace_allowed: bool,
     shares_token: bool = False,
     before_update: Callable[[], Awaitable[None]] | None = None,
+    scope: Scope | None = None,
 ) -> BetaManagedAgentsAgent:
     """Attach ``server_name`` at ``url`` to ``agent_id``, preserving the rest.
 
@@ -253,6 +256,9 @@ async def attach_mcp_server_to_agent(
     attached after the caller decided, and its users would now run on the
     caller's token. The caller withdraws that token.
     """
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.mcp_attach:attach_mcp_server_to_agent"
+    )
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         if not replace_allowed and (
@@ -266,8 +272,12 @@ async def attach_mcp_server_to_agent(
         servers, tools = build_attached_spec(fresh, server_name=server_name, url=url)
         if before_update is not None:
             await before_update()
-        return await client.beta.agents.update(
-            fresh.id, version=fresh.version, mcp_servers=servers, tools=tools
+        return await update_agent(
+            client,
+            fresh.id,
+            payload={"mcp_servers": servers, "tools": tools},
+            version=fresh.version,
+            scope=backend_scope,
         )
 
-    return await update_agent_with_version_retry(client, agent_id, _apply)
+    return await update_agent_with_version_retry(client, agent_id, _apply, scope=backend_scope)

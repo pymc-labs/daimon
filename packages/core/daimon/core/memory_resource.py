@@ -23,6 +23,8 @@ from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import
     BetaManagedAgentsMemoryStoreResourceParam,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_memory_store, create_memory_store, delete_memory_store
 from daimon.core.stores.agent_memory_stores import (
     clear_memory_store,
     get_memory_store_id,
@@ -70,17 +72,22 @@ async def ensure_memory_store_and_mount(
     memory_stores.create + race-safe insert; on a lost race the just-created
     orphan store is deleted and the winner's id is used.
     """
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     async with session_factory() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
 
     if store_id is None:
-        created = await anthropic.beta.memory_stores.create(
-            name=f"daimon {agent_name} {tenant_id}",
-            description=_STORE_DESCRIPTION.format(agent_name=agent_name),
-            metadata={
-                MA_METADATA_KEY_TENANT: str(tenant_id),
-                MA_METADATA_KEY_AGENT: str(agent_id),
+        created = await create_memory_store(
+            anthropic,
+            {
+                "name": f"daimon {agent_name} {tenant_id}",
+                "description": _STORE_DESCRIPTION.format(agent_name=agent_name),
+                "metadata": {
+                    MA_METADATA_KEY_TENANT: str(tenant_id),
+                    MA_METADATA_KEY_AGENT: str(agent_id),
+                },
             },
+            scope=backend_scope,
         )
         try:
             async with session_factory() as session, session.begin():
@@ -95,7 +102,7 @@ async def ensure_memory_store_and_mount(
             # just created — delete it, or a DB outage mints one unreferenced
             # active store per session attempt.
             try:
-                await anthropic.beta.memory_stores.delete(created.id)
+                await delete_memory_store(anthropic, created.id, scope=backend_scope)
             except anthropic_errors.APIError:
                 _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
             raise
@@ -103,7 +110,7 @@ async def ensure_memory_store_and_mount(
             # Lost the provisioning race — discard the orphan store.
             _log.info("memory_store.race_lost", orphan=created.id, winner=store_id)
             try:
-                await anthropic.beta.memory_stores.delete(created.id)
+                await delete_memory_store(anthropic, created.id, scope=backend_scope)
             except anthropic_errors.APIError:
                 _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
         else:
@@ -133,12 +140,13 @@ async def archive_memory_store_for_agent(
     Idempotent: unbound agent → no-op; already-archived/missing store on the
     MA side → binding still cleared.
     """
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     async with session_factory() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
     if store_id is None:
         return
     try:
-        await anthropic.beta.memory_stores.archive(store_id)
+        await archive_memory_store(anthropic, store_id, scope=backend_scope)
     except anthropic_errors.NotFoundError:
         _log.info("memory_store.archive_missing", memory_store_id=store_id)
     async with session_factory() as session, session.begin():
