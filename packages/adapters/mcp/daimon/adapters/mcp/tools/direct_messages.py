@@ -50,19 +50,12 @@ async def send_direct_message_impl(
     *,
     recipient_id: str,
     content: str,
-    connect_url: str | None = None,
 ) -> DirectMessageResult:
     """Validate policy before opening a DM; verify both people in the live tenant."""
     if auth.platform not in _RECIPIENT:
         raise ToolError("direct messages are not supported on this platform")
     if not content.strip() or len(content) > 19000:
         raise ToolError("content must contain between 1 and 19000 characters")
-    if connect_url is not None and (
-        not connect_url.startswith("https://") or connect_url in content
-    ):
-        raise ToolError(
-            "a GitHub connect button needs a private HTTPS URL outside the message text"
-        )
     if auth.platform == "teams":
         recipient_id = recipient_id.lower()  # Entra ids compare case-insensitively
     if re.fullmatch(_RECIPIENT[auth.platform], recipient_id) is None:
@@ -75,7 +68,7 @@ async def send_direct_message_impl(
     ids: list[str] = []
     if auth.platform == "teams":
         chat, ids = await teams_direct_message(
-            runtime, auth, recipient_id=recipient_id, chunks=chunks, connect_url=connect_url
+            runtime, auth, recipient_id=recipient_id, chunks=chunks
         )
         return DirectMessageResult(
             platform="teams", recipient_id=recipient_id, channel_id=chat, message_ids=ids
@@ -91,23 +84,8 @@ async def send_direct_message_impl(
                 if recipient.bot:
                     raise ToolError("recipient must be a human tenant member")
                 dm = await recipient.create_dm()
-                view = None
-                if connect_url is not None:
-                    view = discord.ui.View(timeout=None)
-                    view.add_item(
-                        discord.ui.Button(
-                            label="Connect GitHub", style=discord.ButtonStyle.link, url=connect_url
-                        )
-                    )
                 for chunk in chunks:
-                    if view is None:
-                        message = await dm.send(
-                            chunk, allowed_mentions=discord.AllowedMentions.none()
-                        )
-                    else:
-                        message = await dm.send(
-                            chunk, view=view, allowed_mentions=discord.AllowedMentions.none()
-                        )
+                    message = await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
                     ids.append(str(message.id))
                 return DirectMessageResult(
                     platform="discord",
@@ -140,29 +118,11 @@ async def send_direct_message_impl(
         channel = cast(dict[str, str], opened["channel"])["id"]
         identity_kwargs = await _agent_identity_kwargs(runtime, auth)
         for chunk in chunks:
-            blocks = (
-                [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": chunk}},
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "Connect GitHub"},
-                                "url": connect_url,
-                            }
-                        ],
-                    },
-                ]
-                if connect_url is not None
-                else None
-            )
             response = await _post_with_identity(
                 client,
                 identity_kwargs,
                 channel=channel,
-                text="Connect GitHub" if connect_url is not None else chunk,
-                **({"blocks": blocks} if blocks is not None else {}),
+                text=chunk,
                 mrkdwn=False,
                 parse="none",
                 link_names=False,

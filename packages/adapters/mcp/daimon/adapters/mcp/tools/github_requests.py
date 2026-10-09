@@ -3,27 +3,22 @@
 from __future__ import annotations
 
 import uuid
-from typing import Literal, cast
+from typing import Literal
 
-import discord
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools.discord._client import (
-    _resolve_channel,  # pyright: ignore[reportPrivateUsage]
-    _resolve_member,  # pyright: ignore[reportPrivateUsage]
-    rest_client,
+from daimon.adapters.mcp.tools.github_request_delivery import (
+    deliver_private_request_card,
+    deliver_shared_admin_card,
 )
-from daimon.adapters.mcp.tools.github_request_delivery import deliver_private_request_card
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_app_session import effective_repo_state
-from daimon.core.github_request_cards import RequestCard, admin_card, requester_card
+from daimon.core.github_request_cards import RequestCard, requester_card
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
 from daimon.core.stores.github_access_requests import (
-    AccessRequest,
     AdminRecipient,
     get_request,
     list_server_admin_recipients,
@@ -35,7 +30,6 @@ from daimon.core.stores.github_personal_links import mint_link
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
-from slack_sdk.errors import SlackApiError
 
 
 class GitHubRequestResult(BaseModel):
@@ -44,43 +38,6 @@ class GitHubRequestResult(BaseModel):
     status: Literal["ready", "waiting", "no_admin", "personal_link", "unavailable"]
     message: str
     request_id: uuid.UUID | None = None
-
-
-async def _can_see_origin(
-    runtime: McpRuntime,
-    *,
-    platform: Literal["discord", "slack"],
-    workspace_id: str,
-    channel_id: str,
-    platform_user_id: str,
-) -> bool:
-    """A private-channel request goes only to admins who can read that place."""
-    if platform == "slack" and channel_id.startswith("D"):
-        return True
-    try:
-        if platform == "discord":
-            if runtime.settings.discord is None:
-                return False
-            async with rest_client(runtime.settings.discord.bot_token.get_secret_value()) as c:
-                _, member = await _resolve_member(c, workspace_id, platform_user_id)
-                channel = await _resolve_channel(c, channel_id)
-                return (
-                    True
-                    if isinstance(channel, discord.DMChannel)
-                    else channel.permissions_for(member).view_channel
-                )
-        client = await slack_web_client(runtime, team_id=workspace_id)
-        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
-        raw_channel: object = info.get("channel")
-        channel = cast("dict[str, object]", raw_channel) if isinstance(raw_channel, dict) else {}
-        if not channel.get("is_private"):
-            return True
-        members = await client.conversations_members(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id, limit=1000
-        )
-        return platform_user_id in (members.get("members") or [])
-    except (discord.HTTPException, SlackApiError, ValueError):
-        return False
 
 
 async def _admin_recipients(
@@ -298,44 +255,16 @@ async def request_github_access_impl(
         platform=origin.platform,
         requester_account_id=origin.account_id,
     )
-    for recipient in recipients:
-        if not await _can_see_origin(
-            runtime,
-            platform=origin.platform,
-            workspace_id=workspace_id,
-            channel_id=origin.parent_channel_id,
-            platform_user_id=recipient.platform_user_id,
-        ):
-            continue
-        card = admin_card(
-            request,
-            connected_names=connected_names,
-            channel_label=(
-                ""
-                if (
-                    origin.parent_channel_id == origin.thread_id
-                    or origin.platform == "slack"
-                    and origin.parent_channel_id.startswith("D")
-                )
-                else f"<#{origin.parent_channel_id}>"
-            ),
-            requester_label=f"<@{auth.platform_user_id}>",
-            ability=ability,
-        )
-        await deliver_private_request_card(
-            runtime,
-            tenant_id=origin.tenant_id,
-            platform=origin.platform,
-            workspace_id=workspace_id,
-            request_id=request.id,
-            recipient_account_id=recipient.account_id,
-            platform_user_id=recipient.platform_user_id,
-            card=card,
-        )
+    await deliver_shared_admin_card(
+        runtime,
+        tenant_id=origin.tenant_id,
+        platform=origin.platform,
+        workspace_id=workspace_id,
+        request_id=request.id,
+        admin_user_ids=[recipient.platform_user_id for recipient in recipients],
+    )
     async with runtime.session_factory() as session:
-        updated: AccessRequest | None = await get_request(
-            session, tenant_id=origin.tenant_id, request_id=request.id
-        )
+        updated = await get_request(session, tenant_id=origin.tenant_id, request_id=request.id)
     if updated is None:
         raise ToolError("GitHub request disappeared.")
     status_card = requester_card(

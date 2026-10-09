@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.adapters.mcp.tools import github_request_delivery as delivery_module
 from daimon.adapters.mcp.tools.github_request_delivery import (
-    _discord_embed,
     _discord_view,
     _slack_blocks,
 )
@@ -28,11 +27,6 @@ def test_request_card_has_state_edge_fields_and_separate_actions() -> None:
         "Connect and add",
         ("Decline", "Hide for me"),
     )
-    embed = _discord_embed(card)
-    assert embed.title == "Let ResearchBot use a repo that isn't connected yet?"
-    assert [(field.name, field.value) for field in embed.fields] == [("Can", "read only.")]
-    assert embed.footer.text == "GitHub on Daimon"
-    assert embed.color is not None
     view = _discord_view(card, request_id=uuid.uuid4(), link_url=None)
     assert len(view.to_components()) == 1
 
@@ -92,7 +86,9 @@ async def test_request_card_stays_at_origin_without_dm(
         session_factory=committing_sessionmaker,
         settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
     )
-    card = RequestCard("GitHub request", "Connect and add", ())
+    card = RequestCard(
+        "Let ResearchBot use private/repo?\nCan: Read and write.", "Connect and add", ()
+    )
     if platform == "discord":
 
         class Thread:
@@ -128,7 +124,85 @@ async def test_request_card_stays_at_origin_without_dm(
     )
     if platform == "discord":
         client.fetch_user.assert_not_awaited()
+        assert "private/repo" not in str(Thread.send.await_args.kwargs)
     else:
         client.chat_postEphemeral.assert_awaited_once()
         client.conversations_open.assert_not_awaited()
         client.chat_postMessage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+async def test_shared_admin_card_is_neutral_and_updates_once(
+    platform: str,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform=platform, workspace_id="workspace")
+        account = await make_account(session, tenant=tenant)
+        request = await request_access(
+            session,
+            tenant_id=tenant.id,
+            requester_account_id=account.id,
+            requester_platform_user_id="person",
+            platform=platform,
+            parent_channel_id="100" if platform == "discord" else "C1",
+            thread_id="200" if platform == "discord" else "123.456",
+            agent_id=uuid.uuid4(),
+            ma_agent_id="agent_1",
+            agent_name="ResearchBot",
+            requested_work="Continue the task",
+            repo_name="private/secret",
+            required_ability="write",
+            is_admin=False,
+        )
+    runtime = SimpleNamespace(
+        session_factory=committing_sessionmaker,
+        settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
+    )
+    if platform == "discord":
+
+        class Thread:
+            send = AsyncMock(return_value=SimpleNamespace(id=42))
+            edit = AsyncMock()
+
+            def get_partial_message(self, _id: int) -> Thread:
+                return self
+
+        thread = Thread()
+        client = SimpleNamespace(fetch_channel=AsyncMock(return_value=thread))
+
+        @asynccontextmanager
+        async def rest_client(_token: str):  # type: ignore[no-untyped-def]
+            yield client
+
+        monkeypatch.setattr(delivery_module.discord, "Thread", Thread)
+        monkeypatch.setattr(delivery_module, "rest_client", rest_client)
+    else:
+        client = SimpleNamespace(
+            chat_postMessage=AsyncMock(return_value={"ts": "123.999"}),
+            chat_update=AsyncMock(),
+            chat_postEphemeral=AsyncMock(),
+        )
+        monkeypatch.setattr(delivery_module, "slack_web_client", AsyncMock(return_value=client))
+    kwargs = dict(
+        tenant_id=tenant.id,
+        request_id=request.id,
+        platform=platform,
+        workspace_id="workspace",
+        admin_user_ids=["123" if platform == "discord" else "U123"],
+    )
+    assert await delivery_module.deliver_shared_admin_card(runtime, **kwargs)  # type: ignore[arg-type]
+    assert await delivery_module.deliver_shared_admin_card(runtime, **kwargs)  # type: ignore[arg-type]
+    if platform == "discord":
+        thread.send.assert_awaited_once()
+        assert "private/secret" not in str(thread.send.await_args.kwargs)
+        assert "Review" in str(thread.send.await_args.kwargs["view"].children[0].label)
+        thread.edit.assert_awaited_once()
+    else:
+        client.chat_postMessage.assert_awaited_once()
+        assert "private/secret" not in str(client.chat_postMessage.await_args.kwargs)
+        assert "<@U123>" in str(client.chat_postMessage.await_args.kwargs)
+        client.chat_update.assert_awaited_once()
+        client.chat_postEphemeral.assert_not_awaited()

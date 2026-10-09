@@ -2611,7 +2611,9 @@ class GitHubConnectClickIntent(Base):
     origin_responder_name: Mapped[str] = mapped_column(Text, nullable=False)
     requested_work: Mapped[str | None] = mapped_column(Text)
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
 
 class GitHubConnectFlow(Base):
@@ -2780,6 +2782,7 @@ class GitHubAccessRequest(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     admin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    admin_card_message_id: Mapped[str | None] = mapped_column(Text)
     resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expiry_notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

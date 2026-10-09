@@ -43,7 +43,7 @@ from daimon.core.github_app_session import (
     archive_app_vault,
     close_headless_app_session,
 )
-from daimon.core.github_connect_delivery import claim_next, settle
+from daimon.core.github_connect_delivery import claim_next, poll_once, settle
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.github_requester_access import (
     PermissionCache,
@@ -264,6 +264,14 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id="123"))
     await db_session.flush()
     db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    db_session.add(
+        PlatformPrincipal(
+            tenant_id=tenant_id,
+            platform="discord",
+            external_id="456",
+            account_id=admin_id,
+        )
+    )
     await db_session.flush()
     intent_id = await github_connect.create_discord_connect_intent(
         db_session,
@@ -314,6 +322,67 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
     assert invitation.encrypted_origin_followup == b"encrypted-interaction"
+    account = await db_session.get(Account, admin_id)
+    assert account is not None
+    account.role = "user"
+    await db_session.flush()
+    assert (
+        await github_connect.bind_discord_connect_click(
+            db_session, requester_platform_user_id="456", thread_id="200", **args
+        )
+        is None
+    )
+    account.role = "admin"
+    await github_connect.create_flow(
+        db_session,
+        invitation_hash=invitation.token_hash,
+        state="state",
+        cookie="cookie",
+        encrypted_verifier=b"verifier",
+    )
+    assert await github_connect.confirm(
+        db_session,
+        state="state",
+        cookie="cookie",
+        github_user_id=12,
+        repos=[],
+    )
+    assert await db_session.get(GitHubConnectClickIntent, intent_id) is None
+
+
+@pytest.mark.asyncio
+async def test_expired_click_intents_are_swept_without_a_new_click(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, admin_id, agent_id = (uuid.uuid4() for _ in range(3))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="123"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    intent_id = await github_connect.create_discord_connect_intent(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requester_platform_user_id="456",
+        agent_id=agent_id,
+        agent_name="Helper",
+        parent_channel_id="100",
+        thread_id="200",
+        origin_ma_agent_id="ma-agent",
+        origin_responder_name="Helper",
+        requested_work=None,
+    )
+    row = await db_session.get(GitHubConnectClickIntent, intent_id)
+    assert row is not None
+    row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.flush()
+    await db_session.commit()
+    delivered = AsyncMock(return_value=True)
+    assert await poll_once(db_session_factory, platform="discord", deliver=delivered) == 0
+    delivered.assert_not_awaited()
+    async with db_session_factory() as session:
+        assert await session.get(GitHubConnectClickIntent, intent_id) is None
 
 
 def test_effective_access_properties() -> None:

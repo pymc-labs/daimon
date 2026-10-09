@@ -39,6 +39,7 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     encrypted = encrypt_token(build_multifernet((key.get_secret_value(),)), "private-link-token")
     bind = AsyncMock(return_value=(encrypted, "ResearchBot"))
     monkeypatch.setattr(button_module, "bind_discord_connect_click", bind)
+    monkeypatch.setattr(button_module, "is_member_guild_admin", lambda *_args, **_kwargs: True)
     runtime = SimpleNamespace(
         settings=SimpleNamespace(
             crypto=SimpleNamespace(keys=[key]),
@@ -53,6 +54,7 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     interaction.application_id = 1234
     interaction.token = "interaction-token"
     interaction.client.runtime = runtime
+    interaction.guild = SimpleNamespace(owner_id=456, fetch_member=AsyncMock(return_value=object()))
     button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
     assert len(button.item.custom_id or "") <= 100
     await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]

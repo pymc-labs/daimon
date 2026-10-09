@@ -171,7 +171,6 @@ async def test_discord_live_membership_precedes_dm_and_splits(
         auth,
         recipient_id="123",
         content="Connect GitHub for ResearchBot." if with_connect_button else "x" * 4000,
-        connect_url="https://mcp.test/connect/abc" if with_connect_button else None,
     )
     assert len(result.message_ids) == (1 if with_connect_button else 3)
     sent = [
@@ -181,14 +180,7 @@ async def test_discord_live_membership_precedes_dm_and_splits(
         "Connect GitHub for ResearchBot." if with_connect_button else "x" * 4000
     )
     assert all(body["allowed_mentions"]["parse"] == [] for body in sent)
-    if with_connect_button:
-        button = sent[0]["components"][0]["components"][0]
-        assert (button["type"], button["style"], button["url"], button["label"]) == (
-            2,
-            5,
-            "https://mcp.test/connect/abc",
-            "Connect GitHub",
-        )
+    assert all(not body.get("components") for body in sent)
 
 
 @pytest.mark.parametrize("recipient_team", ["T123", "TOTHER"])

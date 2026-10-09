@@ -95,7 +95,8 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     if not custom_id.startswith("github_request:"):
         return False
     parts = custom_id.split(":")
-    if len(parts) != 3 or parts[2] not in {
+    if len(parts) not in (3, 4) or parts[2] not in {
+        "review",
         "approve",
         "connect",
         "decline",
@@ -136,15 +137,87 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
     if (
         request is None
         or tenant is None
-        or principal is None
-        or delivery is None
-        or delivery.dismissed_at is not None
         or interaction.message is None
-        or delivery.message_id != str(interaction.message.id)
+        or str(interaction.channel_id) != request.thread_id
     ):
         await interaction.response.send_message("This request is unavailable.", ephemeral=True)
         return True
     action = parts[2]
+    shared_action = action == "review" or len(parts) == 4
+    if shared_action:
+        if (
+            not request.admin_card_message_id
+            or (str(interaction.message.id) if action == "review" else parts[3])
+            != request.admin_card_message_id
+        ):
+            await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+            return True
+        guild = interaction.client.get_guild(int(tenant.external_id))
+        if guild is None:
+            await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+            return True
+        member = guild.get_member(interaction.user.id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(interaction.user.id)
+            except discord.HTTPException:
+                await interaction.response.send_message(
+                    "This request is unavailable.", ephemeral=True
+                )
+                return True
+        if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
+            await interaction.response.send_message(
+                "Only a server admin can review GitHub requests.", ephemeral=True
+            )
+            return True
+        async with runtime.sessionmaker.begin() as session:
+            await sync_connect_admin(
+                session,
+                tenant_id=request.tenant_id,
+                platform="discord",
+                platform_user_id=str(interaction.user.id),
+                verified_tenant_admin=True,
+            )
+            principal = await find_platform_principal(
+                session,
+                tenant_id=request.tenant_id,
+                platform="discord",
+                external_id=str(interaction.user.id),
+            )
+        if action == "review":
+            if request.status not in ("open", "waiting_github"):
+                await interaction.response.send_message(
+                    "This request is unavailable.", ephemeral=True
+                )
+                return True
+            level = "Read only" if request.required_ability == "read" else "Read and write"
+            detail = discord.Embed(
+                title=f"{request.agent_name} needs GitHub access",
+                description=f"Repo: {', '.join(request.repo_names)}\nAccess: {level}",
+            )
+            view = discord.ui.View(timeout=900)
+            for label, decision in (
+                ("Approve", "approve"),
+                ("Decline", "decline"),
+                ("Connect and add", "connect"),
+            ):
+                view.add_item(
+                    discord.ui.Button(
+                        label=label,
+                        custom_id=f"github_request:{request_id}:{decision}:{request.admin_card_message_id}",
+                    )
+                )
+            await interaction.response.send_message(embed=detail, view=view, ephemeral=True)
+            return True
+    elif (
+        principal is None
+        or delivery is None
+        or delivery.dismissed_at is not None
+        or delivery.message_id != str(interaction.message.id)
+    ):
+        await interaction.response.send_message("This request is unavailable.", ephemeral=True)
+        return True
+    assert principal is not None
     if action == "link":
         if principal.account_id != request.requester_account_id:
             await interaction.response.send_message(

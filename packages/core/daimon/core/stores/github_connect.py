@@ -308,6 +308,13 @@ async def delete_click_intents_for_account(session: AsyncSession, *, account_id:
     return cast(CursorResult[Any], result).rowcount
 
 
+async def sweep_expired_click_intents(session: AsyncSession, *, now: datetime) -> int:
+    result = await session.execute(
+        delete(GitHubConnectClickIntent).where(GitHubConnectClickIntent.expires_at <= now)
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
 async def activate_confirmed_agent(
     session: AsyncSession,
     *,
@@ -768,6 +775,23 @@ async def bind_discord_connect_click(
         or intent.expires_at <= datetime.now(UTC)
     ):
         return None
+    account = await session.get(Account, intent.requester_account_id)
+    principal = await session.scalar(
+        select(PlatformPrincipal).where(
+            PlatformPrincipal.tenant_id == tenant_id,
+            PlatformPrincipal.platform == "discord",
+            PlatformPrincipal.external_id == requester_platform_user_id,
+            PlatformPrincipal.account_id == intent.requester_account_id,
+        )
+    )
+    if (
+        account is None
+        or account.tenant_id != tenant_id
+        or account.role != "admin"
+        or account.is_external
+        or principal is None
+    ):
+        return None
     if intent.encrypted_token is None:
         token = await mint_invitation(
             session,
@@ -979,6 +1003,12 @@ async def confirm(
         existing.status_reason = None
     invitation.used_at = now
     invitation.connected_repo_count = len(repos)
+    if invitation.encrypted_token is not None:
+        await session.execute(
+            delete(GitHubConnectClickIntent).where(
+                GitHubConnectClickIntent.encrypted_token == invitation.encrypted_token
+            )
+        )
     await session.execute(
         update(GitHubConnectFlow)
         .where(GitHubConnectFlow.invitation_hash == flow.invitation_hash)

@@ -22,8 +22,10 @@ from daimon.core.stores.github_access_requests import (
     mark_expiry_notice_sent,
     ready_and_continue,
     record_delivery,
+    record_shared_card,
     request_access,
     set_status,
+    shared_card_mention_allowed,
 )
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,
@@ -32,6 +34,45 @@ from daimon.core.stores.github_request_actions import (
 )
 from daimon.core.stores.task_continuations import get_continuation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.mark.asyncio
+async def test_shared_request_cards_cap_mentions_per_thread(db_session: AsyncSession) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="slack", external_id="T1"))
+    await db_session.flush()
+    requests = []
+    for index in range(4):
+        account_id = uuid.uuid4()
+        db_session.add(Account(id=account_id, tenant_id=tenant_id, role="user"))
+        await db_session.flush()
+        requests.append(
+            await request_access(
+                db_session,
+                tenant_id=tenant_id,
+                requester_account_id=account_id,
+                requester_platform_user_id=f"U{index}",
+                platform="slack",
+                parent_channel_id="C1",
+                thread_id="123.456",
+                agent_id=agent_id,
+                ma_agent_id="ma-agent",
+                agent_name="Helper",
+                repo_name="private/repo",
+                requested_work="Continue this task",
+                is_admin=False,
+            )
+        )
+    for request in requests[:3]:
+        assert await shared_card_mention_allowed(db_session, request=request)
+        await record_shared_card(
+            db_session, request=request, message_id=str(request.id), mentioned=True
+        )
+        await db_session.flush()
+    assert not await shared_card_mention_allowed(db_session, request=requests[3])
+    await record_shared_card(db_session, request=requests[0], message_id="updated", mentioned=False)
+    await db_session.flush()
+    assert not await shared_card_mention_allowed(db_session, request=requests[3])
 
 
 @pytest.mark.asyncio

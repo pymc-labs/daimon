@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from html import escape
 
 import discord
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -12,8 +13,11 @@ from daimon.core.github_request_cards import RequestCard
 from daimon.core.stores.github_access_requests import (
     get_delivery,
     lock_delivery_slot,
+    lock_shared_card_slot,
     lookup_request,
     record_delivery,
+    record_shared_card,
+    shared_card_mention_allowed,
 )
 from slack_sdk.errors import SlackApiError
 
@@ -33,21 +37,6 @@ _LINK_LABELS = frozenset(
 def _card_parts(text: str) -> tuple[str, str]:
     title, _, detail = text.partition("\n")
     return title, detail
-
-
-def _discord_embed(card: RequestCard) -> discord.Embed:
-    title, detail = _card_parts(card.text)
-    embed = discord.Embed(
-        title=title[:256],
-        color=0xFEE75C if card.primary else 0x5865F2,
-    )
-    if detail:
-        if detail.startswith("Can: "):
-            embed.add_field(name="Can", value=detail.removeprefix("Can: "), inline=False)
-        else:
-            embed.add_field(name="Details", value=detail[:1024], inline=False)
-    embed.set_footer(text="GitHub on Daimon")
-    return embed
 
 
 def _discord_view(
@@ -76,6 +65,117 @@ def _discord_view(
                 )
             )
     return view
+
+
+async def deliver_shared_admin_card(
+    runtime: McpRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    request_id: uuid.UUID,
+    platform: str,
+    workspace_id: str,
+    admin_user_ids: list[str],
+) -> bool:
+    """Post one repo-free card, with at most three admin mention posts per thread per hour."""
+    async with runtime.session_factory.begin() as session:
+        request = await lookup_request(session, request_id=request_id)
+        if request is None or request.tenant_id != tenant_id:
+            return False
+        await lock_shared_card_slot(session, request=request)
+        request = await lookup_request(session, request_id=request_id)
+        if request is None or request.status not in ("open", "waiting_github"):
+            return False
+        mention = (
+            request.admin_card_message_id is None
+            and bool(admin_user_ids)
+            and await shared_card_mention_allowed(session, request=request)
+        )
+        title = f"{request.agent_name} needs GitHub access to continue."
+        try:
+            if platform == "discord":
+                if runtime.settings.discord is None:
+                    return False
+                ids = [int(user_id) for user_id in admin_user_ids] if mention else []
+                content = " ".join(f"<@{user_id}>" for user_id in ids) if mention else None
+                view = discord.ui.View(timeout=None)
+                view.add_item(
+                    discord.ui.Button(
+                        label="Review", custom_id=f"github_request:{request_id}:review"
+                    )
+                )
+                async with rest_client(
+                    runtime.settings.discord.bot_token.get_secret_value()
+                ) as client:
+                    channel = await client.fetch_channel(int(request.thread_id))
+                    if not isinstance(channel, discord.Thread):
+                        return False
+                    if request.admin_card_message_id:
+                        message = channel.get_partial_message(int(request.admin_card_message_id))
+                        await message.edit(
+                            content=content,
+                            embed=discord.Embed(title=title),
+                            view=view,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                        message_id = request.admin_card_message_id
+                    else:
+                        sent = await channel.send(
+                            content=content,
+                            embed=discord.Embed(title=title),
+                            view=view,
+                            allowed_mentions=discord.AllowedMentions(
+                                users=[discord.Object(id=i) for i in ids],
+                                everyone=False,
+                                roles=False,
+                                replied_user=False,
+                            ),
+                        )
+                        message_id = str(sent.id)
+            elif platform == "slack":
+                client = await slack_web_client(runtime, team_id=workspace_id)
+                mentions = (
+                    " ".join(f"<@{user_id}>" for user_id in admin_user_ids) if mention else ""
+                )
+                text = f"{escape(title)} {mentions}".strip()
+                blocks = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "action_id": "github_request__review",
+                                "value": str(request_id),
+                                "text": {"type": "plain_text", "text": "Review"},
+                            }
+                        ],
+                    },
+                ]
+                if request.admin_card_message_id:
+                    await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                        channel=request.parent_channel_id,
+                        ts=request.admin_card_message_id,
+                        text=text,
+                        blocks=blocks,
+                    )
+                    message_id = request.admin_card_message_id
+                else:
+                    sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        channel=request.parent_channel_id,
+                        thread_ts=request.thread_id,
+                        text=text,
+                        blocks=blocks,
+                    )
+                    raw_message_id: object = sent.get("ts")
+                    if not isinstance(raw_message_id, str):
+                        return False
+                    message_id = raw_message_id
+            else:
+                return False
+        except (discord.HTTPException, SlackApiError, ValueError, KeyError):
+            return False
+        await record_shared_card(session, request=request, message_id=message_id, mentioned=mention)
+        return True
 
 
 def _slack_blocks(
@@ -152,17 +252,22 @@ async def deliver_private_request_card(
                     if not isinstance(channel, discord.Thread):
                         return False
                     view = _discord_view(card, request_id=request_id, link_url=link_url)
+                    # Thread messages are visible to everyone with channel access.
+                    # Request details are never rendered in this shared surface.
+                    neutral = discord.Embed(
+                        title="GitHub request", description="Only the requester can use this card."
+                    )
                     if delivery is not None and delivery.message_id is not None:
                         message = channel.get_partial_message(int(delivery.message_id))
                         await message.edit(
                             content=None,
-                            embed=_discord_embed(card),
+                            embed=neutral,
                             view=view,
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return True
                     message = await channel.send(
-                        embed=_discord_embed(card),
+                        embed=neutral,
                         view=view,
                         allowed_mentions=discord.AllowedMentions.none(),
                     )

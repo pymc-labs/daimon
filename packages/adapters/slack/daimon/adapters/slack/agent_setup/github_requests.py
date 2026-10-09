@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from html import escape
 from typing import Any, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -39,6 +41,94 @@ async def _replace_card(
         user=user_id,
         text=text,
         blocks=github_card_blocks(text),
+    )
+
+
+def _review_modal(
+    request_id: uuid.UUID,
+    *,
+    channel_id: str,
+    message_id: str,
+    agent_name: str,
+    repo_names: list[str],
+    ability: str,
+) -> dict[str, Any]:
+    metadata = json.dumps(
+        {"request_id": str(request_id), "channel_id": channel_id, "message_id": message_id}
+    )
+    return {
+        "type": "modal",
+        "callback_id": "github_request_review",
+        "title": {"type": "plain_text", "text": "GitHub access"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "private_metadata": metadata,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*{escape(agent_name)} needs GitHub access*\n"
+                        f"Repo: {', '.join(repo_names)}\nAccess: {ability}"
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": "github_request__decision",
+                        "value": f"{request_id}:approve",
+                        "text": {"type": "plain_text", "text": "Approve"},
+                    },
+                    {
+                        "type": "button",
+                        "action_id": "github_request__decision",
+                        "value": f"{request_id}:decline",
+                        "text": {"type": "plain_text", "text": "Decline"},
+                    },
+                    {
+                        "type": "button",
+                        "action_id": "github_request__decision",
+                        "value": f"{request_id}:connect",
+                        "text": {"type": "plain_text", "text": "Connect and add"},
+                    },
+                ],
+            },
+        ],
+    }
+
+
+async def _replace_modal(
+    client: AsyncWebClient, payload: dict[str, Any], text: str, *, url: str | None = None
+) -> None:
+    view = cast("dict[str, Any]", payload.get("view") or {})
+    blocks: list[dict[str, Any]] = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    if url:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": "github_request__link",
+                        "url": url,
+                        "text": {"type": "plain_text", "text": "Connect GitHub"},
+                    }
+                ],
+            }
+        )
+    await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+        view_id=str(view.get("id") or ""),
+        view={
+            "type": "modal",
+            "callback_id": "github_request_review",
+            "title": {"type": "plain_text", "text": "GitHub access"},
+            "close": {"type": "plain_text", "text": "Close"},
+            "private_metadata": str(view.get("private_metadata") or ""),
+            "blocks": blocks,
+        },
     )
 
 
@@ -111,10 +201,26 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     user_id = str(user.get("id") or "")
     channel_id = str(channel.get("id") or "")
     message_id = str(message.get("ts") or "")
+    action_id = str(action.get("action_id") or "")
+    modal_view = cast("dict[str, Any]", payload.get("view") or {})
+    modal = bool(modal_view)
+    if modal:
+        try:
+            metadata = json.loads(str(modal_view.get("private_metadata") or ""))
+        except (ValueError, TypeError):
+            return
+        if not isinstance(metadata, dict):
+            return
+        metadata = cast("dict[str, object]", metadata)
+        channel_id = str(metadata.get("channel_id") or "")
+        message_id = str(metadata.get("message_id") or "")
     value = str(action.get("value") or "")
-    parts = value.split(":")
-    if len(parts) != 2 or parts[1] not in {"approve", "connect", "decline", "hide", "cancel"}:
-        return
+    if action_id == "github_request__review":
+        parts = [value, "review"]
+    else:
+        parts = value.split(":")
+        if len(parts) != 2 or parts[1] not in {"approve", "connect", "decline", "hide", "cancel"}:
+            return
     try:
         request_id = uuid.UUID(parts[0])
     except ValueError:
@@ -140,19 +246,90 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
             if principal is not None
             else None
         )
+    decision = parts[1]
+    shared = decision == "review" or modal
     if (
         request is None
         or request.tenant_id != tenant_id
-        or principal is None
-        or delivery is None
-        or delivery.dismissed_at is not None
         or request.parent_channel_id != channel_id
+        or (
+            request.admin_card_message_id != message_id
+            if shared
+            else principal is None
+            or delivery is None
+            or delivery.dismissed_at is not None
+            or (delivery.message_id is not None and delivery.message_id != message_id)
+        )
     ):
-        await post_ephemeral(
-            client, channel_id=channel_id, user_id=user_id, text="This request is unavailable."
+        if modal:
+            await _replace_modal(client, payload, "This request is unavailable.")
+        else:
+            await post_ephemeral(
+                client,
+                channel_id=channel_id,
+                user_id=user_id,
+                text="This request is unavailable.",
+            )
+        return
+    if decision == "review":
+        if request.status not in ("open", "waiting_github"):
+            await post_ephemeral(
+                client, channel_id=channel_id, user_id=user_id, text="This request is unavailable."
+            )
+            return
+        if not await resolve_is_admin(client, user_id=user_id):
+            await post_ephemeral(
+                client,
+                channel_id=channel_id,
+                user_id=user_id,
+                text="Only a workspace admin can review GitHub requests.",
+            )
+            return
+        level = "Read only" if request.required_ability == "read" else "Read and write"
+        await client.views_open(  # pyright: ignore[reportUnknownMemberType]
+            trigger_id=str(payload.get("trigger_id") or ""),
+            view=_review_modal(
+                request_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                agent_name=request.agent_name,
+                repo_names=request.repo_names,
+                ability=level,
+            ),
         )
         return
-    decision = parts[1]
+    if principal is None and shared:
+        if not await resolve_is_admin(client, user_id=user_id):
+            await _replace_modal(
+                client, payload, "Only a workspace admin can approve GitHub requests."
+            )
+            return
+        async with runtime.sessionmaker.begin() as session:
+            await sync_connect_admin(
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                verified_tenant_admin=True,
+            )
+            principal = await find_platform_principal(
+                session, tenant_id=tenant_id, platform="slack", external_id=user_id
+            )
+    if principal is None:
+        return
+
+    async def respond(text: str, *, url: str | None = None) -> None:
+        if modal:
+            await _replace_modal(client, payload, text, url=url)
+        else:
+            await _replace_card(
+                client,
+                channel_id=channel_id,
+                thread_id=request.thread_id,
+                user_id=user_id,
+                text=text,
+            )
+
     if decision == "cancel":
         async with runtime.sessionmaker.begin() as session:
             changed = await cancel_request(
@@ -161,13 +338,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 request_id=request_id,
                 account_id=principal.account_id,
             )
-        await _replace_card(
-            client,
-            channel_id=channel_id,
-            thread_id=request.thread_id,
-            user_id=user_id,
-            text="Request cancelled." if changed else "This request is unavailable.",
-        )
+        await respond("Request cancelled." if changed else "This request is unavailable.")
         return
     if decision == "hide":
         async with runtime.sessionmaker.begin() as session:
@@ -177,22 +348,11 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 request_id=request_id,
                 account_id=principal.account_id,
             )
-        await _replace_card(
-            client,
-            channel_id=channel_id,
-            thread_id=request.thread_id,
-            user_id=user_id,
-            text="Hidden for you." if changed else "This request is unavailable.",
-        )
+        await respond("Hidden for you." if changed else "This request is unavailable.")
         return
     is_admin = await resolve_is_admin(client, user_id=user_id)
     if not is_admin:
-        await post_ephemeral(
-            client,
-            channel_id=channel_id,
-            user_id=user_id,
-            text="Only a workspace admin can approve GitHub requests.",
-        )
+        await respond("Only a workspace admin can approve GitHub requests.")
         return
     if decision == "decline":
         async with runtime.sessionmaker.begin() as session:
@@ -203,13 +363,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 expected=request.status,
                 status="declined",
             )
-        await _replace_card(
-            client,
-            channel_id=channel_id,
-            thread_id=request.thread_id,
-            user_id=user_id,
-            text="Declined." if changed else "This request is unavailable.",
-        )
+        await respond("Declined." if changed else "This request is unavailable.")
         if changed:
             await update_requester_card(
                 runtime,
@@ -231,23 +385,12 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     account_id=principal.account_id,
                 )
         except ValueError as error:
-            await post_ephemeral(
-                client,
-                channel_id=channel_id,
-                user_id=user_id,
-                text=safe_github_error(error),
-            )
+            await respond(safe_github_error(error))
             return
-        await _replace_card(
-            client,
-            channel_id=channel_id,
-            thread_id=request.thread_id,
-            user_id=user_id,
-            text=(
-                f"✓ Added. {request.agent_name} is continuing."
-                if changed
-                else "This request is unavailable."
-            ),
+        await respond(
+            f"✓ Added. {request.agent_name} is continuing."
+            if changed
+            else "This request is unavailable."
         )
         if changed:
             await update_requester_card(
@@ -294,23 +437,13 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 account_id=principal.account_id,
             )
     except ValueError as error:
-        await post_ephemeral(
-            client,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=safe_github_error(error),
-        )
+        await respond(safe_github_error(error))
         return
-    await _replace_card(
-        client,
-        channel_id=channel_id,
-        thread_id=request.thread_id,
-        user_id=user_id,
-        text="Waiting for GitHub confirmation.",
-    )
-    await send_link(
-        client, channel_id=channel_id, thread_id=request.thread_id, user_id=user_id, url=url
-    )
+    await respond("Waiting for GitHub confirmation.", url=url if modal else None)
+    if not modal:
+        await send_link(
+            client, channel_id=channel_id, thread_id=request.thread_id, user_id=user_id, url=url
+        )
     await update_requester_card(
         runtime,
         client,

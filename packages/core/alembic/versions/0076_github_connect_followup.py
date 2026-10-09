@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0074_github_connect_followup"
-down_revision: str | None = "0073_github_removal_notice"
+revision: str = "0076_github_connect_followup"
+down_revision: str | None = "0075_pending_skill_add_one_open"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -65,9 +65,17 @@ def upgrade() -> None:
         sa.Column("encrypted_token", sa.LargeBinary()),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
     )
+    op.create_index(
+        "ix_github_connect_click_intents_expires_at",
+        "github_connect_click_intents",
+        ["expires_at"],
+    )
+    op.add_column("github_access_requests", sa.Column("admin_card_message_id", sa.Text()))
 
 
 def downgrade() -> None:
+    op.drop_column("github_access_requests", "admin_card_message_id")
+    op.drop_index("ix_github_connect_click_intents_expires_at", "github_connect_click_intents")
     op.drop_table("github_connect_click_intents")
     for name in (
         "notice_next_attempt_at",

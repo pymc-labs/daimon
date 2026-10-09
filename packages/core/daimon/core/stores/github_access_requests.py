@@ -50,6 +50,7 @@ class AccessRequest(BaseModel):
     updated_at: datetime
     expires_at: datetime
     admin_notified_at: datetime | None
+    admin_card_message_id: str | None = None
     resumed_at: datetime | None
     expiry_notice_sent_at: datetime | None = None
 
@@ -420,6 +421,38 @@ async def lock_delivery_slot(
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
     )
+
+
+async def lock_shared_card_slot(session: AsyncSession, *, request: AccessRequest) -> None:
+    """Serialize posts and the per-thread mention budget across requests."""
+    key = f"github-request-admin-card:{request.tenant_id}:{request.platform}:{request.thread_id}"
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
+    )
+
+
+async def shared_card_mention_allowed(session: AsyncSession, *, request: AccessRequest) -> bool:
+    since = datetime.now(UTC) - timedelta(hours=1)
+    count = await session.scalar(
+        select(func.count(GitHubAccessRequest.id)).where(
+            GitHubAccessRequest.tenant_id == request.tenant_id,
+            GitHubAccessRequest.platform == request.platform,
+            GitHubAccessRequest.thread_id == request.thread_id,
+            GitHubAccessRequest.admin_notified_at >= since,
+        )
+    )
+    return (count or 0) < 3
+
+
+async def record_shared_card(
+    session: AsyncSession, *, request: AccessRequest, message_id: str, mentioned: bool
+) -> None:
+    row = await session.get(GitHubAccessRequest, request.id, with_for_update=True)
+    if row is None or row.tenant_id != request.tenant_id:
+        return
+    row.admin_card_message_id = message_id
+    if mentioned:
+        row.admin_notified_at = datetime.now(UTC)
 
 
 async def record_delivery(

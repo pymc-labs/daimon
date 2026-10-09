@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
+from daimon.core.stores.github_connect import sweep_expired_click_intents
 from daimon.core.stores.github_connect_notices import ConnectNotice, claim_next, expire_old, settle
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +25,7 @@ async def poll_once(
     for _ in range(25):
         async with sessionmaker.begin() as session:
             now = datetime.now(UTC)
+            await sweep_expired_click_intents(session, now=now)
             await expire_old(session, platform=platform, now=now)
             notice = await claim_next(session, platform=platform, now=now)
         if notice is None:

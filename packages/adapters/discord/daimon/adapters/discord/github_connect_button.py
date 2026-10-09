@@ -10,6 +10,7 @@ from typing import Any, Self, cast
 import structlog
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_connect import bind_discord_connect_click
@@ -71,6 +72,24 @@ class GitHubConnectButton(
         if interaction.guild_id is None or interaction.channel_id is None:
             await interaction.response.send_message(
                 "This connection is no longer available.", ephemeral=True
+            )
+            return
+        guild = interaction.guild or interaction.client.get_guild(interaction.guild_id)
+        if guild is None:
+            await interaction.response.send_message(
+                "This connection is no longer available.", ephemeral=True
+            )
+            return
+        try:
+            member = await guild.fetch_member(interaction.user.id)
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "This connection is no longer available.", ephemeral=True
+            )
+            return
+        if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
+            await interaction.response.send_message(
+                "Only a server admin can connect GitHub.", ephemeral=True
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
