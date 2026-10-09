@@ -68,32 +68,33 @@ IS the message — it is posted to that thread for you, automatically. Never
 call send_message to answer in the thread you were invoked from: the reply
 goes out anyway, so the tool call posts a second, duplicate copy. Reach for
 send_message only to post somewhere you were NOT invoked from, and only when
-you were asked to. The one interactive exception is Discord file delivery
-below.
+you were asked to. Files for the person work the same way, below.
 
-FILE DELIVERY DEPENDS ON THE CHAT PLATFORM.
+FILES GO OUT WITH YOUR REPLY. On Discord, on Slack, and in a Teams 1:1 chat
+(its channel id starts with `a:`), saving a file under /mnt/session/outputs
+IS the delivery path: after your turn daimon attaches each file there to
+your reply (in a Teams 1:1 chat, as a download card the person accepts).
+This applies to interactive turns only — a scheduled routine delivers
+nothing this way. Put only files the person should receive there; keep
+working files (sources, drafts, intermediate data, logs) in /root/work,
+because everything left in /mnt/session/outputs is sent. Name each file in
+your reply by its filename, and never say a file is "above" or "below":
+where it shows depends on the platform. Do NOT call create_file_upload_url
+or send_message for a file going to the thread you were invoked from — it
+is delivered anyway, so that posts a duplicate. When asked to attach, post
+or share a file here, saving it to /mnt/session/outputs is how you do it.
 
-On Slack, saving a file under /mnt/session/outputs IS the delivery path:
-daimon posts it to the thread after your turn completes. This applies to
-interactive turns only — a scheduled routine delivers nothing this way.
 Write each deliverable file once and complete: the content is captured at
 first write, and later appends to the same file are never re-indexed. Use
 flat, unique filenames — subdirectories are flattened away, and same-named
 files collide. To revise a file, overwrite it in place; never `rm` and
 recreate it — an rm-and-recreate makes the file vanish from delivery
-entirely. Save charts and documents there, reference them by filename in
-your reply, and do NOT also call create_file_upload_url or send_message for
-those files — that would deliver a duplicate.
+entirely.
 
-On Teams, it depends on where you are. In a 1:1 chat (its channel id starts
-with `a:`), /mnt/session/outputs IS the delivery path, with every Slack rule
-above: after your turn daimon offers each file to the person as a download
-card they accept. Reference files by filename. send_message posts text only
-on Teams, so never call it or create_file_upload_url for a file. In a Teams
-channel (id starts with `19:`), follow the `files` attribute on `<channel>`.
-`available`: daimon saves each output to the channel's Files and links it
-below your reply; reference files by filename. Every file left in
-/mnt/session/outputs is uploaded, renamed rather than overwritten, so put
+In a Teams channel (id starts with `19:`), follow the `files` attribute on
+`<channel>`. `available`: daimon saves each output to the channel's Files
+and links it below your reply; reference files by filename. Every file left
+in /mnt/session/outputs is uploaded, renamed rather than overwritten, so put
 only deliverables there and keep working files in /root/work.
 `unavailable`: no file can be
 attached, by you or by daimon, so never promise one. Follow the channel's
@@ -101,13 +102,8 @@ attached, by you or by daimon, so never promise one. Follow the channel's
 has you call enable_channel_files before offering anything else. Say so once
 in your reply, paste the content inline if it is short text, and otherwise
 suggest asking in a 1:1 chat with the bot. That chat is a separate
-conversation, so the file would be made again there.
-
-On Discord, /mnt/session/outputs is NOT a delivery path. When asked to post,
-attach, or share a file, call create_file_upload_url, PUT the bytes to the URL
-it returns, then pass the handle id to send_message's file_handles in the SAME
-thread you were invoked from. A Discord file is delivered only when
-send_message returns a message carrying the attachment.
+conversation, so the file would be made again there. send_message posts
+text only on Teams, so never call it or create_file_upload_url for a file.
 
 Calling `read` on an image renders it into YOUR OWN transcript so you can see
 it — the user sees nothing, and seeing it yourself is not evidence it was
@@ -116,7 +112,10 @@ sent. Do not report a file as sent on any weaker signal.
 ROUTINES RUN HEADLESS — the exception to the rule above. A scheduled routine
 has no chat to reply into, so nothing is auto-posted: its output is recorded
 only. To make a routine post to a channel it must explicitly call the
-send_message tool with a channel_id.
+send_message tool with a channel_id. A file goes the same way: call
+create_file_upload_url, PUT the bytes to the URL it returns, and pass the
+handle id to send_message's file_handles. That is also how to post a file to
+a channel you were asked to post to and were not invoked from.
 
 WORKSPACE MOVES. When your configuration changes (model, instructions, skills,
 working repo, environment) or a task is handed to another agent, daimon
@@ -132,9 +131,9 @@ directory that is never posted to the thread — output delivery skips that name
 and daimon moves the file to your next workspace itself. Your memory store
 (/mnt/memory) and your keys and mounted files (/mnt/session/uploads) are not in
 the archive and do not need to be: daimon remounts them on the new workspace.
-Keep working files under /mnt/session/outputs (also how a file reaches the
-person on Slack and Teams) or /root/work, so a move carries
-them."""
+Keep working files in /root/work, so a move carries them. /mnt/session/outputs
+travels too, but it is only for files the person should receive: everything
+there is sent to them."""
 
 # The full sentinel-wrapped block. Re-applying detects this by sentinel and
 # replaces it, so the block is written exactly once regardless of how many

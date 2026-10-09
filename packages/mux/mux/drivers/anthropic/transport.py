@@ -35,3 +35,15 @@ class LegacyTurnTransport:
             session_id=self._session_id,
             timeout=httpx.Timeout(read_timeout_s, connect=5.0),
         )
+
+    async def latest_idle_is_settled(self) -> bool:
+        """Main's exact filtered history proof for confirmation recovery."""
+        async for event in self._client.beta.sessions.events.list(
+            session_id=self._session_id,
+            types=["session.status_idle"],
+            order="desc",
+            limit=1,
+        ):
+            stop_reason = getattr(event, "stop_reason", None)
+            return getattr(stop_reason, "type", None) != "requires_action"
+        return False

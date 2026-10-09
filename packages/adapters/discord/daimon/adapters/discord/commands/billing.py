@@ -21,6 +21,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import get_or_create_platform_principal
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord import Interaction, app_commands
@@ -97,7 +98,7 @@ class BillingCog(commands.Cog):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except (DaimonError, anthropic.APIError, discord.HTTPException) as exc:
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("billing.handler.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
                 render_error(exc, request_id=rid),

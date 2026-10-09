@@ -73,7 +73,10 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
 # Copy is byte-identical to the Discord adapter's orphan-retirement embed: the
 # two adapters must say the same thing about the same event.
-INTERRUPTED_NOTICE: str = "Stopped: Daimon restarted.\nMention me to try again."
+INTERRUPTED_NOTICE: str = (
+    "Daimon restarted before this request finished.\n"
+    "@mention Daimon with your request to try again."
+)
 
 # ---------------------------------------------------------------------------
 # Pure functions

@@ -521,8 +521,8 @@ async def _mark_card_interrupted(
     try:
         embed = discord.Embed(
             color=0xE74C3C,
-            title="Stopped: Daimon restarted." if restarted else "Stopped.",
-            description="Mention me to try again.",
+            title="Daimon restarted before this request finished." if restarted else "Stopped.",
+            description="@mention Daimon with your request to try again.",
         )
         if client is not None and message.webhook_id is not None:
             transport = DiscordPostTransport(

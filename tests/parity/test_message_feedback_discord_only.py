@@ -55,11 +55,11 @@ def test_message_feedback_core_documents_the_per_platform_split() -> None:
     )
 
 
-def test_teams_feedback_uses_the_native_custom_loop() -> None:
-    message = card.answer_message("done", is_last=True)
-    assert message.channel_data is not None
-    assert message.channel_data.feedback_loop is not None
-    assert message.channel_data.feedback_loop.type == "custom", (
-        "Teams answers carry Teams' own 👍/👎 with the reasons form behind 👎; "
+def test_teams_feedback_uses_card_buttons() -> None:
+    message = card.controls_card("Ada  12s", ask_human=False)
+    rendered = message.model_dump_json(by_alias=True)
+    assert card.VOTE_UP_DIALOG in rendered and card.VOTE_DOWN_DIALOG in rendered, (
+        "Teams answers carry daimon's own 👍/👎 buttons with the reasons form behind 👎; "
         "if that changed on purpose, update this record and the core docstring"
     )
+    assert message.channel_data is None or message.channel_data.feedback_loop is None

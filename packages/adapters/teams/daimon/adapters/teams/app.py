@@ -63,6 +63,7 @@ from daimon.adapters.teams.lifecycle import (
     TeamsSender,
     TeamsTurnLifecycle,
     TimedSender,
+    retry_hint,
 )
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
@@ -972,6 +973,11 @@ class TeamsApp:
                 ),
                 ask_human=self._ask_human,
                 direct_chat=inbound.kind == "dm",
+                agent_name=admission.agent.name,
+                model_id=admission.agent.model.id,
+                markup=self.runtime.turn_deps.markup,
+                sessionmaker=self.runtime.sessionmaker,
+                budget_channel_id=admission.budget_channel_id,
             )
             holder.append(attempt)
             return attempt
@@ -1000,7 +1006,9 @@ class TeamsApp:
                     await lifecycle.close_with_notice(
                         {
                             "cancelled": CANCELLED_NOTICE,
-                            "timed_out": QUEUE_TIMED_OUT_TEXT,
+                            "timed_out": retry_hint(
+                                QUEUE_TIMED_OUT_TEXT, direct_chat=inbound.kind == "dm"
+                            ),
                             "balance_depleted": admission_refusal_text(
                                 "balance_depleted", TEAMS_REFUSAL_NOUNS
                             ),

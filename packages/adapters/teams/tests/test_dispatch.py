@@ -76,8 +76,9 @@ async def test_message_runs_a_turn_and_the_answer_replaces_the_card(
     assert len(turns) == 1
     posts = [r for r in teams_api_fake.activity_requests if r.method == "POST"]
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
-    assert len(posts) == 1 and "attachments" in posts[0].body, "one status card"
-    assert httpx.URL(posts[0].url).path == f"/test/v3/conversations/{conversation}/activities"
+    card, controls = posts
+    assert "attachments" in card.body and "attachments" in controls.body, "status card, controls"
+    assert httpx.URL(card.url).path == f"/test/v3/conversations/{conversation}/activities"
     assert edits and edits[-1].url.endswith("/activities/m-1")
     assert "Hello from Teams!" in json.dumps(edits[-1].body)
 

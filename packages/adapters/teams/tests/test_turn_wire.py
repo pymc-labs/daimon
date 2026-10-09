@@ -183,6 +183,13 @@ def _feedback(request: SentRequest) -> object:
     return cast(dict[str, Any], request.body.get("channelData") or {}).get("feedbackLoop")
 
 
+def _titles(request: SentRequest) -> list[str]:
+    return [a["title"] for a in _actions(request)]
+
+
+VOTES = ["\N{THUMBS UP SIGN}", "\N{THUMBS DOWN SIGN}"]
+
+
 async def _until(condition: Callable[[], bool]) -> None:
     async with asyncio.timeout(10):
         while not condition():
@@ -203,7 +210,7 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
     router = build_turn_router(str(TENANT), session_id=SESSION_ID)
     await _turn(db_session_factory, teams_api_fake, router, activity)
 
-    status, answer = teams_api_fake.activity_requests
+    status, answer, controls = teams_api_fake.activity_requests
     card_url = f"{CONVERSATIONS}/{conversation}/activities"
     assert (status.method, _path(status)) == ("POST", card_url), "the card, in that conversation"
     [cancel] = _actions(status)
@@ -212,24 +219,35 @@ async def test_answer_replaces_the_status_card_in_the_conversation_it_came_from(
         "PUT",
         f"{CONVERSATIONS}/{conversation}/activities/m-1",
     ), "the answer replaces the card in place"
-    assert answer.body["text"] == AGENT_TEXT, "the answer alone, no usage footer"
-    assert "attachments" not in answer.body, "no card left under the answer"
-    assert _feedback(answer) == {"type": "custom"}, "Teams' thumbs, answered by our own form"
+    assert answer.body["text"] == AGENT_TEXT, "the answer alone"
+    assert "attachments" not in answer.body and _feedback(answer) is None, "text only"
     assert "AIGeneratedContent" in str(answer.body["entities"]), "labelled AI generated"
+    assert (controls.method, _path(controls)) == ("POST", card_url), "the controls follow it"
+    [summary] = _texts(controls)
+    name, _time, used, left = summary.split("\u2003\u2003")
+    assert name == "test-agent" and used.endswith(" used") and left.endswith(" left"), (
+        "Slack's summary line: the agent, the time, the debit, the money left"
+    )
+    assert _titles(controls) == VOTES, "emoji-only 👍/👎, no Ask a human without support"
+    assert _feedback(controls) is None, "not Teams' own thumbs"
 
 
-async def test_with_support_on_the_answer_carries_an_ask_a_human_button_teams_accepts(
+async def test_with_support_on_ask_a_human_follows_the_answer_in_a_card_teams_accepts(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    """The answer edit stays text: Teams refuses one carrying a card too (400 BadSyntax)."""
     router = build_turn_router(str(TENANT), session_id=SESSION_ID)
     await _turn(db_session_factory, teams_api_fake, router, make_message_activity(), support=True)
 
-    _status, answer = teams_api_fake.activity_requests
-    assert answer.body["text"] == AGENT_TEXT, "the answer stays markdown text"
-    [button] = _actions(answer)
-    assert (button["type"], button["title"]) == ("Action.Submit", card.ASK_HUMAN)
-    assert button["data"]["msteams"]["type"] == "task/fetch", "it opens a dialog"
-    assert _feedback(answer) == {"type": "custom"}, "the thumbs stay beside it"
+    _status, answer, controls = teams_api_fake.activity_requests
+    assert answer.method == "PUT" and answer.body["text"] == AGENT_TEXT, "the card becomes text"
+    assert not answer.body.get("attachments"), "no card beside the answer's text"
+    assert controls.method == "POST", "the controls follow in a message of their own"
+    assert _feedback(controls) is None, "not Teams' own thumbs"
+    assert _titles(controls) == [*VOTES, card.ASK_HUMAN], "the thumbs beside the button"
+    for button in _actions(controls):
+        assert button["type"] == "Action.Submit"
+        assert button["data"]["msteams"]["type"] == "task/fetch", "each opens a dialog"
 
 
 def _echo_sessions(router: MARouter) -> None:
@@ -321,18 +339,18 @@ async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_wh
     router = build_turn_router(str(TENANT), session_id=SESSION_ID, agent_text=answer)
     await _turn(db_session_factory, teams_api_fake, router, make_message_activity())
 
-    _status, *parts = teams_api_fake.activity_requests
+    _status, *parts, controls = teams_api_fake.activity_requests
     assert [(r.method, _path(r).rsplit("/", 1)[-1]) for r in parts] == [
         ("PUT", "m-1"),
         ("POST", "activities"),
         ("POST", "activities"),
     ], "the first part replaces the card, the rest follow"
     texts = [str(r.body["text"]) for r in parts]
-    assert "\n\n".join(texts) == answer, "the parts are the answer, in order, no usage footer"
+    assert "\n\n".join(texts) == answer, "the parts are the answer, in order"
     whole = [code in str(r.body["text"]) for r in parts]
     assert whole == [False, True, False], "the code block stays whole in one part"
-    feedback = [_feedback(r) for r in parts]
-    assert feedback == [None, None, {"type": "custom"}], "only the last part asks for feedback"
+    assert [_feedback(r) for r in parts] == [None, None, None], "no part asks for feedback"
+    assert _titles(controls) == VOTES, "the card after the last part does"
     labels = ["AIGeneratedContent" in str(r.body["entities"]) for r in parts]
     assert all(labels), "every part is labelled AI generated"
 
@@ -378,7 +396,7 @@ async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
         await _until(shows_tool)
         release.set()
 
-    status, *edits, answer = teams_api_fake.activity_requests
+    status, *edits, answer, controls = teams_api_fake.activity_requests
     assert status.method == "POST" and edits, "the card is posted, then edited"
     targets = {(r.method, _path(r).rsplit("/", 1)[-1]) for r in [*edits, answer]}
     assert targets == {("PUT", "m-1")}, "every edit lands on the card"
@@ -386,6 +404,7 @@ async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
     assert _texts(progress)[0].startswith("**Working on it…**"), "the card shows active work"
     assert [a["verb"] for a in _actions(progress)] == [card.CANCEL_VERB], "Cancel stays"
     assert str(answer.body["text"]).startswith(AGENT_TEXT), "then the answer replaces it"
+    assert controls.method == "POST" and _titles(controls) == VOTES, "and its controls follow"
 
 
 async def test_stream_that_drops_mid_answer_leaves_the_failure_notice_and_no_answer(
@@ -408,7 +427,7 @@ async def test_stream_that_drops_mid_answer_leaves_the_failure_notice_and_no_ans
     assert streams == [], "the driver reconnected once"
     status, notice = teams_api_fake.activity_requests
     assert (notice.method, _path(notice)) == ("PUT", _path(status) + "/m-1"), "the card is closed"
-    [text] = _texts(notice)
+    text, _summary = _texts(notice)
     lost = render_termination_notice(TerminationReason.CONNECTION_LOST)
     assert lost is not None and text.startswith(f"❌ {lost.headline}: "), "the drop, named"
     assert "first half" not in text, "no partial answer"
@@ -457,4 +476,6 @@ async def test_cancel_from_the_author_interrupts_the_session_and_closes_the_card
     assert streams == [] and not release.is_set(), "the interrupt ends the turn, not the stream"
     _status, closed = teams_api_fake.activity_requests
     assert (closed.method, _path(closed)) == ("PUT", _path(status) + "/m-1"), "the card is closed"
-    assert _texts(closed) == [card.CANCELLED_NOTICE] and _actions(closed) == [], "and says so"
+    notice, summary = _texts(closed)
+    assert notice == card.CANCELLED_NOTICE and _actions(closed) == [], "and says so"
+    assert summary.startswith("test-agent"), "with the summary line, as on Slack"

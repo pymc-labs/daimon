@@ -20,11 +20,12 @@ Otherwise, or when no chat landed, this bot posts it in
 has its own. A channel read only from inside is marked in the post, so whoever
 picks it up answers there, and the form warns that the note leaves it.
 
-When it is, every answer also carries an Ask a human button (`card.ASK_HUMAN_DIALOG`),
+When it is, every answer also gets an Ask a human button (`card.ASK_HUMAN_DIALOG`),
 Slack's: it opens the same form in a dialog only the clicker sees, for the
 people who could have asked the agent there (`answer_access`), and the request
-links to that answer. One person asks once per answer: a second Send on it is
-told the first is in hand and spends nothing. Access is decided for the last
+links to the message the button is on, the card just below the answer.
+One person asks once per answer: a second Send on it is told the first is in
+hand and spends nothing. Access is decided for the last
 time under the ledger and policy locks, in the transaction that spends. The
 same post path carries a tenant's routed 👎 forms (`routes_feedback`,
 `feedback`), which spend no credit.
@@ -86,6 +87,7 @@ from daimon.core.stores.support_escalation import (
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
+    ESCALATE,
     OUT_OF_CREDITS,
     RECEIVED,
     received_text,
@@ -121,6 +123,8 @@ __all__ = [
     "VERB",
     "SupportCommand",
     "enabled",
+    "requester",
+    "support_post",
     "post_to_support_channel",
     "routes_feedback",
 ]
@@ -143,6 +147,18 @@ SEALED_HINT = (
 SEALED_LINE = "_From a channel read only from inside: answer there, the conversation stays in it._"
 # ALREADY_REQUESTED, OUT_OF_CREDITS and RECEIVED are the shared core copy
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
+
+
+def support_post(head: str, link: str, *lines: str) -> str:
+    """`head`, the answer's `link`, then `lines`, a paragraph each: a Teams message
+    drops single line breaks. A channel's long link reads as short words."""
+    if link.startswith("https://"):
+        link = f"[Open the message]({link})"
+    return "\n\n".join(line for line in (head, link, *lines) if line.strip())
+
+
+def requester(user_name: str | None, user_id: str) -> str:
+    return f"{user_name or 'Someone'} (Teams user `{user_id}`)"
 
 
 def enabled(settings: Settings) -> bool:
@@ -200,11 +216,12 @@ class _Asked:
 
     def body(self, note: str) -> str:
         """The request as the support team reads it: who, a link, the note. Nothing else."""
-        who = f"{self.user_name or 'Someone'} (Teams user {self.user_id})"
-        lines = [f"**Human support requested** by {who}", self.link]
-        if self.sealed:
-            lines.append(SEALED_LINE)
-        return "\n".join(lines) + f"\n\n{note}"
+        return support_post(
+            f"**{ESCALATE} Human support requested** by {requester(self.user_name, self.user_id)}",
+            self.link,
+            SEALED_LINE if self.sealed else "",
+            *note.splitlines(),
+        )
 
 
 def form_text(remaining: int) -> str:

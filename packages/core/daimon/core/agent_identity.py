@@ -119,6 +119,72 @@ async def resolve_agent_identity(
     return AgentIdentity(name=agent_name, avatar_url=url, builtin=False)
 
 
+def queue_agent_face(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    metadata: Mapping[str, str] | None,
+    default_agent_name: str | None,
+) -> asyncio.Task[None] | None:
+    """Start rendering a new agent's face in the background; never raises.
+
+    Every creation path calls this once the agent exists, so its first card or
+    answer already has the face. The render is the one `resolve_agent_identity`
+    would start, so it shares the single flight and the back-off after failures.
+    A built-in agent gets none: it posts with the platform app's own icon.
+    """
+    if is_builtin_agent(name=agent_name, metadata=metadata, default_agent_name=default_agent_name):
+        return None
+    try:
+        return _schedule_face(sessionmaker, tenant_id=tenant_id, agent_name=agent_name)
+    except Exception as exc:
+        log.warning("agent_identity.avatar_queue_failed", error_type=type(exc).__name__)
+        return None
+
+
+async def ensure_agent_face(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    metadata: Mapping[str, str] | None,
+    default_agent_name: str | None,
+    timeout_s: float,
+) -> bool:
+    """Render a new agent's face and wait at most `timeout_s`; True once it is stored.
+
+    For one-shot processes such as the CLI, whose background tasks die when
+    the process exits. Never raises: a failed or slow render leaves the face
+    to the agent's first post.
+    """
+    task = queue_agent_face(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        metadata=metadata,
+        default_agent_name=default_agent_name,
+    )
+    if task is None:
+        return False
+    done, _ = await asyncio.wait({task}, timeout=timeout_s)
+    if task not in done:
+        log.warning("agent_identity.avatar_wait_timed_out", timeout_s=timeout_s)
+        return False
+    return (
+        not task.cancelled() and (tenant_id, normalize_agent_name(agent_name)) not in _face_failures
+    )
+
+
+def cancel_pending_agent_faces() -> None:
+    """Cancel every unfinished face render and forget failures; for test isolation only."""
+    for task in list(_face_tasks.values()):
+        task.cancel()
+    _face_tasks.clear()
+    _face_started.clear()
+    _face_failures.clear()
+
+
 def _schedule_face(
     sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_name: str
 ) -> asyncio.Task[None] | None:

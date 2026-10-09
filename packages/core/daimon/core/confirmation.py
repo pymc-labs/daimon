@@ -93,6 +93,10 @@ async def no_confirmation_surface(prompt: ConfirmationPrompt) -> ConfirmationAns
     return "denied"
 
 
+def _in_days(days: object) -> str:
+    return f"in {days} day" if days == 1 else f"in {days} days"
+
+
 def _short(value: object, *, limit: int = 80) -> str:
     text = str(value)
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -165,7 +169,7 @@ def prompt_for_tool_call(
         days = data.get("ttl_days") or 1
         detail_lines = (
             f"Notebook: {slug or 'New notebook'}",
-            f"Link expires: {'Never' if data.get('permanent') else f'in {days} days'}",
+            f"Link expires: {'Never' if data.get('permanent') else _in_days(days)}",
             f"Editable: {'Yes' if data.get('editable') else 'No'}",
         )
     elif call.tool_name == "create_attachment_upload_url" and publishing:

@@ -312,7 +312,7 @@ class TestToInterruptedBlocks:
         # Literal, not imported from the Discord adapter -- import-linter's
         # independence contract forbids cross-adapter imports, and the point
         # of this test is that the two hand-kept literals stay in sync.
-        discord_copy = "Stopped: Daimon restarted.\nMention me to try again."
+        discord_copy = "Daimon restarted before this request finished.\n@mention Daimon with your request to try again."
         blocks = to_interrupted_blocks()
         assert "\n".join(block["text"]["text"] for block in blocks) == discord_copy, (
             "Slack's retirement copy must be byte-identical to Discord's"

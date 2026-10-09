@@ -622,6 +622,7 @@ async def set_channel_rule(
         new_name=new_name,
         public_url=public_url,
         subject=subject,
+        default_agent_name=default.agent_name,
         extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
     )
     try:

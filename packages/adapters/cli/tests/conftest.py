@@ -36,6 +36,16 @@ def _reset_structlog_config() -> Iterator[None]:
     structlog.reset_defaults()
 
 
+@pytest.fixture(autouse=True)
+def isolate_agent_faces() -> Iterator[None]:
+    """Creating an agent starts its face render in the background; one test's
+    render must not write into the next test's database or back-off state."""
+    from daimon.core.agent_identity import cancel_pending_agent_faces
+
+    yield
+    cancel_pending_agent_faces()
+
+
 @pytest_asyncio.fixture
 async def db_session_factory(
     db_session: AsyncSession,  # noqa: F811  # fixture dependency; db_session is imported above for discovery

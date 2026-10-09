@@ -693,7 +693,7 @@
               555000111
             ]
           },
-          "content": "**test-agent**\n\n<@555000111>\nHello from the agent!",
+          "content": "-# test-agent\n<@555000111>\nHello from the agent!",
           "embeds": [
             {
               "color": 5763719,

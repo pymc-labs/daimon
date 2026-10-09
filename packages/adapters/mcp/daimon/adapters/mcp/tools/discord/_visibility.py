@@ -63,7 +63,10 @@ def _check_send_permission(  # pyright: ignore[reportUnusedFunction]
     perms = channel.permissions_for(member)
     if not perms.view_channel:
         raise ToolError("missing view_channel permission")
-    if not perms.send_messages:
+    if isinstance(channel, discord.Thread):
+        if not perms.send_messages_in_threads:
+            raise ToolError("missing send_messages_in_threads permission")
+    elif not perms.send_messages:
         raise ToolError("missing send_messages permission")
 
 

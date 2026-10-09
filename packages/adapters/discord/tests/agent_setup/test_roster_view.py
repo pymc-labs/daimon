@@ -297,15 +297,17 @@ def test_roster_preserves_long_names_but_bounds_the_targeted_setup_label() -> No
     )
 
 
-def test_a_full_page_with_a_thread_line_stays_within_the_component_budget() -> None:
+def test_a_full_admin_page_with_every_line_stays_within_the_component_budget() -> None:
     answering = _agent("answering", tier="channel")
     agents = (answering, *(_agent(f"agent-{index:02d}") for index in range(40)))
     state = _state(
         agents=agents,
         answering=answering,
+        is_admin=True,
         attributions={agent.ma_agent_id: "<@42>" for agent in agents},
         thread_context=ThreadContext(kind="setup", responder_name="Daimon", target_name="agent-00"),
     )
+    state.webhook_fix_url = "https://discord.com/oauth2/authorize?client_id=1"
 
     view = RosterView(state, runtime=MagicMock(), allowed_user_id=42)
 
@@ -418,6 +420,23 @@ def test_only_admins_get_connect_github_on_shared_roster() -> None:
     assert ("Button", "🐙 GitHub", None) in admin_components
     admin_components.remove(("Button", "🐙 GitHub", None))
     assert _structure(member) == admin_components
+
+
+def test_the_webhook_fix_line_renders_only_when_hydrate_supplied_a_link() -> None:
+    answering = _agent("research-bot", tier="channel")
+    state = _state(agents=(answering,), answering=answering, is_admin=True)
+    assert "manage webhooks" not in _text(
+        RosterView(state, runtime=MagicMock(), allowed_user_id=42)
+    )
+
+    state.webhook_fix_url = "https://discord.com/oauth2/authorize?client_id=1"
+    text = _text(RosterView(state, runtime=MagicMock(), allowed_user_id=42))
+
+    assert (
+        "Agents answer as Daimon here because Daimon can't manage webhooks. "
+        "Re-authorize Daimon to show each agent's name and face: "
+        "https://discord.com/oauth2/authorize?client_id=1"
+    ) in text
 
 
 # ---------------------------------------------------------------------------

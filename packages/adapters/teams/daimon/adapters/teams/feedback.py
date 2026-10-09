@@ -1,8 +1,10 @@
 """Teams' 👍/👎 on answers, stored like Slack and Discord votes.
 
-The last answer message (and a tool-only turn's ✅ Done) turns on Teams'
-feedback loop in its custom mode (`card.rated`): a click arrives as a
-`message/fetchTask` invoke, answered with daimon's own dialog. 👍 records the
+The card below an answer (`card.controls_card`, or a tool-only turn's ✅
+Done) carries emoji-only 👍/👎 buttons (`card.vote_actions`): a click opens a
+dialog (`task/fetch`, `on_up`/`on_down`). Answers posted before them carry
+Teams' feedback loop in its custom mode, whose click arrives as a
+`message/fetchTask` (`on_fetch`) and is answered the same way. 👍 records the
 vote and says thanks. 👎 records the vote and opens Slack's "What went wrong?"
 form: optional reasons (`FEEDBACK_REASONS`) and optional text, at least one.
 Its submit (`task/submit`) records the down-vote and the form on the
@@ -62,7 +64,13 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.adapters.teams.support import SEALED_LINE, post_to_support_channel, routes_feedback
+from daimon.adapters.teams.support import (
+    SEALED_LINE,
+    post_to_support_channel,
+    requester,
+    routes_feedback,
+    support_post,
+)
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -79,6 +87,7 @@ from daimon.core.stores.thread_sessions import get_latest_thread_session
 from microsoft_teams.api import (
     MessageFetchTaskInvokeActivity,
     MessageSubmitActionInvokeActivity,
+    TaskFetchInvokeActivity,
     TaskModuleResponse,
     TaskSubmitInvokeActivity,
 )
@@ -222,25 +231,25 @@ def feedback_post(
 ) -> str:
     """The support channel's message for one routed form: who, where, the agent, the
     reasons and the text, as Ask a human spells them. Never the answer itself."""
-    lines = [
-        f"**\N{THUMBS DOWN SIGN} Feedback** from {user_name or 'Someone'} (Teams user {user_id})",
-        link,
-    ]
+    agent = ""
     if recorded.ma_agent_id or recorded.ma_session_id:
-        lines.append(
+        agent = (
             f"Agent `{recorded.ma_agent_id or 'unknown'}`, session "
             f"`{recorded.ma_session_id or 'unknown'}`"
         )
     labels = [FEEDBACK_REASONS[code] for code in form.reasons]
-    lines.append(f"**Reasons:** {', '.join(labels) if labels else 'none picked'}")
-    if recorded.sealed:
-        lines.append(SEALED_LINE)
-    post = "\n".join(lines)
-    return f"{post}\n\n{form.text}" if form.text else post
+    return support_post(
+        f"**\N{THUMBS DOWN SIGN} Feedback** from {requester(user_name, user_id)}",
+        link,
+        agent,
+        f"**Reasons:** {', '.join(labels) if labels else 'none picked'}",
+        SEALED_LINE if recorded.sealed else "",
+        *form.text.splitlines(),
+    )
 
 
 class TeamsFeedback:
-    """The feedback loop's invokes: the click, the form's submit, the built-in form."""
+    """The votes' invokes: the click, the form's submit, the built-in form."""
 
     def __init__(self, runtime: TeamsRuntime, direct: DirectChats | None, *, spawn: Spawn) -> None:
         self._runtime = runtime
@@ -248,11 +257,24 @@ class TeamsFeedback:
         # The routed post runs after the invoke is answered, which Teams wants within seconds.
         self._spawn = spawn
 
+    async def on_up(self, ctx: ActivityContext[TaskFetchInvokeActivity]) -> TaskModuleResponse:
+        return await self._guarded_vote(ctx.activity, "up")
+
+    async def on_down(self, ctx: ActivityContext[TaskFetchInvokeActivity]) -> TaskModuleResponse:
+        return await self._guarded_vote(ctx.activity, "down")
+
     async def on_fetch(
         self, ctx: ActivityContext[MessageFetchTaskInvokeActivity]
     ) -> TaskModuleResponse:
+        """Teams' own 👍/👎, on answers posted before the buttons."""
+        reaction = ctx.activity.value.data.action_value.reaction
+        return await self._guarded_vote(ctx.activity, "up" if reaction == "like" else "down")
+
+    async def _guarded_vote(
+        self, activity: TaskFetchInvokeActivity | MessageFetchTaskInvokeActivity, vote: Vote
+    ) -> TaskModuleResponse:
         return await guarded(
-            self._fetch(ctx.activity), dialog_message(FAILED), "teams.feedback.failed"
+            self._vote(activity, vote), dialog_message(FAILED), "teams.feedback.failed"
         )
 
     async def on_submit(self, ctx: ActivityContext[TaskSubmitInvokeActivity]) -> TaskModuleResponse:
@@ -267,13 +289,14 @@ class TeamsFeedback:
     def _shared(self, tenant_id: uuid.UUID) -> bool:
         return routes_feedback(self._runtime.settings, tenant_id)
 
-    async def _fetch(self, activity: MessageFetchTaskInvokeActivity) -> TaskModuleResponse:
+    async def _vote(
+        self, activity: TaskFetchInvokeActivity | MessageFetchTaskInvokeActivity, vote: Vote
+    ) -> TaskModuleResponse:
         """Record the click's vote; 👍 is thanked, 👎 gets the form."""
         actor = await card_actor(self._runtime, activity)
         message_id = activity.reply_to_id
         if actor is None or not message_id:
             return dialog_message(DENIED)
-        vote: Vote = "up" if activity.value.data.action_value.reaction == "like" else "down"
         recorded = await self._record(actor, AnswerPlace.of(activity, message_id), vote)
         if recorded.outcome != "recorded":
             return dialog_message(refusal_text(recorded.outcome))

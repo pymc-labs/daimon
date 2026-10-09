@@ -473,12 +473,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         summaries, or outputs unless the user specifically requested a post.
         Deliver text output in your reply instead.
 
-        For FILES that rule does not apply, because a reply cannot carry an
-        attachment. Posting a file in the thread you were invoked from is
-        delivery, not a duplicate — asking you to "attach it here" is a
-        request to call this tool with ``file_handles``. Read the two
-        paragraphs above together or you will conclude, wrongly, that you
-        should hand a file back "in your reply" and silently deliver nothing.
+        FILES follow the same rule. A file for the person in the chat you
+        were invoked from (Discord, Slack, a Teams 1:1 chat) goes in
+        /mnt/session/outputs, and daimon attaches it to your reply after the
+        turn; posting it into that thread with this tool delivers a
+        duplicate. Use ``file_handles`` to post a file somewhere else you
+        were asked to post, or from a scheduled routine, which has no reply.
 
         ``file_handles=[handle_id, ...]`` references a file daimon is
         holding: to post a file you made in your sandbox, call

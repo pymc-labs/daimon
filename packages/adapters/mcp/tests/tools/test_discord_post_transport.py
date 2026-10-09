@@ -3,6 +3,7 @@
 import asyncio
 import io
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -86,7 +87,7 @@ async def test_slow_creation_falls_back_then_uses_hook(
     )
     channel.create_webhook.assert_awaited_once()
     assert channel.send.await_count == 3
-    assert channel.send.call_args.kwargs["content"] == "**Research**\n\nfirst"
+    assert channel.send.call_args.kwargs["content"] == "-# Research\nfirst"
     release.set()
     await _post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
     await _post_transport.send_agent_message(
@@ -220,7 +221,7 @@ async def test_create_429_respects_cooldown_and_falls_back(
     await _post_transport.send_agent_message(
         client, channel, identity, content="first", identity_enabled=True
     )
-    channel.send.assert_awaited_once_with(content="**Research**\n\nfirst", files=[])
+    channel.send.assert_awaited_once_with(content="-# Research\nfirst", files=[])
     release.set()
     await _post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
     await _post_transport.send_agent_message(
@@ -342,7 +343,7 @@ async def test_missing_webhook_uses_one_name_prefix(
         content="answer",
         identity_enabled=True,
     )
-    channel.send.assert_awaited_once_with(content="**Research**\n\nanswer", files=[])
+    channel.send.assert_awaited_once_with(content="-# Research\nanswer", files=[])
 
 
 async def test_fallback_resplits_when_name_pushes_content_over_discord_limit(
@@ -545,3 +546,32 @@ async def test_mcp_failed_webhook_upload_rebuilds_file_for_fallback(
     )
     sent_files = channel.send.call_args.kwargs["files"]
     assert sent_files[0].fp.read() == b"payload"
+
+
+async def test_a_403_lookup_backs_off_for_sixty_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(_post_transport, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    client = MagicMock(spec=discord.Client)
+    client.application_id = 10
+    client.http = MagicMock()
+    client.http.channel_webhooks = AsyncMock(
+        side_effect=discord.Forbidden(MagicMock(status=403), {"message": "Missing Permissions"})
+    )
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 92
+    _post_transport._lookup_unavailable_until.clear()  # pyright: ignore[reportPrivateUsage]
+
+    async def lookup() -> None:
+        await _post_transport.own_webhook(client, channel, create=False, webhook_id=30)
+
+    with pytest.raises(discord.ClientException, match="webhook lookup failed"):
+        await lookup()
+    now[0] += 59
+    with pytest.raises(discord.ClientException, match="webhook lookup unavailable"):
+        await lookup()
+    now[0] += 2
+    with pytest.raises(discord.ClientException, match="webhook lookup failed"):
+        await lookup()
+    assert client.http.channel_webhooks.await_count == 2, "the back-off ends after 60 s"

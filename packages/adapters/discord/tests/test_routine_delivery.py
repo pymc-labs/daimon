@@ -8,8 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord import routine_delivery as poster_mod
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_identity import AgentIdentity
+from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -108,6 +111,7 @@ def _poster(
     *,
     dms: _Dms | None = None,
     dm_mode: str = "members",
+    identity: AgentIdentity | None = None,
 ) -> Any:
     from daimon.core.config import DirectMessagePolicy
 
@@ -124,7 +128,30 @@ def _poster(
         fetch_channel=fetch,
         open_dm=(dms or _Dms()).open,
         dm_policy=lambda row: DirectMessagePolicy(mode=dm_mode),  # type: ignore[arg-type]
+        client=MagicMock(spec=discord.Client) if identity is not None else None,
+        resolve_identity=resolved(identity) if identity is not None else None,
     )
+
+
+def resolved(identity: AgentIdentity) -> Any:
+    async def resolve(row: RoutineRow, guild_id: str) -> AgentIdentity:
+        assert guild_id == str(_GUILD), "identity is resolved for the routine's own guild"
+        return identity
+
+    return resolve
+
+
+class _Transport:
+    """Stands in for `DiscordPostTransport`, recording how it was built and used."""
+
+    made: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+
+    def __init__(self, client: object, channel: object, **kwargs: Any) -> None:
+        _Transport.made.append({"channel": channel, **kwargs})
+
+    async def send(self, **kwargs: Any) -> None:
+        _Transport.sent.append(kwargs)
 
 
 def _uncached_thread(
@@ -160,6 +187,70 @@ async def test_posts_the_tail_with_mentions_disabled(
     assert kwargs["content"].endswith("All green @everyone.")
     mentions = kwargs["allowed_mentions"]
     assert not mentions.everyone and not mentions.users and not mentions.roles
+
+
+async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(poster_mod, "DiscordPostTransport", _Transport)
+    _Transport.made, _Transport.sent = [], []
+    row = await _routine(db_session)
+    channel = _text_channel()
+    identity = AgentIdentity(name="research", avatar_url="https://app/a.png", builtin=False)
+
+    outcome = await _poster(db_session_factory, channel, identity=identity)(row)
+
+    assert outcome.status == "delivered"
+    channel.send.assert_not_awaited()
+    (made,) = _Transport.made
+    assert (made["channel"], made["name"], made["avatar_url"]) == (
+        channel,
+        "research",
+        "https://app/a.png",
+    )
+    assert made["builtin"] is False and made["identity_enabled"] is True
+    (sent,) = _Transport.sent
+    assert sent["content"] == "Routine result (0 9 * * 1, UTC):\n\nAll green @everyone."
+    assert sent["_prefix_if_fallback"] is True, "a bot fallback still names the agent"
+    mentions = sent["allowed_mentions"]
+    assert not mentions.everyone and not mentions.users and not mentions.roles
+
+
+async def test_with_identity_a_long_result_leaves_room_for_the_fallback_label(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(poster_mod, "DiscordPostTransport", _Transport)
+    _Transport.made, _Transport.sent = [], []
+    row = (await _routine(db_session)).model_copy(update={"delivery_payload": "x" * 2500})
+    identity = AgentIdentity(name="research", avatar_url=None, builtin=False)
+
+    await _poster(db_session_factory, _text_channel(), identity=identity)(row)
+
+    (sent,) = _Transport.sent
+    assert len(sent["content"]) + len(fallback_name_prefix("research", "")) == 2000
+
+
+async def test_the_built_in_agent_posts_as_the_bot_with_todays_text(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(poster_mod, "DiscordPostTransport", _Transport)
+    _Transport.made = []
+    row = await _routine(db_session)
+    channel = _text_channel()
+    identity = AgentIdentity(name="daimon", avatar_url=None, builtin=True)
+
+    await _poster(db_session_factory, channel, identity=identity)(row)
+
+    assert _Transport.made == []
+    assert channel.send.await_args.kwargs["content"].startswith(
+        "Routine result from daimon (0 9 * * 1, UTC):"
+    )
 
 
 async def test_a_channel_in_a_protected_category_falls_back_to_a_dm(
@@ -427,3 +518,25 @@ async def test_an_isolated_channels_routine_never_leaves_it(
 
     assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
     assert dms.sent == [], "the result never goes by DM"
+
+
+async def test_a_bot_fallback_labels_the_result_with_the_subtext_name_line(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.adapters.discord import post_transport
+
+    row = await _routine(db_session)
+    channel = _text_channel(perms=SimpleNamespace(**vars(_perms()), manage_webhooks=False))
+    channel.id = 555
+    channel.guild.me = object()  # type: ignore[attr-defined]
+    identity = AgentIdentity(name="research", avatar_url=None, builtin=False)
+    post_transport._unavailable_until.pop(555, None)  # pyright: ignore[reportPrivateUsage]
+
+    outcome = await _poster(db_session_factory, channel, identity=identity)(row)
+
+    assert outcome.status == "delivered"
+    content = channel.send.await_args.kwargs["content"]
+    assert content == fallback_name_prefix(
+        "research", "Routine result (0 9 * * 1, UTC):\n\nAll green @everyone."
+    )
+    assert content.startswith("-# research\nRoutine result ("), "the label is #530's subtext line"

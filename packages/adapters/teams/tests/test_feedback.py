@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 import structlog
-from daimon.adapters.teams import feedback, support
+from daimon.adapters.teams import card, feedback, support
 from daimon.adapters.teams.answer_access import IN_DIRECT_CHAT, NOT_ALLOWED, AnswerPlace
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, feedback_text, form_details, sent_form
 from daimon.adapters.teams.http_service import TeamsHttpService
@@ -58,8 +58,16 @@ def _running(
 
 
 async def _click(service: TeamsHttpService, reaction: str, *, user: str = AAD_OBJECT_ID) -> Any:
+    """The answer card's 👍 (`like`) or 👎 button."""
+    dialog_id = card.VOTE_UP_DIALOG if reaction == "like" else card.VOTE_DOWN_DIALOG
+    value = {"data": {"dialog_id": dialog_id}}
+    return await post_activity(service, make_invoke("task/fetch", value, user=user))
+
+
+async def _native_click(service: TeamsHttpService, reaction: str) -> Any:
+    """Teams' own 👍/👎, on an answer posted before the buttons."""
     value = {"data": {"actionName": "feedback", "actionValue": {"reaction": reaction}}}
-    return await post_activity(service, make_invoke("message/fetchTask", value, user=user))
+    return await post_activity(service, make_invoke("message/fetchTask", value))
 
 
 async def _send(
@@ -231,6 +239,18 @@ async def test_someone_who_could_not_ask_there_cannot_vote(
     assert await _rows(db_session_factory) == [], "a refused vote records nothing"
 
 
+async def test_teams_own_thumbs_on_an_older_answer_still_vote(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with _running(db_session_factory, teams_api_fake) as service:
+        up = await _native_click(service, "like")
+        form = _form(await _native_click(service, "dislike"))
+
+    assert _message(up) == feedback.THANKS_VOTE and form["actions"], "thanks, then the form"
+    [row] = await _rows(db_session_factory)
+    assert row["vote"] == "down", "the later click wins, as on the buttons"
+
+
 async def test_teams_built_in_form_on_an_older_answer_still_records(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -289,6 +309,7 @@ async def test_a_routed_form_says_so_and_is_posted_once_per_change_spending_no_c
     assert AAD_OBJECT_ID in first and IN_DIRECT_CHAT in first, "who, and where the answer is"
     assert "Agent `agent_fb`, session `sesn_fb`" in first
     assert "**Reasons:** Wrong or inaccurate" in first and first.endswith(CRITICISM)
+    assert "\n" not in first.replace("\n\n", ""), "a paragraph a line: Teams drops single breaks"
     assert "Something else" in changed, "a changed form is posted again; the same one is not"
     assert await _escalations(db_session_factory) == 0, "a routed form spends no support credit"
     assert CRITICISM not in str(logs), "the text never enters a log record"

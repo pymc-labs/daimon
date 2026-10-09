@@ -17,6 +17,10 @@ from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+# A command that creates an agent waits this long for its face: a background
+# render dies with the process. The render takes about a second.
+FACE_WAIT_S = 10.0
+
 
 @dataclass(frozen=True)
 class CliRuntime:
