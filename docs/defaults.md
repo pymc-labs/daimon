@@ -20,7 +20,9 @@ The models are in `packages/core/daimon/core/specs.py` and the tree is read by
 `extra="forbid"`, so a typo'd key is a parse error rather than a silently
 ignored field, and the field names deliberately mirror the Anthropic SDK's
 create-params shapes — what you write is close to what the SDK sees, with no
-translation layer in between.
+authoring aliases. The defaults pipeline converts these specs at the host
+boundary to resource ports in `mux`; the Anthropic driver preserves the same
+request fields, pagination, skill uploads and error behavior.
 
 Two naming rules the loader enforces before anything is written: an agent or
 environment file's stem must equal its `name` field, and a skill directory's

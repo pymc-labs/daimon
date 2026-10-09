@@ -31,6 +31,13 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionStatusIdleEvent,
 )
 from daimon.core.errors import DaimonError, TurnError
+from daimon.core.mux_compat import (
+    delete_skill,
+    delete_skill_version,
+    list_skill_versions,
+    retrieve_agent,
+)
+from mux.contracts.ids import Scope
 
 log = structlog.get_logger()
 
@@ -251,6 +258,8 @@ async def update_agent_with_version_retry(
     anthropic: AsyncAnthropic,
     agent_id: str,
     apply_update: Callable[[BetaManagedAgentsAgent], Awaitable[BetaManagedAgentsAgent]],
+    *,
+    scope: Scope | None = None,
 ) -> BetaManagedAgentsAgent:
     """Retrieve `agent_id`, apply `apply_update`, retry once on version conflict.
 
@@ -268,7 +277,10 @@ async def update_agent_with_version_retry(
     Retry-once lives here at the I/O shell; pure logic (reducers, decision functions)
     must not retry internally per guideline:architecture.
     """
-    agent = await anthropic.beta.agents.retrieve(agent_id)
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.ma:update_agent_with_version_retry"
+    )
+    agent = await retrieve_agent(anthropic, agent_id, scope=scope)
     try:
         return await apply_update(agent)
     except APIStatusError as err:
@@ -279,19 +291,24 @@ async def update_agent_with_version_retry(
             agent_id=agent_id,
             status_code=err.status_code,
         )
-        fresh = await anthropic.beta.agents.retrieve(agent_id)
+        fresh = await retrieve_agent(anthropic, agent_id, scope=scope)
         return await apply_update(fresh)
 
 
-async def delete_skill_and_versions(anthropic: AsyncAnthropic, skill_id: str) -> None:
+async def delete_skill_and_versions(
+    anthropic: AsyncAnthropic, skill_id: str, *, scope: Scope | None = None
+) -> None:
     """Delete all versions of a skill on MA, then delete the skill itself.
 
     Tolerates 404 on individual version deletes: a previous partial cleanup
     attempt may have already deleted some versions.
     """
-    async for v in anthropic.beta.skills.versions.list(skill_id, limit=100):
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.ma:delete_skill_and_versions"
+    )
+    async for v in list_skill_versions(anthropic, skill_id, limit=100, scope=scope):
         try:
-            await anthropic.beta.skills.versions.delete(v.version, skill_id=skill_id)
+            await delete_skill_version(anthropic, skill_id, v.version, scope=scope)
         except APIStatusError as err:
             if err.status_code == 404:
                 log.info(
@@ -301,7 +318,7 @@ async def delete_skill_and_versions(anthropic: AsyncAnthropic, skill_id: str) ->
                 )
                 continue
             raise
-    await anthropic.beta.skills.delete(skill_id)
+    await delete_skill(anthropic, skill_id, scope=scope)
 
 
 # Name of the agent that marks a workspace as disposable. Only the metadata

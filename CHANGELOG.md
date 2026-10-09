@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Limit tenant skill list results to authorized custom skills and shared provider catalog skills without changing provider pagination.
+
+- Authorize neutral resource calls with tenant/account ownership and explicit workspace scopes; use tenant scopes for agent/environment/skill reconciliation, tenant indexing and sweeps, and retain native skills paginator stop behavior.
+
 ### Fixed
 
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
@@ -35,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An offline driver-agnostic C01–C18 conformance runner reports explicit pending
   dependencies and includes a test-only reference driver.
+
+- The defaults resource pipeline now uses Anthropic resource ports in `mux`,
+  with offline request-equivalence checks. Existing resource requests,
+  reconcile policy, recovery exports and SDK error handling are preserved.
 
 - An offline Managed Agents call inventory and production call ratchet protect
   the neutral-core extraction boundary without changing runtime behavior.

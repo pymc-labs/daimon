@@ -26,6 +26,53 @@ class Scope(Contract):
     principal_id: str
     authorization_id: str
 
+    platform_reason: str | None = None
+    legacy_call_site: str | None = None
+
+    @model_validator(mode="after")
+    def _explicit_authorization(self) -> Scope:
+        if self.platform_reason is not None and not self.platform_reason.strip():
+            raise ValueError("platform authorization requires a nonblank reason")
+        if self.legacy_call_site is not None and not self.legacy_call_site.strip():
+            raise ValueError("legacy authorization requires a nonblank call site")
+        if self.platform_reason is not None and self.legacy_call_site is not None:
+            raise ValueError("platform and legacy authorization are distinct")
+        return self
+
+    @property
+    def is_platform(self) -> bool:
+        return self.platform_reason is not None
+
+    @property
+    def is_legacy_host_authorized(self) -> bool:
+        return self.legacy_call_site is not None
+
+    @classmethod
+    def platform(cls, *, reason: str, authorization_id: str = "platform-resource") -> Scope:
+        """Host-only capability for an explicitly authorized workspace operation."""
+        return cls(
+            tenant_id="platform",
+            account_id="service",
+            principal_id="daimon",
+            authorization_id=authorization_id,
+            platform_reason=reason,
+        )
+
+    @classmethod
+    def legacy_host_authorized(cls, *, call_site: str) -> Scope:
+        """Temporary M0 capability: the existing host caller authorizes access.
+
+        This is distinct from operator privilege and must be removed when the
+        named caller supplies its tenant authorization decision directly.
+        """
+        return cls(
+            tenant_id="legacy",
+            account_id="legacy",
+            principal_id="daimon",
+            authorization_id="legacy-host-authorized",
+            legacy_call_site=call_site,
+        )
+
 
 class ChannelRef(Contract):
     """A channel: the key the agent configuration hangs off."""
@@ -55,6 +102,8 @@ class ResourceRef(Contract):
     kind: str
     provider: Provider
     account_scope_id: str
+    tenant_id: str | None = None
+    account_id: str | None = None
 
 
 class Revision(Contract):

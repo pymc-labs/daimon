@@ -15,7 +15,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from anthropic import AsyncAnthropic
-from daimon.core.defaults.ma_index import list_skills_strict
+from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.mux_backend import managed_agents, platform_scope
+from daimon.core.mux_compat import legacy_call, legacy_iter
+from mux.drivers.anthropic.resources.platform_export import PlatformExport
+from pydantic import JsonValue
 
 
 async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
@@ -25,6 +29,9 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
     removes the partial archive and propagates; a success manifest is written
     only after every paginator and download completes.
     """
+    backend = managed_agents(client)
+    native = backend.extension(PlatformExport, namespace="anthropic.platform_export", version=1)
+    scope = platform_scope("defaults.platform_export", authorization_id="platform-export")
     checksums: dict[str, str] = {}
     fd, temporary = tempfile.mkstemp(prefix=".platform-export-", dir=destination.parent)
     os.close(fd)
@@ -38,42 +45,46 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
             def write_json(name: str, value: object) -> None:
                 write(name, json.dumps(value, ensure_ascii=False, indent=2).encode())
 
-            async for agent in client.beta.agents.list():
+            async for agent in legacy_iter(native.agents(scope)):
                 # List responses may be summaries; retrieve the full current definition.
-                full = await client.beta.agents.retrieve(agent.id)
-                write_json(f"agents/{len(checksums)}.json", full.model_dump(mode="json"))
-            async for environment in client.beta.environments.list():
-                full_env = await client.beta.environments.retrieve(environment.id)
-                write_json(f"environments/{len(checksums)}.json", full_env.model_dump(mode="json"))
-            for skill in await list_skills_strict(client):
-                if skill.source != "custom":
+                full = await legacy_call(native.agent(scope, str(agent["id"])))
+                write_json(f"agents/{len(checksums)}.json", full)
+            async for environment in legacy_iter(native.environments(scope)):
+                full_env = await legacy_call(native.environment(scope, str(environment["id"])))
+                write_json(f"environments/{len(checksums)}.json", full_env)
+            skills: list[dict[str, JsonValue]] = []
+            async for page in legacy_iter(native.skill_pages(scope, limit=1000)):
+                skills.extend(page.data)
+                if len(page.data) >= 1000 and not page.has_more:
+                    raise SkillsListTruncatedError(
+                        "skills.list returned a full page of 1000 rows — "
+                        "the org skill view may be truncated; "
+                        "create/delete decisions on this view are unsafe"
+                    )
+            for skill in skills:
+                if skill["source"] != "custom":
                     continue
                 prefix = f"skills/{len(checksums)}"
-                write_json(f"{prefix}/skill.json", skill.model_dump(mode="json"))
-                async for version in client.beta.skills.versions.list(skill.id):
+                write_json(f"{prefix}/skill.json", skill)
+                async for version in legacy_iter(native.skill_versions(scope, str(skill["id"]))):
                     version_prefix = f"{prefix}/{len(checksums)}"
-                    write_json(f"{version_prefix}/version.json", version.model_dump(mode="json"))
-                    content = await client.beta.skills.versions.download(
-                        version.version, skill_id=skill.id
+                    write_json(f"{version_prefix}/version.json", version)
+                    content = await legacy_call(
+                        native.download_skill_version(
+                            scope, str(skill["id"]), str(version["version"])
+                        )
                     )
-                    try:
-                        write(f"{version_prefix}/content.zip", await content.read())
-                    finally:
-                        await content.close()
-            async for store in client.beta.memory_stores.list():
+                    write(f"{version_prefix}/content.zip", content)
+            async for store in legacy_iter(native.memory_stores(scope)):
                 prefix = f"memory-stores/{len(checksums)}"
-                write_json(f"{prefix}/store.json", store.model_dump(mode="json"))
-                async for memory in client.beta.memory_stores.memories.list(
-                    store.id, path_prefix="/"
-                ):
-                    if memory.type != "memory":
+                write_json(f"{prefix}/store.json", store)
+                async for memory in legacy_iter(native.memories(scope, str(store["id"]))):
+                    if memory["type"] != "memory":
                         continue
-                    full_memory = await client.beta.memory_stores.memories.retrieve(
-                        memory.id, memory_store_id=store.id, view="full"
+                    full_memory = await legacy_call(
+                        native.memory(scope, str(store["id"]), str(memory["id"]))
                     )
-                    write_json(
-                        f"{prefix}/{len(checksums)}.json", full_memory.model_dump(mode="json")
-                    )
+                    write_json(f"{prefix}/{len(checksums)}.json", full_memory)
             archive.writestr(
                 "manifest.json",
                 json.dumps(

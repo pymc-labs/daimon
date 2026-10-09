@@ -29,6 +29,8 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma import delete_skill_and_versions
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, archive_environment
 
 _log = structlog.get_logger(__name__)
 
@@ -64,7 +66,7 @@ async def sweep_removed_agents(
                 ResourceOutcome(kind="agent", name=name, action=Action.ARCHIVED, anthropic_id=ag.id)
             )
             continue
-        await client.beta.agents.archive(ag.id)
+        await archive_agent(client, ag.id, scope=resource_scope(tenant_id=str(tenant_id)))
         outcomes.append(
             ResourceOutcome(kind="agent", name=name, action=Action.ARCHIVED, anthropic_id=ag.id)
         )
@@ -93,7 +95,7 @@ async def sweep_removed_environments(
                 )
             )
             continue
-        await client.beta.environments.archive(env.id)
+        await archive_environment(client, env.id, scope=resource_scope(tenant_id=str(tenant_id)))
         outcomes.append(
             ResourceOutcome(
                 kind="environment", name=name, action=Action.ARCHIVED, anthropic_id=env.id
@@ -165,7 +167,9 @@ async def sweep_removed_skills(
                 )
             )
             continue
-        await delete_skill_and_versions(client, sk.id)
+        await delete_skill_and_versions(
+            client, sk.id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
         outcomes.append(
             ResourceOutcome(
                 kind="skill", name=display_title, action=Action.DELETED, anthropic_id=sk.id

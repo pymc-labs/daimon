@@ -268,3 +268,68 @@ authentication is refused; normal pytest never invokes the judge.
 and export date, and an offline paired M0 replay benchmark. First-token latency
 is explicitly unavailable in the current telemetry schema. The benchmark remains
 pending until N4 supplies the legacy/mux transport adapter; pending never passes.
+
+## Resources (Anthropic driver)
+
+`mux.drivers.anthropic.AnthropicManagedAgents` assembles resource ports around
+Daimon's existing `AsyncAnthropic` client. The host continues to configure and
+close that client; constructing the backend makes no requests and introduces
+no settings or defaults. Agent, environment and skill requests retain omitted
+fields, explicit empty lists, metadata patches and provider version checks.
+The defaults pipeline keeps its current reconcile, duplicate and sweep policy.
+Its full agent/environment list walks use the typed `anthropic.resource_walk@1`
+port, returning neutral records while preserving SDK async iteration. The core
+page APIs remain available for callers that request one page at a time.
+
+Anthropic toolsets and coordinator rosters use closed, versioned schemas in
+`mux.drivers.anthropic.schemas`. Native tool configuration is carried by
+`anthropic.agent_tools@1`; coordinator configuration uses
+`anthropic.multiagent@1`. Unknown properties are rejected before a request.
+The operator recovery export uses `anthropic.platform_export@1`, which exposes
+native JSON for the archive while keeping the SDK client private. It preserves
+the existing request pagination and closes each skill download response.
+
+The driver converts SDK failures to `ProviderError`, including failures while
+reading later pages, and retains the original exception as its cause. For M0,
+`daimon.core.mux_compat` restores the existing SDK exception and model types at
+the host edge so unchanged consumers keep their current behavior and copy.
+That module makes no SDK calls and is tracked for removal after M0 in the
+neutral-core sprint's `FOLLOWUPS.md`.
+
+M0 resource drivers accept operation keys and issue the existing requests
+without a driver cache or deduplication layer. Durable operation handling is
+owned by the host StateStore integration; resource drivers do not add provider
+headers or retry policy for it.
+
+
+Resource authorization is host supplied. `ResourceAuthorization` binds the
+backend to one immutable `Scope` and the native IDs the host already authorized.
+Tenant calls reject another tenant/account or unstamped references before I/O;
+returned agent/environment references carry their minting scope. Native
+`daimon_tenant` tags are checked after the existing request, and tenant lists
+exclude foreign tagged records without additional requests. Agent, environment
+and skill reconciliation, tenant indexing and all three tenant sweeps use the
+tenant scope already established by their caller. Existing metadata and skill
+title predicates retain the same results.
+
+Only multi-tenant agent listing, workspace skill collection, organization-wide
+referenced-skill inventory, operator recovery export and the untagged model
+acceptance probe use `Scope.platform(reason=...)`. These are six production
+call sites; the probe creates and archives its workspace test agent. Export
+additionally requires its existing operator authorization name. The two shared `ma.py` resource helpers accept a
+scope; unmigrated callers retain their current host authorization through the
+separate, temporary `Scope.legacy_host_authorized(call_site=...)` capability.
+Those callers are enumerated in sprint FOLLOWUPS.md for their owning lanes.
+
+Skill collection and version walks use the SDK paginator inside the driver,
+including its stop behavior for empty data and empty-string cursors. They preserve
+page truncation detection and version deletion during iteration.
+
+
+For tenant skill lists and page walks, custom records must appear in the host's
+ResourceAuthorization skill-ID grant. Anthropic catalog records remain shared.
+Filtering runs after each existing SDK request and leaves its cursor and page
+iterator untouched, so a page containing only foreign custom records still
+advances to later authorized records. Platform and approved legacy inventories
+retain the entire workspace view. CLI/MCP keep their existing tenant-title and
+channel-isolation output filters.
