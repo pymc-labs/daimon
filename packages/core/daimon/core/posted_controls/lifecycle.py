@@ -27,9 +27,6 @@ _log = structlog.get_logger(__name__)
 _BACKGROUND_EDITS: set[asyncio.Future[object]] = set()
 #: The latest edit per card, so edits to one card land in call order.
 _LAST_EDIT: dict[object, asyncio.Future[object]] = {}
-#: Most an edit waits for the card's previous edit, so one hung platform call
-#: cannot freeze every later edit to that card.
-ORDER_WAIT_S = 30.0
 
 
 def pending_card_edits() -> int:
@@ -69,7 +66,9 @@ async def edit_card_within(
 
     async def _in_order() -> object:
         if previous is not None and not previous.done():
-            await asyncio.wait({previous}, timeout=ORDER_WAIT_S)
+            # Strict: a later state must never land before an earlier one.
+            # Platform clients time out their own calls, so this ends.
+            await asyncio.wait({previous})
         return await edit
 
     task: asyncio.Future[object] = asyncio.ensure_future(_in_order())

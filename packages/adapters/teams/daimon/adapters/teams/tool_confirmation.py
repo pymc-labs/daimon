@@ -177,7 +177,8 @@ class TeamsConfirmationCards:
                 answered_posted = posted_cards[0]
 
                 async def retire_unsent() -> None:
-                    await answered_posted.answered_edit_done.wait()
+                    # Queued behind the Approved edit on the same card
+                    # (`edit_card_within` keeps per-card call order).
                     await self._edit(answered_posted, "stopped")
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)

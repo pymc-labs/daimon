@@ -83,6 +83,9 @@ class _ConfirmationView(discord.ui.LayoutView):
         self._prompt = prompt
         self._answer = answer
         self.answered_edit_done = asyncio.Event()
+        #: The posted card's ordering key for `edit_card_within`; set once the
+        #: card is sent, before anyone can click it.
+        self.card_key: object = ("discord-view", id(self))
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
             accent_colour=discord.Colour(
                 COLOR_AMBER
@@ -149,10 +152,18 @@ class _ConfirmationView(discord.ui.LayoutView):
         answered = build_confirmation_card(
             self._prompt, state=answer, answered_by_platform_user_id=str(interaction.user.id)
         )
+        # Same per-card order as `_retire`, registered before any await, so a
+        # Stopped retire that follows can never land before this answer.
         try:
-            await interaction.response.edit_message(
-                view=_ConfirmationView(answered, self._prompt, answer=None),
-                allowed_mentions=discord.AllowedMentions.none(),
+            await edit_card_within(
+                interaction.response.edit_message(
+                    view=_ConfirmationView(answered, self._prompt, answer=None),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ),
+                card_key=self.card_key,
+                budget_s=RETIRE_TIMEOUT_S,
+                failure_errors=(discord.HTTPException,),
+                failed_event="tool_confirmation.answer_edit_failed",
             )
         finally:
             self.answered_edit_done.set()
@@ -176,6 +187,7 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
         view = _ConfirmationView(pending, prompt, answer)
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+        view.card_key = ("discord", message.id)
 
         async def retire(state: ConfirmationCardState) -> None:
             await _retire(message, prompt, state)
@@ -184,7 +196,7 @@ def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationH
         if result == "approved":
 
             async def retire_unsent() -> None:
-                await view.answered_edit_done.wait()
+                # Queued behind the Approved edit on the same card.
                 await retire("stopped")
 
             return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
