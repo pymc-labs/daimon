@@ -53,6 +53,7 @@ from daimon.adapters.teams.setup_conversation import (
 )
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
+from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.agent_reach import record_created_for_channel
@@ -544,6 +545,7 @@ class SetupPanel:
         if error is not None or created_id is None:
             return dialog("New agent", cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
+        queue_agent_face(self._runtime.sessionmaker, tenant_id=actor.tenant_id, agent_name=name)
         caller = await channel_admin_caller(
             self._runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
         )

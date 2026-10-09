@@ -16,7 +16,8 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
-from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime
+from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_budget import (
@@ -1031,6 +1032,13 @@ async def channels_rule_set(
     except ChannelRuleRefused as exc:
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
         raise typer.Exit(1) from exc
+    if change.copied_from is not None and change.agent_name is not None:
+        await ensure_agent_face(
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=change.agent_name,
+            timeout_s=FACE_WAIT_S,
+        )
     status = "now" if change.changed else "already"
     console.print(
         f"{where} {channel}: {status} readers {change.rule.readers}, writers {change.rule.writers}."

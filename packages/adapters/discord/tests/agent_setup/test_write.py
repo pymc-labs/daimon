@@ -290,3 +290,37 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
     assert reconcile_calls == [], (
         "create must raise before reconcile when another owner holds the name"
     )
+
+
+@pytest.mark.asyncio
+async def test_create_blank_agent_queues_the_new_agents_face(
+    monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> None:
+    async def reconcile(*_args: Any, **_kwargs: Any) -> Any:
+        outcome = MagicMock()
+        outcome.anthropic_id = "ag_new"
+        return outcome
+
+    async def no_collision(*_args: Any, **_kwargs: Any) -> list[Any]:
+        return []
+
+    queued: list[tuple[uuid.UUID, str]] = []
+    monkeypatch.setattr(write_mod, "reconcile_agent", reconcile)
+    monkeypatch.setattr(write_mod, "find_agents_by_daimon_tag", no_collision)
+    monkeypatch.setattr(
+        write_mod,
+        "queue_agent_face",
+        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+    )
+    runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
+
+    await create_blank_agent(
+        runtime,
+        tenant_id=tenant_id,
+        name="Atlas Birch",
+        system=None,
+        model="claude-sonnet-4-6",
+        account_id=account_id,
+    )
+
+    assert queued == [(tenant_id, "Atlas Birch")]

@@ -240,8 +240,16 @@ async def test_end_button_ends_once_and_reopening_replaces_the_live_conversation
 
 
 async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    queued: list[tuple[uuid.UUID, str]] = []
+    monkeypatch.setattr(
+        setup_panel,
+        "queue_agent_face",
+        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+    )
     state = _ma_state()
     form = {"action": "agent_create", "purpose": "Scout leads", "model": DEFAULT_AGENT_MODEL}
     async with _running(db_session_factory, teams_api_fake, state=state) as (service, _):
@@ -256,6 +264,7 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     assert "Scout leads" in str(created["system"])
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel lands on Details"
+    assert queued == [(TENANT, "scout")], "the new agent's face renders when it is created"
 
 
 @pytest.mark.parametrize(

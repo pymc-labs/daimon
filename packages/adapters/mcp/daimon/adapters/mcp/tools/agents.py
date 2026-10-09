@@ -44,6 +44,7 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
@@ -489,6 +490,7 @@ async def _create_agent_impl(
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+    queue_agent_face(runtime.session_factory, tenant_id=auth.tenant_id, agent_name=spec.name)
     await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
     ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
     # agents.create succeeded — always return AgentInfo even if sync fails.

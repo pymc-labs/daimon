@@ -6,9 +6,10 @@ guaranteed and the credential guidance applied. It starts with no credentials
 (`agent_lifecycle.strip_credentialed_mcp_servers`). Skills scoped to the
 source are uploaded again under the copy's own name, so the two never share a
 skill id; skills scoped to another agent, and any copy that fails, are left
-off and named. Whether it may be copied is
-`authorize(FORK)`'s: an admin's call, and never a pinned agent. The chat
-`fork_agent` tool, the CLI and channel isolation use it.
+off and named. Its face starts rendering as soon as it exists, so its first
+post has it. Whether it may be copied is `authorize(FORK)`'s: an admin's
+call, and never a pinned agent. The chat `fork_agent` tool, the CLI and
+channel isolation use it.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 )
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
+from daimon.core.agent_identity import queue_agent_face
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import (
     download_skill_version,
@@ -252,6 +254,7 @@ async def copy_agent(
     if "skills" in fork_params:
         fork_params["skills"] = split.kept
     created = await anthropic.beta.agents.create(**fork_params)  # type: ignore[arg-type]  # a validated copy of the source's own create fields
+    queue_agent_face(sessionmaker, tenant_id=tenant_id, agent_name=new_name)
     if not split.own:
         return AgentCopy(created, tuple(split.dropped))
     copied, failed = await _copy_own_skills(

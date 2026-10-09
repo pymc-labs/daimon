@@ -11,6 +11,9 @@ must observe real COMMIT visibility.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+import pytest
 import pytest_asyncio
 from daimon.testing.db import (  # noqa: F401
     db_clean,
@@ -24,6 +27,16 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_agent_faces() -> Iterator[None]:
+    """Creating an agent starts its face render in the background; one test's
+    render must not write into the next test's database or back-off state."""
+    from daimon.core.agent_identity import cancel_pending_agent_faces
+
+    yield
+    cancel_pending_agent_faces()
 
 
 @pytest_asyncio.fixture

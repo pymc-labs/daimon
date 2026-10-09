@@ -38,7 +38,8 @@ from daimon.adapters.cli.commands.agents import (
     agents_list,
     agents_update,
 )
-from daimon.adapters.cli.runtime import CliRuntime
+from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime
+from daimon.core import agent_identity
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import Settings
@@ -1402,3 +1403,84 @@ async def test_agents_fork_leaves_token_backed_mcp_servers_off_the_copy(
     tools = cast("list[dict[str, object]]", created[0]["tools"])
     assert [server["name"] for server in servers] == ["docs"]
     assert "crm" not in {tool.get("mcp_server_name") for tool in tools}, "its toolset goes too"
+
+
+@pytest.mark.asyncio
+async def test_agents_create_and_fork_wait_for_the_new_agents_face(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-shot command awaits the render: a background task dies with the process."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+    source_data = _agent_json(agent_id="ag_source", name="base-agent", tenant_id=tenant_id)
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([source_data]))
+    router.add("GET", r"/v1/agents/ag_source", lambda req, m: httpx.Response(200, json=source_data))
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda req, m: httpx.Response(
+            200,
+            json=_agent_json(agent_id="ag_new", name="new", tenant_id=tenant_id),
+        ),
+    )
+    awaited: list[tuple[uuid.UUID, str, float]] = []
+
+    async def ensure(
+        _factory: object, *, tenant_id: uuid.UUID, agent_name: str, timeout_s: float
+    ) -> bool:
+        awaited.append((tenant_id, agent_name, timeout_s))
+        return True
+
+    monkeypatch.setattr(agents_cmd, "ensure_agent_face", ensure)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+    spec_path = tmp_path / "agent.yaml"
+    spec_path.write_text("name: Atlas Birch\nmodel: claude-sonnet-4-6\n")
+
+    await agents_create(rt=rt, console=console, path=spec_path)
+    await agents_fork(rt=rt, console=console, src="base-agent", dst="forked-agent")
+
+    assert awaited == [
+        (tenant_id, "Atlas Birch", FACE_WAIT_S),
+        (tenant_id, "forked-agent", FACE_WAIT_S),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agents_fork_succeeds_when_the_face_render_fails(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+    source_data = _agent_json(agent_id="ag_source", name="base-agent", tenant_id=tenant_id)
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([source_data]))
+    router.add("GET", r"/v1/agents/ag_source", lambda req, m: httpx.Response(200, json=source_data))
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda req, m: httpx.Response(
+            200,
+            json=_agent_json(agent_id="ag_fork", name="forked-agent", tenant_id=tenant_id),
+        ),
+    )
+
+    async def broken(*_args: object, **_kwargs: object) -> None:
+        raise OSError("missing face layer")
+
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", broken)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    await agents_fork(rt=rt, console=console, src="base-agent", dst="forked-agent")
+
+    out = console.file.getvalue()  # type: ignore[attr-defined]
+    assert "forked agent 'base-agent' → 'forked-agent'" in out, out

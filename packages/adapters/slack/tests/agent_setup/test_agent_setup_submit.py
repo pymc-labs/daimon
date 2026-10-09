@@ -505,3 +505,38 @@ async def test_run_new_agent_never_consults_admission(
     assert not any("/v1/sessions" in path for path in paths), (
         "creation opens no session, so nothing is admitted or billed"
     )
+
+
+@pytest.mark.asyncio
+async def test_run_new_agent_queues_its_face_once_it_exists(
+    fake_slack_web_client: Any,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The face renders off the ack path, so the agent's first post already has it;
+    a refused create queues nothing."""
+    from daimon.adapters.slack.agent_setup import submit as submit_mod
+
+    queued: list[tuple[object, str]] = []
+    monkeypatch.setattr(
+        submit_mod,
+        "queue_agent_face",
+        lambda _factory, *, tenant_id, agent_name: queued.append((tenant_id, agent_name)),
+    )
+    client_fake: Any = fake_slack_web_client
+    runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
+    common: dict[str, Any] = {
+        "team_id": _TEAM_ID,
+        "user_id": _USER_ID,
+        "channel_id": _CHANNEL_ID,
+        "meta": _panel_meta(),
+        "name": "Atlas Birch",
+        "purpose": None,
+        "model": "claude-sonnet-4-6",
+    }
+
+    await run_new_agent_submission(runtime, client_fake.client, view_id="V1", **common)
+    await run_new_agent_submission(runtime, client_fake.client, view_id="V2", **common)
+
+    tenant_id = submit_mod.derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
+    assert queued == [(tenant_id, "Atlas Birch")]
