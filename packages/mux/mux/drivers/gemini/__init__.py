@@ -3,7 +3,7 @@
 from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
-from mux.contracts.ports import Artifacts, Models, Skills
+from mux.contracts.ports import Models
 from mux.contracts.profile import Profile
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.core import (
@@ -14,6 +14,7 @@ from mux.drivers.gemini.core import (
     GeminiSessions,
     page_values,
 )
+from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import UnsupportedCapability
@@ -58,14 +59,8 @@ class GeminiManagedAgents:
         self.sessions = GeminiSessions(transport, storage, account_scope_id)
         self.events = GeminiEvents(transport, storage, account_scope_id, state_store=state_store)
         self.usage = GeminiUsage(transport, storage, account_scope_id)
-
-    @property
-    def artifacts(self) -> Artifacts:
-        raise UnsupportedCapability(("artifacts",), PROFILE.profile_id)
-
-    @property
-    def skills(self) -> Skills:
-        raise UnsupportedCapability(("skills_bundle",), PROFILE.profile_id)
+        self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
+        self.skills = GeminiSkills(transport, storage, account_scope_id)
 
     @property
     def models(self) -> Models:

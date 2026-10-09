@@ -27,7 +27,8 @@ from mux.state.store import StateStore
 
 PENDING_REASONS = {
     "C02": PendingReason(
-        PendingKind.ADAPTER_DEPENDENCY, "Environment snapshot resource port is scheduled for PR3."
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Snapshot bytes implemented; clock-driven expiry and unexpected-loss proof absent.",
     ),
     "C04": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
@@ -43,11 +44,11 @@ PENDING_REASONS = {
     ),
     "C09": PendingReason(
         PendingKind.CAPABILITY_UNAVAILABLE,
-        "No provider vault API; snapshot artifact support is deferred to PR3.",
+        "Snapshot downloads are implemented; no provider vault API.",
     ),
     "C11": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
-        "Driver inline skill bundle port is scheduled for PR3.",
+        "Conformance bridge for interaction-time inline skill deployment is absent.",
     ),
 }
 
