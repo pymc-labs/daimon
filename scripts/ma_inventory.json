@@ -1,5 +1,5 @@
 {
-  "files_scanned": 1970,
+  "files_scanned": 1973,
   "parse_errors": [],
   "calls": [
     {
@@ -272,28 +272,6 @@
       "response_access": []
     },
     {
-      "file": "packages/adapters/discord/daimon/adapters/discord/agent_setup/add_skill.py",
-      "line": 114,
-      "end": 114,
-      "scope": "target",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/discord/daimon/adapters/discord/agent_setup/add_skill.py",
-      "line": 333,
-      "end": 333,
-      "scope": "_on_add",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "self.runtime.anthropic.beta.agents.retrieve(self.agent.ma_agent_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/adapters/discord/daimon/adapters/discord/commands/memory.py",
       "line": 158,
       "end": 160,
@@ -325,17 +303,6 @@
       "category": "production",
       "resource": "memory_stores.memories.list",
       "call": "runtime.anthropic.beta.memory_stores.memories.list(store_id, path_prefix='/')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/discord/daimon/adapters/discord/credential_modals.py",
-      "line": 1286,
-      "end": 1288,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "self._runtime.anthropic.beta.agents.update(fresh.id, version=fresh.version, skills=merged)",
       "request_keys": [],
       "response_access": []
     },
@@ -440,6 +407,70 @@
       "resource": "memory_stores.memories.create",
       "call": "client.beta.memory_stores.memories.create(store.id, path=path, content=content)",
       "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 39,
+      "end": 39,
+      "scope": "test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "native.metadata"
+      ]
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 127,
+      "end": 127,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "fresh.version"
+      ]
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 133,
+      "end": 133,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=initial_payload)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 135,
+      "end": 135,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "fresh.version"
+      ]
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 137,
+      "end": 141,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=[*initial_payload, {'type': 'custom', 'skill_id': 'existing'}])",
+      "request_keys": [
+        "skill_id",
+        "type"
+      ],
       "response_access": []
     },
     {
@@ -875,8 +906,8 @@
     },
     {
       "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 706,
-      "end": 706,
+      "line": 710,
+      "end": 710,
       "scope": "_retire_mcp_app_session",
       "category": "production",
       "resource": "sessions.archive",
@@ -886,22 +917,8 @@
     },
     {
       "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 403,
-      "end": 403,
-      "scope": "_fire",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "client.beta.agents.retrieve(resolved_agent_id)",
-      "request_keys": [],
-      "response_access": [
-        "ran.metadata",
-        "ran.name"
-      ]
-    },
-    {
-      "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 765,
-      "end": 765,
+      "line": 769,
+      "end": 769,
       "scope": "_refresh_github_app_sessions",
       "category": "production",
       "resource": "sessions.archive",
@@ -911,8 +928,8 @@
     },
     {
       "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 833,
-      "end": 833,
+      "line": 837,
+      "end": 837,
       "scope": "_refresh_github_app_sessions",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -924,8 +941,8 @@
     },
     {
       "file": "packages/adapters/scheduler/daimon/adapters/scheduler/main.py",
-      "line": 949,
-      "end": 951,
+      "line": 953,
+      "end": 955,
       "scope": "_close_github_app_sessions",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -934,69 +951,6 @@
       "response_access": [
         "observed.status"
       ]
-    },
-    {
-      "file": "packages/adapters/slack/daimon/adapters/slack/agent_setup/add_skill.py",
-      "line": 159,
-      "end": 159,
-      "scope": "run_add_skill_submission",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "runtime.anthropic.beta.agents.retrieve(found.id)",
-      "request_keys": [],
-      "response_access": [
-        "agent.metadata",
-        "agent.metadata.get"
-      ]
-    },
-    {
-      "file": "packages/adapters/slack/daimon/adapters/slack/agent_setup/coding_tools.py",
-      "line": 381,
-      "end": 381,
-      "scope": "_authorize_mint",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)",
-      "request_keys": [],
-      "response_access": [
-        "ma_agent.metadata",
-        "ma_agent.name"
-      ]
-    },
-    {
-      "file": "packages/adapters/slack/daimon/adapters/slack/agent_setup/write.py",
-      "line": 95,
-      "end": 95,
-      "scope": "delete_agent",
-      "category": "production",
-      "resource": "agents.archive",
-      "call": "runtime.anthropic.beta.agents.archive(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/slack/daimon/adapters/slack/app.py",
-      "line": 2320,
-      "end": 2322,
-      "scope": "_run_thread_turn_observed",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)",
-      "request_keys": [],
-      "response_access": [
-        "owner_agent.name"
-      ]
-    },
-    {
-      "file": "packages/adapters/slack/daimon/adapters/slack/credential_submissions.py",
-      "line": 1207,
-      "end": 1209,
-      "scope": "_apply",
-      "category": "production",
-      "resource": "agents.update",
-      "call": "runtime.anthropic.beta.agents.update(fresh.id, version=fresh.version, skills=merged)",
-      "request_keys": [],
-      "response_access": []
     },
     {
       "file": "packages/adapters/slack/tests/agent_setup/test_agent_setup_write.py",
@@ -1142,64 +1096,55 @@
       "response_access": []
     },
     {
-      "file": "packages/adapters/teams/daimon/adapters/teams/add_skill.py",
-      "line": 158,
-      "end": 158,
-      "scope": "add_previewed_skill",
-      "category": "production",
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
+      "line": 84,
+      "end": 84,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
       "resource": "agents.retrieve",
-      "call": "runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)",
+      "call": "old.beta.agents.retrieve('agent1')",
       "request_keys": [],
       "response_access": [
-        "fresh.metadata"
+        "fresh.version"
       ]
     },
     {
-      "file": "packages/adapters/teams/daimon/adapters/teams/add_skill.py",
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
       "line": 90,
       "end": 90,
-      "scope": "target",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/teams/daimon/adapters/teams/app.py",
-      "line": 1012,
-      "end": 1012,
-      "scope": "_refusal",
-      "category": "production",
-      "resource": "agents.retrieve",
-      "call": "self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/teams/daimon/adapters/teams/credential_repos.py",
-      "line": 96,
-      "end": 98,
-      "scope": "_apply",
-      "category": "production",
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
       "resource": "agents.update",
-      "call": "runtime.anthropic.beta.agents.update(fresh.id, version=fresh.version, skills=merged)",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=initial_payload)",
       "request_keys": [],
       "response_access": []
     },
     {
-      "file": "packages/adapters/teams/daimon/adapters/teams/setup_panel.py",
-      "line": 631,
-      "end": 631,
-      "scope": "_issue",
-      "category": "production",
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
+      "line": 92,
+      "end": 92,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
       "resource": "agents.retrieve",
-      "call": "self._runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)",
+      "call": "old.beta.agents.retrieve('agent1')",
       "request_keys": [],
       "response_access": [
-        "ma_agent.metadata",
-        "ma_agent.name"
+        "fresh.version"
       ]
+    },
+    {
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
+      "line": 94,
+      "end": 98,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=[*initial_payload, {'type': 'custom', 'skill_id': 'existing'}])",
+      "request_keys": [
+        "skill_id",
+        "type"
+      ],
+      "response_access": []
     },
     {
       "file": "packages/adapters/teams/tests/test_here.py",
@@ -1253,6 +1198,70 @@
       "resource": "memory_stores.memories.create",
       "call": "client.beta.memory_stores.memories.create(store.id, path=path, content=content)",
       "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 34,
+      "end": 34,
+      "scope": "test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "native.metadata"
+      ]
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 113,
+      "end": 113,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "fresh.version"
+      ]
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 119,
+      "end": 119,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=initial_payload)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 121,
+      "end": 121,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.retrieve",
+      "call": "old.beta.agents.retrieve('agent1')",
+      "request_keys": [],
+      "response_access": [
+        "fresh.version"
+      ]
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 123,
+      "end": 127,
+      "scope": "test_imported_skill_attachment_keeps_requests_retry_limit_and_notice",
+      "category": "test",
+      "resource": "agents.update",
+      "call": "old.beta.agents.update('agent1', version=fresh.version, skills=[*initial_payload, {'type': 'custom', 'skill_id': 'existing'}])",
+      "request_keys": [
+        "skill_id",
+        "type"
+      ],
       "response_access": []
     },
     {
@@ -9229,6 +9238,33 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 12,
+      "module": "anthropic",
+      "names": [
+        "ConflictError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 13,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/discord/tests/test_mux_resource_parity.py",
+      "line": 14,
+      "module": "anthropic.types.beta.beta_managed_agents_skill_params",
+      "names": [
+        "BetaManagedAgentsSkillParams"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/discord/tests/test_on_guild_join.py",
       "line": 23,
       "module": "anthropic",
@@ -10629,6 +10665,33 @@
       "category": "test"
     },
     {
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
+      "line": 11,
+      "module": "anthropic",
+      "names": [
+        "ConflictError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
+      "line": 12,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/slack/tests/test_mux_resource_parity.py",
+      "line": 13,
+      "module": "anthropic.types.beta.beta_managed_agents_skill_params",
+      "names": [
+        "BetaManagedAgentsSkillParams"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/adapters/slack/tests/test_names.py",
       "line": 10,
       "module": "anthropic",
@@ -10819,6 +10882,33 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 11,
+      "module": "anthropic",
+      "names": [
+        "ConflictError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 12,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/teams/tests/test_mux_resource_parity.py",
+      "line": 13,
+      "module": "anthropic.types.beta.beta_managed_agents_skill_params",
+      "names": [
+        "BetaManagedAgentsSkillParams"
       ],
       "category": "test"
     },

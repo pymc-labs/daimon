@@ -393,3 +393,18 @@ ports land. The existing agent_chat turn calls wait for the turn lane.
 
 The MCP version-count read also retains its SDK walk while the resource decoder
 requires fields that the existing SDK counting caller does not consume.
+### Chat platform and scheduler resource consumers
+
+Discord, Slack and Teams skill checks, imported-skill attachment and applicable
+agent writes consume neutral resource ports with the tenant from their existing
+platform context. Version retries use that same tenant scope. The scheduler
+passes the routine row's tenant when re-reading the selected agent for pin and
+channel-isolation checks.
+
+The adapters keep their current refusal and partial-attachment notices when an
+agent re-read fails scope validation. Best-effort previous-agent name lookups
+still fall back to the existing generic owner notice. Foreign-agent final skill
+checks in Discord and Teams retain their existing refusal copy before upload.
+
+Discord memory list/retrieve and scheduler session retrieve/archive calls retain
+their current SDK path pending the memory, lifecycle and archive ports.

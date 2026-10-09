@@ -38,6 +38,8 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.operation_policy import decide_operation
 from daimon.core.roster import RosterAgent
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
@@ -50,6 +52,7 @@ from daimon.core.skills.ingest import (
     bundle_from_upload,
     require_upload_suffix,
 )
+from mux.errors import ScopeViolation
 
 import discord
 
@@ -111,7 +114,9 @@ async def skill_change_refusal(
     async def target() -> BetaManagedAgentsAgent:
         if ma_agent is not None:
             return ma_agent
-        return await runtime.anthropic.beta.agents.retrieve(agent.ma_agent_id)
+        return await retrieve_agent(
+            runtime.anthropic, agent.ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
 
     async with runtime.sessionmaker() as session:
 
@@ -330,7 +335,16 @@ class SkillPreviewView(PanelViewBase):
                 raise _AddRefused(refusal)
 
         try:
-            agent = await self.runtime.anthropic.beta.agents.retrieve(self.agent.ma_agent_id)
+            try:
+                agent = await retrieve_agent(
+                    self.runtime.anthropic,
+                    self.agent.ma_agent_id,
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
+            except ScopeViolation as exc:
+                if exc.reason != "provider record belongs to another tenant":
+                    raise
+                raise _AddRefused(f"{name} is not an agent of this server.") from None
             await recheck(agent)
             result = await add_agent_skill(
                 self.runtime.anthropic,

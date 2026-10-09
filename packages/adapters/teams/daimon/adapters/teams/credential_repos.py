@@ -22,7 +22,10 @@ from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import upsert_credential_encrypted
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import update_agent
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
+from mux.errors import ScopeViolation
 
 log = structlog.get_logger()
 
@@ -93,13 +96,19 @@ async def attach_imported_skills(
         )
         if collision is not None:
             raise DaimonError(f"cannot attach: {collision}")
-        return await runtime.anthropic.beta.agents.update(
-            fresh.id, version=fresh.version, skills=merged
+        return await update_agent(
+            runtime.anthropic,
+            fresh.id,
+            version=fresh.version,
+            payload={"skills": merged},
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
 
     try:
-        await update_agent_with_version_retry(runtime.anthropic, agent.id, _apply)
-    except (DaimonError, anthropic.APIStatusError) as err:
+        await update_agent_with_version_retry(
+            runtime.anthropic, agent.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+        )
+    except (DaimonError, anthropic.APIStatusError, ScopeViolation) as err:
         log.warning("teams.credential.skill_attach_failed", err_type=type(err).__name__)
         note = "Attaching them did not finish. Ask again to retry."
         return SkillAttach(note=note, attached=False, agent_name=agent.name)

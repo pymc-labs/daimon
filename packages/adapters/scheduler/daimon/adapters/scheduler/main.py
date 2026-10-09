@@ -76,6 +76,8 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
@@ -400,7 +402,9 @@ async def _build_fire(
         if fire_policy is not None and (
             any_agent_rules(fire_policy) or any_own_readers(fire_policy)
         ):
-            ran = await client.beta.agents.retrieve(resolved_agent_id)
+            ran = await retrieve_agent(
+                client, resolved_agent_id, scope=resource_scope(tenant_id=str(row.tenant_id))
+            )
             decision = authorize(
                 fire_policy,
                 subject=Subject(),
