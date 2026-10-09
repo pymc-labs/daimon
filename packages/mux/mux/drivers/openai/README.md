@@ -25,6 +25,10 @@ uses that SDK's public `AsyncOpenAI.get`, `post` and `delete` primitives, with
 | `/agents/sessions/{session_id}/events` | POST input; GET `?stream=true` (SSE, `Accept: text/event-stream`) | [Input events](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/subresources/events/methods/create), [stream recovery](https://developers.openai.com/api/docs/guides/agents-api/sessions/events) |
 | `/agents/sessions/{session_id}/items` | GET, `after`/`limit`/`order` pagination | [Saved items](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/subresources/items/methods/list) |
 | `/agents/sessions/{session_id}/turns`, `/agents/sessions/{session_id}/turns/{turn_id}` | GET list/retrieve | [Turns](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/subresources/turns) |
+| `/skills`, `/skills/{id}`, `/skills/{id}/versions/{version}` | Multipart POST skill/version; GET list/retrieve; DELETE skill | [Skills](https://developers.openai.com/api/reference/python/resources/skills) |
+| `/files`, `/files/{id}`, `/files/{id}/content` | Multipart POST (`purpose=user_data`); GET metadata/binary; DELETE | [Files](https://developers.openai.com/api/reference/python/resources/files) |
+| `/agents/sessions/{session_id}/artifacts`, `/{artifact_id}`, `/{artifact_id}/content` | GET all pages/metadata/binary; DELETE artifact | [Artifacts](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/subresources/artifacts) |
+| `/vaults`, `/vaults/{id}/credentials`, `/{credential_id}` | GET metadata/pages; POST vault/credential; DELETE credential | [Vaults](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/vaults) |
 
 Resource identifiers are escaped as path segments. A native page's `has_more` and
 `last_id` determine continuation. A missing option is omitted; explicit empty tool
@@ -100,16 +104,15 @@ See [observability and usage](https://developers.openai.com/api/docs/guides/agen
 
 ## Current boundaries
 
-Artifacts, skills, models and vault implementations can be injected; the resource
-slice supplies their concrete ports. Until then their absent ports refuse explicitly.
-Conversation-only creation requires initial input, as the native API documents.
-Both OpenAI profiles are currently non-core and require an explicit profile in
-backend configuration. The persistent profile reports
-`skills_bundle` and `artifacts` unsupported until PR3 proves them; admission
-surfaces those waived core capabilities. Vault support and its extension are
-unadvertised. Multiagent configuration is unsupported, and complete workspace
-export/import is unknown: decoding child events and publishing individual files
-does not implement either feature. Anthropic default resolution remains unchanged.
+Skills, artifacts and vault ports use the private SDK transport by default.
+Models still require an injected implementation. Conversation-only creation
+requires initial input, as the native API documents. The persistent profile is
+core with evidence for all nine mandatory capabilities below. Explicitly selecting
+backend `openai` chooses it when no profile is named; an explicit model is still
+required. `openai.conversation_only` remains non-core and must be named. The
+unconfigured backend, profile and thread mode remain Anthropic/per-caller.
+Multiagent configuration is unsupported and complete workspace export/import is
+unknown. Resource support does not imply a live or complete C01–C18 certificate.
 Agent/environment conditional updates, archive, workspace export/restore, native
 SSE replay and atomic `expected_turn` are refused. Session update plans return
 `refuse`, and migration always raises `MigrationUnsupported`. Resource revision
@@ -120,6 +123,61 @@ not on a provider CAS. Generic tool confirmations and native input bypasses refu
 Run `uv run --all-packages --all-extras pytest packages/mux/tests/drivers/openai`.
 Synthetic fixtures and `httpx.MockTransport` exercise the actual pinned SDK without
 provider access. No live certificate is implied by these tests.
+
+## Resource boundaries and core evidence
+
+A `SkillUpload` is a deterministic ZIP with one root `SKILL.md` and exact inline
+supporting bytes. Noncanonical, duplicate or nested-manifest paths refuse before
+upload. Separate display titles and external catalogue/digest pins refuse rather
+than silently changing the manifest. Versions are concrete positive integers;
+mutable `latest` is refused. Agents have no native skills field: neutral skill
+intent is stored in reserved `mux_skill_pins` metadata, bounded at 512 characters.
+Session creation resolves default versions once and sends documented hosted
+`environment.skills` references. Retrieved installed versions must match the
+stored concrete pins; missing/changed pins raise `ContinuityLost`.
+The [session schema](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/methods/create)
+explicitly declares hosted skill references, despite the older supplied general
+skills guide describing capability-directory discovery.
+
+Input files use distinct `file:<id>` references. Published artifact references
+encode their parent session and artifact identities canonically. All native pages
+are preserved; a turn filter is applied locally without replacing the provider's
+cursor. Downloads stream exact binary bytes and close the response on error or
+cancellation. Short/oversized downloads raise a typed network error. Uploads spool
+at one MiB and refuse beyond 512 MiB. Native metadata does not expose MIME; the required neutral field therefore uses
+the generic `application/octet-stream` fallback without guessing from filenames. Deletion validates native identity and the parent tenant before
+removing exactly the requested input file or session artifact.
+
+`openai.vaults@1` accepts a closed configuration containing scoped vault refs.
+Ensure searches all pages and refuses duplicate owned names. Credential writes
+resolve a host secret reference only after native vault ownership checks; records
+and their revision hashes exclude tokens/refresh secrets/upstream extras. A private
+string representation redacts credentials in the pinned SDK's DEBUG options log
+while preserving the real JSON on the wire, verified with actual SDK logs.
+Static bearer and MCP OAuth access-token bindings require HTTPS destinations;
+environment credentials, archive and conditional credential writes refuse.
+Session deletion retains attached vaults and never deletes their provider resources.
+
+Initial file mounts use uploaded `file:` refs at canonical `/workspace/` paths.
+Repositories, raw native/secret bindings and conditional resource replacement are
+unavailable. C08 and deployed repository/MCP certification remain pending.
+
+| Mandatory capability | Actual-driver offline evidence |
+| --- | --- |
+| Workspace persistence | `test_skill_workflow`: two completed turns reuse one environment and immutable installed pins; existing binding tests refuse changed environment identity |
+| Turn lifecycle | C05: child-first completion, authoritative saved items, EOF occupancy and one root outcome |
+| Cancel | C06: queued acknowledgement retains occupancy until an independently observed interrupted root |
+| Tool loop | `test_tool_result_routes_call_and_turn_from_required_action`: preserves native function call/turn routing |
+| Required actions | Documented nested session envelope tests cover function/browser/environment kinds and reject missing/conflicting turn identity |
+| Skills bundle | Real multipart ZIP preserves inline manifest/supporting bytes; actual agent/session workflow installs fixed native versions |
+| Artifacts | C09: all pages, binary checksum, typed interruption and shared-vault retention; scoped deletion tests use the actual SDK |
+| Usage observations | Null counts, distinct subagents, replay/restart and signed `100 → 120 → 110` revisions in driver tests |
+| Reconcile | C05 and recovery tests: consume stream before all saved pages, deduplicate overlaps, preserve terminal journal and publish an explicit unrecoverable gap |
+
+Host durability, batching, attribution, pricing, wake generations and registry
+selection still require their shared fixture adapters. A guarded smoke on
+2026-10-09 returned `invalid_request`, with unknown billing and a retained $0.45
+reservation; it did not establish live correctness. No recorder fixtures were made.
 
 ## Offline conformance
 
@@ -147,16 +205,16 @@ diagnostics, including under optimized Python.
 | Fixture | Offline result | Evidence or missing dependency |
 | --- | --- | --- |
 | C01 | PENDING | Host attribution, batching and workspace binding adapter |
-| C02 | PENDING | PR3 artifacts and verified native expiry classification |
+| C02 | PENDING | Verified native expiry classification and host session preparation |
 | C03 | PENDING | Host intent, atomic claiming and receipt recovery |
 | C04 | PENDING | Host lease/fencing and transactional journal crash recovery |
 | C05 | PASS | Child-first completion, preview authority, EOF occupancy, saved-page overlap, explicit gap and one root outcome |
 | C06 | PASS | Cancel acceptance holds occupancy until an observed interrupted root |
 | C07 | PENDING | Shared usage revision/outbox StateStore scenario adapter |
 | C08 | PENDING | Conditional required-mount replacement refused; host preparation adapter absent |
-| C09 | PENDING | PR3 binary artifacts and shared-vault deletion retention |
+| C09 | PASS | All artifact pages, exact binary bytes, typed truncation and actual shared-vault retention |
 | C10 | PASS | Required unavailable capabilities, extension versions and foreign scope refused |
-| C11 | PENDING | PR3 skills and deployed repository/MCP bindings |
+| C11 | PENDING | Deployed repository/MCP bindings and separate display-title mapping |
 | C12 | PENDING | Host billing identity and overlapping-grain pricing hook |
 | C13 | PENDING | Host new-slot adoption and restart persistence adapter |
 | C14 | PENDING | Existing/new-thread provider selection adapter |

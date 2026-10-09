@@ -11,11 +11,14 @@ from mux.contracts.ports import Artifacts, ManagedAgents, Models, Skills, Steeri
 from mux.contracts.profile import Profile
 from mux.drivers.openai._common import Authorization, Context
 from mux.drivers.openai.agents import OpenAIAgents
+from mux.drivers.openai.artifacts import OpenAIArtifacts
 from mux.drivers.openai.environments import OpenAIEnvironments
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
+from mux.drivers.openai.skills import OpenAISkills
 from mux.drivers.openai.transport import Transport
 from mux.drivers.openai.turn import OpenAIEvents, RecoveryJournal
 from mux.drivers.openai.usage import OpenAIUsage, UsageRevisions
+from mux.drivers.openai.vaults import OpenAIVaults, SecretResolver
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
 
@@ -23,7 +26,7 @@ from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
 class OpenAIDriver:
     """Explicit profile and host state. SDK handles remain inside the transport.
 
-    Resource ports may be injected until the resource slice supplies them.
+    Resource ports use the actual SDK by default; host implementations may be injected.
     There is no host registry/default/configuration change in this package.
     """
 
@@ -41,6 +44,7 @@ class OpenAIDriver:
         skills: Skills | None = None,
         models: Models | None = None,
         vaults: Vaults | None = None,
+        secrets: SecretResolver | None = None,
     ) -> None:
         profiles = {p.profile_id: p for p in (PERSISTENT_WORKSPACE, CONVERSATION_ONLY)}
         if profile_id not in profiles:
@@ -52,12 +56,14 @@ class OpenAIDriver:
         self.sessions = OpenAISessions(context, binding_lookup)
         self.events = OpenAIEvents(context, self.sessions, journal)
         self.usage = OpenAIUsage(context, usage_revisions)
-        self._artifacts, self._skills, self._models = artifacts, skills, models
+        self._artifacts = artifacts if artifacts is not None else OpenAIArtifacts(context)
+        self._skills = skills if skills is not None else OpenAISkills(context)
+        self._models = models
+        vaults = vaults if vaults is not None else OpenAIVaults(context, secrets)
         self._extensions: dict[tuple[type[object], str, int], object] = {
             (Steering, "openai.steer", 1): self.events,
         }
-        if vaults is not None:
-            self._extensions[Vaults, "openai.vaults", 1] = vaults
+        self._extensions[Vaults, "openai.vaults", 1] = vaults
 
     def _required[T](self, implementation: T | None, name: str) -> T:
         if implementation is None:
@@ -95,5 +101,4 @@ class OpenAIDriver:
 
 
 if TYPE_CHECKING:
-    # CI excludes tests; check every async port signature here too.
     _checked_factory: Callable[..., ManagedAgents] = OpenAIDriver

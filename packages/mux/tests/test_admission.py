@@ -87,8 +87,8 @@ def test_emulated_support_is_admitted_and_surfaced() -> None:
 def test_core_capabilities_are_mandatory_on_a_core_profile() -> None:
     assert set(MANAGED_AGENTS.missing_core()) == set()
     assert MANAGED_AGENTS.core
-    assert not PERSISTENT_WORKSPACE.core
-    assert PERSISTENT_WORKSPACE.missing_core() == ("artifacts", "skills_bundle")
+    assert PERSISTENT_WORKSPACE.core
+    assert PERSISTENT_WORKSPACE.missing_core() == ()
 
 
 def test_named_non_core_profile_is_admitted_with_waived_core_surfaced() -> None:

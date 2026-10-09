@@ -20,7 +20,9 @@ from mux.contracts.resources import (
 )
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
+from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
+from mux.drivers.openai.skill_bindings import KEY, compile_pins, decode, encode, resolve_pins
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ContinuityLost, MigrationUnsupported, ProviderError, ScopeViolation
 
@@ -82,6 +84,19 @@ class OpenAISessions:
         expected_env = binding.native_refs.get("environment")
         if expected_env is not None and environment.get("id") != expected_env:
             raise ContinuityLost(binding.id, ("hosted environment identity changed",))
+        pins = decode(object_json(raw.get("metadata") or {}))
+        if pins is not None:
+            actual = objects(environment.get("skills", []))
+            identities = {
+                (value.get("skill_id"), value.get("version"))
+                for value in actual
+                if value.get("type") == "skill_reference"
+            }
+            expected = {(pin.id, pin.version) for pin in pins}
+            if identities != expected or len(actual) != len(pins):
+                raise ContinuityLost(
+                    binding.id, ("installed skill pins changed or are unavailable",)
+                )
         status = text(raw["status"])
         states = {
             "idle": "idle",
@@ -136,12 +151,18 @@ class OpenAISessions:
     ) -> Session:
         self._c.authorize(scope, "session")
         self._c.check(scope, spec.agent, "agent")
-        if spec.resources or spec.extensions:
-            raise self._c.unsupported("session_resources")
+        if set(spec.extensions) - {"openai.vaults"}:
+            raise self._c.unsupported("session_extension")
+        files = resources(scope, spec.resources, self._c)
+        vaults = (
+            vault_ids(scope, spec.extensions["openai.vaults"], self._c)
+            if "openai.vaults" in spec.extensions
+            else None
+        )
         if spec.agent_revision.local != 0 or spec.agent_revision.native is not None:
             raise self._c.unsupported("agent_revision_pin")
         if self._c.profile_id == "openai.conversation_only":
-            if spec.environment is not None:
+            if spec.environment is not None or spec.resources:
                 raise self._c.unsupported("thread_workspace_persistence")
             if initial is None or not initial.content:
                 raise ProviderError(
@@ -153,12 +174,30 @@ class OpenAISessions:
             if spec.environment is not None:
                 self._c.check(scope, spec.environment, "environment")
                 environment["environment_template_id"] = spec.environment.id
+        if files:
+            environment["files"] = [value for value in files]
+        agent = await self._c.call("GET", "/agents/" + segment(spec.agent.id))
+        if agent.get("id") != spec.agent.id:
+            raise ValueError("wrong session agent identity")
+        self._c.record(scope, agent)
+        pins = decode(agent.get("metadata"))
+        resolved = None
+        if pins is not None:
+            if self._c.profile_id == "openai.conversation_only" and pins:
+                raise self._c.unsupported("skills_bundle")
+            resolved = await resolve_pins(pins, scope, self._c)
+            if self._c.profile_id != "openai.conversation_only":
+                environment["skills"] = compile_pins(resolved, scope, self._c)
         metadata: Object = {
             **dict(spec.metadata),
             "mux_tenant": scope.tenant_id,
             "mux_config_revision": str(spec.config_revision),
         }
+        if resolved is not None:
+            metadata[KEY] = encode(resolved, self._c)
         body: Object = {"agent_id": spec.agent.id, "environment": environment, "metadata": metadata}
+        if vaults is not None:
+            body["vault_ids"] = [value for value in vaults]
         if initial is not None:
             if initial.mode != "new_turn":
                 raise self._c.unsupported("initial_steer")

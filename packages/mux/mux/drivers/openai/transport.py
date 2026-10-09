@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from typing import Literal, Protocol
+from typing import IO, Literal, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -46,6 +46,15 @@ class Transport(Protocol):
         key: str | None = None,
     ) -> Object: ...
     async def open_stream(self, path: str) -> AsyncIterator[Object]: ...
+    async def multipart(
+        self,
+        path: str,
+        *,
+        files: tuple[tuple[str, str, bytes | IO[bytes], str], ...],
+        fields: Mapping[str, str],
+        key: str,
+    ) -> Object: ...
+    async def download(self, path: str) -> AsyncIterator[bytes]: ...
 
 
 NATIVE_ERROR_CATEGORIES: dict[str, ProviderErrorCategory] = {
@@ -187,3 +196,81 @@ class SDKTransport:
             return _Stream(source)
         except (APIConnectionError, APIError, APIStatusError, httpx.HTTPError) as error:
             raise provider_error(error) from None
+
+    async def multipart(
+        self,
+        path: str,
+        *,
+        files: tuple[tuple[str, str, bytes | IO[bytes], str], ...],
+        fields: Mapping[str, str],
+        key: str,
+    ) -> Object:
+        try:
+            response = await self._client.post(
+                path,
+                cast_to=httpx.Response,
+                body=dict(fields),
+                files=[
+                    (field, (name, data, media_type)) for field, name, data, media_type in files
+                ],
+                options={
+                    "headers": {
+                        "OpenAI-Beta": "agents=v1",
+                        "Content-Type": "multipart/form-data",
+                        "Idempotency-Key": key,
+                    }
+                },
+            )
+            return object_json(response.json())
+        except (APIError, httpx.HTTPError) as error:
+            raise provider_error(error) from None
+        except (ValueError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_response"
+            ) from None
+
+    async def download(self, path: str) -> AsyncIterator[bytes]:
+        try:
+            # cast_to=httpx.Response retains the raw streamed binary response;
+            # the installed public SDK path is checked by offline HTTP tests.
+            response: object = await self._client.get(
+                path,
+                cast_to=httpx.Response,
+                stream=True,
+                stream_cls=AsyncStream[bytes],
+                options={"headers": {"OpenAI-Beta": "agents=v1"}},
+            )
+            if not isinstance(response, httpx.Response):
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="invalid_binary_response"
+                )
+            return _Bytes(response)
+        except (APIError, httpx.HTTPError) as error:
+            raise provider_error(error) from None
+
+
+class _Bytes(AsyncIterator[bytes]):
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self._iterator = response.aiter_bytes(chunk_size=65536)
+        self._closed = False
+
+    def __aiter__(self) -> _Bytes:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            raise StopAsyncIteration
+        try:
+            return await self._iterator.__anext__()
+        except httpx.HTTPError as error:
+            await self.aclose()
+            raise provider_error(error) from None
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        if not self._closed:
+            self._closed = True
+            await self._response.aclose()
