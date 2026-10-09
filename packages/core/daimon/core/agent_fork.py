@@ -29,6 +29,7 @@ from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import (
+    download_skill_version,
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
     list_agents_by_tenant,
@@ -152,13 +153,9 @@ async def _copy_own_skills(
         try:
             if skill.version is None:
                 raise DaimonError(f"{skill.body} has no version to copy.")
-            content = await anthropic.beta.skills.versions.download(
-                skill.version, skill_id=skill.skill_id
+            data = await download_skill_version(
+                anthropic, skill_id=skill.skill_id, version=skill.version
             )
-            try:
-                data = await content.read()
-            finally:
-                await content.close()
             # A new skill under the copy's title, never a share of the source's id.
             added = await add_agent_skill(
                 anthropic,

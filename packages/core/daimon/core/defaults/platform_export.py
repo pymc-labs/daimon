@@ -14,7 +14,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, omit
 from daimon.core.defaults.ma_index import list_skills_strict
 
 
@@ -54,7 +54,7 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
                     version_prefix = f"{prefix}/{len(checksums)}"
                     write_json(f"{version_prefix}/version.json", version.model_dump(mode="json"))
                     content = await client.beta.skills.versions.download(
-                        version.version, skill_id=skill.id
+                        version.id, skill_id=skill.id, extra_headers={"anthropic-beta": omit}
                     )
                     try:
                         write(f"{version_prefix}/content.zip", await content.read())

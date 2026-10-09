@@ -8,6 +8,8 @@ import json
 import re
 import uuid
 import zipfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -45,6 +47,7 @@ from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn_origin import turn_origin
 from daimon.testing import ma_agent, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
@@ -917,15 +920,14 @@ async def test_a_pin_or_share_added_during_the_fetch_still_refuses_the_upload(
     assert world.state.agents["agent_helper"]["skills"] == []
 
 
-@pytest.mark.parametrize("caller", ["chat_turn", "direct"])
 async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_them_off(
-    db_session_factory: async_sessionmaker[AsyncSession], caller: str
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Even from a chat turn whose session is gated, tool safety off means no card,
+    """Outside a chat turn, tool safety off means no card and no reply to confirm with,
     and the preview and refusal blame the deployment, not the conversation."""
     world = await _world(db_session_factory)
     world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
-    auth, origin = await _chat_turn(world) if caller == "chat_turn" else (world.auth(), None)
+    auth, origin = world.auth(), None
 
     async def add(**extra: Any) -> AddSkillResult:
         return await _add_skill_impl(
@@ -1104,3 +1106,191 @@ async def test_an_attachment_of_the_wrong_kind_is_refused_before_download(
             attachment_url="https://cdn.discordapp.com/attachments/1/2/huge.iso",
         )
     assert fetched == []
+
+
+@asynccontextmanager
+async def _reply(
+    world: _World, auth: AuthIdentity, text: str, *, thread_id: str = CHAT_THREAD
+) -> AsyncIterator[str]:
+    """The person's next message in a thread, as the adapter starts its turn with it."""
+    async with turn_origin(
+        world.runtime.session_factory,
+        tenant_id=world.tenant_id,
+        account_id=auth.account_id,
+        platform="discord",
+        parent_channel_id=ROOM,
+        thread_id=thread_id,
+        responder_ma_agent_id="agent_helper",
+        responder_name="helper",
+        role=auth.role,
+        message_text=text,
+    ) as origin:
+        yield str(origin.id)
+
+
+async def _cards_off_turn(world: _World) -> tuple[AuthIdentity, str]:
+    """A member's chat turn in ROOM on a deployment with approval cards off."""
+    world.runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+    return await _chat_turn(world, admin=False)
+
+
+async def _add_from(
+    world: _World, auth: AuthIdentity, origin: str | None, **extra: Any
+) -> AddSkillResult:
+    return await _add_skill_impl(
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        skill_md=extra.pop("skill_md", _MD),
+        origin_context_id=origin,
+        **extra,
+    )
+
+
+@pytest.mark.parametrize("text", ["yes", "<@1530628070405308456> Yes!", " CONFIRM ", "y."])
+async def test_with_cards_off_a_yes_as_the_next_message_confirms_once(
+    db_session_factory: async_sessionmaker[AsyncSession], text: str
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+
+    preview = await _add_from(world, auth, origin)
+    content_hash = preview.preview.content_hash
+    assert f"content_hash='{content_hash}'" in preview.summary
+    assert "`yes`" in preview.summary and "/agent-setup" not in preview.summary
+
+    async with _reply(world, auth, text) as reply:
+        added = await _add_from(world, auth, reply, content_hash=content_hash)
+        assert added.status == "added" and len(world.created) == 1
+        with pytest.raises(ToolError, match="already used"):
+            await _add_from(world, auth, reply, content_hash=content_hash)
+
+
+@pytest.mark.parametrize(
+    "text", ["no", "what does it do?", "yes but change the name first", "sure", ""]
+)
+async def test_with_cards_off_any_other_next_message_cancels(
+    db_session_factory: async_sessionmaker[AsyncSession], text: str
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    async with _reply(world, auth, text) as reply:
+        with pytest.raises(ToolError, match="did not start with the person replying"):
+            await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
+    async with _reply(world, auth, "yes") as late_yes:
+        with pytest.raises(ToolError, match="did not start with the person replying"):
+            await _add_from(world, auth, late_yes, content_hash=preview.preview.content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_the_model_cannot_confirm_without_the_persons_yes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """In the previewing turn, or with no origin, a model-supplied hash adds nothing."""
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    with pytest.raises(ToolError, match="did not start with the person replying"):
+        await _add_from(world, auth, origin, content_hash=preview.preview.content_hash)
+    with pytest.raises(ToolError, match="approval cards are turned off"):
+        await _add_from(world, auth, None, content_hash=preview.preview.content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_nobody_else_confirms_and_nowhere_else(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Another person's yes (even an admin's), or the same person's yes in another
+    thread, approves nothing."""
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+    content_hash = preview.preview.content_hash
+
+    async with world.runtime.session_factory.begin() as session:
+        other = await make_account(session)
+    someone_else = dataclasses.replace(
+        auth, account_id=other.id, role=Role.ADMIN, is_admin=True, platform_user_id="777"
+    )
+    async with _reply(world, someone_else, "yes") as theirs:
+        with pytest.raises(ToolError, match="did not start with the person replying"):
+            await _add_from(world, someone_else, theirs, content_hash=content_hash)
+    async with _reply(world, auth, "yes", thread_id="666666666666666666") as elsewhere:
+        with pytest.raises(ToolError, match="did not start with the person replying"):
+            await _add_from(world, auth, elsewhere, content_hash=content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_only_the_latest_preview_can_be_confirmed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Preview A, then B in the same turn: the person's yes answers B, never A."""
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    first = await _add_from(world, auth, origin)
+    other_md = _MD.replace("name: notes", "name: minutes")
+    second = await _add_from(world, auth, origin, skill_md=other_md)
+
+    async with _reply(world, auth, "yes") as reply:
+        with pytest.raises(ToolError, match="did not start with the person replying"):
+            await _add_from(world, auth, reply, content_hash=first.preview.content_hash)
+        assert world.created == []
+        added = await _add_from(
+            world, auth, reply, skill_md=other_md, content_hash=second.preview.content_hash
+        )
+    assert added.status == "added" and len(world.created) == 1
+
+
+async def test_with_cards_off_a_changed_skill_needs_a_fresh_preview(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    changed = _MD.replace("Write them down.", "Email them to everyone.")
+    async with _reply(world, auth, "yes") as reply:
+        with pytest.raises(ToolError, match="changed since its preview"):
+            await _add_from(
+                world, auth, reply, skill_md=changed, content_hash=preview.preview.content_hash
+            )
+    assert world.created == []
+
+
+async def test_with_cards_off_a_yes_after_the_ttl_confirms_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    monkeypatch.setattr("daimon.core.stores.pending_skill_adds.PENDING_SKILL_ADD_TTL", timedelta(0))
+    preview = await _add_from(world, auth, origin)
+
+    async with _reply(world, auth, "yes") as reply:
+        with pytest.raises(ToolError, match="did not start with the person replying"):
+            await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
+    assert world.created == []
+
+
+async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The yes changes who approves, not who may change the agent."""
+    world = await _world(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
+            tenant_id=world.tenant_id,
+            agent_name="helper",
+            mode="agent",
+        )
+    auth, origin = await _cards_off_turn(world)
+
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await _add_from(world, auth, origin)
+    assert world.created == []

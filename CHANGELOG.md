@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A finished Discord or Slack answer ends with one short line instead of a five-line Details block: `Ada  12s  $0.042 used  $41.20 left`. Fields are set apart by spacing, not dots. Token counts are gone, and a channel budget's remainder reads `$8.10 left` like the prepaid balance.
 - The summary line sits under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack, or on Discord a file Daimon posts after it.
 - Discord no longer attaches a generated file twice when the agent already sent it in the thread itself.
+- Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
+- The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.
+- A copied agent keeps the skills its source added itself again. Copying (a channel's own agent made with `--copy-from`, or `fork_agent`) downloaded each skill with a header a workspace API key is refused for, so the copy silently left those skills off. The workspace recovery export downloads skills the same way and is fixed too.
 - A new agent's first Slack or Discord answer now shows its generated face. The first turn waits up to three seconds for the face to render instead of posting without a picture.
 - Discord agent posts and MCP tools now wait at most two seconds for a new channel webhook, then post through the bot with the agent name while creation continues in the background. Creation is deduplicated per channel, 429 retries respect a cooldown, and new channels create one webhook.
 - **The scheduler's usage sweep no longer re-replays every model call it has
@@ -31,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- Where approval cards are turned off, a person adds a skill from chat by replying `yes` to its preview. "Add this skill to our agent" previews it. Daimon reads the person's next message in that thread itself: a plain yes (or y, confirm, approve) approves the upload for that turn, and any other reply cancels it. The preview is valid for 15 minutes, for that person, thread, agent and content only, and is used once. A newer preview replaces an older one. Who may change the agent is unchanged. Discord turns pass the message; elsewhere the chat path stays preview-only.
 - MCP browser pages now share a responsive Daimon shell with Daimon's face in
   the page header, local Inter font, brand colours, and inline action icons.
   The picker uses separate desktop, tablet, and phone layouts. GitHub and Slack
