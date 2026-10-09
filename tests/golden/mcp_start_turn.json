@@ -1,0 +1,195 @@
+{
+  "database": {
+    "task_continuations": [],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "archived_at": null,
+              "created_at": "<time:epoch-24278400s>",
+              "description": null,
+              "id": "ag_test001",
+              "mcp_servers": [],
+              "metadata": {
+                "daimon_name": "test-agent",
+                "daimon_tenant": "00000000-0000-0000-0000-000000100005"
+              },
+              "model": {
+                "id": "claude-sonnet-4-6",
+                "speed": null
+              },
+              "multiagent": null,
+              "name": "test-agent",
+              "skills": [],
+              "system": null,
+              "tools": [],
+              "type": "agent",
+              "updated_at": "<time:epoch-24278400s>",
+              "version": 1
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/environments",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ],
+          [
+            "include_archived",
+            "false"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "config": {
+                "networking": {
+                  "type": "unrestricted"
+                },
+                "packages": {
+                  "apt": [],
+                  "cargo": [],
+                  "gem": [],
+                  "go": [],
+                  "npm": [],
+                  "pip": [],
+                  "type": null
+                },
+                "type": "cloud"
+              },
+              "created_at": "<time:epoch-9331200s>",
+              "description": "",
+              "id": "env_test001",
+              "metadata": {
+                "daimon_name": "production",
+                "daimon_tenant": "00000000-0000-0000-0000-000000100005"
+              },
+              "name": "production",
+              "type": "environment",
+              "updated_at": "<time:epoch-9331200s>"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions/ses_test001/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "id": "sevt_boundary_001",
+              "processed_at": null,
+              "type": "user.message"
+            }
+          ]
+        },
+        "status": 200
+      }
+    }
+  ],
+  "requests": null
+}

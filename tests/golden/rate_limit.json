@@ -1,0 +1,124 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "error": {
+            "message": "rate limited",
+            "type": "rate_limit_error"
+          },
+          "type": "error"
+        },
+        "status": 429
+      }
+    },
+    {
+      "operation": "on_render",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": {
+              "cause_kind": "RateLimitError",
+              "error_kind": "TurnError",
+              "kind": "upstream",
+              "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
+            },
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": "<time:anchor-14731170s>",
+            "retrying_error": null,
+            "seen_event_ids": [],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "rate_limited",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_rate_limited",
+      "payload": {
+        "args": [
+          "2026-04-21T12:00:30+00:00"
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_failure",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": {
+              "cause_kind": "RateLimitError",
+              "error_kind": "TurnError",
+              "kind": "upstream",
+              "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
+            },
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": "<time:anchor-14731170s>",
+            "retrying_error": null,
+            "seen_event_ids": [],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "rate_limited",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          {
+            "cause_kind": "RateLimitError",
+            "error_kind": "TurnError",
+            "kind": "upstream",
+            "message": "upstream: Error code: 429 - {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'rate limited'}}"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

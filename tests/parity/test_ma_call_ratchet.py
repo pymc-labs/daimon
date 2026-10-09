@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+MAX_OUTSIDE_DRIVERS = 246
 SPEC = importlib.util.spec_from_file_location("ma_inventory", ROOT / "scripts/ma_inventory.py")
 assert SPEC is not None and SPEC.loader is not None
 inventory = importlib.util.module_from_spec(SPEC)
@@ -21,6 +22,10 @@ def test_ma_call_ratchet() -> None:
     baseline = json.loads(inventory.BASELINE.read_text())
     assert not baseline["parse_errors"]
     ceiling = len(inventory.outside_driver_calls(baseline))
+    assert ceiling <= MAX_OUTSIDE_DRIVERS, (
+        f"Checked-in MA baseline grew above its fixed ceiling: {ceiling} > {MAX_OUTSIDE_DRIVERS}. "
+        "Regenerating JSON must never raise the ceiling. Lower the literal alongside extraction."
+    )
     calls = inventory.outside_driver_calls(current)
     assert len(calls) <= ceiling, (
         f"Production MA calls outside packages/mux/mux/drivers grew: {len(calls)} > {ceiling}. "

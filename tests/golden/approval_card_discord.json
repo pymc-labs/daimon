@@ -1,0 +1,105 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "send",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "allowed_mentions": {
+            "parse": []
+          },
+          "view": [
+            {
+              "accent_color": 16705372,
+              "components": [
+                {
+                  "content": "**Approve a write?**",
+                  "type": 10
+                },
+                {
+                  "divider": true,
+                  "spacing": 1,
+                  "type": 14
+                },
+                {
+                  "components": [
+                    {
+                      "custom_id": "<id:1>",
+                      "disabled": false,
+                      "label": "Approve",
+                      "style": 3,
+                      "type": 2
+                    },
+                    {
+                      "custom_id": "<id:2>",
+                      "disabled": false,
+                      "label": "Deny",
+                      "style": 4,
+                      "type": 2
+                    },
+                    {
+                      "custom_id": "<id:3>",
+                      "disabled": false,
+                      "label": "Details",
+                      "style": 2,
+                      "type": 2
+                    }
+                  ],
+                  "type": 1
+                },
+                {
+                  "content": "-# Only <@11111111-1111-1111-1111-111111111111> can approve or deny",
+                  "type": 10
+                },
+                {
+                  "content": "-# Expires <t:1790986200:R>",
+                  "type": 10
+                }
+              ],
+              "spoiler": false,
+              "type": 17
+            }
+          ]
+        }
+      },
+      "platform": "discord_card",
+      "result": null
+    },
+    {
+      "operation": "edit_message",
+      "payload": {
+        "args": [],
+        "kwargs": {
+          "allowed_mentions": {
+            "parse": []
+          },
+          "view": [
+            {
+              "accent_color": 5763719,
+              "components": [
+                {
+                  "content": "**Approved**",
+                  "type": 10
+                },
+                {
+                  "content": "Approve a write",
+                  "type": 10
+                },
+                {
+                  "content": "-# by <@11111111-1111-1111-1111-111111111111>",
+                  "type": 10
+                }
+              ],
+              "spoiler": false,
+              "type": 17
+            }
+          ]
+        }
+      },
+      "platform": "discord_card",
+      "result": null
+    }
+  ],
+  "requests": null
+}

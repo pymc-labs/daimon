@@ -8,6 +8,8 @@ The initial snapshot reproduces 246 production calls in 79 files at integration
 75d73af9f2827470fe0cb8c6f218af1da678bb2c, with anthropic==0.117.0 (uv.lock).
 The ratchet is collected by the normal suite in tests/parity/test_ma_call_ratchet.py.
 No SDK import, credentials, settings change, or network access is needed.
+Detection is syntactic: calls must spell .beta.<resource> in the callee. Aliases
+of resource objects and dynamic getattr calls are outside this scan's coverage.
 """
 
 from __future__ import annotations

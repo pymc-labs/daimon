@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An offline Managed Agents call inventory and production call ratchet protect
   the neutral-core extraction boundary without changing runtime behavior.
+- Thirty-three offline current-path golden transcripts protect neutral-core turn,
+  adapter, billing and continuity behavior, including HTTP request payloads,
+  early feedback ordering, ledger dating and DM delivery. A controlled deadline
+  and stream-read barrier make ceiling/cancel HTTP replay deterministic under load; a fixed call ceiling prevents
+  inventory regeneration from raising the MA ratchet. Golden fixture defaults
+  use public testing metadata access, preserving the private-core import boundary.
 - Scripted offline MA transport and platform/DB effect recorders support
   deterministic neutral-core parity checks with exact billing values and
   jitter-safe DB timestamps that preserve scheduled durations.

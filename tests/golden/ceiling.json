@@ -1,0 +1,119 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_ceiling/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": null,
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions/sess_ceiling/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "on_terminal_failure",
+      "payload": {
+        "args": [
+          {
+            "content": [],
+            "error": {
+              "error_kind": "TurnError",
+              "kind": "ceiling",
+              "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
+            },
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [],
+            "stop_reason": null,
+            "tasks": [],
+            "termination": "ceiling",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          {
+            "error_kind": "TurnError",
+            "kind": "ceiling",
+            "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

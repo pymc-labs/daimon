@@ -1,0 +1,315 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": null,
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "events": [
+            {
+              "content": [
+                {
+                  "text": "hi",
+                  "type": "text"
+                }
+              ],
+              "type": "user.message"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions/sess_1/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "text": "hello ",
+                "type": "text"
+              }
+            ],
+            "id": "sevt_1",
+            "processed_at": "<time:epoch-24278400s>",
+            "type": "agent.message"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_reconnect",
+      "payload": {
+        "args": [
+          "connection_dropped"
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": [
+            {
+              "content": [
+                {
+                  "text": "hello ",
+                  "type": "text"
+                }
+              ],
+              "id": "sevt_1",
+              "processed_at": "<time:epoch-24278400s>",
+              "type": "agent.message"
+            },
+            {
+              "content": [
+                {
+                  "text": "world",
+                  "type": "text"
+                }
+              ],
+              "id": "sevt_2",
+              "processed_at": "<time:epoch-24278400s>",
+              "type": "agent.message"
+            }
+          ],
+          "next_page": null
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/sess_1/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": null,
+        "status": 200
+      }
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "text": "world",
+                "type": "text"
+              }
+            ],
+            "id": "sevt_2",
+            "processed_at": "<time:epoch-24278400s>",
+            "type": "agent.message"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_sse_event",
+      "payload": {
+        "args": [
+          {
+            "id": "sevt_3",
+            "processed_at": "<time:epoch-24278400s>",
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "type": "session.status_idle"
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_render",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "kind": "text",
+                "text": "hello world"
+              }
+            ],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:1>",
+              "<id:2>",
+              "<id:3>"
+            ],
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "tasks": [],
+            "termination": "completed",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    },
+    {
+      "operation": "on_terminal_success",
+      "payload": {
+        "args": [
+          {
+            "content": [
+              {
+                "kind": "text",
+                "text": "hello world"
+              }
+            ],
+            "error": null,
+            "finished_tool_ids": [],
+            "mcp_failures": [],
+            "rate_limit_until": null,
+            "retrying_error": null,
+            "seen_event_ids": [
+              "<id:1>",
+              "<id:2>",
+              "<id:3>"
+            ],
+            "stop_reason": {
+              "type": "end_turn"
+            },
+            "tasks": [],
+            "termination": "completed",
+            "usage_totals": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        ],
+        "kwargs": {}
+      },
+      "platform": "RecordingLifecycle",
+      "result": null
+    }
+  ],
+  "requests": null
+}

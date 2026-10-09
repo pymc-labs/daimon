@@ -1,0 +1,189 @@
+{
+  "database": null,
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/ses_test001",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "ag_test001",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-4-6",
+              "speed": null
+            },
+            "multiagent": null,
+            "name": "test-agent",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "ses_test001",
+          "metadata": {
+            "daimon_account": "00000000-0000-0000-0000-000000100006"
+          },
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "running",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time:epoch-24278400s>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": {
+          "events": [
+            {
+              "type": "user.interrupt"
+            }
+          ]
+        },
+        "method": "POST",
+        "path": "/v1/sessions/ses_test001/events",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "data": []
+        },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/ses_test001",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "agent": {
+            "description": null,
+            "id": "ag_test001",
+            "mcp_servers": [],
+            "model": {
+              "id": "claude-sonnet-4-6",
+              "speed": null
+            },
+            "multiagent": null,
+            "name": "test-agent",
+            "skills": [],
+            "system": null,
+            "tools": [],
+            "type": "agent",
+            "version": 1
+          },
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "deployment_id": null,
+          "environment_id": "<id:1>",
+          "id": "ses_test001",
+          "metadata": {
+            "daimon_account": "00000000-0000-0000-0000-000000100006"
+          },
+          "outcome_evaluations": [],
+          "resources": [],
+          "stats": {
+            "active_seconds": null,
+            "duration_seconds": null
+          },
+          "status": "running",
+          "title": null,
+          "type": "session",
+          "updated_at": "<time:epoch-24278400s>",
+          "usage": {
+            "cache_creation": null,
+            "cache_read_input_tokens": null,
+            "input_tokens": null,
+            "output_tokens": null
+          },
+          "vault_ids": []
+        },
+        "status": 200
+      }
+    }
+  ],
+  "requests": null
+}

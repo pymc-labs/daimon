@@ -1,0 +1,88 @@
+{
+  "database": {
+    "task_continuations": [
+      {
+        "attempts": 0,
+        "available_at": "<time:anchor-900000s>",
+        "claimed_at": null,
+        "created_at": "<time:epoch+0s>",
+        "delivered_at": null,
+        "id": "<id:1>",
+        "idempotency_key": "<id:2>",
+        "lease_expires_at": null,
+        "lease_owner": null,
+        "parent_channel_id": "channel-1",
+        "platform": "discord",
+        "reason": "timer",
+        "requested_work": "check whether the nightly build went green",
+        "requester_account_id": "00000000-0000-0000-0000-000000000002",
+        "requester_external_user_id": "discord-user-1",
+        "skip_reason": null,
+        "started_at": null,
+        "status": "pending",
+        "target_ma_agent_id": "agent_stats",
+        "target_name": "stats-bot",
+        "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea",
+        "thread_id": "thread-1"
+      }
+    ],
+    "tenant_ledger": [],
+    "thread_sessions": [],
+    "turn_outcomes": [],
+    "usage_events": []
+  },
+  "effects": [
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/agents/agent_stats",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": {
+          "archived_at": null,
+          "created_at": "<time:epoch-24278400s>",
+          "description": null,
+          "id": "agent_stats",
+          "mcp_servers": [],
+          "metadata": {
+            "daimon_name": "stats-bot",
+            "daimon_tenant": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
+          },
+          "model": {
+            "id": "claude-sonnet-4-6",
+            "speed": null
+          },
+          "multiagent": null,
+          "name": "stats-bot",
+          "skills": [],
+          "system": null,
+          "tools": [],
+          "type": "agent",
+          "updated_at": "<time:epoch-24278400s>",
+          "version": 1
+        },
+        "status": 200
+      }
+    }
+  ],
+  "requests": null
+}
