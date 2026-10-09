@@ -191,6 +191,34 @@ observation of 100, then 120, then 110 output tokens yields deltas of 100,
 process restart, and a `crash` plan raises `SimulatedCrash` just before or
 just after a named method commits.
 
+`mux.state.suite` holds the protocol checks every store must pass. Each
+check takes a function returning a store over the same durable state (a
+second call is a restart). The memory store runs them in
+`packages/mux/tests`, and Daimon's Postgres store runs the same checks.
+
+Daimon's Postgres store is `daimon.core.stores.mux_state.PostgresStateStore`,
+over the tables of migration `0075_neutral_state`. Races are settled by the
+database (unique constraints, row locks, and an advisory lock per usage
+observation), and lease expiry follows the database's wall clock, read
+after the locks a decision depends on are held. Its module
+functions take an `AsyncSession`, so `mark_outbox_applied` can run in the
+transaction that writes the ledger rows. The migration backfills a binding for
+each caller's thread (keyed by tenant, platform, thread and account, as the
+legacy reader is) that has a live `thread_sessions` row. Its current
+generation is the newest live row, the one Daimon resumes today, and the
+caller's other rows are earlier generations. A thread with no live row
+gets no binding. Rows with no account are not backfilled, and a session
+recorded by two callers is owned by neither. The migration reads
+`thread_sessions` once, in one statement, and derives everything it writes
+from that snapshot. The steps that lock existing tables run last, so their
+locks last only until the commit: the tenant foreign keys (which block
+tenant writes) and two instant nullable `ADD COLUMN`s on `thread_sessions`.
+At 200,000 rows both are held for well under a second. It leaves `binding_id` and `binding_generation`
+NULL: `mux_state.link_legacy_thread_sessions(session, batch=2000)` fills
+backfilled rows a batch per call, skipping rows already linked, so it can
+be run, stopped and rerun at any time. Nothing in Daimon calls
+the store yet.
+
 ## Events
 
 `Event` is one journal entry: an id, the session, a local `sequence`, a

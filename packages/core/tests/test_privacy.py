@@ -966,6 +966,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # FK; the scheduler then retires the orphaned session and vault
             # instead of renewing its tokens as a headless requester.
             "github_app_session_vaults",
+            # The provider-neutral operation log (`stores.mux_state`). Nothing
+            # writes it until the mux turn path lands; a row holds an
+            # operation key, request digest and status, no content. The lane
+            # that first writes it wires the purge.
+            "operation",
         }
     )
 
