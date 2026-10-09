@@ -208,10 +208,11 @@ class TeamsOutputDelivery:
                     status=err.status,
                     reason=err.reason,
                 )
-                # No status covers token/transport failures; 408, 429 and 5xx can clear
-                # on a later sweep. Keep 401/403 and other permanent responses on the
-                # existing skip path rather than repeatedly retrying denied access.
-                if err.status is None or err.status in (408, 429) or 500 <= err.status < 600:
+                # No status covers token/transport failures; 408, 423 (a locked
+                # file or folder), 429 and 5xx can clear on a later sweep. Keep
+                # 401/403 and other permanent responses on the existing skip path
+                # rather than repeatedly retrying denied access.
+                if err.status is None or err.status in (408, 423, 429) or 500 <= err.status < 600:
                     raise
                 return
             links.append(file_link(sanitize_title(item.name or name), item.web_url))

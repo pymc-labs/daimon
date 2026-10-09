@@ -429,7 +429,7 @@ async def test_a_refused_channel_upload_is_only_logged_and_deleted(
     assert harness.deletes == ["file_csv"], "the ledger entry goes, as on the skip path"
 
 
-@pytest.mark.parametrize("status", [None, 429, 503])
+@pytest.mark.parametrize("status", [None, 408, 423, 429, 503])
 async def test_transient_channel_upload_failure_keeps_output_for_retry(
     db_session_factory: async_sessionmaker[AsyncSession], status: int | None
 ) -> None:
