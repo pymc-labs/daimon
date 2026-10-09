@@ -1182,6 +1182,14 @@ Servers or server/tool pairs whose writes may run in routines and other unattend
 e.g. ["linear/create_issue"]. "*" allows every write there. Daimon's own add_skill never
 confirms unattended.
 
+### `DAIMON_TOOL_SAFETY__CONFIRMATION_TIMEOUT_S`
+
+`int` · optional · default `600`
+
+How long an approval card waits for the requester's Approve or Deny, in seconds, before
+it expires and the call is refused. Production keeps the 10-minute default; staging can
+set it short (60-90) so a precheck or load test does not hold a turn for ten minutes.
+
 ## Artifacts
 
 Read from `daimon.core.config.ArtifactsSettings`. Prefix `DAIMON_ARTIFACTS__`.

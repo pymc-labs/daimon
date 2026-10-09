@@ -134,7 +134,11 @@ def _recipients(value: object) -> str:
 
 
 def prompt_for_tool_call(
-    call: ToolCall, *, requester_platform_user_id: str, now: datetime
+    call: ToolCall,
+    *,
+    requester_platform_user_id: str,
+    now: datetime,
+    timeout: timedelta = CONFIRMATION_TIMEOUT,
 ) -> ConfirmationPrompt:
     """The card for one gated write, with short product-facing details."""
     server = call.server_name or "a tool"
@@ -223,7 +227,7 @@ def prompt_for_tool_call(
         denied_action=denied_action,
         detail_lines=detail_lines,
         requester_platform_user_id=requester_platform_user_id,
-        expires_at=now + CONFIRMATION_TIMEOUT,
+        expires_at=now + timeout,
     )
 
 
