@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an unwired, offline-tested OpenAI Agents API driver core with hosted and conversation-only profiles, root-turn event normalization, saved-state recovery and revisioned usage; existing backend defaults remain Anthropic.
 - Keep the OpenAI hosted profile non-core until its skills and artifact ports land; refuse required unimplemented vault, multiagent and whole-workspace export/import capabilities.
 - Resolve OpenAI required-action turn identity from the documented nested session payload and suppress stale actions after root completion.
+- Route CLI GitHub grant cleanup through tenant-scoped session and vault archive ports while preserving revocation order, operator output and cleanup errors.
 
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
