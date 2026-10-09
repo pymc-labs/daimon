@@ -33,6 +33,11 @@ The C12 conformance fixture requires a host accounting evidence hook with actual
 usage rows, Decimal ledger amounts, correction totals and rollback/restart facts;
 a transport without that hook remains pending for host billing certification.
 
+`mux.conformance.budget.BudgetGuard` provides standalone `reserve`/`settle` spend
+receipts for authorized manual probes. It requires an explicitly initialized,
+pinned ledger with checkpoint and retained sequence lock, and refuses past 80%
+of provider/total caps. It imports no recorder or provider SDK.
+
 The Anthropic skills version extension also supports workspace-key downloads by
 native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
