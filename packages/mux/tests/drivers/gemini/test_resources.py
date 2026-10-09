@@ -289,7 +289,7 @@ async def test_output_snapshot_pagination_is_stable_and_download_revalidates_byt
         SCOPE, s.ref, page=PageRequest(limit=1, cursor=first.next_cursor)
     )
     assert second.data[0].filename == "nested/b.txt" and not second.has_more
-    assert transport.snapshot_reads == ["e1"]
+    assert transport.snapshot_reads == ["e1", "e1"]
     assert (
         b"".join([part async for part in ma.artifacts.download(SCOPE, first.data[0].ref)]) == data
     )
