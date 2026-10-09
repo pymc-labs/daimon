@@ -333,6 +333,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bindings, idempotent operations with a single send claim, fenced leases,
   the event journal and the usage-revision outbox) with a restartable in-memory store. Daimon
   has no Postgres implementation of it yet, so nothing a user sees changes.
+- Migration `0074_neutral_state` adds the Postgres tables behind the mux
+  state store (`daimon.core.stores.mux_state`) and nullable `binding_id` and
+  `binding_generation` columns on `thread_sessions`, backfilled for
+  caller-owned rows. Nothing reads them yet, so nothing a user sees changes.
 - Tool approval cards on Discord, Slack and Teams now name the action and consequence, show plain labelled inputs in Details, and collapse after a decision. Each blocked call gets its own card and confirmation event.
 - If a turn stops after an approval click but before its confirmation is sent, the answered card now shows Stopped.
 

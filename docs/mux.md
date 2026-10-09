@@ -191,6 +191,22 @@ observation of 100, then 120, then 110 output tokens yields deltas of 100,
 process restart, and a `crash` plan raises `SimulatedCrash` just before or
 just after a named method commits.
 
+`mux.state.suite` holds the protocol checks every store must pass. Each
+check takes a function returning a store over the same durable state (a
+second call is a restart). The memory store runs them in
+`packages/mux/tests`, and Daimon's Postgres store runs the same checks.
+
+Daimon's Postgres store is `daimon.core.stores.mux_state.PostgresStateStore`,
+over the tables of migration `0074_neutral_state`. Races are settled by the
+database (unique constraints, row locks, and an advisory lock per usage
+observation), and lease expiry follows the database clock. Its module
+functions take an `AsyncSession`, so `mark_outbox_applied` can run in the
+transaction that writes the ledger rows. The migration backfills a binding
+per caller-owned `thread_sessions` row (one generation per row, in creation
+order) and records it in the row's new `binding_id` and `binding_generation`
+columns. Rows with no account are not backfilled. Nothing in Daimon calls
+the store yet.
+
 ## Events
 
 `Event` is one journal entry: an id, the session, a local `sequence`, a

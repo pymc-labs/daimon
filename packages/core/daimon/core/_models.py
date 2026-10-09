@@ -498,6 +498,11 @@ class ThreadSession(Base):
     effective_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The provider-neutral binding this row backs (`provider_binding`), and its
+    # generation. Backfilled for caller-owned rows; NULL on rows written since,
+    # until the mux turn path writes them. No existing query reads them.
+    binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    binding_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Lineage of one continuing task across session replacements.
     predecessor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -3099,3 +3104,220 @@ class PlatformChannelName(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+# The provider-neutral state store (`daimon.core.stores.mux_state`, the
+# Postgres `mux.state.store.StateStore`). Nothing in Daimon reads or writes
+# these tables yet. Contract ids that are not Daimon UUIDs (account and
+# principal ids, binding ids, native session ids) are Text; every row carries
+# its tenant for isolation and for the tenant purge cascade.
+
+
+def _tenant_fk() -> Mapped[uuid.UUID]:
+    return mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class ChannelConfigRevision(Base):
+    """One immutable revision of a channel's resolved backend configuration."""
+
+    __tablename__ = "channel_config_revision"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "platform", "channel_id", "local"),)
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    local: Mapped[int] = mapped_column(Integer, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    # A `mux.contracts.config.ConfigRevision` as JSON.
+    revision: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ProviderBindingSlot(Base):
+    """A binding slot and the one binding id that lives in it.
+
+    A slot is a thread plus the caller account owning it (NULL = a shared
+    thread), unique with NULLS NOT DISTINCT. `generation` is the slot's
+    current generation, the compare-and-swap target.
+    """
+
+    __tablename__ = "provider_binding_slot"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "thread_id",
+            "account_id",
+            name="uq_provider_binding_slot",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ProviderBinding(Base):
+    """Every generation of a binding; the slot's current one is the highest."""
+
+    __tablename__ = "provider_binding"
+    __table_args__ = (PrimaryKeyConstraint("binding_id", "generation"),)
+
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    # A `mux.contracts.resources.ProviderBinding` as JSON.
+    binding: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ThreadLease(Base):
+    """A slot's lease: the highest fence issued and the active holder, if any."""
+
+    __tablename__ = "thread_lease"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "thread_id",
+            "account_id",
+            name="uq_thread_lease_slot",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_fence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # A `mux.state.lease.Lease` as JSON, or NULL when nobody holds the slot.
+    active: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class MuxOperation(Base):
+    """An idempotent operation: found by (tenant, account, key), owned by a principal.
+
+    The principal is deliberately not in the key: reusing a key from another
+    principal is refused, never forked into a second operation.
+    """
+
+    __tablename__ = "operation"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "account_id", "key"),)
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # A `mux.state.operations.OperationRecord` as JSON.
+    record: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class JournalSession(Base):
+    """A session's journal head: its owning binding (hence slot), projection and cursor.
+
+    Written when a binding names the session, never by an append.
+    """
+
+    __tablename__ = "journal_session"
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # A `mux.contracts.resources.ProjectionSnapshot` as JSON; NULL before the first append.
+    projection: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class Journal(Base):
+    """One normalized event, in local commit order."""
+
+    __tablename__ = "journal"
+    __table_args__ = (
+        PrimaryKeyConstraint("session_id", "sequence"),
+        UniqueConstraint(
+            "session_id", "source_key", "revision", "preview", name="uq_journal_source"
+        ),
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("journal_session.session_id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    preview: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # A `mux.contracts.events.Event` as JSON.
+    event: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class UsageObservation(Base):
+    """Each applied revision of a usage observation; the latest is the highest."""
+
+    __tablename__ = "usage_observation"
+    __table_args__ = (PrimaryKeyConstraint("binding_id", "observation_id", "revision"),)
+
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    observation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    # A `mux.state.usage_ledger.AppliedUsage` as JSON.
+    applied: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class AccountingOutbox(Base):
+    """One revision's signed usage deltas, for the host to apply exactly once."""
+
+    __tablename__ = "accounting_outbox"
+    __table_args__ = (
+        PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
+        Index(
+            "accounting_outbox_pending_idx",
+            "created_at",
+            postgresql_where=text("applied_at IS NULL"),
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    observation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    prior_applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    # A `mux.state.usage_ledger.OutboxRow` as JSON (its `applied` flag is `applied_at`).
+    row: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
