@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Discord, the files an agent makes are attached to its answer, the same message that carries the summary line and the 👍 👎 🙋 reactions, instead of arriving as separate posts after it. The summary line no longer moves onto a file post, which left an empty-looking card at the end of the thread. Agents on Discord, Slack and Teams 1:1 chats are now told to put only files for the person in their outputs folder, keep working files such as `.typ` sources elsewhere, name files instead of saying "above" or "below", and not post a file into their own thread themselves.
 - The summary line and Discord's 👍 👎 🙋 sit under the last message of an answer, not the first: the last chunk of a long answer on Discord and Slack.
 - Discord no longer attaches a generated file twice when the agent already sent it in the thread itself.
+- Privacy deletion now includes sessions belonging to archived agents.
 - On Discord, a reply to any message of an answer reaches the agent, not only a reply to the first one. With agent identity off, a reply without the ping to the card or a later chunk used to be ignored.
 - Hackathon staging layouts accept the existing QA admin bot and recognize Discord Administrator permissions, so private team roles can be provisioned without the roleless fallback.
 - The file-handling skill now tells agents to export only the current turn's finished deliverables, keeping working directories and already delivered files out of outputs to avoid duplicate attachments.

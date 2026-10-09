@@ -151,6 +151,17 @@ async def list_agents_by_tenant(
     return results
 
 
+async def list_agents_for_privacy_deletion(
+    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+) -> list[BetaManagedAgentsAgent]:
+    """Return the tenant's live and archived agents for transcript deletion."""
+    results: list[BetaManagedAgentsAgent] = []
+    async for agent in client.beta.agents.list(include_archived=True):
+        if agent.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
+            results.append(agent)
+    return results
+
+
 async def list_agents_by_tenants(
     client: AsyncAnthropic, *, tenant_ids: Collection[uuid.UUID]
 ) -> dict[uuid.UUID, list[BetaManagedAgentsAgent]]:

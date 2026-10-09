@@ -510,6 +510,38 @@ async def test_delete_sessions_for_account_returns_zero_counts_when_no_matching_
     assert result.failed == 0, "no matching sessions means failed=0"
 
 
+async def test_privacy_delete_includes_sessions_of_archived_tenant_agents() -> None:
+    """A removed agent's old transcripts still belong to the person requesting deletion."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    archived_agent = _make_agent("agent_archived", tenant_id)
+    old_session = _make_session("sesn_archived", archived_agent.id, account_id)
+    deleted_ids: list[str] = []
+    router = MARouter()
+
+    def agents(request: httpx.Request, match: Any) -> httpx.Response:
+        # MA excludes archived agents unless include_archived=true is requested.
+        included = request.url.params.get("include_archived") == "true"
+        return list_response([archived_agent.model_dump(mode="json")] if included else [])
+
+    def sessions(request: httpx.Request, match: Any) -> httpx.Response:
+        return list_response([old_session.model_dump(mode="json")])
+
+    def delete_session(request: httpx.Request, match: Any) -> httpx.Response:
+        deleted_ids.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "session_deleted"})
+
+    router.add("GET", r"/v1/agents", agents)
+    router.add("GET", r"/v1/sessions", sessions)
+    router.add("DELETE", r"/v1/sessions/([^/]+)", delete_session)
+    client = build_fake_anthropic(router.dispatch)
+
+    result = await delete_sessions_for_account(client, tenant_id=tenant_id, account_id=account_id)
+
+    assert result.deleted == 1
+    assert deleted_ids == ["sesn_archived"]
+
+
 # ---------------------------------------------------------------------------
 # update_agent_with_version_retry tests
 # ---------------------------------------------------------------------------
