@@ -12,7 +12,8 @@ For the event guild, add ``--event --allow-guild-id ID``. This explicit
 allow-list prevents a staging rehearsal from writing to another server.
 ``--no-roles`` is a QA-only fallback: channels are visible to the QA guild,
 and the QA bot may lack permission to pin the start message. The script
-records that failure in the state file.
+records that failure in the state file. Use ``--admin-role-id ID`` with
+``--no-roles`` to grant Daimon channel administration through an existing QA role.
 """
 
 from __future__ import annotations
@@ -255,8 +256,9 @@ def setup_team(
         entry["budget_set"] = True
         save(args.state, state)
     if not entry.get("admins_set"):
-        if role_id:
-            cli("channels", "admins", "set", "discord", guild, channel_id, "--role", role_id)
+        admin_role_id = role_id or args.admin_role_id
+        if admin_role_id:
+            cli("channels", "admins", "set", "discord", guild, channel_id, "--role", admin_role_id)
         else:
             cli(
                 "channels",
@@ -375,13 +377,19 @@ def main() -> None:
     parser.add_argument("--bot-token-env", default="DISCORD_QA_BOT_TOKEN")
     parser.add_argument("--teardown", action="store_true")
     parser.add_argument("--no-roles", action="store_true")
-    parser.add_argument("--admin-user-id")
+    admin = parser.add_mutually_exclusive_group()
+    admin.add_argument("--admin-user-id")
+    admin.add_argument(
+        "--admin-role-id", help="Existing QA role for channel admins with --no-roles"
+    )
     parser.add_argument("--daimon-bot-id", default=STAGING_DAIMON_BOT_ID)
     args = parser.parse_args()
     if args.guild_id != QA_GUILD and not (args.event and args.guild_id in args.allow_guild_id):
         parser.error("non-QA guild requires --event and matching --allow-guild-id")
     if args.no_roles and args.guild_id != QA_GUILD:
         parser.error("--no-roles is limited to the QA guild")
+    if args.admin_role_id and (not args.no_roles or not args.admin_role_id.isdigit()):
+        parser.error("--admin-role-id requires --no-roles and a numeric role id")
     if args.threads_per_team < 1 or args.threads_per_team > 10 or args.budget_usd < 0:
         parser.error("threads-per-team must be 1..10 and budget nonnegative")
     token = os.environ.get(args.bot_token_env)
@@ -404,8 +412,12 @@ def main() -> None:
         parser.error("state file role mode does not match")
     api = Discord(token)
     bot = api.request("GET", "/users/@me")
-    if args.guild_id == QA_GUILD and str(bot["id"]) not in {QA_BOT_ID, QA_ADMIN_BOT_ID}:
-        parser.error("staging layout requires an approved QA bot token")
+    if args.guild_id == QA_GUILD and str(bot["id"]) not in {
+        QA_BOT_ID,
+        QA_ADMIN_BOT_ID,
+        STAGING_DAIMON_BOT_ID,
+    }:
+        parser.error("staging layout requires an approved staging bot token")
     if not args.teardown:
         require_setup_permissions(api, args.guild_id, str(bot["id"]), args.no_roles)
     if args.teardown:
