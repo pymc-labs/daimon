@@ -1,11 +1,18 @@
-"""Explicit offline Gemini adapter draft; pending scenarios never certify."""
+"""Explicit offline Gemini adapter; deferred scenarios never certify."""
 
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from pydantic import JsonValue
 
-from mux.conformance.runner import Adapter, Registry, Scenario, SendEvidence
+from mux.conformance.runner import (
+    Adapter,
+    PendingKind,
+    PendingReason,
+    Registry,
+    Scenario,
+    SendEvidence,
+)
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -19,18 +26,34 @@ from mux.state.memory import CrashPoint, MemoryStateStore
 from mux.state.store import StateStore
 
 PENDING_REASONS = {
-    "C02": "Environment snapshot resource port is scheduled for PR3.",
-    "C04": "Host fenced journal/cursor bridge is absent; send crash tests alone are insufficient.",
-    "C05": "No durable saved-item/SSE gap bridge; preview and EOF tests do not prove this fixture.",
-    "C08": "Inline reuse exposes no implemented in-place mount mutation transaction.",
-    "C09": "PR3 snapshot downloads are absent; shared provider vault/delete is unsupported.",
-    "C10": "Static Gemini support declarations cannot be changed by native admission faults.",
-    "C11": "Inline skills mount on an interaction, not a standalone provider skill upload API.",
+    "C02": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY, "Environment snapshot resource port is scheduled for PR3."
+    ),
+    "C04": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Host fenced journal/cursor bridge is absent; send crash tests alone are insufficient.",
+    ),
+    "C05": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "No durable saved-item/SSE gap bridge; preview and EOF tests do not prove this fixture.",
+    ),
+    "C08": PendingReason(
+        PendingKind.CAPABILITY_UNAVAILABLE,
+        "Inline reuse exposes no implemented in-place mount mutation transaction.",
+    ),
+    "C09": PendingReason(
+        PendingKind.CAPABILITY_UNAVAILABLE,
+        "PR3 snapshot downloads are absent; shared provider vault/delete is unsupported.",
+    ),
+    "C10": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Static Gemini support declarations cannot be changed by native admission faults.",
+    ),
+    "C11": PendingReason(
+        PendingKind.CAPABILITY_UNAVAILABLE,
+        "Inline skills mount on an interaction, not a standalone provider skill upload API.",
+    ),
 }
-
-
-class PendingScenario(Exception):
-    """Draft placeholder: replace with N9's shared typed PENDING before READY."""
 
 
 def native(id_: str, *, status: str = "completed", output: int | None = 0) -> Object:
@@ -63,7 +86,7 @@ class GeminiScript(FakeTransport):
 
     async def arrange(self, fixture_id: str) -> Scenario:
         if fixture_id in PENDING_REASONS:
-            raise PendingScenario(PENDING_REASONS[fixture_id])
+            raise ValueError("declared deferred fixture must be dispatched through run_fixture")
         agent = await self.ma.agents.create(
             self.scope,
             AgentSpec(name="fixture", model=ModelRef(provider="gemini", id="fixture")),
@@ -171,7 +194,7 @@ class GeminiScript(FakeTransport):
 
 def adapter() -> Adapter:
     script = GeminiScript()
-    return Adapter(script.ma, script.store, script)
+    return Adapter(script.ma, script.store, script, pending=PENDING_REASONS)
 
 
 def register(registry: Registry) -> None:

@@ -566,9 +566,11 @@ must avoid retaining database connections during provider I/O.
 The explicit offline Gemini conformance adapter currently executes C03, C06,
 C07, C13, C15 and C16 against the actual driver and injected test store. C13
 proves that store's binding CAS, rather than production host registration.
-Other provider scenarios carry concrete draft reasons; until the runner's
-typed adapter-PENDING seam lands, those scenarios fail rather than certify.
-Host-owned probes retain their existing pending results. No real transport is
+Seven deferred provider scenarios declare typed PENDING reasons before fixture
+setup; five host-owned probes retain their existing pending results. The pinned
+C01–C18 matrix has six PASS and twelve PENDING results, and cannot certify.
+Pending kinds distinguish missing adapter dependencies from unavailable
+capabilities. No real transport is
 discovered or invoked by registering this adapter. Broken-driver checks reject
 public raw handles and null usage incorrectly converted to zero.
 
