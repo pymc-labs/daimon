@@ -821,3 +821,29 @@ async def test_the_card_expiry_follows_the_operator_setting() -> None:
     )
     await default(ToolCall(tool_use_id="t2", server_name="linear", tool_name="create_issue"))
     assert prompts[1].expires_at == _NOW + timedelta(minutes=10)
+
+
+async def test_the_card_expiry_setting_reaches_the_publish_only_path() -> None:
+    """Production runs with tool safety off and asks only before publishing;
+    the expiry setting must reach that path too (review of #517)."""
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    posture = chat_tool_confirmation(
+        ToolSafetyPolicy(enabled=False, confirmation_timeout_s=90),
+        requester_platform_user_id="U1",
+        confirm=card,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        asks_before_publishing=True,
+    )
+    assert isinstance(posture, PolicyApproval)
+    before = datetime.now(UTC)
+    await posture.decide(
+        ToolCall(tool_use_id="t1", server_name=DAIMON_SERVER_NAME, tool_name="publish_report")
+    )
+    assert len(prompts) == 1
+    lifetime = prompts[0].expires_at - before
+    assert timedelta(seconds=85) <= lifetime <= timedelta(seconds=95)
