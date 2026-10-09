@@ -74,6 +74,8 @@ from daimon.core.mcp_auth import (
     token_jti,
 )
 from daimon.core.models_catalog import ModelChoice, list_model_choices
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.panel_operator_tokens import (
@@ -628,7 +630,11 @@ class SetupPanel:
             return dialog_message(POLICY_UNREADABLE_REFUSAL)
         agent = AgentRef.of(name)
         if target is not None and channel_id is not None and any_agent_rules(policy):
-            ma_agent = await self._runtime.anthropic.beta.agents.retrieve(target.ma_agent_id)
+            ma_agent = await retrieve_agent(
+                self._runtime.anthropic,
+                target.ma_agent_id,
+                scope=resource_scope(tenant_id=str(actor.tenant_id)),
+            )
             agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
         decision, bound_channel_id = authorize_coding_token(
             policy, subject=subject, agent=agent, channel_id=channel_id
