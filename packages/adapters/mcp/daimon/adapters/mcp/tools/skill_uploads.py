@@ -547,7 +547,8 @@ async def _add_skill_impl(
         status = getattr(exc, "status_code", None)
         raise ToolError(
             f"Adding the skill failed upstream{f' (HTTP {status})' if status else ''}; it is "
-            "not attached. Try again later."
+            "not attached. Ask the person to preview again and reply `yes` to "
+            "the new preview before trying again."
         ) from exc
     done = {
         "created": f"Added '{preview.name}' to '{agent_name}'",

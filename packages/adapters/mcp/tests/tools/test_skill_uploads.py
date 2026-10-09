@@ -1140,6 +1140,28 @@ async def test_an_upstream_failure_is_a_tool_error(
         await _preview_then_confirm(world, skill_md=_MD)
 
 
+async def test_failed_upload_after_chat_approval_asks_for_new_preview_and_yes(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = await _world(db_session_factory)
+    auth, origin = await _cards_off_turn(world)
+    preview = await _add_from(world, auth, origin)
+
+    async def failing(*_args: object, **_kwargs: object) -> None:
+        response = httpx.Response(500, request=httpx.Request("POST", "https://api.example"))
+        raise anthropic.APIStatusError("boom", response=response, body=None)
+
+    monkeypatch.setattr(skill_uploads, "add_agent_skill", failing)
+    async with _reply(world, auth, "yes") as reply:
+        with pytest.raises(ToolError) as failure:
+            await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
+        message = str(failure.value).lower()
+        assert "preview again" in message and "reply `yes`" in message
+        assert "try again later" not in message
+        with pytest.raises(ToolError, match="already used"):
+            await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
+
+
 async def test_an_attachment_of_the_wrong_kind_is_refused_before_download(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
