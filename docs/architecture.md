@@ -721,10 +721,11 @@ environments also check the caller can see the channel.
 **Channel skills — `packages/core/daimon/core/channel_skills.py`.** A channel
 can add skills to whatever agent answers there, for its turns only, so a
 shared agent carries one team's skill without every channel getting it.
-Server admins and operator tokens (`channels:write`) add and remove them,
-never a channel's own admins (`authorize(SET_CHANNEL_SKILLS)`), with the
-`*_channel_skill(s)` MCP tools, Who answers where in the Discord and Slack
-setup panels (the Channel settings dialog on Teams), or the CLI:
+Server admins, operator tokens (`channels:write`) and a channel's own admins
+for that channel add and remove them (`authorize(SET_CHANNEL_SKILLS)`), with
+the `*_channel_skill(s)` MCP tools, Who answers where in the Discord and Slack
+setup panels (the Channel settings dialog on Teams; on Slack and Teams the
+panels still offer them to server admins only), or the CLI:
 
 ```bash
 daimon channels skills list slack TEAM_ID [CHANNEL_ID]
