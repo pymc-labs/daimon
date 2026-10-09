@@ -309,8 +309,12 @@ def _atomic_write_bytes(path: Path, content: bytes, *, owner_uid: int | None = N
     write_file_nofollow(path, content, owner_uid=owner_uid)
 
 
-def _read_published_source(path: Path) -> bytes | None:
-    """Read only a single-link regular source, never a jail-planted link."""
+def _read_published_source(path: Path, *, max_bytes: int) -> bytes | None:
+    """Read only a single-link regular source, never a jail-planted link.
+
+    The jail uid owns the file and can grow it, so the read is bounded: a
+    source over ``max_bytes`` was never a valid upload and counts as none.
+    """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError as err:
@@ -321,7 +325,8 @@ def _read_published_source(path: Path) -> bytes | None:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             return None
-        return source.read()
+        content = source.read(max_bytes + 1)
+        return content if len(content) <= max_bytes else None
 
 
 async def _spawn_tracked(
@@ -391,20 +396,30 @@ async def _spawn_tracked(
             remove_path(d)
         paths = ensure_slug_jail(state.settings.data_dir, slug, uid=uid)
     previous_source = (
-        _read_published_source(paths.notebook) if state.validator is not None else None
+        _read_published_source(paths.notebook, max_bytes=state.settings.max_source_bytes)
+        if state.validator is not None
+        else None
     )
     _atomic_write_bytes(paths.notebook, source_bytes, owner_uid=uid)
 
+    def restore_previous_source() -> None:
+        if previous_source is None:
+            remove_path(paths.notebook)
+        else:
+            _atomic_write_bytes(paths.notebook, previous_source, owner_uid=uid)
+
     # Confirm the cells actually execute before we tear down a same-mode
     # notebook. Runs off the event loop (the marimo export is blocking).
-    # On rejection, restore the old source so a later cold start uses it.
+    # On rejection, or if validation itself fails, restore the old source so
+    # a later cold start uses it.
     if state.validator is not None:
-        result = await asyncio.to_thread(state.validator, slug, paths, jail_uid=uid)
+        try:
+            result = await asyncio.to_thread(state.validator, slug, paths, jail_uid=uid)
+        except BaseException:
+            restore_previous_source()
+            raise
         if not result.ok:
-            if previous_source is None:
-                remove_path(paths.notebook)
-            else:
-                _atomic_write_bytes(paths.notebook, previous_source, owner_uid=uid)
+            restore_previous_source()
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={

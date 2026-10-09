@@ -1137,3 +1137,59 @@ def test_put_notebook_published_when_validation_passes(
     assert resp.status_code == 200, "a notebook that passes validation should publish normally"
     assert seen == [("good", "notebook.py")], "validator should be called with (slug, SlugPaths)"
     assert stub_spawner.call_count == 1, "a validated notebook should be spawned exactly once"
+
+
+def test_published_source_reader_never_follows_links_or_reads_specials(tmp_path: Path) -> None:
+    """The reader only takes a single-link regular file, and only up to the cap."""
+    import os
+
+    from notebook_host.admin import _read_published_source  # pyright: ignore[reportPrivateUsage]
+
+    target = tmp_path / "host-secret"
+    target.write_text("secret")
+    link = tmp_path / "link.py"
+    link.symlink_to(target)
+    assert _read_published_source(link, max_bytes=100) is None
+
+    hard = tmp_path / "hard.py"
+    os.link(target, hard)
+    assert _read_published_source(hard, max_bytes=100) is None
+
+    fifo = tmp_path / "fifo.py"
+    os.mkfifo(fifo)
+    assert _read_published_source(fifo, max_bytes=100) is None
+
+    assert _read_published_source(tmp_path / "missing.py", max_bytes=100) is None
+
+    regular = tmp_path / "notebook.py"
+    regular.write_bytes(b"x" * 100)
+    assert _read_published_source(regular, max_bytes=100) == b"x" * 100
+    regular.write_bytes(b"x" * 101)
+    assert _read_published_source(regular, max_bytes=100) is None, "an oversized source is none"
+
+
+def test_validator_error_restores_the_published_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A validator that raises leaves the old source for the next cold start too."""
+    from notebook_host.lifecycle import ValidationResult
+
+    calls = {"n": 0}
+
+    def validator(slug: str, paths: SlugPaths, *, jail_uid: int | None = None) -> ValidationResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ValidationResult(ok=True)
+        raise RuntimeError("uv not on PATH")
+
+    client, state, _ = _make_test_app(tmp_path, monkeypatch, validator=validator)
+    first = client.put(
+        "/admin/notebooks/dash", json={"source": "good = 1"}, headers={"Authorization": AUTH}
+    )
+    assert first.status_code == 200
+    source_path = get_slug_paths(state.settings.data_dir, "dash").notebook
+    with pytest.raises(RuntimeError):
+        client.put(
+            "/admin/notebooks/dash", json={"source": "bad = 1"}, headers={"Authorization": AUTH}
+        )
+    assert source_path.read_text() == "good = 1"
