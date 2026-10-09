@@ -66,6 +66,15 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
+from daimon.adapters.mcp.resource_ports import (
+    list_session_events as list_events_page,
+)
+from daimon.adapters.mcp.resource_ports import (
+    mcp_scope,
+    retrieve_file_metadata,
+    send_session_events,
+    walk_sessions,
+)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
@@ -95,6 +104,7 @@ from daimon.core.permissions import agent_permissions, channel_permissions, memo
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
+from daimon.core.session_ports_compat import archive_session_record, retrieve_session_record
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
@@ -106,6 +116,7 @@ from daimon.core.turn.termination import TerminationReason
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
+from mux.errors import ScopeViolation
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 
@@ -321,7 +332,10 @@ async def _verify_agent_owns_session(
     it (``token_channel_id``). Checked on every call, so a follow-up after the
     channel is sealed is refused too.
     """
-    s = await runtime.client.beta.sessions.retrieve(handle)
+    try:
+        s = await retrieve_session_record(runtime.client, handle, scope=mcp_scope(auth))
+    except ScopeViolation:
+        raise ToolError("session not found") from None
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
     if auth.agent_id is None or derived != auth.agent_id:
         raise ToolError("session not found")
@@ -502,7 +516,7 @@ async def _start_turn_impl(
         if claims is None:
             raise ToolError("bundle not found")
         try:
-            await runtime.client.beta.files.retrieve_metadata(claims.file_id)
+            await retrieve_file_metadata(runtime.client, claims.file_id, scope=mcp_scope(auth))
         except anthropic.NotFoundError as err:
             raise ToolError("bundle expired; re-upload") from err
         resources: list[Resource] = [
@@ -585,8 +599,10 @@ async def _start_turn_impl(
     if recheck is not None:
         await recheck()
     turn_started_at = now()
-    sent = await runtime.client.beta.sessions.events.send(
+    sent = await send_session_events(
+        runtime.client,
         session.id,
+        scope=mcp_scope(auth),
         events=[
             {
                 "type": "user.message",
@@ -671,8 +687,10 @@ async def _continue_turn_impl(
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This session is closed.")
-        sent = await runtime.client.beta.sessions.events.send(
+        sent = await send_session_events(
+            runtime.client,
             handle,
+            scope=mcp_scope(auth),
             events=[
                 {
                     "type": "user.message",
@@ -701,7 +719,7 @@ async def _list_sessions_impl(
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
     owned: list[BetaManagedAgentsSession] = []
-    async for s in runtime.client.beta.sessions.list(agent_id=str(ma_agent.id)):
+    async for s in walk_sessions(runtime.client, agent_id=str(ma_agent.id), scope=mcp_scope(auth)):
         if _owned_by_caller(s, auth):
             owned.append(s)
     return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
@@ -736,7 +754,7 @@ async def _archive_my_session_impl(
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
-        await runtime.client.beta.sessions.archive(handle)
+        await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
     try:
         await close_headless_app_session(
             runtime.client,
@@ -777,8 +795,10 @@ async def _cancel_turn_impl(
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
-        await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
-    session = await runtime.client.beta.sessions.retrieve(handle)
+        await send_session_events(
+            runtime.client, handle, events=[{"type": "user.interrupt"}], scope=mcp_scope(auth)
+        )
+    session = await retrieve_session_record(runtime.client, handle, scope=mcp_scope(auth))
     return {"handle": handle, "status": session.status}
 
 
@@ -833,7 +853,9 @@ async def _get_turn_cost_impl(
         }
         if page is not None:
             list_kwargs["page"] = page
-        cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
+        cursor = await list_events_page(
+            runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
+        )
         for event in cursor.data:
             if event.id == turn_event_id:
                 continue
@@ -890,7 +912,9 @@ async def _list_events_impl(
         list_kwargs["created_at_gte"] = created_at_gte
     if types is not None:
         list_kwargs["types"] = types
-    cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
+    cursor = await list_events_page(
+        runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
+    )
     return Page[SessionEventOut](
         items=[
             SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data

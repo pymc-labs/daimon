@@ -17,6 +17,13 @@ from typing import Any, Literal
 
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.resource_ports import (
+    list_session_events as list_events_page,
+)
+from daimon.adapters.mcp.resource_ports import (
+    mcp_scope,
+    walk_sessions,
+)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
@@ -26,8 +33,10 @@ from daimon.adapters.mcp.tools._session_access import (
     sessions_outside_seals,
 )
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.session_ports_compat import retrieve_session_record
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.errors import ScopeViolation
 from pydantic import BaseModel, ConfigDict
 
 
@@ -121,7 +130,10 @@ async def _verify_caller_owns_session(
     channel is then refused unless ``origin_context_id`` names a turn inside
     that channel: the transcript holds everything the seal keeps in.
     """
-    s = await runtime.client.beta.sessions.retrieve(session_id)
+    try:
+        s = await retrieve_session_record(runtime.client, session_id, scope=mcp_scope(auth))
+    except ScopeViolation:
+        raise ToolError("session not found") from None
     tenant_agent_ids = {
         a.id for a in await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     }
@@ -146,11 +158,10 @@ async def _list_sessions_impl(
         )
         if agent is None:
             raise ToolError(f"agent {agent_name!r} not found")
-        list_kwargs: dict[str, Any] = {"agent_id": agent.id}
-        if page is not None:
-            list_kwargs["page"] = page
         owned: list[BetaManagedAgentsSession] = []
-        async for s in runtime.client.beta.sessions.list(**list_kwargs):
+        async for s in walk_sessions(
+            runtime.client, agent_id=agent.id, page=page, scope=mcp_scope(auth)
+        ):
             if _session_belongs_to_caller(s, auth):
                 owned.append(s)
         visible = await sessions_outside_seals(
@@ -164,7 +175,7 @@ async def _list_sessions_impl(
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     owned_all: list[BetaManagedAgentsSession] = []
     for agent in agents:
-        async for s in runtime.client.beta.sessions.list(agent_id=agent.id):
+        async for s in walk_sessions(runtime.client, agent_id=agent.id, scope=mcp_scope(auth)):
             if _session_belongs_to_caller(s, auth):
                 owned_all.append(s)
     drained = [
@@ -208,7 +219,9 @@ async def _list_session_events_impl(
         list_kwargs["limit"] = limit
     if order is not None:
         list_kwargs["order"] = order
-    cursor = await runtime.client.beta.sessions.events.list(session_id, **list_kwargs)
+    cursor = await list_events_page(
+        runtime.client, session_id, query=list_kwargs, scope=mcp_scope(auth)
+    )
     return Page[SessionEventOut](
         items=[
             SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data

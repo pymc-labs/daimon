@@ -32,6 +32,7 @@ from mux.drivers.anthropic.resources.environments import AnthropicEnvironments, 
 from mux.drivers.anthropic.resources.memory_stores import AnthropicMemoryStores
 from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
+from mux.drivers.anthropic.resources.session_tools import AnthropicSessionTools, SessionTools
 from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
 from mux.drivers.anthropic.resources.sessions_admin import (
     SessionResources as NativeSessionResources,
@@ -111,6 +112,9 @@ class AnthropicManagedAgents:
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
+            (SessionTools, "anthropic.session_tools", 1): AnthropicSessionTools(
+                client, self.account_scope_id, authorization
+            ),
             (WorkspaceTransfer, "anthropic.workspace_transfer", 1): AnthropicWorkspaceTransfer(
                 self.account_scope_id, authorization
             ),
