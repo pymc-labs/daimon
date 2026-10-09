@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
-async def test_missing_face_queues_generation_without_blocking_turn(
+async def test_slow_face_render_does_not_block_turn_past_the_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -32,6 +32,7 @@ async def test_missing_face_queues_generation_without_blocking_turn(
 
     monkeypatch.setattr(agent_identity, "get_agent_avatar", lookup)
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
+    monkeypatch.setattr(agent_identity, "_FIRST_FACE_WAIT_S", 0.01)
     factory = MagicMock()
     factory.kw = {"bind": None}
     identity = await asyncio.wait_for(
@@ -51,6 +52,35 @@ async def test_missing_face_queues_generation_without_blocking_turn(
     assert (tenant_id, "analyst") in agent_identity._face_tasks
     release.set()
     await asyncio.gather(*agent_identity._face_tasks.values())
+
+
+@pytest.mark.asyncio
+async def test_new_agent_first_answer_waits_for_its_face(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored: list[AvatarLink] = []
+
+    async def lookup(*_args: object, **_kwargs: object) -> AvatarLink | None:
+        return stored[0] if stored else None
+
+    async def generate(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(0.05)
+        stored.append(AvatarLink("face-token", "abcdef123456" + "0" * 52, "default", True))
+
+    monkeypatch.setattr(agent_identity, "get_agent_avatar", lookup)
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
+    factory = MagicMock()
+    factory.kw = {"bind": None}
+    identity = await resolve_agent_identity(
+        cast(AsyncSession, object()),
+        tenant_id=uuid.uuid4(),
+        agent_name="Test-Agent",
+        is_builtin=False,
+        public_base_url="https://example.test",
+        enabled=True,
+        background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
+    )
+    assert identity.avatar_url == "https://example.test/avatars/face-token/abcdef123456.png"
 
 
 @pytest.mark.asyncio
@@ -109,6 +139,7 @@ async def test_existing_initials_url_is_used_while_face_is_queued(
 
     monkeypatch.setattr(agent_identity, "get_agent_avatar", lookup)
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
+    monkeypatch.setattr(agent_identity, "_FIRST_FACE_WAIT_S", 0.01)
     factory = MagicMock()
     factory.kw = {"bind": None}
     identity = await resolve_agent_identity(
@@ -171,15 +202,15 @@ async def test_background_face_generation_uses_independent_database_sessions(
             enabled=True,
             background_sessionmaker=factory,
         )
-    assert identity.avatar_url is None
-    task = agent_identity._face_tasks.get((tenant.id, "background research"))
-    if task is not None:
-        await task
     async with factory() as session:
         avatar = await get_agent_avatar(
             session, tenant_id=tenant.id, agent_name="Background Research"
         )
     assert avatar is not None and avatar.has_face_assignment
+    # The first answer carries the face rendered for it.
+    assert identity.avatar_url == (
+        f"https://example.test/avatars/{avatar.token}/{avatar.sha256[:12]}.png"
+    )
 
 
 @pytest.mark.asyncio
@@ -212,7 +243,6 @@ async def test_face_generation_backs_off_and_stops_after_three_failures(
             enabled=True,
             background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
         )
-        await agent_identity._face_tasks[key]
         await asyncio.sleep(0)
         assert calls == expected
         assert agent_identity._face_failures[key][0] == expected

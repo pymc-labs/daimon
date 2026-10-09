@@ -23,6 +23,9 @@ log = structlog.get_logger(__name__)
 _face_tasks: dict[tuple[uuid.UUID, str], asyncio.Task[None]] = {}
 _face_failures: dict[tuple[uuid.UUID, str], tuple[int, float]] = {}
 _MAX_FACE_ATTEMPTS = 3
+# A new agent's first answer waits this long for its face to render (about
+# a second), so it does not go out without a picture.
+_FIRST_FACE_WAIT_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -90,7 +93,17 @@ async def resolve_agent_identity(
         if (avatar is None or (avatar.source == "default" and not avatar.has_face_assignment)) and (
             background_sessionmaker is not None
         ):
-            _schedule_face(background_sessionmaker, tenant_id=tenant_id, agent_name=agent_name)
+            task = _schedule_face(
+                background_sessionmaker, tenant_id=tenant_id, agent_name=agent_name
+            )
+            if task is not None:
+                done, _ = await asyncio.wait({task}, timeout=_FIRST_FACE_WAIT_S)
+                if task in done and (tenant_id, normalize_agent_name(agent_name)) not in (
+                    _face_failures
+                ):
+                    avatar = await get_agent_avatar(
+                        session, tenant_id=tenant_id, agent_name=agent_name
+                    )
     except Exception as exc:
         log.warning("agent_identity.avatar_lookup_failed", error_type=type(exc).__name__)
     base = public_base_url.rstrip("/") if public_base_url else None
@@ -100,13 +113,14 @@ async def resolve_agent_identity(
 
 def _schedule_face(
     sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_name: str
-) -> None:
+) -> asyncio.Task[None] | None:
+    """Start the face render once per agent; return the running task, if any."""
     key = tenant_id, normalize_agent_name(agent_name)
     if key in _face_tasks:
-        return
+        return _face_tasks[key]
     attempts, next_retry = _face_failures.get(key, (0, 0.0))
     if attempts >= _MAX_FACE_ATTEMPTS or time.monotonic() < next_retry:
-        return
+        return None
     bind = sessionmaker.kw.get("bind")
     # A checked-out connection cannot serve the turn and the generator at
     # once. Bind background work to its engine, preserving session metadata.
@@ -149,3 +163,4 @@ def _schedule_face(
     task = asyncio.create_task(generate(), name="agent-face-generation")
     _face_tasks[key] = task
     task.add_done_callback(lambda _: _face_tasks.pop(key, None))
+    return task
