@@ -2,6 +2,8 @@
 
 import copy
 import pickle
+from collections.abc import MutableMapping
+from typing import cast
 
 import pytest
 from mux.contracts.extensions import ExtensionConfig
@@ -76,9 +78,14 @@ def test_session_fidelity_round_trip_and_pickle(record: SessionSpec | Session | 
 
 def test_session_extension_map_is_immutable() -> None:
     with pytest.raises(TypeError):
-        _spec().extensions["new"] = ExtensionConfig(namespace="anthropic.new", version=1, value={})
+        # Deliberate runtime violation; the normal type forbids assignment too.
+        cast(MutableMapping[str, ExtensionConfig], _spec().extensions)["new"] = ExtensionConfig(
+            namespace="anthropic.new", version=1, value={}
+        )
 
 
 def test_session_update_extension_map_is_immutable() -> None:
     with pytest.raises(TypeError):
-        _plan().extensions["new"] = ExtensionConfig(namespace="anthropic.new", version=1, value={})
+        cast(MutableMapping[str, ExtensionConfig], _plan().extensions)["new"] = ExtensionConfig(
+            namespace="anthropic.new", version=1, value={}
+        )

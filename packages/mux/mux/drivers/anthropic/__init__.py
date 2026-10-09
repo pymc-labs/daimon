@@ -40,8 +40,8 @@ from mux.drivers.anthropic.resources.skills import (
 )
 from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
-from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions, SessionWalk
+from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
 

@@ -9,9 +9,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_file_resource import (
     BetaManagedAgentsFileResource,
 )
 from daimon.core.session_ports_compat import add_session_file_record
-from daimon.core.session_update_ops import _find_env_resource_id
+from daimon.core.session_update_ops import (
+    _find_env_resource_id,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from pydantic import JsonValue
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
@@ -19,7 +22,7 @@ SCOPE = Scope(
 NOW = datetime(2026, 10, 9, tzinfo=UTC).isoformat()
 
 
-def file_mount(resource_id, path):
+def file_mount(resource_id: str, path: str) -> dict[str, JsonValue]:
     return {
         "id": resource_id,
         "type": "file",
@@ -31,8 +34,8 @@ def file_mount(resource_id, path):
 
 
 @pytest.mark.parametrize("scenario", ["first", "second", "none", "empty", "empty_cursor"])
-async def test_find_first_env_matches_the_original_lazy_paginator(scenario):
-    first = [file_mount("other", "/report.txt")]
+async def test_find_first_env_matches_the_original_lazy_paginator(scenario: str) -> None:
+    first: list[dict[str, JsonValue]] = [file_mount("other", "/report.txt")]
     cursor = "page2"
     second = [file_mount("env2", "/nested/.env"), file_mount("env3", "/other/.env")]
     if scenario == "first":
@@ -93,7 +96,9 @@ async def test_find_first_env_matches_the_original_lazy_paginator(scenario):
 
 
 @pytest.mark.parametrize("status", [200, 400, 404, 500])
-async def test_add_file_preserves_wire_errors_and_the_returned_resource_identity(status):
+async def test_add_file_preserves_wire_errors_and_the_returned_resource_identity(
+    status: int,
+) -> None:
     # The old caller only needs id; partial SDK responses must remain usable.
     body = (
         {"id": "new_mount"}
@@ -116,6 +121,7 @@ async def test_add_file_preserves_wire_errors_and_the_returned_resource_identity
                 client, "sess_1", file_id="file_env", mount_path=".env", scope=SCOPE
             )
             assert actual.id == expected.id
+            assert actual.resource is not None
             assert actual.resource.id == "file_env"
             assert actual.target_path == ".env"
         else:

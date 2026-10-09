@@ -6,7 +6,7 @@ from typing import cast
 
 import httpx
 import pytest
-from anthropic import BadRequestError
+from anthropic import AsyncAnthropic, BadRequestError
 from anthropic.types.beta.session_update_params import SessionUpdateParams
 from daimon.testing.ma_models import ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
@@ -49,7 +49,7 @@ def spec(payload: dict[str, object]) -> SessionSpec:
     )
 
 
-def port(client) -> AnthropicSessions:
+def port(client: AsyncAnthropic) -> AnthropicSessions:
     return AnthropicSessions(
         client,
         "org",
@@ -57,26 +57,26 @@ def port(client) -> AnthropicSessions:
     )
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"agent": {"tools": [], "mcp_servers": []}},
-        {
-            "agent": {
-                "tools": [
-                    {
-                        "configs": [],
-                        "default_config": {"enabled": False},
-                        "type": "agent_toolset_20260401",
-                    }
-                ],
-                "mcp_servers": [{"name": "mcp", "type": "url", "url": "https://mcp.example"}],
-            }
-        },
-        {"metadata": {}},
-        {"agent": None},
-    ],
-)
+VALID_UPDATES: list[dict[str, object]] = [
+    {"agent": {"tools": [], "mcp_servers": []}},
+    {
+        "agent": {
+            "tools": [
+                {
+                    "configs": [],
+                    "default_config": {"enabled": False},
+                    "type": "agent_toolset_20260401",
+                }
+            ],
+            "mcp_servers": [{"name": "mcp", "type": "url", "url": "https://mcp.example"}],
+        }
+    },
+    {"metadata": {}},
+    {"agent": None},
+]
+
+
+@pytest.mark.parametrize("payload", VALID_UPDATES)
 async def test_plan_is_pure_and_apply_matches_legacy_bytes(payload: dict[str, object]) -> None:
     old, new = ScriptedTransport(), ScriptedTransport()
     for transport in (old, new):

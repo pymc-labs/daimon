@@ -118,7 +118,9 @@ endpoint has no server revision CAS. Unsupported generic revision/environment
 changes and fresh-state requests are refused; they never silently replace a thread.
 
 Session output delivery uses `anthropic.outputs@1`: one listing page per poll,
-buffered download and deletion retain the managed-agents beta. Standalone bundle
+with opaque entries preserving partial SDK response fields. The host filters
+pending entries before reading delivery metadata; no timestamp is synthesized.
+Buffered download and deletion retain the managed-agents beta. Standalone bundle
 uploads and the workspace-wide TTL queue retain the default Files API headers.
 The host keeps settle timing, exclusions, size limits, consent deferral and
 post-before-delete ordering. No additional provider requests are introduced.

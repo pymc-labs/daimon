@@ -13,7 +13,7 @@ SCOPE = Scope(
 )
 
 
-def ref(kind, native_id):
+def ref(kind: str, native_id: str) -> ResourceRef:
     return ResourceRef(
         id=native_id,
         kind=kind,
@@ -25,7 +25,7 @@ def ref(kind, native_id):
 
 
 @pytest.mark.parametrize("violation", ["session_tenant", "file_tenant", "file_grant", "scope"])
-async def test_additive_file_add_checks_scope_and_both_references(violation):
+async def test_additive_file_add_checks_scope_and_both_references(violation: str) -> None:
     transport = ScriptedTransport()
     session, file = ref("session", "sess_1"), ref("file", "file_1")
     scope = SCOPE
@@ -57,7 +57,7 @@ async def test_additive_file_add_checks_scope_and_both_references(violation):
     assert transport.requests == []
 
 
-async def test_additive_resource_walk_checks_the_session_before_io():
+async def test_additive_resource_walk_checks_the_session_before_io() -> None:
     transport = ScriptedTransport()
     async with transport.client() as client:
         port = AnthropicSessionAdmin(client, "org", authorization=ResourceAuthorization(SCOPE))

@@ -19,7 +19,9 @@ SCOPE = Scope(
 @pytest.mark.parametrize(
     "empty,cursor", [(False, "next"), (True, "next"), (False, ""), (False, None)]
 )
-async def test_walk_matches_sdk_requests_and_terminal_rules(empty, cursor):
+async def test_walk_matches_sdk_requests_and_terminal_rules(
+    empty: bool, cursor: str | None
+) -> None:
     first = [] if empty else [ma_session(id="sess_1").model_dump(mode="json")]
     if first:
         first[0]["future_field"] = {"kept": True}
@@ -72,7 +74,7 @@ async def test_walk_matches_sdk_requests_and_terminal_rules(empty, cursor):
     assert old.requests == new.requests
 
 
-async def test_walk_rejects_scope_before_io_and_filters_tenant_results():
+async def test_walk_rejects_scope_before_io_and_filters_tenant_results() -> None:
     transport = ScriptedTransport()
     async with transport.client() as client:
         port = AnthropicSessions(client, "org", ResourceAuthorization(SCOPE))
@@ -112,7 +114,7 @@ async def test_walk_rejects_scope_before_io_and_filters_tenant_results():
     transport.assert_consumed()
 
 
-async def test_walk_normalizes_sdk_error_without_an_extra_lookup():
+async def test_walk_normalizes_sdk_error_without_an_extra_lookup() -> None:
     transport = ScriptedTransport()
     transport.queue(
         ScriptedReply(
