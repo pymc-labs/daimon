@@ -208,16 +208,23 @@ _SWEEP_CONCURRENCY = 2
 _TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
+THREAD_OPENING_REACTION = "⌛"
+
+
 async def _open_thread_with_notice(
     message: discord.Message,
     opening: Coroutine[Any, Any, discord.Thread],
     *,
-    guild_id: str,
     after_s: float,
 ) -> discord.Thread:
-    """Keep an opening mention visible while naming or Discord creation waits."""
+    """Keep an opening mention visibly acknowledged while naming or Discord creation waits.
+
+    The acknowledgment is a reaction on the mention, never a channel message: a
+    channel-level "your chat is ready" post outlives the wait and reads as a stray
+    reply. A failed opening propagates to `_handle_mention`, which renders the error
+    as a visible reply, so the mention is never left without an answer."""
     task = asyncio.create_task(opening)
-    notice: discord.Message | None = None
+    reacted = False
     try:
         try:
             if after_s > 0:
@@ -225,38 +232,21 @@ async def _open_thread_with_notice(
         except TimeoutError:
             pass
         try:
-            notice = await message.reply(
-                "Opening your chat… Discord is busy, this can take a minute.",
-                mention_author=False,
-            )
+            await message.add_reaction(THREAD_OPENING_REACTION)
+            reacted = True
         except discord.HTTPException as exc:
             log.warning("discord.thread_open_notice_failed", error=str(exc))
-        try:
-            thread = await task
-        except Exception:
-            if notice is not None:
-                try:
-                    await notice.edit(
-                        content="I couldn't open your chat. Please try mentioning me again."
-                    )
-                except discord.HTTPException as exc:
-                    log.warning("discord.thread_open_notice_edit_failed", error=str(exc))
-            raise
-        if notice is not None:
-            try:
-                await notice.edit(
-                    content=(
-                        f"Your chat is ready: https://discord.com/channels/{guild_id}/{thread.id}"
-                    )
-                )
-            except discord.HTTPException as exc:
-                log.warning("discord.thread_open_notice_edit_failed", error=str(exc))
-        return thread
+        return await task
     finally:
         if not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if reacted and message.guild is not None:
+            try:
+                await message.remove_reaction(THREAD_OPENING_REACTION, message.guild.me)
+            except discord.HTTPException as exc:
+                log.warning("discord.thread_open_notice_clear_failed", error=str(exc))
 
 
 def _resolve_bot_display_name(settings: Settings) -> str:
@@ -3043,7 +3033,6 @@ class DaimonBot(commands.Bot):
             thread = await _open_thread_with_notice(
                 message,
                 _open_thread(),
-                guild_id=guild_id,
                 after_s=discord_settings.thread_open_notice_after_s,
             )
 
