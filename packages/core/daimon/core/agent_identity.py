@@ -22,7 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 _face_tasks: dict[tuple[uuid.UUID, str], asyncio.Task[None]] = {}
 _face_failures: dict[tuple[uuid.UUID, str], tuple[int, float]] = {}
+_face_started: dict[tuple[uuid.UUID, str], float] = {}
 _MAX_FACE_ATTEMPTS = 3
+# A new agent's first answer waits this long after the render started (it
+# takes about a second), so it does not go out without a picture. The wait
+# runs from the render's start, so a stuck render costs later turns nothing.
+_FIRST_FACE_WAIT_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -77,10 +82,12 @@ async def resolve_agent_identity(
     public_base_url: str | None,
     enabled: bool = False,
     background_sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    wait_for_face: bool = False,
 ) -> AgentIdentity:
     """Resolve the identity once when a turn admits an agent.
 
-    Built-in turns keep the platform app's own name and icon.
+    Built-in turns keep the platform app's own name and icon. `wait_for_face`
+    is for answer paths only: panels with a platform deadline must not wait.
     """
     if is_builtin or not enabled:
         return AgentIdentity(name=agent_name, avatar_url=None, builtin=True)
@@ -90,7 +97,18 @@ async def resolve_agent_identity(
         if (avatar is None or (avatar.source == "default" and not avatar.has_face_assignment)) and (
             background_sessionmaker is not None
         ):
-            _schedule_face(background_sessionmaker, tenant_id=tenant_id, agent_name=agent_name)
+            task = _schedule_face(
+                background_sessionmaker, tenant_id=tenant_id, agent_name=agent_name
+            )
+            key = tenant_id, normalize_agent_name(agent_name)
+            if task is not None and wait_for_face:
+                started = _face_started.get(key, time.monotonic())
+                remaining = max(0.0, started + _FIRST_FACE_WAIT_S - time.monotonic())
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+                if task in done and key not in _face_failures:
+                    avatar = await get_agent_avatar(
+                        session, tenant_id=tenant_id, agent_name=agent_name
+                    )
     except Exception as exc:
         log.warning("agent_identity.avatar_lookup_failed", error_type=type(exc).__name__)
     base = public_base_url.rstrip("/") if public_base_url else None
@@ -100,13 +118,14 @@ async def resolve_agent_identity(
 
 def _schedule_face(
     sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_name: str
-) -> None:
+) -> asyncio.Task[None] | None:
+    """Start the face render once per agent; return the running task, if any."""
     key = tenant_id, normalize_agent_name(agent_name)
     if key in _face_tasks:
-        return
+        return _face_tasks[key]
     attempts, next_retry = _face_failures.get(key, (0, 0.0))
     if attempts >= _MAX_FACE_ATTEMPTS or time.monotonic() < next_retry:
-        return
+        return None
     bind = sessionmaker.kw.get("bind")
     # A checked-out connection cannot serve the turn and the generator at
     # once. Bind background work to its engine, preserving session metadata.
@@ -148,4 +167,11 @@ def _schedule_face(
 
     task = asyncio.create_task(generate(), name="agent-face-generation")
     _face_tasks[key] = task
-    task.add_done_callback(lambda _: _face_tasks.pop(key, None))
+    _face_started[key] = time.monotonic()
+
+    def finished(_: object) -> None:
+        _face_tasks.pop(key, None)
+        _face_started.pop(key, None)
+
+    task.add_done_callback(finished)
+    return task
