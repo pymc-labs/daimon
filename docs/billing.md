@@ -116,9 +116,11 @@ Two consequences worth knowing before you add a model:
 `DAIMON_BILLING__MARKUP` (default `1.0`, pass-through) multiplies the cost
 before it is debited, in `debit_amount` in
 `packages/core/daimon/core/tenant_balance.py`, quantized to six decimal
-places. It is applied to the ledger only. Every reporting surface reprices raw
-`usage_events` rows, so what a panel shows is provider cost, not what the
-tenant was charged.
+places. It is applied to the ledger and to the finished-turn summary line,
+whose `used` is the turn's debit (its whole-turn cost times `markup`, so it can
+differ from the sum of the per-call debits by at most $0.001). Every other
+reporting surface reprices raw `usage_events` rows, so what a panel or
+`get_turn_cost` shows is provider cost, not what the tenant was charged.
 
 ## The gates, in order
 
