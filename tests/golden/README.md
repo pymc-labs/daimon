@@ -1,6 +1,9 @@
-# Neutral-core current-path oracle
+# Neutral-core turn-path oracle
 
 These 33 offline scenarios run existing tests and four boundary scenarios against the current production path. The initial recordings came from integration `546ed15c7765d270a228beb730258002dbe09e98`; the canonical files now include the SYNC-2 merge of integration `d5a3072b92bbf919386c45b4900f9c644a32b9e2` and main `c77c7090a1821e1cf99e35ccaa0d9552f28f9b72`. No production module changed while recording. [RERECORD-20261009.md](RERECORD-20261009.md) attributes every updated file to its main PR. The pytest test in `tests/parity/test_ma_goldens.py` replays every scenario and compares its entire transcript. Failure of the original scenario test is also a failure of the oracle.
+
+Mux cases explicitly skip as a group until the public N4 driver exposes all four controls (`path`, `backend`, `scope`, `session_ref`). An unwired flag is not a parity pass. After that seam lands, all 33 mux comparisons and all four mux mutation probes run; no scenario-specific skips or separate mux golden files are allowed. This pending matrix does not certify M0 until the mux comparisons actually pass.
+
 
 Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test database before running. N3 uses `daimon_test_nc_n3`. Do not use the shared `daimon_test` or live provider credentials.
 
@@ -9,11 +12,18 @@ Fixture setup obtains mapped metadata through the public `daimon.testing.effect_
 ```bash
 uv run pytest -n 2 -q tests/parity/test_ma_goldens.py tests/parity/test_ma_call_ratchet.py
 uv run python tests/golden/runner.py plain_discord approval_card
+uv run python tests/golden/runner.py --turn-path both
+# A mux-only invocation fails clearly while its bridge is pending.
+uv run python tests/golden/runner.py --turn-path mux plain_turn
 # Only N3 may record from unchanged integration; forbidden in extraction lanes.
-uv run python tests/golden/runner.py --regen
+uv run python tests/golden/runner.py --turn-path legacy --regen
 ```
 
-The runner starts one fresh pytest process per scenario. The instrumentation observes the real SDK over existing MockTransport/MARouter/stateful resource fakes and ScriptedTransport, existing Discord/Slack fake clients, lifecycle callbacks, confirmation prompt/card posts and edits, CLI JSON output, DM turns, and scheduler execution/billing bindings. It captures `usage_events`, `tenant_ledger`, `turn_outcomes`, `thread_sessions`, and `task_continuations`, including rows still in the test fixture's transaction, after draining background writes. No domain rules are copied into a new scenario implementation.
+The runner starts one fresh pytest process per scenario and selected path, pinning `DAIMON_TURN__PATH` independently of the parent environment. Both CLI and API regeneration accept only the unmutated legacy path. `--turn-path both` reports every pending mux case as skipped; a mux-only invocation fails before replay when the bridge is absent.
+
+After normal oracle/fixture setup, `turn_path_plugin.py` applies the same explicit path to real driver calls and their imported aliases. A caller's conflicting explicit path fails instead of producing a false match. Mux direct-driver fixtures receive an explicit offline Scope when none was supplied; existing caller Scope/backend/session_ref values remain intact. Mux absolute deadlines share the host's frozen clock. Mocked `run_turn` records omit only the four internal controls above; actual calls still receive them and all semantic kwargs remain recorded. Real SDK HTTP/SSE, request bodies/query/beta headers, platform effects and legacy DB facts retain the same comparison boundary on both paths.
+
+The instrumentation observes the real SDK over existing MockTransport/MARouter/stateful resource fakes and ScriptedTransport, existing Discord/Slack fake clients, lifecycle callbacks, confirmation prompt/card posts and edits, CLI JSON output, DM turns, and scheduler execution/billing bindings. It captures `usage_events`, `tenant_ledger`, `turn_outcomes`, `thread_sessions`, and `task_continuations`, including rows still in the test fixture's transaction, after draining background writes. No domain rules are copied into a new scenario implementation.
 
 `LEGACY_DB_COLUMNS` in the effect recorder pins every column present in those five tables at integration `4d61c7391a5098f8ae1cffd7ca1a80fb077af326`. Do not regenerate or extend that list when schema fields are added. Missing legacy columns fail recording. Additional mapped columns, including NULL values and columns in empty tables, are captured separately: `EffectRecorder.database()` returns a labelled `non_legacy_columns` section, and the full replay transcript exposes it as the root `database_extensions` section. Each table lists its additional columns and rows containing `legacy_row_index` (the index in that table's sorted legacy rows) and exact `values`. Additive values stay literal and cannot alter legacy row sorting, runtime-id numbering or timestamp normalization.
 

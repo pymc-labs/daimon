@@ -186,7 +186,8 @@ def test_regeneration_writes_only_legacy_bytes(
     transcript = json.dumps({**legacy, "database_extensions": {"thread_sessions": {"new": None}}})
     monkeypatch.setattr(RUNNER, "GOLDENS", tmp_path)
 
-    def replay(name: str, *, mutation: str | None = None) -> str:
+    def replay(name: str, *, mutation: str | None = None, turn_path: str = "legacy") -> str:
+        assert (name, mutation, turn_path) == ("probe", None, "legacy")
         return transcript
 
     monkeypatch.setattr(RUNNER, "replay", replay)

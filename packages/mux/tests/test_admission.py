@@ -29,6 +29,8 @@ def _optional(fallback: str) -> CapabilityRequirement:
 
 
 def _revision(**config: object) -> ConfigRevision:
+    if config.get("backend") == "openai":
+        config.setdefault("profile", "openai.persistent_workspace")
     return ConfigRevision.create(CHANNEL, 1, resolve_default(BackendConfig.model_validate(config)))
 
 
@@ -75,13 +77,18 @@ def test_optional_unsupported_is_admitted_with_its_fallback_surfaced() -> None:
 
 
 def test_emulated_support_is_admitted_and_surfaced() -> None:
-    admission = admit(_revision(backend="openai", model="gpt-6"), PERSISTENT_WORKSPACE)
+    admission = admit(
+        _revision(backend="openai", model="gpt-6", requires={"reconcile": REQUIRED}),
+        PERSISTENT_WORKSPACE,
+    )
     assert admission.emulated == ("reconcile",)
 
 
 def test_core_capabilities_are_mandatory_on_a_core_profile() -> None:
     assert set(MANAGED_AGENTS.missing_core()) == set()
-    assert MANAGED_AGENTS.core and PERSISTENT_WORKSPACE.core
+    assert MANAGED_AGENTS.core
+    assert not PERSISTENT_WORKSPACE.core
+    assert PERSISTENT_WORKSPACE.missing_core() == ("artifacts", "skills_bundle")
 
 
 def test_named_non_core_profile_is_admitted_with_waived_core_surfaced() -> None:
@@ -98,14 +105,31 @@ def test_non_core_profile_still_refuses_an_explicitly_required_core_capability()
     )
     with pytest.raises(UnsupportedCapability) as caught:
         admit(config, INLINE_REUSE)
-    assert caught.value.missing == ("thread_workspace_persistence", "usage_observations")
+    assert caught.value.missing == ("thread_workspace_persistence",)
+
+
+def test_gemini_inline_reuse_requires_an_explicit_profile_and_model() -> None:
+    admission = admit(
+        _revision(backend="gemini", profile="gemini.inline_reuse", model="gemini-3"), INLINE_REUSE
+    )
+    assert admission.profile_id == "gemini.inline_reuse"
+    assert "usage_observations" in admission.emulated
+    assert "thread_workspace_persistence" in admission.waived_core
+    assert not INLINE_REUSE.core
+    with pytest.raises(InvalidConfig, match="profile"):
+        _revision(backend="gemini", model="gemini-3")
+    with pytest.raises(InvalidConfig, match="model"):
+        _revision(backend="gemini", profile="gemini.inline_reuse")
 
 
 def test_usage_observations_cannot_be_waived_even_by_a_named_non_core_profile() -> None:
     assert not INLINE_REUSE.core
     config = _revision(backend="gemini", profile="gemini.inline_reuse", model="gemini-3")
+    unmetered_gemini = INLINE_REUSE.model_copy(
+        update={"support": {**INLINE_REUSE.support, "usage_observations": "unknown"}}
+    )
     with pytest.raises(UnsupportedCapability) as caught:
-        admit(config, INLINE_REUSE)
+        admit(config, unmetered_gemini)
     assert caught.value.missing == ("usage_observations",)
     unmetered = CONVERSATION_ONLY.model_copy(
         update={"support": {**CONVERSATION_ONLY.support, "usage_observations": "unknown"}}
@@ -148,7 +172,9 @@ def test_profile_must_match_the_config() -> None:
 
 
 def test_non_default_backend_without_a_model_is_refused_at_admission() -> None:
-    resolved = resolve_default(BackendConfig(backend="openai", model="gpt-6"))
+    resolved = resolve_default(
+        BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6")
+    )
     config = ConfigRevision.create(CHANNEL, 1, resolved)
     for model in (None, "", "  "):
         forged = config.model_copy(update={"model": model})

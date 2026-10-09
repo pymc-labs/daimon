@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord and Slack Connect GitHub buttons now show a link emoji.
 - GitHub connection links now appear in a branded card with the agent's face and readable name when agent identity is enabled. Generated names are shown as "this agent". The compact card is the default; a richer card is available with a one-line switch.
+- Add an opt-in Gemini inline-reuse driver with offline transport probes, explicit continuity loss, normalized turn events and revisioned usage; Anthropic remains the default.
+- Filter completed Gemini function calls from required actions, defer open saved steps, and persist parsed usage timestamp watermarks without duplicate charges.
+
+- Add an unwired, offline-tested OpenAI Agents API driver core with hosted and conversation-only profiles, root-turn event normalization, saved-state recovery and revisioned usage; existing backend defaults remain Anthropic.
+- Keep the OpenAI hosted profile non-core until its skills and artifact ports land; refuse required unimplemented vault, multiagent and whole-workspace export/import capabilities.
+- Resolve OpenAI required-action turn identity from the documented nested session payload and suppress stale actions after root completion.
+- Route CLI GitHub grant cleanup through tenant-scoped session and vault archive ports while preserving revocation order, operator output and cleanup errors.
+
 - Route CLI agent, environment and skill operations through tenant-scoped neutral resource ports, preserving requests, output and SDK error handling.
 - MCP agent, environment and skill operations now consume tenant-scoped neutral resource ports.
 - Discord, Slack, Teams and scheduler agent operations now consume tenant-scoped neutral resource ports.
@@ -75,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Re-record the neutral-core oracle against synced main, attributing every changed transcript to its main PR while retaining exact provider requests and database effects.
+- Run the offline golden matrix on both legacy and mux turn paths against the same recordings, with explicit pending skips until the mux bridge lands and legacy-only regeneration.
 
 - Conformance now probes durable send replay, independent recovery evidence, lease ownership,
   usage revision accounting, and binding races against the merged StateStore;
