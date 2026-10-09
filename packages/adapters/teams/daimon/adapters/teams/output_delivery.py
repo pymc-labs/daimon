@@ -302,7 +302,7 @@ class TeamsOutputDelivery:
             self._claimed.discard(file_id)
 
     async def _upload(self, offer: _Offer, info: FileUploadInfo) -> None:
-        """PUT the bytes to the upload session, delete the output, show the file."""
+        """PUT the bytes, show the file, then remove its output listing."""
         client = self._runtime.anthropic
         try:
             await self._put(info, await download_output_file(client, offer.file_id))
@@ -313,10 +313,10 @@ class TeamsOutputDelivery:
                 offer.conversation_id, offer.service_url, _UPLOAD_FAILED.format(name=offer.filename)
             )
             return
-        await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
         await self._sender.send(
             offer.conversation_id, file_info_message(info), service_url=offer.service_url
         )
+        await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
 
     async def _put(self, info: FileUploadInfo, content: bytes) -> None:
         """PUT `content` to the person's OneDrive upload session; `FetchRefused` on failure."""

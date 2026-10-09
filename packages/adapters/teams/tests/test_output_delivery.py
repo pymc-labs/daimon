@@ -189,6 +189,24 @@ async def test_accepted_offer_uploads_then_deletes_and_shows_the_file(
     assert (info.content_type, info.content_url) == (FILE_INFO_CONTENT_TYPE, CONTENT_URL)
 
 
+@pytest.mark.parametrize(
+    ("failure", "error"), [("fail_on", httpx.ConnectError), ("timeout_on", httpx.ReadTimeout)]
+)
+async def test_failed_file_card_send_keeps_dm_output_for_retry(
+    db_session_factory: async_sessionmaker[AsyncSession], failure: str, error: type[Exception]
+) -> None:
+    harness = _harness(db_session_factory)
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    getattr(harness.sender, failure).add(1)
+
+    await harness.delivery.handle_consent(_consent("accept", _offer_token(harness.sender)))
+    with pytest.raises(error):
+        await harness.settle()
+
+    assert len(harness.uploads) == 1
+    assert harness.deletes == [], "an unconfirmed file card leaves the output retryable"
+
+
 async def _staged(db_factory: async_sessionmaker[AsyncSession]) -> str:
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
     async with db_factory.begin() as session:
