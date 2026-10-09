@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advertise closed session create, resource-mount and update configuration namespaces for backend admission.
 - Expose scoped workspace session enumeration through the native SDK paginator,
   preserving full native records and pagination stop rules for billing sweeps.
+- Route session output polling, download and deletion through scoped native ports,
+  preserving Files API beta headers, settle timing and post-before-delete delivery.
+
 - Plan native session tool/MCP changes before one in-place apply call, preserving
   busy deferral, mount deletion, repository-token rotation and inherited seals.
 

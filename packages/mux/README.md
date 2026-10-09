@@ -116,3 +116,9 @@ by SessionSpec and UpdatePlan extensions. Planning performs no provider read;
 apply checks the caller's plan revision and makes one native update. Anthropic's
 endpoint has no server revision CAS. Unsupported generic revision/environment
 changes and fresh-state requests are refused; they never silently replace a thread.
+
+Session output delivery uses `anthropic.outputs@1`: one listing page per poll,
+buffered download and deletion retain the managed-agents beta. Standalone bundle
+uploads and the workspace-wide TTL queue retain the default Files API headers.
+The host keeps settle timing, exclusions, size limits, consent deferral and
+post-before-delete ordering. No additional provider requests are introduced.

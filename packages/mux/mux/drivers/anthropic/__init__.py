@@ -21,6 +21,7 @@ from mux.contracts.ports import (
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
+from mux.drivers.anthropic.outputs import AnthropicOutputs, Outputs
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources._secrets import SecretResolver
 from mux.drivers.anthropic.resources.agents import AnthropicAgents
@@ -99,6 +100,9 @@ class AnthropicManagedAgents:
         native_export = AnthropicPlatformExport(client)
         self._extensions: dict[tuple[type[object], str, int], object] = {
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
+            (Outputs, "anthropic.outputs", 1): AnthropicOutputs(
+                client, self.account_scope_id, authorization, secrets
+            ),
             (NativeArtifacts, "anthropic.artifacts", 1): native_artifacts,
             (Vaults, "anthropic.vaults", 1): native_vaults,
             (CoreVaults, "anthropic.vaults", 1): native_vaults,

@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2029,
+  "files_scanned": 2035,
   "parse_errors": [],
   "calls": [
     {
@@ -1611,54 +1611,6 @@
       ]
     },
     {
-      "file": "packages/core/daimon/core/output_delivery.py",
-      "line": 140,
-      "end": 140,
-      "scope": "download_output_file",
-      "category": "production",
-      "resource": "files.download",
-      "call": "anthropic_client.beta.files.download(file_id, betas=[_MA_BETA])",
-      "request_keys": [],
-      "response_access": [
-        "response.read"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/output_delivery.py",
-      "line": 116,
-      "end": 118,
-      "scope": "_poll_until_settled",
-      "category": "production",
-      "resource": "files.list",
-      "call": "anthropic_client.beta.files.list(scope_id=session_id, betas=[_MA_BETA], limit=1000)",
-      "request_keys": [],
-      "response_access": [
-        "page.data"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/output_delivery.py",
-      "line": 149,
-      "end": 149,
-      "scope": "delete_output_file",
-      "category": "production",
-      "resource": "files.delete",
-      "call": "anthropic_client.beta.files.delete(file_id, betas=[_MA_BETA])",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/pending_file_sweeper.py",
-      "line": 53,
-      "end": 53,
-      "scope": "sweep_pending_file_deletes",
-      "category": "production",
-      "resource": "files.delete",
-      "call": "anthropic_client.beta.files.delete(row.file_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
       "file": "packages/core/daimon/core/reader_agent.py",
       "line": 212,
       "end": 216,
@@ -1681,22 +1633,9 @@
       "response_access": []
     },
     {
-      "file": "packages/core/daimon/core/session_seal.py",
-      "line": 135,
-      "end": 135,
-      "scope": "inherited_seal_ids",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "anthropic.beta.sessions.retrieve(predecessor_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "predecessor.metadata"
-      ]
-    },
-    {
       "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 149,
-      "end": 149,
+      "line": 156,
+      "end": 156,
       "scope": "_find_env_resource_id",
       "category": "production",
       "resource": "sessions.resources.list",
@@ -1710,19 +1649,8 @@
     },
     {
       "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 254,
-      "end": 256,
-      "scope": "_rotate_repo_token",
-      "category": "production",
-      "resource": "sessions.resources.update",
-      "call": "anthropic.beta.sessions.resources.update(op.resource_id, session_id=session_id, authorization_token=token)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 199,
-      "end": 201,
+      "line": 209,
+      "end": 211,
       "scope": "_replace_env_file",
       "category": "production",
       "resource": "sessions.resources.add",
@@ -1731,28 +1659,6 @@
       "response_access": [
         "added.id"
       ]
-    },
-    {
-      "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 189,
-      "end": 189,
-      "scope": "_replace_env_file",
-      "category": "production",
-      "resource": "sessions.resources.delete",
-      "call": "anthropic.beta.sessions.resources.delete(resource_id, session_id=session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/session_update_ops.py",
-      "line": 326,
-      "end": 328,
-      "scope": "apply_update_ops",
-      "category": "production",
-      "resource": "sessions.update",
-      "call": "anthropic.beta.sessions.update(session_id, agent=_agent_update(tools, servers))",
-      "request_keys": [],
-      "response_access": []
     },
     {
       "file": "packages/core/daimon/core/setup_conversations.py",
@@ -5104,9 +5010,103 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 68,
+      "end": 70,
+      "scope": "test_output_requests_and_errors_match_the_original",
+      "category": "test",
+      "resource": "files.list",
+      "call": "legacy.beta.files.list(scope_id='sess_output', betas=[MA_BETA], limit=1000)",
+      "request_keys": [],
+      "response_access": [
+        "original.data",
+        "original.read"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 76,
+      "end": 76,
+      "scope": "test_output_requests_and_errors_match_the_original",
+      "category": "test",
+      "resource": "files.download",
+      "call": "legacy.beta.files.download(metadata.id, betas=[MA_BETA])",
+      "request_keys": [],
+      "response_access": [
+        "original.data",
+        "original.read"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 82,
+      "end": 82,
+      "scope": "test_output_requests_and_errors_match_the_original",
+      "category": "test",
+      "resource": "files.delete",
+      "call": "legacy.beta.files.delete(metadata.id, betas=[MA_BETA])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 87,
+      "end": 89,
+      "scope": "test_output_requests_and_errors_match_the_original",
+      "category": "test",
+      "resource": "files.list",
+      "call": "legacy.beta.files.list(scope_id='sess_output', betas=[MA_BETA], limit=1000)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 91,
+      "end": 91,
+      "scope": "test_output_requests_and_errors_match_the_original",
+      "category": "test",
+      "resource": "files.download",
+      "call": "legacy.beta.files.download(metadata.id, betas=[MA_BETA])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 93,
+      "end": 93,
+      "scope": "test_output_requests_and_errors_match_the_original",
+      "category": "test",
+      "resource": "files.delete",
+      "call": "legacy.beta.files.delete(metadata.id, betas=[MA_BETA])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_pending_file_port_requests.py",
+      "line": 45,
+      "end": 45,
+      "scope": "test_ttl_delete_matches_original_request_and_retains_failed_queue_row",
+      "category": "test",
+      "resource": "files.delete",
+      "call": "legacy.beta.files.delete('file_ttl')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_pending_file_port_requests.py",
+      "line": 53,
+      "end": 53,
+      "scope": "test_ttl_delete_matches_original_request_and_retains_failed_queue_row",
+      "category": "test",
+      "resource": "files.delete",
+      "call": "legacy.beta.files.delete('file_ttl')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 35,
-      "end": 35,
+      "line": 38,
+      "end": 38,
       "scope": "test_partial_sdk_response_keeps_original_parser_semantics",
       "category": "test",
       "resource": "sessions.create",
@@ -5118,8 +5118,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 206,
-      "end": 208,
+      "line": 209,
+      "end": 211,
       "scope": "test_repository_tokens_stay_opaque_until_the_single_wire_request",
       "category": "test",
       "resource": "sessions.create",
@@ -5129,8 +5129,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 107,
-      "end": 112,
+      "line": 110,
+      "end": 115,
       "scope": "test_session_create_matches_legacy_wire_request",
       "category": "test",
       "resource": "sessions.create",
@@ -5142,8 +5142,8 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 122,
-      "end": 128,
+      "line": 125,
+      "end": 131,
       "scope": "test_session_create_matches_legacy_wire_request",
       "category": "test",
       "resource": "sessions.create",
@@ -5152,6 +5152,17 @@
       "response_access": [
         "old.model_dump"
       ]
+    },
+    {
+      "file": "packages/core/tests/test_session_port_requests.py",
+      "line": 258,
+      "end": 260,
+      "scope": "test_repository_create_errors_keep_sdk_type_and_redact_every_token",
+      "category": "test",
+      "resource": "sessions.create",
+      "call": "legacy.beta.sessions.create(agent='ag_1', environment_id='env_1', resources=resources)",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/core/tests/test_session_preparation.py",
@@ -5319,6 +5330,39 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_session_update_port_requests.py",
+      "line": 45,
+      "end": 45,
+      "scope": "test_update_codec_preserves_native_request_bytes",
+      "category": "test",
+      "resource": "sessions.update",
+      "call": "legacy.beta.sessions.update('sess_1', agent=agent)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_session_update_port_requests.py",
+      "line": 97,
+      "end": 97,
+      "scope": "test_resource_delete_codec_matches_legacy_request",
+      "category": "test",
+      "resource": "sessions.resources.delete",
+      "call": "legacy.beta.sessions.resources.delete('resource_1', session_id='sess_1')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_session_update_port_requests.py",
+      "line": 125,
+      "end": 127,
+      "scope": "test_repository_rotation_matches_legacy_request",
+      "category": "test",
+      "resource": "sessions.resources.update",
+      "call": "legacy.beta.sessions.resources.update('repo_1', session_id='sess_1', authorization_token='dummy-rotation-token')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/core/tests/test_workspace_transfer.py",
       "line": 112,
       "end": 112,
@@ -5387,6 +5431,39 @@
       "category": "test",
       "resource": "sessions.events.stream_scripts.append",
       "call": "fa.beta.sessions.events.stream_scripts.append([YieldEvent(make_status_idle(event_id='ack', stop_reason=make_end_turn()))])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/outputs.py",
+      "line": 37,
+      "end": 37,
+      "scope": "list_outputs",
+      "category": "production",
+      "resource": "files.list",
+      "call": "self._client.beta.files.list(scope_id=session.id, betas=[_MA_BETA], limit=1000)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/outputs.py",
+      "line": 44,
+      "end": 44,
+      "scope": "read_output",
+      "category": "production",
+      "resource": "files.download",
+      "call": "self._client.beta.files.download(ref.id, betas=[_MA_BETA])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/outputs.py",
+      "line": 50,
+      "end": 50,
+      "scope": "delete_output",
+      "category": "production",
+      "resource": "files.delete",
+      "call": "self._client.beta.files.delete(ref.id, betas=[_MA_BETA])",
       "request_keys": [],
       "response_access": []
     },
@@ -6003,8 +6080,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 370,
-      "end": 370,
+      "line": 384,
+      "end": 384,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.list",
@@ -6014,8 +6091,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 355,
-      "end": 355,
+      "line": 369,
+      "end": 369,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -6025,8 +6102,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 320,
-      "end": 320,
+      "line": 334,
+      "end": 334,
       "scope": "send",
       "category": "production",
       "resource": "sessions.create",
@@ -6036,8 +6113,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 327,
-      "end": 327,
+      "line": 341,
+      "end": 341,
       "scope": "create",
       "category": "production",
       "resource": "sessions.create",
@@ -6047,12 +6124,23 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 334,
-      "end": 334,
+      "line": 348,
+      "end": 348,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
       "call": "self._client.beta.sessions.retrieve(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 478,
+      "end": 480,
+      "scope": "apply_update",
+      "category": "production",
+      "resource": "sessions.update",
+      "call": "self._client.beta.sessions.update(plan.session.id, **cast(SessionUpdateParams, dict(extension.value)))",
       "request_keys": [],
       "response_access": []
     },
@@ -6260,6 +6348,17 @@
       "response_access": [
         "first.iter_pages"
       ]
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_session_updates.py",
+      "line": 91,
+      "end": 91,
+      "scope": "test_plan_is_pure_and_apply_matches_legacy_bytes",
+      "category": "test",
+      "resource": "sessions.update",
+      "call": "legacy.beta.sessions.update('sess_1', **cast(SessionUpdateParams, payload))",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/mux/tests/test_anthropic_session_walk.py",
@@ -12116,6 +12215,33 @@
       "category": "production"
     },
     {
+      "file": "packages/core/daimon/core/output_ports_compat.py",
+      "line": 5,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/output_ports_compat.py",
+      "line": 6,
+      "module": "anthropic._models",
+      "names": [
+        "construct_type_unchecked"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/output_ports_compat.py",
+      "line": 7,
+      "module": "anthropic.types.beta",
+      "names": [
+        "FileMetadata"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/core/daimon/core/participation_gates.py",
       "line": 22,
       "module": "anthropic",
@@ -12126,7 +12252,7 @@
     },
     {
       "file": "packages/core/daimon/core/pending_file_sweeper.py",
-      "line": 23,
+      "line": 24,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -12246,6 +12372,15 @@
     {
       "file": "packages/core/daimon/core/session_ports_compat.py",
       "line": 17,
+      "module": "anthropic.types.beta.beta_managed_agents_session_agent_update_param",
+      "names": [
+        "BetaManagedAgentsSessionAgentUpdateParam"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/session_ports_compat.py",
+      "line": 20,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Agent",
@@ -14468,6 +14603,34 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 7,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_output_port_requests.py",
+      "line": 8,
+      "module": "anthropic.types.beta",
+      "names": [
+        "FileMetadata"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_pending_file_port_requests.py",
+      "line": 10,
+      "module": "anthropic",
+      "names": [
+        "InternalServerError",
+        "NotFoundError"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_pending_file_sweeper.py",
       "line": 10,
       "module": "anthropic",
@@ -14534,9 +14697,10 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 12,
+      "line": 14,
       "module": "anthropic",
       "names": [
+        "APIStatusError",
         "AsyncAnthropic",
         "omit"
       ],
@@ -14544,7 +14708,7 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 13,
+      "line": 15,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSessionAgent"
@@ -14553,7 +14717,7 @@
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
-      "line": 172,
+      "line": 175,
       "module": "anthropic.types.beta.session_create_params",
       "names": [
         "Resource"
@@ -14776,6 +14940,24 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_file_resource",
       "names": [
         "BetaManagedAgentsFileResource"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_session_update_port_requests.py",
+      "line": 7,
+      "module": "anthropic",
+      "names": [
+        "BadRequestError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_session_update_port_requests.py",
+      "line": 8,
+      "module": "anthropic.types.beta.beta_managed_agents_session_agent_update_param",
+      "names": [
+        "BetaManagedAgentsSessionAgentUpdateParam"
       ],
       "category": "test"
     },
@@ -16097,6 +16279,15 @@
       "category": "production"
     },
     {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 12,
+      "module": "anthropic.types.beta.session_update_params",
+      "names": [
+        "SessionUpdateParams"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
       "line": 9,
       "module": "anthropic",
@@ -16173,6 +16364,24 @@
         "BetaManagedAgentsAgentMCPToolResultEvent",
         "BetaManagedAgentsAgentToolResultEvent",
         "BetaManagedAgentsUserCustomToolResultEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_session_updates.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "BadRequestError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/mux/tests/test_anthropic_session_updates.py",
+      "line": 10,
+      "module": "anthropic.types.beta.session_update_params",
+      "names": [
+        "SessionUpdateParams"
       ],
       "category": "test"
     },

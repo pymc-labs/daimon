@@ -609,3 +609,9 @@ Mount deletion and repository token rotation use session administration. Token
 material is resolved and redacted at the existing driver boundary. Secret file
 upload and inherited-seal reads receive the existing tenant/account context.
 An unreadable predecessor remains conservatively sealed to the successor thread.
+
+Session output delivery uses `anthropic.outputs@1`: one listing page per poll,
+buffered download and deletion retain the managed-agents beta. Standalone bundle
+uploads and the workspace-wide TTL queue retain the default Files API headers.
+The host keeps settle timing, exclusions, size limits, consent deferral and
+post-before-delete ordering. No additional provider requests are introduced.
