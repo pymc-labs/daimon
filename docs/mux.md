@@ -559,6 +559,26 @@ transport. It verifies complete legacy-row snapshots, exact Decimal amounts for
 by restart. The hook supplies database facts rather than a verdict. Missing host
 evidence leaves C12 pending; the generic reference transport does not certify a
 host ledger. No provider request is made by the accounting bridge itself.
+Headless session assembly retrieves its agent and environment through the
+existing resource ports, in the same order, and decodes their native snapshots
+at the M0 host edge. Tenant callers use their existing tenant/account context
+and authorized IDs; tenantless callers retain the explicitly tracked
+`headless_runner:run_turn:tenantless` host authorization seam until they supply
+that context. No provider lookups or retry policy are added.
+
+The Anthropic usage port reads model-request spans with the shared observation
+converter. Its typed walk keeps the SDK async paginator, ascending order and
+model-request filter, including early closure and errors on later pages. Scope
+and session-reference checks run before requests; the optional model identity
+comes from the caller's existing session snapshot, without another lookup.
+
+The usage factory registers both the core usage port and `anthropic.usage_walk`
+version 1. Backfill validates a session's tenant stamp against the deployment's
+known tenants before granting that session to the model-span reader. The host
+restores the existing SDK exception type at its M0 boundary.
+The complete billing inventory uses `anthropic.session_walk@1` with an explicit
+workspace scope and the original argument-free native session list. The host
+retains tenant validation, incremental cutoffs and billing-exempt handling.
 
 ### Gemini inline reuse
 

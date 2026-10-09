@@ -111,6 +111,14 @@ counts include cache stages; the host projects them into its existing billing
 and telemetry columns. Temporary host compatibility entrypoints accept existing
 SDK callers while turn and adapter ports migrate.
 
+The Anthropic usage implementation supplies scoped page reads and a typed
+`UsageWalk` for model-request spans. Both use the shared pure converter and
+preserve the SDK paginator, native event time, meter and revision 1. Model
+identity may come from an existing session snapshot without a provider lookup.
+Billing reconciliation combines this span walk with `anthropic.session_walk@1`
+under an explicit workspace scope. Tenant, watermark and billing-exempt policy
+remain in the host, including its handling of unknown native session statuses.
+
 Gemini's explicitly constructed `GeminiManagedAgents` driver runs the non-core
 `gemini.inline_reuse` profile. The host injects transactional driver storage,
 a StateStore and a private transport; importing or constructing it makes no

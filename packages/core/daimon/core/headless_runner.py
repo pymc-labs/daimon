@@ -34,7 +34,7 @@ the `daimon_tenant`/`daimon_account` metadata stamp that
 `daimon.core.usage_sweep.sweep_headless_usage` requires to bill a session.
 `run_turn` keeps its string `agent_id`/`environment_id` signature (the
 scheduler only has ids) and bridges to `create_session`'s SDK-object
-signature via `beta.agents.retrieve` / `beta.environments.retrieve`
+signature via neutral agent/environment retrieval ports and the M0 SDK codecs
 (mirrors `daimon.adapters.cli.sessions_bootstrap`).
 
 Per `guideline:architecture` "Error propagation" the runner does not
@@ -60,6 +60,8 @@ from cryptography.fernet import MultiFernet
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.github_app_session import close_headless_app_session
+from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
+from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
@@ -75,6 +77,7 @@ from daimon.core.turn.posture import (
     ExemptReason,
 )
 from daimon.core.turn.state import TurnState, extract_final_response
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -235,7 +238,7 @@ async def run_turn_impl(
 
     Flow:
 
-    1. ``beta.agents.retrieve(agent_id)`` / ``beta.environments.retrieve(environment_id)``
+    1. Neutral agent/environment retrieval ports
        resolve the SDK objects ``create_session`` needs (it takes objects, not
        ids — the scheduler only has ids after `resolve_agent`/`resolve_environment`).
     2. ``create_session(...)`` (from ``daimon.core.sessions``) opens a fresh MA session.
@@ -311,8 +314,34 @@ async def run_turn_impl(
     )
 
     async def _assemble_session() -> BetaManagedAgentsSession:
-        agent = await anthropic.beta.agents.retrieve(agent_id)
-        environment = await anthropic.beta.environments.retrieve(environment_id)
+        scope = (
+            resource_scope(
+                tenant_id=str(tenant_id),
+                account_id=str(account_id) if account_id is not None else "service",
+                authorization_id="headless-session-assembly",
+            )
+            if tenant_id is not None
+            else Scope.legacy_host_authorized(call_site="headless_runner:run_turn:tenantless")
+        )
+        backend = managed_agents(
+            anthropic,
+            scope=scope,
+            resources=frozenset({("agent", agent_id), ("environment", environment_id)}),
+        )
+        agent = sdk_agent(
+            await legacy_call(
+                backend.agents.retrieve(
+                    scope, resource_ref(backend, "agent", agent_id, scope=scope)
+                )
+            )
+        )
+        environment = sdk_environment(
+            await legacy_call(
+                backend.environments.retrieve(
+                    scope, resource_ref(backend, "environment", environment_id, scope=scope)
+                )
+            )
+        )
         return await create_session(
             anthropic,
             agent=agent,

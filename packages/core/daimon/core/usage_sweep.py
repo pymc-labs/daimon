@@ -41,6 +41,7 @@ failure must not kill the process.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -54,21 +55,24 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
+from daimon.core.mux_compat import legacy_iter
+from daimon.core.pricing import MODEL_PRICING, cost_of, usage_tokens
+from daimon.core.session_ports_compat import sdk_session
 from daimon.core.stores import usage_events
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.tenants import list_all_tenant_ids
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
+from mux.contracts.usage import UsageObservation
+from mux.drivers.anthropic.sessions_lifecycle import SessionWalk
+from mux.drivers.anthropic.usage import UsageWalk
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
 _OVERLAP = timedelta(minutes=15)
 _FULL_PASS_INTERVAL = timedelta(hours=1)
-# Filtered server-side: a session's other events (messages, tool results) are
-# most of its history and the sweep never reads them.
-_SWEPT_EVENT_TYPES = ["span.model_request_end"]
 
 
 @dataclass
@@ -127,7 +131,16 @@ async def sweep_headless_usage(
     exempt_debit = Decimal("0")
     async with sessionmaker() as s:
         known_tenants = await list_all_tenant_ids(s)
-    async for session in client.beta.sessions.list():
+    inventory_scope = platform_scope(
+        "workspace-wide billing reconciliation of stamped sessions",
+        authorization_id="usage_sweep:session_inventory",
+    )
+    inventory_backend = managed_agents(client, scope=inventory_scope)
+    sessions = inventory_backend.extension(
+        SessionWalk, namespace="anthropic.session_walk", version=1
+    )
+    async for record in legacy_iter(sessions.walk(inventory_scope)):
+        session = sdk_session(record)
         tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
         if tenant_raw is None:
             continue
@@ -174,10 +187,10 @@ async def sweep_headless_usage(
                 s, managed_session_id=session.id
             )
 
-        async for event in client.beta.sessions.events.list(
-            session.id, order="asc", types=_SWEPT_EVENT_TYPES
+        async for observation in _observations(
+            client, session, tenant_id=tenant_id, exclude_ids=frozenset(recorded_ids)
         ):
-            if event.type != "span.model_request_end" or event.id in recorded_ids:
+            if observation.id in recorded_ids:
                 continue
             await record_turn_usage(
                 sessionmaker=sessionmaker,
@@ -185,7 +198,7 @@ async def sweep_headless_usage(
                 platform_user_id=platform_user_id,
                 managed_session_id=session.id,
                 model_id=model_id,
-                event=event,
+                observation=observation,
                 markup=markup,
                 pricing=pricing,
                 channel_id=channel_id,
@@ -232,18 +245,16 @@ async def _log_absorbed_usage(
     cache_read_input_tokens = 0
     cost = Decimal("0")
     debit = Decimal("0")
-    async for event in client.beta.sessions.events.list(
-        session.id, order="asc", types=_SWEPT_EVENT_TYPES
-    ):
-        if event.type != "span.model_request_end":
-            continue
-        usage = event.model_usage
+    async for observation in _observations(client, session, tenant_id=tenant_id):
+        usage = usage_tokens(observation)
+        if usage is None:
+            raise ValueError("usage totals require all four reported token stages")
         model_calls += 1
         input_tokens += usage.input_tokens
         output_tokens += usage.output_tokens
         cache_creation_input_tokens += usage.cache_creation_input_tokens
         cache_read_input_tokens += usage.cache_read_input_tokens
-        event_cost = cost_of(usage, pricing)
+        event_cost = cost_of(observation, pricing)
         cost += debit_amount(event_cost, markup=Decimal("1"))
         debit += debit_amount(event_cost, markup=markup)
     log.info(
@@ -302,3 +313,27 @@ async def _resolve_platform_user_id(
         )
         return None
     return identity.platform_user_id
+
+
+async def _observations(
+    client: AsyncAnthropic,
+    session: BetaManagedAgentsSession,
+    *,
+    tenant_id: uuid.UUID,
+    exclude_ids: frozenset[str] = frozenset(),
+) -> AsyncIterator[UsageObservation]:
+    # The caller validated the session stamp against tenants owned by this DB.
+    scope = resource_scope(
+        tenant_id=str(tenant_id), authorization_id="usage_sweep:validated_session"
+    )
+    backend = managed_agents(client, scope=scope, resources=frozenset({("session", session.id)}))
+    usage = backend.extension(UsageWalk, namespace="anthropic.usage_walk", version=1)
+    async for observation in legacy_iter(
+        usage.model_requests(
+            scope,
+            resource_ref(backend, "session", session.id, scope=scope),
+            model_id=session.agent.model.id,
+            exclude_ids=exclude_ids,
+        )
+    ):
+        yield observation
