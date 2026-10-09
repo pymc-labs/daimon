@@ -234,6 +234,8 @@ async def handle_direct_message(
     message_id = str(event.get("ts") or "")
     if not channel_id or not message_id:
         return
+    thread_ts = event.get("thread_ts")
+    thread_kwargs = {"thread_ts": thread_ts} if thread_ts else {}
     route_key = f"{team_id}:{channel_id}"
     client: AsyncWebClient | None = None
     try:
@@ -300,6 +302,7 @@ async def handle_direct_message(
                     text=answer[offset : offset + 3500],
                     parse="none",
                     unfurl_links=False,
+                    **thread_kwargs,
                 )
     except _ERRORS as exc:
         log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
@@ -312,4 +315,5 @@ async def handle_direct_message(
                         "Couldn't complete this private conversation. Please retry.",
                         settings=runtime.settings,
                     ),
+                    **thread_kwargs,
                 )
