@@ -267,14 +267,15 @@ async def balance_footer(
     budget_channel_id: str | None,
     now: datetime,
 ) -> str | None:
-    """A turn footer's money line: what an active channel budget has left, else the
-    prepaid balance; None for an operator-funded tenant outside a budgeted channel."""
+    """A turn footer's money: what an active channel budget has left, else the prepaid
+    balance, as ``$8.10 left``; None for an operator-funded tenant outside a budgeted
+    channel."""
     if budget_channel_id is not None:
         status = await get_channel_budget_status(
             session, tenant_id=tenant_id, platform=platform, channel_id=budget_channel_id, now=now
         )
         if status is not None and status.is_active:
-            return f"${status.remaining_usd:.2f} of channel budget left"
+            return f"${status.remaining_usd:.2f} left"
     balance = await get_prepaid_balance(session, tenant_id=tenant_id)
     return None if balance is None else f"${balance:.2f} left"
 

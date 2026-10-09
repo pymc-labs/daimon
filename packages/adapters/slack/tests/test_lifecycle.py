@@ -12,7 +12,7 @@ Task 1 (debounce / registry / usage):
     (debounce elapsed).
   - The first flush's registration rides post_initial(); a later
     render-tick update does not re-register.
-  - _apply_usage folds usage_totals into merged usage_in / usage_out / cost_str.
+  - _apply_usage prices usage_totals into cost_str.
 
 on_render error propagation:
   - A failing chat.update surfaces out of on_render unswallowed -- the
@@ -79,6 +79,7 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
@@ -162,7 +163,7 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     )
     await lc.post_initial()
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
-    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith("Balance: $12.50 left")
+    assert _block_text(_last_update_blocks(fake_slack_web_client)).endswith(f"{GAP}$12.50 left")
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -715,7 +716,7 @@ async def test_status_ts_is_none_before_anything_is_posted(fake_slack_web_client
 
 
 async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> None:
-    """_apply_usage folds usage_totals (merged input + output + cost_str) onto lifecycle state."""
+    """_apply_usage prices usage_totals onto the lifecycle state's cost_str."""
     lc, *_ = _make_lifecycle(fake_slack_web_client, model_id="claude-sonnet-4-6")
     state = dataclasses.replace(
         TurnState(),
@@ -728,14 +729,6 @@ async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> Non
     )
 
     lc._apply_usage(state)  # pyright: ignore[reportPrivateUsage]  # unit-testing internal helper
-
-    # merged_in = 1000 + 500 + 2000 = 3500
-    assert lc._state.usage_in == 3500, (  # pyright: ignore[reportPrivateUsage]
-        "usage_in must be the merged input (input + cache_creation + cache_read)"
-    )
-    assert lc._state.usage_out == 300, (  # pyright: ignore[reportPrivateUsage]
-        "usage_out must equal output_tokens"
-    )
 
     expected_cost = format_cost(
         cost_of(
@@ -1822,9 +1815,9 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.post_initial()
         await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
         footers[channel] = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert footers["C1"].endswith("Balance: $3.75 of channel budget left"), "the budget's remainder"
+    assert footers["C1"].endswith(f"{GAP}$3.75 left"), "the budget's remainder"
     for channel in ("C2", "C3", None):
-        assert footers[channel].endswith("Balance: $11.25 left"), (
+        assert footers[channel].endswith(f"{GAP}$11.25 left"), (
             f"{channel}: an inactive or missing budget shows the tenant balance"
         )
 

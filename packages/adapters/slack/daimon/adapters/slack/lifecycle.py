@@ -400,12 +400,12 @@ class SlackTurnLifecycle:
             self._last_flush = now
 
     def _apply_usage(self, state: TurnState) -> None:
-        """Fold accumulated token totals + priced cost onto the Block Kit state.
+        """Price accumulated token totals onto the Block Kit state.
 
         Reconstructs a per-turn BetaManagedAgentsSpanModelUsage from the four
         cache-split totals and prices it through cost_of, so the displayed cost
         matches the billing ledger to the cent. An unpriced model yields None
-        cost — Details omits the cost line.
+        cost and the summary line omits it.
         """
         t = state.usage_totals
         usage = BetaManagedAgentsSpanModelUsage(
@@ -416,13 +416,7 @@ class SlackTurnLifecycle:
             speed="standard",
         )
         cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
-        merged_in = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens
-        self._state = dataclasses.replace(
-            self._state,
-            usage_in=merged_in,
-            usage_out=t.output_tokens,
-            cost_str=format_cost(cost),
-        )
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
     async def _post_or_update(self, blocks: list[dict[str, Any]], text: str) -> None:
         """Post the status message the first time, or update it in place after.

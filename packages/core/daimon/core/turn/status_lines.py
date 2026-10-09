@@ -17,6 +17,8 @@ from daimon.core.turn.state import ContentBlock, ToolUseBlock
 MAX_TOOL_LINES = 6
 DRAFT_MAX_CHARS = 300
 _LABEL_MAX_CHARS = 48
+# Em spaces: chat clients collapse runs of plain spaces but keep these.
+SUMMARY_GAP = "\u2003\u2003"
 
 _DONE_ICON = "✔️"
 _FAILED_ICON = "🚫"
@@ -67,6 +69,23 @@ def format_duration(seconds: float) -> str:
         return f"{minutes}m {secs}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h {minutes}m"
+
+
+def format_summary(
+    *, agent_name: str | None, elapsed_seconds: float, cost: str | None, left: str | None
+) -> str:
+    """The finished card's one line: ``Ada  12s  $0.042 used  $41.20 left``.
+
+    Fields are set apart by space alone, never a dot or a bar; a missing one
+    drops out with its gap.
+    """
+    fields = [
+        agent_name or None,
+        format_duration(elapsed_seconds),
+        f"{cost} used" if cost is not None else None,
+        left,
+    ]
+    return SUMMARY_GAP.join(field for field in fields if field)
 
 
 def format_headline(
