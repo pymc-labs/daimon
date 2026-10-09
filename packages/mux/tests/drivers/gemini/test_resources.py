@@ -277,6 +277,10 @@ async def test_output_snapshot_pagination_is_stable_and_download_revalidates_byt
     transport.snapshots["e1"] = snapshot({"a.bin": data, "nested/b.txt": b"B"})
     first = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest(limit=1))
     assert first.has_more and first.next_cursor is not None
+    filtered = await ma.artifacts.list(
+        SCOPE, s.ref, page=PageRequest(limit=1), turn_id=first.data[0].turn_id
+    )
+    assert filtered.next_cursor != first.next_cursor
     ma = GeminiManagedAgents(
         transport, storage=storage, state_store=state.restart(), account_scope_id="project"
     )

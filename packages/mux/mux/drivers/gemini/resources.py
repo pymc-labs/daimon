@@ -316,7 +316,12 @@ class GeminiArtifacts(Base):
                     )
                     records.artifacts.setdefault(id_, ArtifactRecord(artifact, sha))
                     ids.append(id_)
-                query: Object = {"session": session.id, "ids": [id_ for id_ in ids], "order": order}
+                query: Object = {
+                    "session": session.id,
+                    "turn_id": turn_id,
+                    "ids": [id_ for id_ in ids],
+                    "order": order,
+                }
                 snapshot = request_digest(query)
                 records.artifact_pages[snapshot] = session.id, turn_id, order, tuple(ids)
                 start = 0
