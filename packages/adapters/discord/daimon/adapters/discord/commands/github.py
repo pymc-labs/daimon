@@ -1,5 +1,6 @@
 """Private /github connect link for one selected agent."""
 
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anthropic
@@ -12,6 +13,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -147,6 +149,13 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     agent_id=agent_id,
                     agent_name=target_name,
                     origin_platform="discord",
+                    encrypted_origin_followup=encrypt_token(
+                        build_multifernet(
+                            tuple(key.get_secret_value() for key in runtime.settings.crypto.keys)
+                        ),
+                        f"{interaction.application_id}:{interaction.token}",
+                    ),
+                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 )
                 await append_event(
                     session,

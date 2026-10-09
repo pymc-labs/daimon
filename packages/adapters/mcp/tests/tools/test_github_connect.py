@@ -107,22 +107,33 @@ async def test_member_request_is_recorded_and_admin_link_goes_only_to_private_de
         is_admin=True,
     )
     result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, admin, origin_context_id=str(uuid.uuid4())
+        runtime,
+        admin,
+        origin_context_id=str(uuid.uuid4()),
+        requested_work="Review the issue after GitHub is connected",
     )
     assert result.status == "sent" and "http" not in result.message
     delivery.assert_awaited_once()
+    assert delivery.await_args is not None
     content = delivery.await_args.kwargs["content"]
     assert content == "Connect GitHub for ResearchBot."
     connect_url = delivery.await_args.kwargs["connect_url"]
     assert connect_url.startswith("https://mcp.test/oauth/github/connect/")
     assert connect_url not in result.model_dump_json()
     assert delivery.await_args.kwargs["recipient_id"] == "123"
+    async with committing_sessionmaker() as session:
+        invitation = await get_invitation(session, digest(connect_url.rsplit("/", 1)[1]))
+        assert invitation is not None
+        assert invitation.requested_work == "Review the issue after GitHub is connected"
+        assert invitation.origin_thread_id == "thread"
+        assert invitation.origin_ma_agent_id == "agent_research"
     delivery.side_effect = ToolError("DM blocked")
     blocked = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, admin, origin_context_id=str(uuid.uuid4())
     )
     assert blocked.status == "dm_blocked"
     assert blocked.message == "I can't DM you. Run /github connect here."
+    assert delivery.await_args is not None
     blocked_url = delivery.await_args.kwargs["connect_url"]
     async with committing_sessionmaker() as session:
         assert await get_invitation(session, digest(blocked_url.rsplit("/", 1)[1])) is None

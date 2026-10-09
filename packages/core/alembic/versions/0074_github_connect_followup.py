@@ -19,9 +19,18 @@ def upgrade() -> None:
         "origin_platform",
         "origin_parent_channel_id",
         "origin_thread_id",
+        "origin_ma_agent_id",
+        "requested_work",
     ):
         op.add_column("github_connect_invitations", sa.Column(name, sa.Text()))
     op.add_column("github_connect_invitations", sa.Column("connected_repos", JSONB()))
+    op.add_column(
+        "github_connect_invitations", sa.Column("encrypted_origin_followup", sa.LargeBinary())
+    )
+    op.add_column(
+        "github_connect_invitations",
+        sa.Column("origin_followup_expires_at", sa.DateTime(timezone=True)),
+    )
     for name in ("notice_claimed_at", "notice_delivered_at"):
         op.add_column("github_connect_invitations", sa.Column(name, sa.DateTime(timezone=True)))
 
@@ -30,7 +39,11 @@ def downgrade() -> None:
     for name in (
         "notice_delivered_at",
         "notice_claimed_at",
+        "origin_followup_expires_at",
+        "encrypted_origin_followup",
         "connected_repos",
+        "requested_work",
+        "origin_ma_agent_id",
         "origin_thread_id",
         "origin_parent_channel_id",
         "origin_platform",

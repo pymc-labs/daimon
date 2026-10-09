@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Final, Literal
 
+import aiohttp
 import anthropic as _anthropic
 import sentry_sdk
 import structlog
@@ -79,6 +80,7 @@ from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.github_connect_delivery import run_connect_notice_poller
+from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_new_repo_delivery import run_new_repo_notice_poller
 from daimon.core.github_removal_delivery import run_removal_notice_poller
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -2244,17 +2246,40 @@ class DaimonBot(commands.Bot):
         if tenant is None:
             return True
         try:
-            if notice.in_thread and notice.origin_thread_id:
-                destination = await self._channel_by_id(int(notice.origin_thread_id))
-                if not isinstance(destination, discord.abc.Messageable):
-                    return True
-                await destination.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
-            else:
-                destination = await self.open_member_dm(
-                    int(tenant.external_id), int(notice.requester_platform_user_id)
+            if (
+                notice.encrypted_origin_followup is not None
+                and notice.origin_followup_expires_at is not None
+                and datetime.now(UTC) < notice.origin_followup_expires_at
+            ):
+                credentials = build_multifernet(
+                    tuple(key.get_secret_value() for key in self.runtime.settings.crypto.keys)
                 )
-                await destination.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
+                application_id, interaction_token = decrypt_token(
+                    credentials, notice.encrypted_origin_followup
+                ).split(":", 1)
+                async with (
+                    aiohttp.ClientSession() as client,
+                    client.post(
+                        f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}",
+                        json={
+                            "content": notice.text,
+                            "flags": 64,
+                            "allowed_mentions": {"parse": []},
+                        },
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response,
+                ):
+                    if response.status < 300:
+                        return True
+                    if response.status >= 500:
+                        return False
+            recipient = await self.open_member_dm(
+                int(tenant.external_id), int(notice.requester_platform_user_id)
+            )
+            await recipient.send(notice.text, allowed_mentions=discord.AllowedMentions.none())
             return True
+        except aiohttp.ClientError:
+            return False
         except (discord.NotFound, discord.Forbidden, ValueError, LookupError):
             return True
         except discord.HTTPException:

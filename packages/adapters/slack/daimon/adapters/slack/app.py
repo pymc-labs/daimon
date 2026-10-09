@@ -505,21 +505,37 @@ class SlackApp:
         if client is None:
             return False
         try:
-            if notice.in_thread and notice.origin_parent_channel_id:
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=notice.origin_parent_channel_id,
-                    thread_ts=notice.origin_thread_id,
-                    text=notice.text,
+            if (
+                notice.encrypted_origin_followup is not None
+                and notice.origin_followup_expires_at is not None
+                and datetime.now(UTC) < notice.origin_followup_expires_at
+            ):
+                credentials = build_multifernet(
+                    tuple(key.get_secret_value() for key in self.runtime.settings.crypto.keys)
                 )
-            else:
-                opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
-                    users=notice.requester_platform_user_id
-                )
-                channel_data = cast(dict[str, str], opened["channel"])
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel_data["id"], text=notice.text
-                )
+                response_url = decrypt_token(credentials, notice.encrypted_origin_followup)
+                async with (
+                    aiohttp.ClientSession() as followup_client,
+                    followup_client.post(
+                        response_url,
+                        json={"text": notice.text, "response_type": "ephemeral"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response,
+                ):
+                    if response.status < 300 and await response.text() == "ok":
+                        return True
+                    if response.status >= 500:
+                        return False
+            opened = await client.conversations_open(  # pyright: ignore[reportUnknownMemberType]
+                users=notice.requester_platform_user_id
+            )
+            channel_data = cast(dict[str, str], opened["channel"])
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_data["id"], text=notice.text
+            )
             return True
+        except aiohttp.ClientError:
+            return False
         except SlackApiError as error:
             return cast(str, error.response["error"]) in ("user_not_found", "account_inactive")
 

@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.fernet import Fernet
 from daimon.adapters.discord.commands import github as github_command
+from pydantic import SecretStr
 
 
 class _Sessions:
@@ -34,12 +36,15 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
                 client_id="client",
                 client_secret="secret",
             ),
+            crypto=SimpleNamespace(keys=[SecretStr(Fernet.generate_key().decode())]),
         ),
         anthropic=object(),
         sessionmaker=_Sessions(),
     )
     interaction = AsyncMock()
     interaction.user.id = 123
+    interaction.application_id = 456
+    interaction.token = "interaction-token"
     interaction.client.runtime = runtime
     monkeypatch.setattr(github_command, "is_guild_admin", lambda _interaction: True)  # pyright: ignore[reportUnknownArgumentType,reportUnknownLambdaType]
     monkeypatch.setattr(
@@ -74,3 +79,4 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     assert button.url == "https://mcp.test/oauth/github/connect/private-token"
     assert audit.await_args.kwargs["reason"] == "admin link minted"
     assert audit.await_args.kwargs["platform"] == "discord"
+    assert github_command.mint_invitation.await_args.kwargs["encrypted_origin_followup"]

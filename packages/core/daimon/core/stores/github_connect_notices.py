@@ -18,39 +18,17 @@ class ConnectNotice(BaseModel):
     tenant_id: uuid.UUID
     requester_platform_user_id: str
     agent_name: str | None
-    origin_parent_channel_id: str | None
-    origin_thread_id: str | None
+    encrypted_origin_followup: bytes | None = None
+    origin_followup_expires_at: datetime | None = None
     connected_repos: list[dict[str, str]]
     notice_claimed_at: datetime
 
     @property
-    def access_label(self) -> str:
-        access = {repo["access"] for repo in self.connected_repos}
-        return "Read and write" if access == {"write"} else "Read only"
-
-    @property
-    def in_thread(self) -> bool:
-        channel = self.origin_parent_channel_id
-        return (
-            channel is not None
-            and self.origin_thread_id is not None
-            and not channel.startswith("D")
-        )
-
-    @property
     def text(self) -> str:
-        if self.in_thread:
-            return (
-                f"GitHub connected: {len(self.connected_repos)} repo(s), "
-                f"{self.access_label}. What should I do first?"
-            )
         names = ", ".join(repo["name"] for repo in self.connected_repos)
-        target = self.agent_name or "your workspace"
-        mention = self.agent_name or "an agent"
-        return (
-            f"GitHub connected for {target}: {names}, {self.access_label}. "
-            f"Mention {mention} in a channel to start."
-        )
+        access = {repo["access"] for repo in self.connected_repos}
+        level = "Read and write" if access == {"write"} else "Read only"
+        return f"Connected {names}, {level}. Ready."
 
 
 async def claim_next(
@@ -66,6 +44,7 @@ async def claim_next(
             GitHubConnectInvitation.activation_status.is_distinct_from("update_pending"),
             GitHubConnectInvitation.connected_repos.is_not(None),
             GitHubConnectInvitation.notice_delivered_at.is_(None),
+            GitHubConnectInvitation.requested_work.is_(None),
             or_(
                 GitHubConnectInvitation.notice_claimed_at.is_(None),
                 GitHubConnectInvitation.notice_claimed_at < now - timedelta(minutes=10),
