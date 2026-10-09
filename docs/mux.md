@@ -900,3 +900,12 @@ keys pass through in M0, without a second replay cache. Bundle existence probes
 use the Artifacts native metadata projection so unused reply fields remain
 optional. Offline ScriptedTransport proofs compare raw request body bytes and
 protocol headers, as well as SDK projections and call order.
+Gemini probe preparation uses `python -m mux.drivers.gemini.live_cert`, with an
+explicit model and empty output directory. Its default MockTransport command
+uses a private ledger and no real key. An authorized `--live` command additionally
+requires the pinned mode-0600 key file and reviewed model prices in the shared
+N9 ledger configuration ($30 Gemini allocation, $24 admission stop). It records
+a bounded single-POST SDK smoke and the separate offline C-matrix, preserving
+typed PENDING and unknown spend. Neither key presence nor offline passes grant a
+live certificate. See the driver's `LIVE-CERT.md` for commands and provider-budget
+limitations.
