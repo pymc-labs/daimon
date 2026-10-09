@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -11,7 +12,7 @@ from typing import cast
 import pytest
 
 from mux.conformance.fixtures import FIXTURES
-from mux.conformance.reference import ReferenceDriver, ReferenceEvents, Transport, create
+from mux.conformance.reference import NOW, ReferenceDriver, ReferenceEvents, Transport, create
 from mux.conformance.runner import Adapter, Registry, run
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.errors import BindingConflict
@@ -21,11 +22,12 @@ from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import SendReceipt
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
+from mux.state.journal import JournalAppend, JournalEntry
 from mux.state.lease import Lease, Slot
 from mux.state.memory import CrashPoint, MemoryStateData, MemoryStateStore
-from mux.state.operations import OperationRecord
-from mux.state.store import binding_slot
-from mux.state.usage_ledger import OutboxRow
+from mux.state.operations import Begun, OperationRecord, claim, operation_scope
+from mux.state.store import StateStore, binding_slot
+from mux.state.usage_ledger import OutboxRow, apply_observation
 
 
 class RestartableVariant(MemoryStateStore):
@@ -88,6 +90,60 @@ class QueuedAcknowledgement(ReferenceEvents):
         )
 
 
+class ImmediateProcessed(ReferenceEvents):
+    async def _record_acknowledgement(
+        self, store: StateStore, scope: Scope, key: str, session: ResourceRef, fence: Lease
+    ) -> OperationRecord:
+        return await store.advance_operation(
+            scope,
+            key,
+            "processed",
+            now=NOW,
+            fence=fence,
+            resource=session,
+            result={"input_ids": [key], "turn_id": key},
+        )
+
+
+class AcceptedOnly(ReferenceEvents):
+    async def _record_acknowledgement(
+        self, store: StateStore, scope: Scope, key: str, session: ResourceRef, fence: Lease
+    ) -> OperationRecord:
+        return await store.advance_operation(
+            scope,
+            key,
+            "accepted",
+            now=NOW,
+            fence=fence,
+            resource=session,
+            result={"input_ids": [key], "turn_id": key},
+        )
+
+    @staticmethod
+    def _receipt(record: OperationRecord) -> SendReceipt:
+        if record.operation.status == "accepted":
+            return SendReceipt.model_validate(
+                {
+                    "operation_id": record.operation.id,
+                    "status": "queued",
+                    "input_ids": record.result.get("input_ids"),
+                    "turn_id": record.result.get("turn_id"),
+                }
+            )
+        return ReferenceEvents._receipt(record)
+
+
+class WrongProcessedEvidence(ImmediateProcessed):
+    @staticmethod
+    def _receipt(record: OperationRecord) -> SendReceipt:
+        receipt = ReferenceEvents._receipt(record)
+        return (
+            receipt.model_copy(update={"input_ids": ("invented",)})
+            if receipt.status == "processed"
+            else receipt
+        )
+
+
 class ForgetRestart(RestartableVariant):
     def restart(self, *, crash: Mapping[str, CrashPoint] | None = None) -> ForgetRestart:
         return type(self)(self.data if crash is not None else None, crash=crash)
@@ -115,6 +171,94 @@ class IgnoreFence(RestartableVariant):
         self, staged: MemoryStateData, target: Slot | None, fence: Lease | None, now: datetime
     ) -> None:
         return
+
+
+class FenceOptional(RestartableVariant):
+    def _fenced(
+        self, staged: MemoryStateData, target: Slot | None, fence: Lease | None, now: datetime
+    ) -> None:
+        if fence is not None:
+            super()._fenced(staged, target, fence, now)
+
+
+class ForeignFenceOK(RestartableVariant):
+    def _fenced(
+        self, staged: MemoryStateData, target: Slot | None, fence: Lease | None, now: datetime
+    ) -> None:
+        if fence is not None and target is not None and fence.slot != target:
+            return
+        super()._fenced(staged, target, fence, now)
+
+
+class AppendAdopts(RestartableVariant):
+    async def append_events(
+        self,
+        session: ResourceRef,
+        entries: Sequence[JournalEntry],
+        *,
+        fence: Lease,
+        cursor: str,
+        now: datetime,
+    ) -> JournalAppend:
+        self.data.session_slots.setdefault(session.id, fence.slot)
+        return await super().append_events(session, entries, fence=fence, cursor=cursor, now=now)
+
+
+class YieldingStore(RestartableVariant):
+    """Expose pending intent to concurrent senders before the atomic claim."""
+
+    max_claimants = 0
+    claimants = 0
+
+    async def begin_operation(
+        self,
+        scope: Scope,
+        *,
+        key: str,
+        request_digest: str,
+        operation_id: str,
+        now: datetime,
+        slot: Slot | None = None,
+    ) -> Begun:
+        await asyncio.sleep(0)
+        begun = await super().begin_operation(
+            scope,
+            key=key,
+            request_digest=request_digest,
+            operation_id=operation_id,
+            now=now,
+            slot=slot,
+        )
+        await asyncio.sleep(0)
+        return begun
+
+    async def claim_send(
+        self, scope: Scope, key: str, *, now: datetime, fence: Lease | None
+    ) -> OperationRecord:
+        self.claimants += 1
+        self.max_claimants = max(self.max_claimants, self.claimants)
+        try:
+            await asyncio.sleep(0)
+            return await super().claim_send(scope, key, now=now, fence=fence)
+        finally:
+            self.claimants -= 1
+
+
+class RacyClaim(YieldingStore):
+    async def claim_send(
+        self, scope: Scope, key: str, *, now: datetime, fence: Lease | None
+    ) -> OperationRecord:
+        seen = await self.get_operation(scope, key)
+        if seen is None:
+            raise RuntimeError("missing scripted intent")
+        await asyncio.sleep(0)
+        claimed = claim(seen, now=now)
+        async with self.data.lock:
+            staged = self.data.snapshot()
+            self._fenced(staged, seen.slot, fence, now)
+            staged.operations[(*operation_scope(scope), key)] = claimed
+            self._commit("claim_send", staged)
+        return claimed
 
 
 class LeaseLossMeansUnsent(RestartableVariant):
@@ -167,6 +311,18 @@ class ReplayUsage(RestartableVariant):
         )
 
 
+class RewindStaleUsage(RestartableVariant):
+    async def record_usage(
+        self, binding_id: str, observation: UsageObservation
+    ) -> OutboxRow | None:
+        if (binding_id, observation.id, observation.revision) in self.data.outbox:
+            applied = apply_observation(None, binding_id, observation)
+            if applied is not None:
+                self.data.usage[(binding_id, observation.id)] = applied[0]
+            return None
+        return await super().record_usage(binding_id, observation)
+
+
 class DoubleApply(RestartableVariant):
     async def mark_outbox_applied(self, row: OutboxRow) -> bool:
         await super().mark_outbox_applied(row)
@@ -205,13 +361,19 @@ MUTANTS: dict[str, tuple[str, Callable[[], Adapter]]] = {
     "resend_unknown": ("C03", lambda: variant(events=ResendUnknown)),
     "lost_restart": ("C04", lambda: variant(store=ForgetRestart)),
     "invent_completion": ("C04", lambda: variant(events=InventCompletion)),
+    "wrong_processed_evidence": ("C04", lambda: variant(events=WrongProcessedEvidence)),
     "partial_journal": ("C04", lambda: variant(store=PartialJournal)),
     "lost_cursor": ("C04", lambda: variant(store=LoseCursor)),
     "stale_fence": ("C04", lambda: variant(store=IgnoreFence)),
+    "fence_optional": ("C04", lambda: variant(store=FenceOptional)),
+    "foreign_fence": ("C04", lambda: variant(store=ForeignFenceOK)),
+    "append_adopts": ("C04", lambda: variant(store=AppendAdopts)),
+    "racy_claim": ("C03", lambda: variant(store=RacyClaim)),
     "lease_loss_unsent": ("C04", lambda: variant(store=LeaseLossMeansUnsent)),
     "null_zero": ("C07", lambda: variant(store=NullIsZero)),
     "unsigned_correction": ("C07", lambda: variant(store=UnsignedCorrection)),
     "replayed_usage": ("C07", lambda: variant(store=ReplayUsage)),
+    "rewind_stale_usage": ("C07", lambda: variant(store=RewindStaleUsage)),
     "double_apply": ("C07", lambda: variant(store=DoubleApply)),
     "lost_outbox": ("C07", lambda: variant(store=LostOutbox)),
     "split_winner": ("C13", lambda: variant(store=SplitWinner)),
@@ -235,8 +397,9 @@ async def test_missing_state_adapter_stays_pending(fixture: str) -> None:
 
 
 @pytest.mark.parametrize("fixture", ["C03", "C04"])
-async def test_queued_acknowledgement_is_valid_without_turn_completion(fixture: str) -> None:
-    a = variant(events=QueuedAcknowledgement)
+@pytest.mark.parametrize("events", [QueuedAcknowledgement, AcceptedOnly, ImmediateProcessed])
+async def test_contract_valid_acknowledgements(fixture: str, events: type[ReferenceEvents]) -> None:
+    a = variant(events=events)
     result = await FIXTURES[fixture](a.driver, a.store, a.transport)
     assert result.status == "pass"
 
@@ -255,11 +418,13 @@ async def check_optimized_matrix() -> None:
         raise RuntimeError("reference pending matrix changed under optimized Python")
     if any(r.status == "fail" for r in results):
         raise RuntimeError("valid reference failed under optimized Python")
-    for fixture in ("C03", "C04"):
-        adapter = variant(events=QueuedAcknowledgement)
-        result = await FIXTURES[fixture](adapter.driver, adapter.store, adapter.transport)
-        if result.status != "pass":
-            raise RuntimeError("valid queued acknowledgement failed under optimized Python")
+    await check_yielding_claim()
+    for events in (QueuedAcknowledgement, AcceptedOnly, ImmediateProcessed):
+        for fixture in ("C03", "C04"):
+            adapter = variant(events=events)
+            result = await FIXTURES[fixture](adapter.driver, adapter.store, adapter.transport)
+            if result.status != "pass":
+                raise RuntimeError("valid acknowledgement failed under optimized Python")
     for name, (fixture, factory) in MUTANTS.items():
         registry.register(name, factory)
         result = next(r for r in await run(registry, name) if r.fixture_id == fixture)
@@ -267,6 +432,18 @@ async def check_optimized_matrix() -> None:
             f"check failed: {fixture}:"
         ):
             raise RuntimeError(f"{name} escaped its semantic probe under optimized Python")
+
+
+async def check_yielding_claim() -> None:
+    adapter = variant(store=YieldingStore)
+    store = cast(YieldingStore, adapter.store)
+    result = await FIXTURES["C03"](adapter.driver, store, adapter.transport)
+    if result.status != "pass" or store.max_claimants != 3:
+        raise RuntimeError("valid claim must interleave three contenders and send exactly once")
+
+
+async def test_yielding_claim_interleaves_three_contenders_safely() -> None:
+    await check_yielding_claim()
 
 
 def test_state_mutants_and_valid_matrix_under_optimized_python() -> None:

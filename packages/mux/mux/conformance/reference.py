@@ -63,6 +63,7 @@ from mux.contracts.resources import (
 )
 from mux.contracts.usage import UsageObservation
 from mux.profiles import MANAGED_AGENTS
+from mux.state.lease import Lease
 from mux.state.memory import CrashPoint, MemoryStateStore
 from mux.state.operations import OperationRecord, SendClaimed, request_digest
 from mux.state.store import StateStore, binding_slot
@@ -347,17 +348,22 @@ class ReferenceEvents(UnsupportedPort):
                 scope, key, "outcome_unknown", now=NOW, fence=fence
             )
         else:
-            await store.advance_operation(
-                scope,
-                key,
-                "accepted",
-                now=NOW,
-                fence=fence,
-                resource=session,
-                result={"input_ids": [key], "turn_id": key},
-            )
-            record = await store.advance_operation(scope, key, "processed", now=NOW, fence=fence)
+            record = await self._record_acknowledgement(store, scope, key, session, fence)
         return self._receipt(record)
+
+    async def _record_acknowledgement(
+        self, store: StateStore, scope: Scope, key: str, session: ResourceRef, fence: Lease
+    ) -> OperationRecord:
+        await store.advance_operation(
+            scope,
+            key,
+            "accepted",
+            now=NOW,
+            fence=fence,
+            resource=session,
+            result={"input_ids": [key], "turn_id": key},
+        )
+        return await store.advance_operation(scope, key, "processed", now=NOW, fence=fence)
 
     async def stream(
         self,

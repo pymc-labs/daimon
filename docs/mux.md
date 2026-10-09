@@ -264,6 +264,10 @@ and C13 binding races against a fresh restartable store. Missing store adapters
 stay pending; host queue/attribution, historical billing, backend selection,
 wake generation and outcome-row probes remain pending until their adapters land.
 These offline oracle results certify no provider or host integration.
+Recovery requires the owning slot's active lease and persisted receipt evidence;
+unbound sessions cannot acquire journal ownership through an append. Yielding
+race tests exercise send claiming, and a later same-count usage revision checks
+that stale replay preserved the latest accounted state.
 
 The manual `tests/judge` harness grades recorded
 transcripts separately from conformance, using a fixed 12-task rubric and

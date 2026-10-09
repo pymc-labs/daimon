@@ -12,10 +12,11 @@ from mux.contracts.errors import BindingConflict, OperationConflict, ScopeViolat
 from mux.contracts.events import Event, NativeProvenance, TextPart
 from mux.contracts.ids import ResourceRef
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.receipts import SendReceipt
 from mux.state.journal import JournalEntry
 from mux.state.lease import StaleFence
 from mux.state.memory import CrashPoint, SimulatedCrash
-from mux.state.operations import recovery
+from mux.state.operations import OperationRecord, recovery
 from mux.state.store import StateStore, bind_new_slot, binding_slot
 from mux.state.usage_ledger import OutboxRow
 
@@ -50,6 +51,29 @@ def entry(
             }
         ),
     )
+
+
+def recovered_receipt(record: OperationRecord, receipt: SendReceipt) -> None:
+    ids = record.result.get("input_ids")
+    if record.operation.status == "processed":
+        require(
+            isinstance(ids, list) and bool(ids),
+            "C04: processed recovery requires durable input identity",
+        )
+    if receipt.status == "processed":
+        require(
+            record.operation.status == "processed"
+            and isinstance(ids, list)
+            and bool(ids)
+            and tuple(ids) == receipt.input_ids
+            and record.result.get("turn_id") == receipt.turn_id,
+            "C04: processed recovery requires matching durable receipt evidence",
+        )
+    else:
+        require(
+            receipt.status in ("queued", "outcome_unknown"),
+            "C04: recovery must not invent successful completion",
+        )
 
 
 async def c03(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
@@ -147,8 +171,15 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         record = await store.get_operation(s.scope, key)
         if record is None:
             raise ConformanceFailure("C04: restart lost persisted operation intent")
-        require(record.operation.status == status, "C04: crash crossed the wrong commit boundary")
-        require(recovery(record.operation) == action, "C04: crash recovery chose an unsafe action")
+        allowed = (
+            {("accepted", "observe"), ("processed", "done")}
+            if status == "accepted"
+            else {(status, action)}
+        )
+        require(
+            (record.operation.status, recovery(record.operation)) in allowed,
+            "C04: crash crossed the wrong commit boundary",
+        )
         require(
             t.mutation_count == before + sends, "C04: crash changed the expected upstream effects"
         )
@@ -165,10 +196,7 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
             )
             require(t.mutation_count == before + 1, "C04: recovered pending intent must send once")
         else:
-            require(
-                replay.status in ("queued", "outcome_unknown"),
-                "C04: recovery must not invent successful completion",
-            )
+            recovered_receipt(record, replay)
             require(
                 t.mutation_count == before + sends, "C04: ambiguous/accepted recovery resent input"
             )
@@ -253,10 +281,10 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         replay = await ma.events.send(
             s.scope, s.session.ref, (UserMessage(content=(TextPart(text=key),)),), key=key
         )
-        require(
-            replay.status in ("queued", "outcome_unknown"),
-            "C04: successor must not invent completion after taking over the lease",
-        )
+        persisted = await store.get_operation(s.scope, key)
+        if persisted is None:
+            raise ConformanceFailure("C04: takeover lost durable operation evidence")
+        recovered_receipt(persisted, replay)
     require(t.mutation_count == writes, "C04: lease takeover triggered a blind resend")
     before_events = tuple(await store.read_events(s.session.ref.id))
     before_projection = await store.projection(s.session.ref.id)
@@ -288,21 +316,84 @@ async def c04(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         ),
         "C04: stale worker committed a journal append",
     )
+    await refused(
+        ScopeViolation,
+        store.claim_send(s.scope, "stale", now=later, fence=None),
+        "C04: unfenced worker claimed a send",
+    )
+    await refused(
+        ScopeViolation,
+        store.advance_operation(s.scope, "stale", "failed", now=later, fence=None),
+        "C04: unfenced worker advanced an operation",
+    )
+    foreign = await store.acquire_lease(
+        slot.model_copy(
+            update={"thread": slot.thread.model_copy(update={"thread_id": "other-thread"})}
+        ),
+        holder="foreign",
+        turn_id="root",
+        now=later,
+        ttl=TTL,
+    )
+    await refused(
+        ScopeViolation,
+        store.claim_send(s.scope, "stale", now=later, fence=foreign),
+        "C04: foreign-slot worker claimed a send",
+    )
+    await refused(
+        ScopeViolation,
+        store.advance_operation(s.scope, "stale", "failed", now=later, fence=foreign),
+        "C04: foreign-slot worker advanced an operation",
+    )
+    await refused(
+        ScopeViolation,
+        store.append_events(
+            s.session.ref,
+            (
+                entry(
+                    s.session.ref,
+                    "foreign-entry",
+                    "agent.message",
+                    {"item_id": "foreign", "content": []},
+                ),
+            ),
+            fence=foreign,
+            cursor="foreign",
+            now=later,
+        ),
+        "C04: foreign-slot worker committed a journal append",
+    )
+    orphan = s.session.ref.model_copy(update={"id": "unowned-session"})
+    await refused(
+        ScopeViolation,
+        store.append_events(
+            orphan,
+            (entry(orphan, "orphan-entry", "agent.message", {"item_id": "orphan", "content": []}),),
+            fence=successor,
+            cursor="orphan",
+            now=later,
+        ),
+        "C04: append established journal ownership",
+    )
+    require(
+        not await store.read_events(orphan.id) and await store.projection(orphan.id) is None,
+        "C04: rejected unowned append changed journal or projection",
+    )
     unchanged = await store.get_operation(s.scope, "stale")
     require(
         unchanged is not None and unchanged.operation.status == "pending",
-        "C04: rejected stale write changed intent",
+        "C04: rejected stale/unfenced/foreign write changed intent",
     )
     require(
         tuple(await store.read_events(s.session.ref.id)) == before_events
         and await store.projection(s.session.ref.id) == before_projection,
-        "C04: rejected stale write changed journal or projection",
+        "C04: rejected stale/unfenced/foreign write changed journal or projection",
     )
     await store.claim_send(s.scope, "stale", now=later, fence=successor)
     return Result(
         "C04",
         "pass",
-        ("crash recovery preserves intent/journal/cursor; stale fences cannot commit",),
+        ("crash recovery preserves evidence/ownership; stale, missing and foreign fences refused",),
     )
 
 
@@ -344,9 +435,19 @@ async def c07(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
             await store.record_usage(s.session.binding.id, observation) is None,
             "C07: stale or replayed usage produced another debit",
         )
+    store = t.restart_store(store)
+    unchanged = observations[-1].model_copy(update={"revision": 5})
+    row = await store.record_usage(s.session.binding.id, unchanged)
+    require(
+        row is not None and row.deltas["output_tokens"] == 0 and row.prior_applied_revision == 4,
+        "C07: stale replay rewound the latest accounted revision or token count",
+    )
+    if row is None:
+        raise ConformanceFailure("C07: higher same-count revision must create its outbox row")
+    rows.append(row)
     pending = await store.pending_outbox()
     require(
-        {r.key: r for r in pending} == {r.key: r for r in rows} and len(pending) == 4,
+        {r.key: r for r in pending} == {r.key: r for r in rows} and len(pending) == 5,
         "C07: restart lost or duplicated accounting rows",
     )
     total = 0

@@ -67,15 +67,25 @@ No Postgres implementation or host integration is certified by the memory oracle
 - C03 races same-key sends, reconstructs a receipt after restart, rejects changed
   content and another principal, and retains unknown delivery after a timeout
   following upstream acceptance. Retries must not add upstream effects.
+  The memory store does not suspend inside its transactions, so its default
+  sends serialize. A checked-in yielding wrapper suspends between intent and
+  claim transactions, proves three claim contenders overlap, and rejects a
+  read/yield/write claim that omits the atomic compare-and-swap. Driver adapters
+  must provide such suspension to exercise their races.
 - C04 injects deaths before/after send-claim and acceptance commits, then before/
   after the journal commit. Intent, event content, projection and cursor survive
   together; replay deduplicates and a superseded worker cannot claim, advance or
   append. A committed send claim requires reconciliation even when no I/O is seen.
   Lease takeover preserves prior uncertain/accepted intents and never permits a
-  blind resend of them.
+  blind resend of them. Missing and foreign-slot leases are refused; an append
+  cannot establish ownership of a session no persisted binding names. Recovery
+  accepts accepted-only acknowledgements and immediate processed commits;
+  processed receipts require matching persisted input and turn identity.
 - C07 takes normalized usage null → 100 → 120 → 110 through the actual store,
   preserving signed deltas, binding ownership, prior revisions and outbox rows.
-  Replays add nothing; each outbox row applies once and final units are 110.
+  Replays add nothing. A higher same-count revision then requires zero delta
+  against revision 4, proving stale replay did not rewind the latest state.
+  Each outbox row applies once and final units are 110.
   Host pricing and overlapping-grain billing stay outside this probe (C12 pending).
 - C13 races two distinct candidates for an unbound slot through `bind_new_slot`;
   both must adopt the one persisted winner, which survives restart.
