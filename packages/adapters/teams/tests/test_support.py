@@ -157,12 +157,16 @@ async def test_a_request_asked_in_a_channel_links_back_to_it(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as service:
         card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
-        reply = await _send(service, _token(card), "the routine broke")
+        reply = await _send(service, _token(card), "the routine broke\nat 9am")
 
     assert "3 requests left" in card
     assert support.RECEIVED.format(remaining=2) in reply
     [posted] = _posts_to(teams_api_fake, OPS)
-    assert "the routine broke" in posted and "teams.microsoft.com/l/message/" in posted
+    # A Teams message drops single line breaks, so every line is a paragraph.
+    head, link, *note = json.loads(posted)["text"].split("\n\n")
+    assert head.startswith("**🙋 Human support requested** by ") and AAD_OBJECT_ID in head
+    assert link.startswith("[Open the message](https://teams.microsoft.com/l/message/"), "short"
+    assert note == ["the routine broke", "at 9am"], "the note's lines stay apart"
     [row] = await _rows(db_session_factory)
     assert (row.platform_user_id, row.channel_id, row.delivered_at is not None) == (
         AAD_OBJECT_ID,

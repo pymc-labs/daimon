@@ -1,8 +1,9 @@
 """Teams' 👍/👎 on answers, stored like Slack and Discord votes.
 
-The last answer message (and a tool-only turn's ✅ Done) turns on Teams'
-feedback loop in its custom mode (`card.rated`): a click arrives as a
-`message/fetchTask` invoke, answered with daimon's own dialog. 👍 records the
+The card below an answer (`card.controls_card`, or a tool-only turn's ✅
+Done) turns on Teams' feedback loop in its custom mode (`card.rated`): a
+click arrives as a `message/fetchTask` invoke, answered with daimon's own
+dialog. 👍 records the
 vote and says thanks. 👎 records the vote and opens Slack's "What went wrong?"
 form: optional reasons (`FEEDBACK_REASONS`) and optional text, at least one.
 Its submit (`task/submit`) records the down-vote and the form on the
@@ -62,7 +63,13 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.adapters.teams.support import SEALED_LINE, post_to_support_channel, routes_feedback
+from daimon.adapters.teams.support import (
+    SEALED_LINE,
+    post_to_support_channel,
+    requester,
+    routes_feedback,
+    support_post,
+)
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -222,21 +229,21 @@ def feedback_post(
 ) -> str:
     """The support channel's message for one routed form: who, where, the agent, the
     reasons and the text, as Ask a human spells them. Never the answer itself."""
-    lines = [
-        f"**\N{THUMBS DOWN SIGN} Feedback** from {user_name or 'Someone'} (Teams user {user_id})",
-        link,
-    ]
+    agent = ""
     if recorded.ma_agent_id or recorded.ma_session_id:
-        lines.append(
+        agent = (
             f"Agent `{recorded.ma_agent_id or 'unknown'}`, session "
             f"`{recorded.ma_session_id or 'unknown'}`"
         )
     labels = [FEEDBACK_REASONS[code] for code in form.reasons]
-    lines.append(f"**Reasons:** {', '.join(labels) if labels else 'none picked'}")
-    if recorded.sealed:
-        lines.append(SEALED_LINE)
-    post = "\n".join(lines)
-    return f"{post}\n\n{form.text}" if form.text else post
+    return support_post(
+        f"**\N{THUMBS DOWN SIGN} Feedback** from {requester(user_name, user_id)}",
+        link,
+        agent,
+        f"**Reasons:** {', '.join(labels) if labels else 'none picked'}",
+        SEALED_LINE if recorded.sealed else "",
+        *form.text.splitlines(),
+    )
 
 
 class TeamsFeedback:
