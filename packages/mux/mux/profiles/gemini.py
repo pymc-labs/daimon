@@ -8,7 +8,7 @@ it.
 
 from __future__ import annotations
 
-from mux.contracts.profile import Profile
+from mux.contracts.profile import ExtensionRef, Profile
 
 INLINE_REUSE = Profile(
     provider="gemini",
@@ -16,6 +16,7 @@ INLINE_REUSE = Profile(
     schema_version="1",
     sdk_pin="google-genai>=2.7.0,<3",
     core=False,
+    extensions=(ExtensionRef(namespace="gemini.session", version=1),),
     support={
         "thread_workspace_persistence": "unsupported",
         "turn_lifecycle": "native",
