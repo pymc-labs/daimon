@@ -9,10 +9,16 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import uuid
 
 import pytest
+from daimon.core import agent_identity
 from daimon.core._models import Base
 from daimon.testing.db import (
+    _create_schema_with_tables,  # pyright: ignore[reportPrivateUsage]
+    _drain_background_tasks,  # pyright: ignore[reportPrivateUsage]
+    _drop_schema,  # pyright: ignore[reportPrivateUsage]
+    _fresh_schema_session,  # pyright: ignore[reportPrivateUsage]
     _require_test_dsn,  # pyright: ignore[reportPrivateUsage]
     build_test_engine,
     sweep_orphan_schemas,
@@ -200,3 +206,88 @@ async def test_sweep_orphan_schemas_drops_dead_pid_and_keeps_live_pid(
         async with db_engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{live}" CASCADE'))
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{dead}" CASCADE'))
+
+
+async def test_background_face_transaction_finishes_before_worker_schema_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued face must release its Postgres locks before schema teardown."""
+    schema = f"test_f{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    engine = build_test_engine(os.environ["DAIMON_DATABASE__TEST_URL"], schema, poolclass=NullPool)
+    started = asyncio.Event()
+
+    async def blocked_face(session: AsyncSession, **_kwargs: object) -> None:
+        await session.execute(text("SELECT id FROM tenants FOR KEY SHARE"))
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", blocked_face)
+    task: asyncio.Task[None] | None = None
+    try:
+        await _create_schema_with_tables(engine, schema)
+        task = agent_identity.queue_agent_face(
+            async_sessionmaker(engine),
+            tenant_id=uuid.uuid4(),
+            agent_name="teardown-race",
+            metadata=None,
+            default_agent_name=None,
+        )
+        assert task is not None
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # Existing suite-local autouse fixtures may request cancellation first.
+        # The shared DB cleanup must still see and await that task's rollback.
+        agent_identity.cancel_pending_agent_faces()
+        await _drain_background_tasks()
+        assert task.done(), "cleanup must await cancellation and transaction rollback"
+        await asyncio.wait_for(_drop_schema(engine, schema), timeout=10)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        async with engine.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
+
+
+async def test_background_face_transaction_finishes_before_fresh_schema_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh-schema test must drain its face before its private schema drops."""
+    started = asyncio.Event()
+
+    async def blocked_face(session: AsyncSession, **_kwargs: object) -> None:
+        await session.execute(text("SELECT id FROM tenants FOR KEY SHARE"))
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(agent_identity, "get_or_create_avatar", blocked_face)
+    task: asyncio.Task[None] | None = None
+    schema: str | None = None
+    fresh = _fresh_schema_session(os.environ["DAIMON_DATABASE__TEST_URL"])
+    try:
+        session = await fresh.__aenter__()
+        schema = (await session.execute(text("SELECT current_schema()"))).scalar_one()
+        task = agent_identity.queue_agent_face(
+            async_sessionmaker(session.bind),
+            tenant_id=uuid.uuid4(),
+            agent_name="fresh-teardown-race",
+            metadata=None,
+            default_agent_name=None,
+        )
+        assert task is not None
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await asyncio.wait_for(fresh.__aexit__(None, None, None), timeout=10)
+        assert task is not None and task.done()
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if schema is not None:
+            cleanup = build_test_engine(
+                os.environ["DAIMON_DATABASE__TEST_URL"], schema, poolclass=NullPool
+            )
+            try:
+                async with cleanup.begin() as conn:
+                    await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            finally:
+                await cleanup.dispose()

@@ -177,12 +177,26 @@ async def ensure_agent_face(
 
 
 def cancel_pending_agent_faces() -> None:
-    """Cancel every unfinished face render and forget failures; for test isolation only."""
+    """Request cancellation of test face renders; retain them until they finish."""
     for task in list(_face_tasks.values()):
         task.cancel()
-    _face_tasks.clear()
     _face_started.clear()
     _face_failures.clear()
+
+
+async def cancel_and_wait_pending_agent_faces() -> None:
+    """Finish test face tasks before their database connection can be torn down.
+
+    ``Task.cancel()`` only requests cancellation. The caller must wait for the
+    task's session context to roll back and check its connection in first.
+    """
+    tasks = tuple(_face_tasks.values())
+    cancel_pending_agent_faces()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for key, task in list(_face_tasks.items()):
+        if task in tasks:
+            _face_tasks.pop(key, None)
 
 
 def _schedule_face(
@@ -239,8 +253,9 @@ def _schedule_face(
     _face_started[key] = time.monotonic()
 
     def finished(_: object) -> None:
-        _face_tasks.pop(key, None)
-        _face_started.pop(key, None)
+        if _face_tasks.get(key) is task:
+            _face_tasks.pop(key, None)
+            _face_started.pop(key, None)
 
     task.add_done_callback(finished)
     return task

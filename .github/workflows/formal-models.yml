@@ -14,6 +14,9 @@ on:
     paths:
       - "formal/**"
       - ".github/workflows/formal-models.yml"
+      - "packages/core/daimon/core/agent_identity.py"
+      - "packages/testing/daimon/testing/db.py"
+      - "packages/testing/tests/test_db.py"
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
       - "packages/core/daimon/core/turn/render.py"
@@ -116,6 +119,10 @@ on:
     paths:
       - "formal/**"
       - ".github/workflows/formal-models.yml"
+      # test_schema_cleanup/
+      - "packages/core/daimon/core/agent_identity.py"
+      - "packages/testing/daimon/testing/db.py"
+      - "packages/testing/tests/test_db.py"
       # turn/
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
