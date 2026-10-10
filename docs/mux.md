@@ -1075,3 +1075,14 @@ revision match. It never adopts an Anthropic mapping for another provider. The
 registered codec receives `TurnCodecRequest.persistence` and owns forwarding
 its neutral records and mutations through this journal/claim context. Missing
 native references or bindings fail before provider I/O.
+
+Provider-native usage frames may carry an actual usage observation without a
+display event. Prepared foreign sessions use their bound native observation
+recorder, preserving nullable measurements and pending accounting. The default
+Anthropic session continues to use its SDK span recorder and existing recovery.
+
+Provider recovery can atomically publish a collected journal snapshot through
+`TurnPersistence.record_many(session, events, cursor=...)`. It uses the active
+binding lease and the same source identity/revision rules as individual records.
+All records, the projection and the supplied cursor commit together; a malformed
+late record leaves the entire batch unchanged.

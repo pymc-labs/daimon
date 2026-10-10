@@ -431,3 +431,14 @@ Host accounting requires fixed coverage sets across revisions of each alternate
 provider observation ID. It refuses overlapping sibling aggregates at ingest,
 including shared transitive descendants which have not arrived yet. Corrections
 may update amounts within that fixed coverage; dynamic coverage is unsupported.
+
+The host's provider usage edge allows `TurnEvent(usage=observation)` without a
+native SDK display record. Prepared recorder selection requires the admitted
+foreign profile and matching authorized native session. The original Anthropic
+recorder remains unchanged. Native accounting is supplied by its observation
+callback, independently of provider display events.
+
+The host persistence context exposes fenced `record_many(session, events,
+cursor=...)` over the existing atomic StateStore append. Provider recovery
+collects all pages before publication; it does not need a private host fence or
+an independent lease. Empty snapshots can checkpoint their explicit cursor.

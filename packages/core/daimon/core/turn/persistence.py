@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
-from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -17,7 +17,7 @@ from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.transport import single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
-from mux.state.journal import JournalEntry
+from mux.state.journal import JournalAppend, JournalEntry
 from mux.state.lease import Lease, StaleFence
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore, binding_slot
@@ -242,6 +242,26 @@ class TurnPersistence:
             fence=self._fence(),
             cursor=event.native.cursor or source,
             now=self._now(),
+        )
+
+    async def record_many(
+        self, session: ResourceRef, events: Sequence[Event], *, cursor: str
+    ) -> JournalAppend:
+        """Publish a collected snapshot atomically under the active host lease.
+
+        The caller supplies its completed-snapshot cursor, including for an
+        empty snapshot. Source identities and revisions match record(); all
+        entries, projection and cursor commit in one StateStore transaction.
+        """
+        self.check_session(self.scope, session)
+        entries: list[JournalEntry] = []
+        for event in events:
+            source = event.native.event_id or event.id
+            raw_revision = event.payload.get("revision", 1)
+            revision = raw_revision if isinstance(raw_revision, int) else 1
+            entries.append(JournalEntry(source_key=source, revision=revision, event=event))
+        return await self.store.append_events(
+            session, entries, fence=self._fence(), cursor=cursor, now=self._now()
         )
 
     async def stopped(self, key: str, session: ResourceRef) -> None:

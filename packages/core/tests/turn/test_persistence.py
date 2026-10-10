@@ -802,3 +802,61 @@ async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutat
         assert client.max_retries == MA_MAX_RETRIES
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET", "GET", "POST", "POST"]
+
+
+async def test_bulk_snapshot_keeps_revisions_preview_identity_and_completed_cursor(
+    stores: Callable[[], StateStore],
+) -> None:
+    store = stores()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = context(store)
+    preview, recorded = message(preview=True), message()
+    corrected = recorded.model_copy(update={"payload": {"revision": 2}})
+    batch = (preview, recorded, corrected)
+
+    async def publish() -> None:
+        appended = await persistence.record_many(SESSION, batch, cursor="complete-snapshot")
+        assert len(appended.appended) == 3 and appended.duplicates == 0
+        assert [event.sequence for event in appended.appended] == [0, 1, 2]
+        assert appended.projection.cursor == "complete-snapshot"
+        replayed = await persistence.record_many(SESSION, batch, cursor="complete-snapshot")
+        assert replayed.appended == () and replayed.duplicates == 3
+        # An authoritative empty snapshot can checkpoint without deleting history.
+        empty = await persistence.record_many(SESSION, (), cursor="empty-snapshot")
+        assert empty.appended == () and empty.duplicates == 0
+        assert empty.projection.cursor == "empty-snapshot"
+
+    await persistence.run(publish)
+    events = await stores().read_events(SESSION.id)
+    assert [event.authority for event in events] == ["preview", "record", "record"]
+    assert [event.sequence for event in events] == [0, 1, 2]
+    assert events[-1].payload["revision"] == 2
+    with pytest.raises(ScopeViolation, match="lease"):
+        await persistence.record_many(SESSION, batch, cursor="unbound")
+    projected = await store.projection(SESSION.id)
+    assert projected is not None and projected.cursor == "empty-snapshot"
+
+
+async def test_bulk_snapshot_rolls_back_all_records_and_cursor_on_a_late_invalid_event(
+    stores: Callable[[], StateStore],
+) -> None:
+    store = stores()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = context(store)
+    valid = message()
+    wrong_session = valid.model_copy(update={"session_id": "other-session"})
+
+    async def publish() -> None:
+        before = await store.projection(SESSION.id)
+        with pytest.raises(ValueError, match="belongs to session"):
+            await persistence.record_many(
+                SESSION, (valid, wrong_session), cursor="must-not-publish"
+            )
+        assert not await stores().read_events(SESSION.id)
+        assert await store.projection(SESSION.id) == before
+        # A partial per-record append would incorrectly deduplicate this valid record.
+        result = await persistence.record_many(SESSION, (valid,), cursor="completed")
+        assert len(result.appended) == 1 and result.duplicates == 0
+        assert result.projection.cursor == "completed"
+
+    await persistence.run(publish)

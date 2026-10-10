@@ -79,6 +79,7 @@ from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPr
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn_origin import SessionState
+from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
@@ -142,7 +143,7 @@ class PreparedTurn:
     watermark: str | None
     reused: bool
     session_account_id: uuid.UUID
-    _record: UsageRecorder
+    _record: UsageRecorder | ObservationRecorder
     continuity: ContinuityOutcome = CONTINUED
     # Populated only by a provider-native preparation hook. Anthropic's
     # existing field values and preparation remain unchanged.
