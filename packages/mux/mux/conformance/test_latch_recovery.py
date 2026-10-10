@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from mux.conformance.budget import (
     BudgetGuard,
@@ -338,3 +339,70 @@ def test_replay_refuses_changed_recovery_evidence(tmp_path: Path, damage: str) -
     )
     with pytest.raises(BudgetLedgerError, match="cannot change known|below reservation"):
         guard.report()
+
+
+def recovered(root: Path) -> tuple[BudgetGuard, LatchRecovery, SpendReceipt]:
+    guard, _, original = latched(root)
+    recovery = proposal(guard, original)
+    sign(guard, recovery)
+    return guard, recovery, guard.recover_latch(recovery)
+
+
+@pytest.mark.parametrize("variant", ["actual_with_hold", "actual_full", "accounting_actual"])
+def test_forged_actual_rejected_by_model(tmp_path: Path, variant: str) -> None:
+    _, _, row = recovered(tmp_path)
+    data = row.model_dump()
+    if variant == "actual_with_hold":
+        data.update(actual_usd=Decimal("1"), cost_estimate_usd=Decimal("3"))
+    elif variant == "actual_full":
+        data.update(actual_usd=Decimal("2"), held_usd=Decimal("0"))
+    else:
+        data.update(accounting_status="actual")
+    with pytest.raises(ValidationError):
+        SpendReceipt.model_validate(data)
+
+
+def test_forged_actual_in_ledger_refused(tmp_path: Path) -> None:
+    guard, _, row = recovered(tmp_path)
+    line = row.model_dump_json()
+    data = row.model_dump(mode="json")
+    data.update(actual_usd="2", held_usd="0", accounting_status="actual")
+    forged = json.dumps(data, separators=(",", ":"))
+    guard.spend_path.write_text(guard.spend_path.read_text().replace(line, forged))
+    with pytest.raises(BudgetLedgerError):
+        guard.report()
+
+
+def test_missing_approval_in_ledger_refused(tmp_path: Path) -> None:
+    guard, _, row = recovered(tmp_path)
+    data = row.model_dump(mode="json")
+    data["latch_recovery"] = None
+    guard.spend_path.write_text(
+        guard.spend_path.read_text().replace(
+            row.model_dump_json(), json.dumps(data, separators=(",", ":"))
+        )
+    )
+    with pytest.raises(BudgetLedgerError):
+        guard.report()
+
+
+def test_status_latch_recovered_requires_hold_ge_reserved_model(tmp_path: Path) -> None:
+    _, recovery, row = recovered(tmp_path)
+    data = row.model_dump()
+    low = row.reserved_usd - Decimal("0.01")
+    data.update(
+        held_usd=low,
+        cost_estimate_usd=low,
+        latch_recovery=recovery.model_copy(update={"held_usd": low}),
+    )
+    with pytest.raises(ValidationError):
+        SpendReceipt.model_validate(data)
+
+
+def test_unsigned_proposal_after_config_unpin_still_replays(tmp_path: Path) -> None:
+    # Replay trusts appended rows protected by the checkpoint, like RECONCILE.
+    guard, _, row = recovered(tmp_path)
+    data = json.loads(guard.config_path.read_text())
+    data["approved_latch_recoveries"] = []
+    guard.config_path.write_text(json.dumps(data))
+    assert guard.report() == (row,)
