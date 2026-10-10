@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -217,6 +217,36 @@ async def test_send_interrupt_and_wait_treats_requires_action_as_terminal() -> N
 
     # Should not raise — requires_action is now terminal for interrupt acks.
     await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
+
+
+@pytest.mark.parametrize("stop", ["end_turn", "retries_exhausted", "requires_action"])
+async def test_send_interrupt_and_wait_observes_idle_emitted_during_send(stop: str) -> None:
+    """SSE only delivers idle when the interrupt is sent after subscription."""
+    subscribed = False
+    received: asyncio.Queue[bytes] = asyncio.Queue()
+
+    class LiveStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield await received.get()
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        nonlocal subscribed
+        if request.method == "GET":
+            assert request.url.path == "/v1/sessions/sesn_test/events/stream"
+            subscribed = True
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=LiveStream()
+            )
+        assert request.method == "POST"
+        assert request.url.path == "/v1/sessions/sesn_test/events"
+        assert json.loads(request.content)["events"] == [{"type": "user.interrupt"}]
+        if subscribed:
+            event = _idle("sevt_instant", stop=stop).model_dump_json()
+            received.put_nowait(f"event: session.status_idle\ndata: {event}\n\n".encode())
+        return httpx.Response(200, json={"data": None})
+
+    async with build_fake_anthropic(handle_request) as client:
+        await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=0.1)
 
 
 def test_send_interrupt_and_wait_interrupt_terminal_is_superset_of_terminal_stop_reasons() -> None:
