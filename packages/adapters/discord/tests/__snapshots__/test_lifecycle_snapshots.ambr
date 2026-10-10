@@ -77,7 +77,16 @@
       }),
       dict({
         'content': 'Here is the answer.',
-        'embeds': None,
+        'embeds': list([
+          dict({
+            'color': 5763719,
+            'description': None,
+            'fields': list([
+            ]),
+            'footer': 'Atlas\u2003\u200311s\u2003\u2003$0.008 used',
+            'title': None,
+          }),
+        ]),
       }),
     ]),
     'sends': list([
