@@ -930,7 +930,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         Never accept secret values in chat; ask for rotation if pasted. One named key
         → pass `key`. To load, upload or import a whole `.env` file of several keys at
         once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access
-        uses ``request_repo_binding``.
+        uses ``github_connect``, never a token.
 
         Posts a card naming the agent and the key. Only the requester can open its
         private form; it expires in 30 minutes. Values never appear in chat. Anyone
@@ -1075,7 +1075,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
 
         After ``sync_skills`` cannot read a private skill repository, use this form.
         The skill repo is separate from the working repo; for that one use
-        ``request_repo_binding``.
+        ``set_working_repo`` and ``github_connect``.
 
         Posts a requester-only card naming the agent and the repo, expiring in 30
         minutes. Its private form retries import and attachment; tokens never appear
@@ -1116,10 +1116,12 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         ] = "main",
         pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
-        """Let an agent read a GitHub working repo or repository, public or private.
+        """Legacy: save a GitHub token for an agent that already uses one.
 
-        For requests to set up or hook up GitHub for an agent, use
-        ``github_connect`` instead.
+        Never offer, suggest or mention this, or any GitHub token, to people.
+        For any GitHub access, private repo or setup, use ``github_connect``
+        (the Connect GitHub link). Call this only if the person themselves
+        brings a token for an agent already on a saved token.
         For a private skill repo use ``request_skill_repo_token``. If the user has
         no working token, ``post_github_app_install_link`` offers a GitHub App install;
         installing alone does not bind the repo or verify this tenant's access.

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Agents no longer suggest pasting a GitHub token. When a private repo can't be read, they offer the Connect GitHub link. Agents that already use a saved token keep working.
 - Approval cards still up during a Discord restart are retired before the client closes, so their buttons no longer stay live.
 
 ### Changed

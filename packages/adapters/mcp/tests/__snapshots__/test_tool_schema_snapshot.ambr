@@ -620,8 +620,8 @@
         github.com/owner/project", "point it at our open-source repository".
         <blank line>
         Only for a repository that needs no token to clone; this checks, and
-        refuses otherwise. When a token is needed, use ``request_repo_binding``,
-        which collects one privately.
+        refuses otherwise. For a private repo, use ``github_connect`` (the
+        Connect GitHub link); never suggest a token.
         <blank line>
         The agent checks it out and works in it from your next message here, and
         anyone who talks to it works in it too. Files already open in this
@@ -3727,12 +3727,11 @@
         <blank line>
         For requests to set up or hook up GitHub for an agent, use
         ``github_connect`` instead.
-        For a private repo with a working token, use ``request_repo_binding`` instead.
-        A token remains the fallback and existing bound tokens keep being used.
+        Never suggest a GitHub token; existing bound tokens keep being used.
         <blank line>
         Posts a link button in this channel opening GitHub's install page. It cannot
         tell whether installation happened. Installing alone neither verifies this
-        tenant's access nor binds a working repo; use ``request_repo_binding`` and
+        tenant's access nor binds a working repo; use ``github_connect`` and
         verify access through the requested operation afterwards.
       ''',
       'parameters': dict({
@@ -4403,7 +4402,7 @@
         Never accept secret values in chat; ask for rotation if pasted. One named key
         → pass `key`. To load, upload or import a whole `.env` file of several keys at
         once, omit it. For MCP credentials use ``request_mcp_token``; GitHub access
-        uses ``request_repo_binding``.
+        uses ``github_connect``, never a token.
         <blank line>
         Posts a card naming the agent and the key. Only the requester can open its
         private form; it expires in 30 minutes. Values never appear in chat. Anyone
@@ -4644,10 +4643,12 @@
     }),
     'request_repo_binding': dict({
       'description': '''
-        Let an agent read a GitHub working repo or repository, public or private.
+        Legacy: save a GitHub token for an agent that already uses one.
         <blank line>
-        For requests to set up or hook up GitHub for an agent, use
-        ``github_connect`` instead.
+        Never offer, suggest or mention this, or any GitHub token, to people.
+        For any GitHub access, private repo or setup, use ``github_connect``
+        (the Connect GitHub link). Call this only if the person themselves
+        brings a token for an agent already on a saved token.
         For a private skill repo use ``request_skill_repo_token``. If the user has
         no working token, ``post_github_app_install_link`` offers a GitHub App install;
         installing alone does not bind the repo or verify this tenant's access.
@@ -4717,7 +4718,7 @@
         <blank line>
         After ``sync_skills`` cannot read a private skill repository, use this form.
         The skill repo is separate from the working repo; for that one use
-        ``request_repo_binding``.
+        ``set_working_repo`` and ``github_connect``.
         <blank line>
         Posts a requester-only card naming the agent and the repo, expiring in 30
         minutes. Its private form retries import and attachment; tokens never appear
