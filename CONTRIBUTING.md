@@ -49,6 +49,12 @@ DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
 instead, and run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
 behind by a killed run.
 
+Adapter parity scenarios use `tests/parity/drivers/`. `dispatch_turn()` keeps
+returning posted text for older scenarios; `captured_turn_effects()` records
+the latest turn's sends, edits, reactions, uploads and failures in API order.
+Use `recorded_final_message_id()` to compare the lifecycle's final answer ID
+with the post carrying the cost line and feedback controls.
+
 Install pre-commit hooks once so the gates below run automatically on every
 commit:
 

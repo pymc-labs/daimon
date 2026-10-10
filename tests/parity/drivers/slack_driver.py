@@ -21,6 +21,7 @@ been sent.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import re
@@ -35,6 +36,7 @@ from typing import Any, Literal, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
+from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -76,6 +78,7 @@ from daimon.adapters.slack.credential_requests import (
     run_mcp_credential_submission,
 )
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.config import (
     AnthropicSettings,
@@ -99,9 +102,11 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
+from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard, read_slack_card
+from .effects import DeliveryEffect, cost_line
 from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, read_slack_view
 
@@ -121,7 +126,11 @@ _BALANCE_BLOCKED_TEXT = (
 _CAP_BLOCKED_TEXT = "You've reached your monthly usage cap. An operator can raise it."
 
 
-def _register_slack_defaults(mock: AioResponsesMock) -> None:
+def _register_slack_defaults(
+    mock: AioResponsesMock,
+    effects: list[DeliveryEffect] | None = None,
+    fail_answer_at: int | None = None,
+) -> None:
     """Canned ok=True responses for the Slack Web API methods a turn touches.
 
     Mirrors `packages/adapters/slack/tests/conftest.py`'s
@@ -137,7 +146,43 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
         },
         repeat=True,
     )
+    answer_attempts = 0
     for method in _POST_JSON_METHODS:
+        if effects is not None:
+
+            def record(_url: Any, *, _method: str = method, **kwargs: Any) -> CallbackResult:
+                nonlocal answer_attempts
+                body = cast(dict[str, Any], kwargs.get("json") or {})
+                is_answer = "word " in str(body.get("text") or "")
+                if is_answer:
+                    answer_attempts += 1
+                failed = (
+                    is_answer and fail_answer_at is not None and answer_attempts == fail_answer_at
+                )
+                ts = str(body.get("ts") or f"1000000000.{len(effects) + 1:06d}")
+                blocks = cast(list[dict[str, Any]], body.get("blocks") or [])
+                summary = cost_line(blocks)
+                effects.append(
+                    DeliveryEffect(
+                        kind="edit" if _method == "chat.update" else "send",
+                        message_id=ts,
+                        text=body.get("text"),
+                        summary=summary,
+                        feedback="feedback_vote" in str(blocks),
+                        reply_to=body.get("thread_ts"),
+                        sender="agent" if body.get("username") or body.get("icon_url") else "bot",
+                        success=not failed,
+                        error="injected send failure" if failed else None,
+                    )
+                )
+                if failed:
+                    return CallbackResult(payload={"ok": False, "error": "injected_failure"})
+                return CallbackResult(payload={"ok": True, "ts": ts, "channel": "C_PARITY"})
+
+            mock.post(  # pyright: ignore[reportUnknownMemberType]
+                f"{_SLACK_API_BASE}/{method}", callback=record, repeat=True
+            )
+            continue
         mock.post(  # pyright: ignore[reportUnknownMemberType]
             f"{_SLACK_API_BASE}/{method}",
             payload={"ok": True, "ts": "1000000000.000001", "channel": "C_PARITY"},
@@ -150,7 +195,18 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
         payload={"ok": True, "user_id": "U_BOT"},
         repeat=True,
     )
-    mock.post(_REACTIONS_ADD_PATTERN, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+    if effects is not None:
+
+        def record_reaction(_url: Any, **kwargs: Any) -> CallbackResult:
+            body = cast(dict[str, Any], kwargs.get("json") or kwargs.get("data") or {})
+            effects.append(
+                DeliveryEffect("react", str(body.get("timestamp")), text=body.get("name"))
+            )
+            return CallbackResult(payload={"ok": True})
+
+        mock.post(_REACTIONS_ADD_PATTERN, callback=record_reaction, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+    else:
+        mock.post(_REACTIONS_ADD_PATTERN, payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
     mock.get(  # pyright: ignore[reportUnknownMemberType]
         _CONVERSATIONS_REPLIES_PATTERN,
         payload={"ok": True, "messages": [], "has_more": False},
@@ -295,6 +351,8 @@ class SlackDriver:
     """Drives turns through `SlackApp._handle_app_mention`, the real Slack entry point."""
 
     param_id: str = "slack"
+    _turn_effects: list[DeliveryEffect] = field(default_factory=list[DeliveryEffect])
+    _final_message_id: str | None = None
     #: Every card this driver posted or edited, oldest first.
     _cards: list[CapturedCard] = field(default_factory=list[CapturedCard])
     #: One workspace key for the driver's whole life, so the bot token seeded
@@ -320,8 +378,10 @@ class SlackDriver:
         *,
         fernet_key: str,
         billing_config: object | None = None,
+        identity_enabled: bool = False,
     ) -> SlackRuntime:
         settings = MagicMock()
+        settings.agent_identity.enabled = identity_enabled
         settings.crypto.keys = (SecretStr(fernet_key),)
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),
@@ -367,6 +427,9 @@ class SlackDriver:
         text: str,
         billing_config: object | None = None,
         thread_ts: str | None = None,
+        identity_enabled: bool = False,
+        fail_answer_at: int | None = None,
+        cold_thread: bool = False,
     ) -> list[str]:
         """`thread_ts`, when given, targets an existing thread (e.g. a
         pre-seeded live `thread_sessions` row) instead of starting a fresh
@@ -378,6 +441,9 @@ class SlackDriver:
         this is Slack-only, keyword-only, and defaults to None so every
         existing call site is unaffected.
         """
+        del cold_thread  # an app mention without thread_ts is a top-level mention
+        self._turn_effects.clear()
+        self._final_message_id = None
         fernet_key = Fernet.generate_key().decode()
         fernet = build_multifernet((fernet_key,))
         async with sessionmaker() as s:
@@ -387,7 +453,11 @@ class SlackDriver:
             await s.commit()
 
         runtime = self._make_runtime(
-            sessionmaker, router, fernet_key=fernet_key, billing_config=billing_config
+            sessionmaker,
+            router,
+            fernet_key=fernet_key,
+            billing_config=billing_config,
+            identity_enabled=identity_enabled,
         )
         app = SlackApp(runtime=runtime)
 
@@ -403,11 +473,30 @@ class SlackDriver:
         if thread_ts is not None:
             event["thread_ts"] = thread_ts
 
+        original_terminal = SlackTurnLifecycle.on_terminal_success
+
+        async def capture_terminal(lifecycle: SlackTurnLifecycle, state: Any) -> None:
+            await original_terminal(lifecycle, state)
+            self._final_message_id = lifecycle.final_ts
+
+        async def upload_file(_client: AsyncWebClient, **kwargs: Any) -> dict[str, Any]:
+            self._turn_effects.append(
+                DeliveryEffect(
+                    "upload",
+                    message_id="F_PARITY_OUTPUT",
+                    files=(str(kwargs["filename"]),),
+                    reply_to=str(kwargs["thread_ts"]),
+                )
+            )
+            return {"ok": True, "files": [{"id": "F_PARITY_OUTPUT"}]}
+
         with (
             AioResponsesMock() as mock,
             patch("daimon.core.turn.prepare.create_session") as mock_create_session,
+            patch.object(SlackTurnLifecycle, "on_terminal_success", capture_terminal),
+            patch.object(AsyncWebClient, "files_upload_v2", upload_file),
         ):
-            _register_slack_defaults(mock)
+            _register_slack_defaults(mock, self._turn_effects, fail_answer_at)
             mock_create_session.return_value = ma_session(
                 id="sess_parity_test",
                 agent_id="ag_parity_test",
@@ -415,8 +504,15 @@ class SlackDriver:
                 environment_id="env_parity_test",
             )
             await app._handle_app_mention(event, team_id=workspace_id)  # pyright: ignore[reportPrivateUsage]
-            posted = _extract_posted_texts(mock)
-        return posted
+            if app._output_sweeps:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.gather(*app._output_sweeps.values())  # pyright: ignore[reportPrivateUsage]
+        return [e.text for e in self._turn_effects if e.kind in ("send", "edit") and e.text]
+
+    def captured_turn_effects(self) -> list[DeliveryEffect]:
+        return list(self._turn_effects)
+
+    def recorded_final_message_id(self) -> str | None:
+        return self._final_message_id
 
     def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
         return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT

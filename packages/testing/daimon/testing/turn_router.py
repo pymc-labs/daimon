@@ -13,8 +13,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from anthropic.types.beta import FileMetadata
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_use_event import (
+    BetaManagedAgentsAgentToolUseEvent,
 )
 from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
     BetaManagedAgentsSessionEndTurn,
@@ -51,6 +55,7 @@ def turn_events(
     output_tokens: int = 50,
     event_id_suffix: str = "",
     now: datetime | None = None,
+    tool_use: bool = False,
 ) -> list[dict[str, Any]]:
     """The SSE script of one finished turn, as JSON-ready event dicts.
 
@@ -61,14 +66,26 @@ def turn_events(
     `(managed_session_id, event_id)` idempotency key.
     """
     processed_at = now if now is not None else datetime.now(UTC)
-    events: list[dict[str, Any]] = [
+    events: list[dict[str, Any]] = []
+    if tool_use:
+        events.append(
+            BetaManagedAgentsAgentToolUseEvent(
+                id=f"evt_parity_tool{event_id_suffix}",
+                type="agent.tool_use",
+                name="create_file",
+                input={},
+                evaluated_permission="allow",
+                processed_at=processed_at,
+            ).model_dump(mode="json")
+        )
+    events.append(
         BetaManagedAgentsAgentMessageEvent(
             id=f"evt_parity_msg{event_id_suffix}",
             type="agent.message",
             processed_at=processed_at,
             content=[BetaManagedAgentsTextBlock(type="text", text=agent_text)],
         ).model_dump(mode="json")
-    ]
+    )
     if usage_event_id is not None:
         events.append(
             BetaManagedAgentsSpanModelRequestEndEvent(
@@ -108,6 +125,7 @@ def build_turn_router(
     sent_event_bodies: list[dict[str, Any]] | None = None,
     stream_hits: list[str] | None = None,
     router: MARouter | None = None,
+    generated_file: tuple[str, bytes] | None = None,
 ) -> MARouter:
     """Build a MARouter handling agent/environment resolution + a turn SSE stream.
 
@@ -166,6 +184,7 @@ def build_turn_router(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 event_id_suffix=suffix,
+                tool_use=generated_file is not None,
             )
         )
 
@@ -180,4 +199,34 @@ def build_turn_router(
         )
     target.add("POST", rf"/v1/sessions/(?P<session_id>{session_re})/events", _send_events)
     target.add("GET", rf"/v1/sessions/(?P<session_id>{session_re})/events/stream", _stream)
+    if generated_file is not None:
+        filename, content = generated_file
+        file_id = "file_parity_output"
+        target.add(
+            "GET",
+            r"/v1/files",
+            lambda _r, _m: list_response(
+                [
+                    FileMetadata(
+                        id=file_id,
+                        created_at=datetime.now(UTC),
+                        filename=filename,
+                        mime_type="text/plain",
+                        size_bytes=len(content),
+                        type="file",
+                        downloadable=True,
+                    ).model_dump(mode="json")
+                ]
+            ),
+        )
+        target.add(
+            "GET",
+            rf"/v1/files/{file_id}/content",
+            lambda _r, _m: httpx.Response(200, content=content),
+        )
+        target.add(
+            "DELETE",
+            rf"/v1/files/{file_id}",
+            lambda _r, _m: httpx.Response(200, json={"id": file_id, "type": "file_deleted"}),
+        )
     return target

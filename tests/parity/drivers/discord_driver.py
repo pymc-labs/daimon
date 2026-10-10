@@ -21,6 +21,7 @@ the SDK boundary -- there is no Discord gateway to receive from.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import Iterator
@@ -43,6 +44,7 @@ from daimon.adapters.discord.credential_modals import (
     EnvFileModal,
     McpCredentialModal,
 )
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -82,6 +84,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard, read_discord_card, walk_components
+from .effects import DeliveryEffect, cost_line
 from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
@@ -295,6 +298,8 @@ class DiscordDriver:
     #: The deployment fall-through the panel renders; scenarios set routing
     #: through the config store instead, so both platforms read one source.
     _panel_default: DeploymentDefault = field(default_factory=DeploymentDefault)
+    _turn_effects: list[DeliveryEffect] = field(default_factory=list[DeliveryEffect])
+    _final_message_id: str | None = None
 
     def _make_runtime(
         self,
@@ -302,9 +307,10 @@ class DiscordDriver:
         router: MARouter,
         *,
         billing_config: object | None = None,
+        identity_enabled: bool = False,
     ) -> DiscordRuntime:
         settings = MagicMock()
-        settings.agent_identity.enabled = True
+        settings.agent_identity.enabled = identity_enabled
         settings.mcp = McpSettings()
         settings.billing.markup = Decimal("1.0")
         settings.billing.signup_credit = Decimal("0")
@@ -347,7 +353,14 @@ class DiscordDriver:
         return bot
 
     def _make_message(
-        self, *, workspace_id: str, channel_id: str, user_id: str, text: str
+        self,
+        *,
+        workspace_id: str,
+        channel_id: str,
+        user_id: str,
+        text: str,
+        fail_answer_at: int | None = None,
+        cold_thread: bool = False,
     ) -> discord.Message:
         message = MagicMock(spec=discord.Message)
         message.content = f"<@999> {text}"
@@ -366,6 +379,14 @@ class DiscordDriver:
         # above is not a guild Member, so its mention runs as USER; the
         # lookup mirrors that by finding no member, which is also USER.
         thread.guild = message.guild
+        thread.guild.filesize_limit = 25 * 1024 * 1024
+        thread.guild.me.id = 999
+
+        async def history(**_kwargs: Any) -> Any:
+            if False:
+                yield None
+
+        thread.history = MagicMock(side_effect=history)
         message.guild.fetch_member = AsyncMock(
             side_effect=discord.NotFound(
                 MagicMock(status=404, reason="Not Found"), "Unknown Member"
@@ -374,13 +395,88 @@ class DiscordDriver:
 
         # message_ref must carry a real .id so lifecycle._message_ref is
         # non-None; edit must be an AsyncMock since _edit_message awaits it.
-        message_ref = MagicMock()
-        message_ref.id = 42
-        message_ref.edit = AsyncMock()
-        thread.send = AsyncMock(return_value=message_ref)
+        answer_attempts = 0
 
-        message.channel = thread
-        message.add_reaction = AsyncMock()
+        def record(kind: Literal["send", "edit"], message_id: str, kwargs: dict[str, Any]) -> None:
+            nonlocal answer_attempts
+            content = kwargs.get("content")
+            is_answer = isinstance(content, str) and "word " in content
+            if is_answer:
+                answer_attempts += 1
+            failed = is_answer and fail_answer_at is not None and answer_attempts == fail_answer_at
+            embeds = kwargs.get("embeds") or ([kwargs["embed"]] if kwargs.get("embed") else [])
+            summary = cost_line([e.to_dict() for e in embeds])
+            files = kwargs.get("files") or kwargs.get("attachments") or []
+            if kwargs.get("file") is not None:
+                files = [kwargs["file"], *files]
+            self._turn_effects.append(
+                DeliveryEffect(
+                    kind=kind,
+                    message_id=message_id,
+                    text=kwargs.get("content"),
+                    summary=summary,
+                    files=tuple(str(f.filename) for f in files),
+                    sender="agent" if kwargs.get("username") else "bot",
+                    success=not failed,
+                    error="injected send failure" if failed else None,
+                )
+            )
+            if failed:
+                raise discord.HTTPException(MagicMock(status=500, reason="injected"), "injected")
+
+        def make_ref(message_id: str) -> MagicMock:
+            ref = MagicMock()
+            ref.id = int(message_id)
+            ref.attachments = []
+
+            async def edit(**kwargs: Any) -> MagicMock:
+                record("edit", message_id, kwargs)
+                return ref
+
+            async def react(emoji: str) -> None:
+                self._turn_effects.append(DeliveryEffect("react", message_id, text=emoji))
+
+            async def delete() -> None:
+                self._turn_effects.append(DeliveryEffect("delete", message_id))
+
+            ref.edit = AsyncMock(side_effect=edit)
+            ref.add_reaction = AsyncMock(side_effect=react)
+            ref.delete = AsyncMock(side_effect=delete)
+            return ref
+
+        refs: list[MagicMock] = []
+        refs_by_id: dict[int, MagicMock] = {}
+
+        async def send(*args: Any, **kwargs: Any) -> MagicMock:
+            ref = make_ref(str(42 + len(refs)))
+            refs.append(ref)
+            refs_by_id[ref.id] = ref
+            if args and "content" not in kwargs:
+                kwargs["content"] = args[0]
+            record("send", str(ref.id), kwargs)
+            return ref
+
+        thread.send = AsyncMock(side_effect=send)
+        thread.get_partial_message = MagicMock(
+            side_effect=lambda message_id: refs_by_id[message_id]
+        )
+        thread.fetch_message = AsyncMock(side_effect=lambda message_id: refs_by_id[message_id])
+
+        if cold_thread:
+            parent = MagicMock(spec=discord.TextChannel)
+            parent.id = int(channel_id) - 1
+            parent.guild = message.guild
+            parent.send = AsyncMock()
+            message.channel = parent
+            message.id = 41
+            message.create_thread = AsyncMock(return_value=thread)
+        else:
+            message.channel = thread
+
+        async def react_to_trigger(emoji: str) -> None:
+            self._turn_effects.append(DeliveryEffect("react", "trigger", text=emoji))
+
+        message.add_reaction = AsyncMock(side_effect=react_to_trigger)
         message.attachments = []
         message.mentions = [SimpleNamespace(id=999)]
         message.created_at = datetime(2026, 6, 14, tzinfo=UTC)
@@ -397,17 +493,34 @@ class DiscordDriver:
         user_id: str,
         text: str,
         billing_config: object | None = None,
+        identity_enabled: bool = False,
+        fail_answer_at: int | None = None,
+        cold_thread: bool = False,
     ) -> list[str]:
-        runtime = self._make_runtime(sessionmaker, router, billing_config=billing_config)
+        self._turn_effects.clear()
+        self._final_message_id = None
+        runtime = self._make_runtime(
+            sessionmaker, router, billing_config=billing_config, identity_enabled=identity_enabled
+        )
         bot = self._make_bot(runtime)
         message = self._make_message(
-            workspace_id=workspace_id, channel_id=channel_id, user_id=user_id, text=text
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=text,
+            fail_answer_at=fail_answer_at,
+            cold_thread=cold_thread,
         )
-        thread = cast(MagicMock, message.channel)
+        original_terminal = DiscordTurnLifecycle.on_terminal_success
+
+        async def capture_terminal(lifecycle: DiscordTurnLifecycle, state: Any) -> None:
+            await original_terminal(lifecycle, state)
+            self._final_message_id = lifecycle.final_message_id
 
         with (
             patch("daimon.core.turn.prepare.create_session") as mock_create_session,
             patch("daimon.adapters.discord.bot.build_context_xml") as mock_build_context_xml,
+            patch.object(DiscordTurnLifecycle, "on_terminal_success", capture_terminal),
         ):
             mock_create_session.return_value = ma_session(
                 id="sess_parity_test",
@@ -417,17 +530,16 @@ class DiscordDriver:
             )
             mock_build_context_xml.return_value = (f"<user_query>{text}</user_query>", [])
             await bot.on_message(message)
+            if bot._output_sweeps:  # pyright: ignore[reportPrivateUsage]
+                await asyncio.gather(*bot._output_sweeps.values())  # pyright: ignore[reportPrivateUsage]
 
-        message_ref = cast(MagicMock, thread.send.return_value)
-        posted: list[str] = []
-        for call in thread.send.call_args_list:
-            if call.args and isinstance(call.args[0], str):
-                posted.append(call.args[0])
-        for call in message_ref.edit.call_args_list:
-            content = call.kwargs.get("content")
-            if isinstance(content, str):
-                posted.append(content)
-        return posted
+        return [e.text for e in self._turn_effects if e.kind in ("send", "edit") and e.text]
+
+    def captured_turn_effects(self) -> list[DeliveryEffect]:
+        return list(self._turn_effects)
+
+    def recorded_final_message_id(self) -> str | None:
+        return self._final_message_id
 
     def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
         return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT

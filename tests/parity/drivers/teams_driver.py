@@ -39,6 +39,7 @@ from daimon.adapters.mcp.tools.credential_requests import (
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams.credential_requests import SUBMIT
 from daimon.adapters.teams.http_service import create_teams_http_service
+from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import (
     AnthropicSettings,
@@ -69,6 +70,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard, read_teams_card, walk_components
+from .effects import DeliveryEffect, cost_line
 from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_teams_view
 
@@ -110,6 +112,9 @@ class _TeamsApiFake:
     and a roster lookup answers as for one of `tenant_id`'s own members."""
 
     tenant_id: str = ""
+    fail_answer_at: int | None = None
+    answer_attempts: int = 0
+    failed_activity_ids: set[str] = field(default_factory=set[str])
     #: (method, body, activity id) of every post and edit, in order.
     activities: list[tuple[str, dict[str, Any], str]] = field(
         default_factory=list[tuple[str, dict[str, Any], str]]
@@ -133,7 +138,18 @@ class _TeamsApiFake:
             return httpx.Response(200, json={}, request=request)
         update = re.search(r"/activities/([^/]+)$", path)
         activity_id = update.group(1) if update else f"m-{len(self.activities) + 1}"
-        self.activities.append((context.method, cast(dict[str, Any], context.json), activity_id))
+        body = cast(dict[str, Any], context.json)
+        is_answer = "word " in str(body.get("text") or "")
+        if is_answer:
+            self.answer_attempts += 1
+        self.activities.append((context.method, body, activity_id))
+        if (
+            is_answer
+            and self.fail_answer_at is not None
+            and self.answer_attempts == self.fail_answer_at
+        ):
+            self.failed_activity_ids.add(activity_id)
+            return httpx.Response(500, json={"error": "injected_failure"}, request=request)
         return httpx.Response(200, json={"id": activity_id}, request=request)
 
 
@@ -148,14 +164,17 @@ def _actions(card: object) -> list[dict[str, Any]]:
 
 
 async def _exchange(
-    runtime: TeamsRuntime, activity: dict[str, Any]
+    runtime: TeamsRuntime,
+    activity: dict[str, Any],
+    *,
+    fail_answer_at: int | None = None,
 ) -> tuple[dict[str, Any], _TeamsApiFake]:
     """POST one activity to the started service and drain the work it spawned.
 
     Ingress auth, MSAL, boot provisioning and timers are stubbed.
     """
     assert runtime.settings.teams is not None
-    fake = _TeamsApiFake(tenant_id=runtime.settings.teams.tenant_id)
+    fake = _TeamsApiFake(tenant_id=runtime.settings.teams.tenant_id, fail_answer_at=fail_answer_at)
     client = Client(ClientOptions())
     client.use(fake)
     with (
@@ -250,6 +269,8 @@ class TeamsDriver:
     """Drives Teams through `/api/messages`, the real Teams entry point."""
 
     param_id: str = "teams"
+    _turn_effects: list[DeliveryEffect] = field(default_factory=list[DeliveryEffect])
+    _final_message_id: str | None = None
     _cards: list[CapturedCard] = field(default_factory=list[CapturedCard])
     _fernet_key: str = field(default_factory=lambda: Fernet.generate_key().decode())
     _views: list[CapturedView] = field(default_factory=list[CapturedView])
@@ -270,12 +291,14 @@ class TeamsDriver:
         admins: tuple[str, ...] = (),
         billing_config: object | None = None,
         turn: bool = False,
+        identity_enabled: bool = False,
     ) -> TeamsRuntime:
         """Real turn deps over a MagicMock `Settings`.
 
         A `turn` runs as the other drivers' do: no daimon-mcp, `test-agent` by default.
         """
         settings = MagicMock()
+        settings.agent_identity.enabled = identity_enabled
         settings.teams = TeamsSettings(
             client_id=_CLIENT_ID,
             client_secret=SecretStr("parity-secret"),
@@ -330,7 +353,13 @@ class TeamsDriver:
         user_id: str,
         text: str,
         billing_config: object | None = None,
+        identity_enabled: bool = False,
+        fail_answer_at: int | None = None,
+        cold_thread: bool = False,
     ) -> list[str]:
+        self._turn_effects.clear()
+        self._final_message_id = None
+        del cold_thread  # a channel id without ;messageid= starts a new thread
         del tenant_id  # derived from the Entra tenant, as production does
         runtime = self._runtime(
             sessionmaker,
@@ -338,6 +367,7 @@ class TeamsDriver:
             entra_tenant=workspace_id,
             billing_config=billing_config,
             turn=True,
+            identity_enabled=identity_enabled,
         )
         activity = _activity(tenant=workspace_id, user=user_id, conversation=channel_id, text=text)
         session = ma_session(
@@ -346,11 +376,46 @@ class TeamsDriver:
             model="claude-sonnet-4-6",
             environment_id="env_parity_test",
         )
-        with patch("daimon.core.turn.prepare.create_session", return_value=session):
-            _response, fake = await _exchange(runtime, activity)
-        return [
-            body["text"] for _m, body, _id in fake.activities if isinstance(body.get("text"), str)
-        ]
+        original_terminal = TeamsTurnLifecycle.on_terminal_success
+
+        async def capture_terminal(lifecycle: TeamsTurnLifecycle, state: Any) -> None:
+            await original_terminal(lifecycle, state)
+            self._final_message_id = lifecycle.final_message_id
+
+        with (
+            patch("daimon.core.turn.prepare.create_session", return_value=session),
+            patch.object(TeamsTurnLifecycle, "on_terminal_success", capture_terminal),
+        ):
+            _response, fake = await _exchange(runtime, activity, fail_answer_at=fail_answer_at)
+        for method, body, message_id in fake.activities:
+            cards = _cards_in(body)
+            files = tuple(
+                str(item.get("name"))
+                for item in body.get("attachments") or []
+                if "file" in str(item.get("contentType", "")).lower()
+            )
+            self._turn_effects.append(
+                DeliveryEffect(
+                    kind="upload" if files else "edit" if method == "PUT" else "send",
+                    message_id=message_id,
+                    text=body.get("text"),
+                    summary=cost_line(cards),
+                    feedback="feedback_up" in str(cards),
+                    files=files,
+                    reply_to=body.get("replyToId"),
+                    success=message_id not in fake.failed_activity_ids,
+                    error="injected send failure"
+                    if message_id in fake.failed_activity_ids
+                    else None,
+                )
+            )
+        return [e.text for e in self._turn_effects if e.text]
+
+    def captured_turn_effects(self) -> list[DeliveryEffect]:
+        return list(self._turn_effects)
+
+    def recorded_final_message_id(self) -> str | None:
+        return self._final_message_id
 
     def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
         return _BALANCE_BLOCKED_TEXT if kind == "balance" else _CAP_BLOCKED_TEXT

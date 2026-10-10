@@ -37,6 +37,7 @@ from daimon.testing.ma import MARouter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard
+from .effects import DeliveryEffect
 from .views import CapturedView
 
 #: Namespace for the account id a driver acts as. `credential_requests`,
@@ -116,6 +117,14 @@ class PlatformDriver(Protocol):
 
     param_id: str
 
+    def captured_turn_effects(self) -> list[DeliveryEffect]:
+        """Effects of the latest turn in the order the platform fake saw them."""
+        ...
+
+    def recorded_final_message_id(self) -> str | None:
+        """The lifecycle's final answer ID, independent of the thread watermark."""
+        ...
+
     async def dispatch_turn(
         self,
         *,
@@ -127,6 +136,9 @@ class PlatformDriver(Protocol):
         user_id: str,
         text: str,
         billing_config: object | None = None,
+        identity_enabled: bool = False,
+        fail_answer_at: int | None = None,
+        cold_thread: bool = False,
     ) -> list[str]:
         """Drive one turn through the real platform entry point.
 
@@ -141,9 +153,8 @@ class PlatformDriver(Protocol):
     def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:
         """The exact per-driver copy a blocked turn must have posted.
 
-        Deliberately NOT shared across platforms -- the divergence principle
-        (02-CONTEXT D-10) means Discord and Slack copy is allowed to differ;
-        each driver returns its own platform's exact string.
+        Legacy adapter-specific copy for existing blocked-turn callers. New
+        parity assertions name any differences in one test allow-list.
         """
         ...
 
