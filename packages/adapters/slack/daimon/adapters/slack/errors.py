@@ -97,8 +97,6 @@ def _guidance(exc: BaseException) -> str | None:
     """
     if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
         return _guidance(exc.cause)
-    if isinstance(exc, SessionAgentMismatch):
-        return _SESSION_AGENT_MISMATCH
     if isinstance(exc, AgentNameCollision):
         return "This workspace already has an agent with that name. Pick a different name."
     if isinstance(exc, UserFacingError):
@@ -154,11 +152,11 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
 
 
 def _rendered(exc: Exception, request_id: str) -> tuple[str, str | None]:
-    """The message and its `Ref` line (None for fixed guidance), logging the full id."""
+    """The message and its `Ref` line (None without a request id), logging the full id."""
+    if isinstance(exc, SessionAgentMismatch):
+        return _SESSION_AGENT_MISMATCH, None  # its own wording, unchanged
     guidance = _guidance(exc)
-    if guidance is not None:
-        return guidance, None
-    message = "\n\n".join(_cause_lines(exc))
+    message = guidance if guidance is not None else "\n\n".join(_cause_lines(exc))
     if not request_id:
         return message, None
     ref = short_ref(request_id)

@@ -15,7 +15,7 @@ from daimon.core._models import (
     ThreadSession,
     UserConfig,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.scope import (
     ChannelConfigRow,
     ChannelScopeRef,
@@ -64,7 +64,7 @@ async def resolve(
         )
         if binding is not None:
             if binding.deleted:
-                raise DaimonError(
+                raise UserFacingError(
                     "This setup conversation was deleted. Open a new setup conversation."
                     if binding.kind == "setup"
                     else "This conversation was deleted. Start the task again in a new thread."

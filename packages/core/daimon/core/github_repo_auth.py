@@ -40,7 +40,7 @@ from typing import Literal
 
 import httpx
 import structlog
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_app_auth import (
     build_app_jwt,
     get_installation_id_for_repo,
@@ -370,7 +370,7 @@ async def resolve_clone_token(
     path (on-demand ``GET /repos/{owner}/{repo}/installation`` ->
     ``mint_installation_token``) when the binding recorded proof of access,
     falls back to the operator fallback PAT on a binding that recorded a
-    verified-public proof, and raises ``DaimonError`` when none of those
+    verified-public proof, and raises ``UserFacingError`` when none of those
     apply. Never returns an empty string (MA rejects an empty
     ``authorization_token`` with a 400).
 
@@ -389,7 +389,7 @@ async def resolve_clone_token(
         The resolved clone token (PAT or minted installation token).
 
     Raises:
-        DaimonError: When no PAT, App coverage, or fallback PAT resolves —
+        UserFacingError: When no PAT, App coverage, or fallback PAT resolves —
             the fail-loud branch.
     """
     # Empty string is "no token" (same as fallback_pat's bool() handling below);
@@ -460,7 +460,7 @@ async def resolve_clone_token(
             proof_kind=binding.proof_kind,
             app_configured=app_configured,
         )
-        raise DaimonError(
+        raise UserFacingError(
             render_clone_refusal(
                 repo_url=binding.repo_url,
                 proof_kind=binding.proof_kind,
@@ -473,7 +473,7 @@ async def resolve_clone_token(
             repo_url=binding.repo_url,
             proof_kind=binding.proof_kind,
         )
-    raise DaimonError(
+    raise UserFacingError(
         render_clone_refusal(
             repo_url=binding.repo_url,
             proof_kind=binding.proof_kind,

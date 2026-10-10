@@ -155,7 +155,7 @@ def render_error(
     A failure reads as two lines, what happened and what to do, then a small
     `Ref` line: the last six characters of `request_id`. The full id and the
     exception are logged here, so support can find the failure from the ref.
-    Fixed guidance for our own errors carries no ref.
+    Fixed guidance for our own errors keeps its one line, and the ref.
 
     `new_responder`/`owner`/`channel` are the contextual facts a
     `SessionAgentMismatch` render needs (who answers now, whose work this
@@ -171,10 +171,7 @@ def render_error(
             channel=channel or "this channel",
             offer_button=offer_button,
         )
-    guidance = _guidance(exc)
-    if guidance is not None:
-        return guidance
-    lines = list(_cause_lines(exc))
+    lines = list(error_lines(exc))
     if request_id:
         log.warning(
             "error.rendered",

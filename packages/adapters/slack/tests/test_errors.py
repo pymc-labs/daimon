@@ -19,6 +19,7 @@ from daimon.adapters.slack.errors import (
     render_error_payload,
     surface_command_error,
 )
+from daimon.adapters.slack.setup_conversations import create_setup_conversation
 from daimon.core.errors import DaimonError, SpecError, StoreError, TurnError, UserFacingError
 from daimon.core.turn.errors import SessionAgentMismatch
 from slack_sdk.errors import SlackApiError
@@ -148,9 +149,28 @@ class TestRenderError:
         ]:
             assert render_error(exc, request_id=TEST_RID) == f"{OUR_SIDE}\n\n{REF}"
 
-    def test_user_facing_guidance_is_shown_escaped_without_a_ref(self) -> None:
+    def test_user_facing_guidance_is_shown_escaped_with_the_ref(self) -> None:
         result = render_error(UserFacingError("Ask <@U123> & retry."), request_id=TEST_RID)
-        assert result == "Ask &lt;@U123&gt; &amp; retry."
+        assert result == f"Ask &lt;@U123&gt; &amp; retry.\n\n{REF}"
+
+    async def test_a_converted_setup_refusal_keeps_its_words_and_the_ref(self) -> None:
+        """Opening setup outside a channel is authored copy, so it reaches chat as written."""
+        with pytest.raises(UserFacingError) as caught:
+            await create_setup_conversation(
+                MagicMock(),
+                MagicMock(),
+                team_id="T1",
+                channel_id="D_DM",
+                user_id="U1",
+                target_ma_agent_id=None,
+            )
+        words = "Open /agent-setup in a workspace channel to start a setup conversation."
+        assert render_error(caught.value, request_id=TEST_RID) == f"{words}\n\n{REF}"
+        payload = render_error_payload(caught.value, request_id=TEST_RID)
+        assert payload["blocks"] == [
+            {"type": "section", "text": {"type": "mrkdwn", "text": words}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "Ref 000000"}]},
+        ]
 
     def test_session_agent_mismatch_keeps_its_wording(self) -> None:
         exc = SessionAgentMismatch(

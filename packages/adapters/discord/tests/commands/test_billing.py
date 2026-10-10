@@ -156,4 +156,4 @@ async def test_billing_command_answers_after_a_database_read_error(
     interaction.response.defer.assert_awaited_once()
     # The deferred "thinking" reply gets an answer instead of hanging.
     interaction.followup.send.assert_awaited_once()
-    assert "couldn't load or save" in interaction.followup.send.await_args.args[0]
+    assert "Something went wrong on our side." in interaction.followup.send.await_args.args[0]

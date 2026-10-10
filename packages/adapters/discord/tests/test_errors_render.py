@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import anthropic
@@ -28,9 +29,11 @@ from daimon.core.errors import (
     TurnError,
     UserFacingError,
 )
+from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.setup_conversations import get_setup_responder
 from daimon.core.stores.direct_messages import DirectMessageBusy
+from daimon.core.stores.domain import AgentRepoBindingRow
 from daimon.testing.ma import build_fake_anthropic
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
@@ -72,7 +75,7 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
         assert result.startswith(expected)
         assert "private" not in result
         assert "SELECT" not in result
-        assert "Ref" not in result, "fixed guidance needs no ref"
+        assert result.endswith(f"\n\n{REF}"), "fixed guidance keeps the ref line"
 
 
 def test_everything_else_is_our_side_with_a_ref_and_no_body() -> None:
@@ -197,14 +200,14 @@ def test_discord_existing_thread_error_is_plain_copy() -> None:
         response, {"code": 160004, "message": "A thread has already been created for this message"}
     )
     assert render_error(error, request_id=TEST_RID) == (
-        "A conversation already exists for this message. Continue in its thread."
+        f"A conversation already exists for this message. Continue in its thread.\n\n{REF}"
     )
 
 
 def test_discord_permission_error_is_actionable_without_http_detail() -> None:
     error = discord.HTTPException(MagicMock(status=403, reason="Forbidden"), "private")
     assert render_error(error, request_id=TEST_RID) == (
-        "Daimon doesn't have permission to post here. Ask a server admin for help."
+        f"Daimon doesn't have permission to post here. Ask a server admin for help.\n\n{REF}"
     )
 
 
@@ -226,7 +229,7 @@ def test_audited_user_guidance_keeps_its_next_step_without_retry_later() -> None
         "This server is not registered. Ask a server admin to finish setup.",
         "The agent was created but is not listed yet. Reopen `/agent-setup` to see it.",
     ):
-        assert render_error(UserFacingError(copy), request_id=TEST_RID) == copy
+        assert render_error(UserFacingError(copy), request_id=TEST_RID) == f"{copy}\n\n{REF}"
 
 
 @pytest.mark.parametrize("status", [400, 404])
@@ -242,4 +245,36 @@ async def test_missing_setup_responder_keeps_shared_helper_guidance(status: int)
     assert render_error(caught.value, request_id=TEST_RID) == (
         "This setup conversation's Daimon responder is missing. "
         "Ask the operator to restore it, then open a new setup conversation."
+        f"\n\n{REF}"
+    )
+
+
+async def test_a_converted_core_refusal_keeps_its_words_and_the_ref() -> None:
+    """The clone refusal is authored copy, so it reaches chat as written."""
+    now = datetime.now(UTC)
+    binding = AgentRepoBindingRow(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        repo_url="acme/widgets",
+        default_branch="main",
+        ma_secret_ref="",
+        created_at=now,
+        updated_at=now,
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(UserFacingError) as caught:
+            await resolve_clone_token(
+                client,
+                binding=binding,
+                per_agent_pat=None,
+                fallback_pat=None,
+                app_id=None,
+                app_private_key=None,
+                now=int(now.timestamp()),
+            )
+    wrapped = TurnError(kind="upstream", cause=caught.value)
+    assert render_error(wrapped, request_id=TEST_RID) == (
+        "No credential is authorized to clone acme/widgets. Re-bind this repo "
+        "with a GitHub token that can read it, using request_repo_binding."
+        f"\n\n{REF}"
     )
