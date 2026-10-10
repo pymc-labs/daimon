@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2158,
+  "files_scanned": 2163,
   "parse_errors": [],
   "calls": [
     {
@@ -16970,6 +16970,26 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_provider_usage_driver.py",
+      "line": 13,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_provider_usage_driver.py",
+      "line": 14,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsEventParams",
+        "BetaManagedAgentsSessionEvent",
+        "BetaManagedAgentsSpanModelRequestEndEvent"
       ],
       "category": "test"
     },
