@@ -764,3 +764,14 @@ the proposal and retains the hold.
 Missing amounts, empty/delayed bills, duplicate groups, foreign
 scope, unknown line items or ambiguous attribution remain estimated, unverified.
 Exact billed token and container line items replace estimates only after approval.
+An `ObservationBilled` callback is an accounting posture, not provider
+enablement. Prepared foreign turns require authorized native resources and
+profiles, genuine usage frames, bounded authoritative post-run usage fetches,
+and the admitted persistence lease/journal. Explicit host registration and
+adapter support must supply those prerequisites. Foreign `ProviderUsageTotals`
+compatibility counters are lower bounds. Before a foreign profile is enabled,
+each adapter footer must omit cost unless verified provider prices and actual
+infrastructure are available, and must not price those counters through an
+Anthropic meter. Today's Discord, Slack and Teams footers still price the legacy
+counters through `MODEL_PRICING`, so foreign enablement is gated on that adapter
+work.
