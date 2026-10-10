@@ -130,7 +130,7 @@ def register_github_working_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
 
         A clear ask is enough: set it right away and reply with the returned
         line. Ask once in plain words during agent setup. Use an owner/repo already on
-        this agent's list. Other repos have token access; clone one by name when
+        this agent's list. Other repos have token access; clone one with gh repo clone when
         asked. Only a server admin or an admin for this non-managed agent's
         channels may change this setting. Pass the current turn origin and the
         selected agent's name and MA id. If the repo is not on its list, offer
