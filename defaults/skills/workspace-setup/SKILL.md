@@ -59,6 +59,11 @@ their snapshots. Selecting a target does not change who answers or routing.
    `request_repo_binding` private PAT form only if the person explicitly asks
    for that fallback. Connecting repos does not silently replace an existing
    saved key; the admin confirms **Update and restart chats** first.
+   If the person asks to remove a repo from this agent, call `remove_repo`
+   with the selected agent and owner/repo. Ask its returned question, “Remove
+   owner/repo from <Agent>?”, and call it with `confirmed=true` only after the
+   same person says yes in a later message in this thread. Removal clears this
+   agent's working repo if it was selected; other agents keep their access.
 2. **Keys.** Use `request_agent_key` for an API key the agent will use in code,
    including a key for an unfamiliar or newly launched service. Infer and state
    a conventional name such as `HIGGSFIELD_API_KEY`; do not ask the person to

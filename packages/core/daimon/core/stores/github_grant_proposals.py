@@ -26,7 +26,7 @@ async def propose(
     thread_id: str,
     agent_id: uuid.UUID,
     repo_name: str,
-    ability: Literal["read", "write"],
+    ability: Literal["read", "write", "remove"],
     origin_id: uuid.UUID,
 ) -> None:
     now = datetime.now(UTC)
@@ -93,7 +93,7 @@ async def consume(
     thread_id: str,
     agent_id: uuid.UUID,
     repo_name: str,
-    ability: Literal["read", "write"],
+    ability: Literal["read", "write", "remove"],
     origin_id: uuid.UUID,
     origin_created_at: datetime,
 ) -> bool:

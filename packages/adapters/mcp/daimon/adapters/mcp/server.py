@@ -67,6 +67,7 @@ from daimon.adapters.mcp.tools.credential_requests import register_credential_re
 from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
+from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
 from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
@@ -459,6 +460,7 @@ def create_mcp_app(
     register_github_connect_tools(mcp, runtime)
     register_github_request_tools(mcp, runtime)
     register_github_working_repo_tools(mcp, runtime)
+    register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
     register_skill_upload_tools(mcp, runtime)

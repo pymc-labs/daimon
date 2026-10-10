@@ -502,3 +502,19 @@ def test_new_token_only_grant_replaces_the_session() -> None:
         recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
     )
     assert decision == ReplaceSession(reasons=("repo_set",))
+
+
+def test_removed_token_only_grant_replaces_the_session() -> None:
+    url = "https://github.com/example/removed"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(),
+        token_repo_urls=(url,),
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(update={"token_repo_urls": ()})
+    assert decide_session_compatibility(
+        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+    ) == ReplaceSession(reasons=("repo_set",))

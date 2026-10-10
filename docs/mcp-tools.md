@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 119 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 120 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -211,6 +211,14 @@ Private, agent-bound GitHub setup from an active conversation.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos through GitHub. |
+
+## `github_remove_repo`
+
+Remove one repository from one agent after confirmation in chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `remove_repo` | Discord callers, Slack callers | Remove owner/repo from this agent only, after the requester confirms in a later turn. |
 
 ## `github_requests`
 
