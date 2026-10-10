@@ -1257,6 +1257,16 @@ Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 Seconds between scheduler ticks (loop sleep). The usage sweep runs on its own loop and
 pauses the same interval between passes.
 
+### `DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`
+
+`bool` · optional · default `False`
+
+Run the headless usage sweep (usage backfill for MCP start_turn sessions). Off by
+default: the current sweep lists every session in the shared Managed Agents workspace
+and drains its request rate limit. While off, headless MCP turns are not metered;
+turning it back on backfills them, since recording is idempotent and the startup pass
+reads every stamped session still in the workspace.
+
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 
 `float` · optional · default `900.0`
