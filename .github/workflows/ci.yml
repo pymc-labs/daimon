@@ -69,8 +69,13 @@ jobs:
         run: uv run python scripts/generate_web_css.py --check
 
   pytest-core:
+    name: pytest-core (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -104,11 +109,28 @@ jobs:
           DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
         run: uv run alembic upgrade head
       - name: pytest (core + cli + scheduler + testing + integration)
-        run: uv run pytest qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_deploy_workflow_quotes.py -n auto
+        run: >-
+          uv run pytest qa/live/tests packages/core packages/adapters/cli
+          packages/adapters/scheduler packages/testing tests/integration
+          tests/test_deploy_workflow_quotes.py tests/test_ci_workflow_contract.py -n auto
+          -p daimon.testing.ci_shard --ci-shard-index=${{ matrix.shard }}
+          --ci-shard-count=3 --durations=20
+          --junitxml=core-shard-${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-shard-${{ matrix.shard }}-junit
+          path: core-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
 
   pytest-mcp:
+    name: pytest-mcp (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -140,7 +162,17 @@ jobs:
           DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
         run: uv run alembic upgrade head
       - name: pytest (mcp)
-        run: uv run pytest packages/adapters/mcp -n auto
+        run: >-
+          uv run pytest packages/adapters/mcp -n auto
+          -p daimon.testing.ci_shard --ci-shard-index=${{ matrix.shard }}
+          --ci-shard-count=2 --durations=20
+          --junitxml=mcp-shard-${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mcp-shard-${{ matrix.shard }}-junit
+          path: mcp-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
 
   pytest-discord:
     runs-on: ubuntu-latest
@@ -331,12 +363,11 @@ jobs:
       - name: pytest (mux)
         run: uv run pytest packages/mux -n auto
 
-  # Builds the three images deploy.yml ships. On a push to main it also fills
-  # the build cache deploy.yml reads, while the tests run, so the deploy only
-  # rebuilds what changed. Pull requests read that cache but never write it:
-  # their entries would crowd main's out of the repository's cache quota. A
-  # failed cache upload is ignored: it must not block the deploy needing this.
+  # Pull requests and self-hosted main runs without GCP config exercise all
+  # three Dockerfiles without publishing images or staging credentials. Hosted
+  # main runs build the same Dockerfiles in docker-publish-candidate instead.
   docker-build:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main' || vars.GCP_WIF_PROVIDER == ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -350,25 +381,99 @@ jobs:
           context: .
           file: Dockerfile
           cache-from: type=gha,scope=daimon
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=daimon,ignore-error=true' || '' }}
       - name: notebook-host
         uses: docker/build-push-action@v6
         with:
           context: .
           file: apps/notebook-host/Dockerfile
           cache-from: type=gha,scope=notebook-host
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=notebook-host,ignore-error=true' || '' }}
       - name: report-host
         uses: docker/build-push-action@v6
         with:
           context: .
           file: apps/report-host/Dockerfile
           cache-from: type=gha,scope=report-host
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=report-host,ignore-error=true' || '' }}
+
+  # Unique candidate tags are deliberately not the 7-char SHA tags consumed
+  # by promote.yml. Passing digests pins staging to these exact tested images;
+  # deploy.yml assigns promotable SHA tags only after all staging gates pass.
+  docker-publish-candidate:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.GCP_WIF_PROVIDER != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      daimon-digest: ${{ steps.daimon.outputs.digest }}
+      notebook-digest: ${{ steps.notebook.outputs.digest }}
+      report-digest: ${{ steps.report.outputs.digest }}
+    env:
+      AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
+      REPO: ${{ vars.GCP_AR_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          skip_install: true
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "$AR_HOST" --quiet
+      - name: Compute candidate tags
+        id: tags
+        run: |
+          BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
+          TAG="ci-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "daimon=$BASE/daimon:$TAG" >> "$GITHUB_OUTPUT"
+          echo "notebook=$BASE/notebook-host:$TAG" >> "$GITHUB_OUTPUT"
+          echo "report=$BASE/report-host:$TAG" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+      - name: Build + push candidate daimon
+        id: daimon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ steps.tags.outputs.daimon }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=daimon
+          cache-to: type=gha,mode=max,scope=daimon,ignore-error=true
+      - name: Build + push candidate notebook-host
+        id: notebook
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/notebook-host/Dockerfile
+          tags: ${{ steps.tags.outputs.notebook }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=notebook-host
+          cache-to: type=gha,mode=max,scope=notebook-host,ignore-error=true
+      - name: Build + push candidate report-host
+        id: report
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/report-host/Dockerfile
+          tags: ${{ steps.tags.outputs.report }}
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=report-host
+          cache-to: type=gha,mode=max,scope=report-host,ignore-error=true
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-teams, pytest-parity, pytest-notebook-host, pytest-report-host, pytest-mux, docker-build]
+    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-teams, pytest-parity, pytest-notebook-host, pytest-report-host, pytest-mux, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators
@@ -386,3 +491,6 @@ jobs:
     with:
       environment: staging
       sha: ${{ github.sha }}
+      daimon_digest: ${{ needs.docker-publish-candidate.outputs.daimon-digest }}
+      notebook_digest: ${{ needs.docker-publish-candidate.outputs.notebook-digest }}
+      report_digest: ${{ needs.docker-publish-candidate.outputs.report-digest }}
