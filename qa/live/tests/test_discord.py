@@ -34,10 +34,10 @@ class FakeDriver:
         self.calls.append((method, path))
         if path == "/users/@me":
             return {"id": self.qa_id}
-        if path == "/channels/1435062989119295641":
+        if path == "/channels/1558361838960382032":
             return {"guild_id": self.category_guild, "type": 4}
         if path.startswith("/guilds/") and method == "POST":
-            assert body and body["parent_id"] == "1435062989119295641"
+            assert body and body["parent_id"] == "1558361838960382032"
             return {"id": "parent"}
         if path.endswith("/messages") and method == "POST":
             return {"id": "123"}

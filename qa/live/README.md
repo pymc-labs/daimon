@@ -54,7 +54,7 @@ Configure all required QA identities, including
 the admin bot when scenarios use `as: admin`.
 
 Staging is hard-bound to guild `1435062989119295640`, category
-`1435062989119295641`, and logging project `pymc-daimon-staging`. Preflight checks
+`1558361838960382032`, and logging project `pymc-daimon-staging`. Preflight checks
 bot identity, category ownership and effective permissions before channel creation,
 and warms staging's MCP service. The deployment must already allow the configured
 QA bot IDs through `DAIMON_DISCORD__QA_BOT_USER_IDS`; the runner does not change it.

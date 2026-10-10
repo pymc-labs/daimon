@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
+
 - Rejected or failed MCP and GitHub token forms on Discord, Slack and Teams now show an error with a usable retry button. After 90 seconds the card says it is still saving and will update when finished; long skill imports continue until success or error.
 - Slack, Discord and Teams members now see only locally routed responders and agents explicitly allowed in their channel, across setup panels, agent tools, skill reads and routing explanations. Unrouted agents and agents belonging to other channels stay hidden; admin visibility and channel isolation are unchanged.
 - Discord form, credential and app install buttons now check private thread membership before posting for someone.
