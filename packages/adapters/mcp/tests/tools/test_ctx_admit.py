@@ -353,5 +353,5 @@ async def test_admit_over_the_cap_says_the_cap_is_the_callers_and_an_operator_ra
     ):
         await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
     assert str(refused.value) == (
-        "TERMINAL ERROR: You've reached your monthly usage cap. An operator can raise it."
+        "TERMINAL ERROR: You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ), "the MCP refusal uses the shared cap wording"
