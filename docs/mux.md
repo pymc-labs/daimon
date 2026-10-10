@@ -880,6 +880,12 @@ The host retains the one billed checkpoint, its access fence, fallback notices,
 quoted transcript and system-message policy. Generic lifecycle export/restore
 stay unsupported; this explicit native extension handles the existing MA ladder.
 
+Workspace checkpoint runners accept the account from the caller's existing
+authorization decision and pass its tenant/account scope to the turn bridge and
+native restore. Existing direct callers retain their optional-account semantics
+and their existing requests, checkpoint debit, before-send callback and fallback
+behavior; the production chat caller supplies its reauthorized account.
+
 Workspace rehosting uses the native outputs extension's ID-only upload result.
 The request helper is shared with the generic Artifacts port; beta headers,
 multipart bytes and download/delete/upload ordering stay unchanged. Successful

@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve SDK-accepted partial sessions and nullable native location metadata in MCP reads without constructing or changing durable provider bindings.
 
 - Route account purge, DM quarantine and adapter orphan interruption through scoped resource ports; preserve disposable-workspace cleanup requests and its opt-in sentinel gate.
+- Carry the caller's authorized account into workspace checkpoint turns and native restore scopes, preserving existing direct callers and the handoff fallback ladder.
 
 - Bound OpenAI session cleanup with idle polling and HTTP 409 recovery, preserving deletion keys, shared vaults and unknown-outcome failures.
 

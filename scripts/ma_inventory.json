@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2181,
+  "files_scanned": 2182,
   "parse_errors": [],
   "calls": [
     {
@@ -3644,6 +3644,17 @@
       "response_access": [
         "agent.id"
       ]
+    },
+    {
+      "file": "packages/core/tests/test_checkpoint_turn_scope.py",
+      "line": 78,
+      "end": 78,
+      "scope": "test_checkpoint_passes_real_scope_and_preserves_the_existing_read",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "legacy.beta.sessions.events.list(session_id='sess_old')",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/core/tests/test_core_admin_port_requests.py",
@@ -15313,6 +15324,16 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/test_checkpoint_turn_scope.py",
+      "line": 11,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsAgentMessageEvent",
+        "BetaManagedAgentsTextBlock"
       ],
       "category": "test"
     },
