@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Add a cross-backend QA outcome oracle for authoritative root completion, bounded latency and follow-up session reuse, with explicit incomplete-capture results.
+- Prepare unsigned OpenAI Admin spend reconciliations from audited isolated project/day exports; reject client filters and retain holds unless effective requests, billed line-item amounts and usage counts match independent complete-project evidence.
 - Bound live-probe overrun exposure per request/container identity across all snapshots, retaining residual holds above settled actual and preserving the sum in budget checkpoints.
 
 - Preserve pre-upgrade reconciliation hashes and legacy ledger replay; keep proven live-probe bounds held when a complete measurement omits or predates the overrun evidence.

@@ -736,3 +736,31 @@ Prepared turns for an explicitly configured alternate provider use its authorize
 native session and bound observation recorder. Usage frames can arrive without
 a display event; nullable measurements and pending accounting stay intact.
 The default Anthropic session continues to use its SDK span recorder.
+OpenAI probe reconciliation can read captured Admin Costs and Completions Usage
+exports through `python -m daimon.core.usage_reconciliation --costs costs.json
+--usage usage.json --attestation attestation.json --guard-config budget.json
+--spend-ledger spend.md`. This command reads files only and emits an assessment
+and, when eligible, an unsigned proposal bound to the current hold. Lead approval
+and the existing append-only guard application are separate. No key is discovered
+and no charge or hold changes during proposal generation.
+
+The [Admin Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs)
+provides daily buckets, and [Completions Usage](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/completions)
+reports grouped token counts. The collector requires an explicitly supplied
+[Admin API key](https://developers.openai.com/api/reference/administration/overview)
+and transport. Buckets are project totals: reconciliation supports an audited
+isolated project window containing exactly one run, across all keys and sources.
+It never prorates a shared project's bill. Final billing evidence and inventory
+hashes must bind the complete exports; an exhausted page cursor does not prove
+final posting. Every page must record the effective organization, origin and
+full-scope query, including its pagination cursor. The collector rejects client
+query, authentication, cookie, custom-header and event-hook defaults before IO.
+Independent final-bill totals and amounts for every classified line item, plus
+inventory token/request totals, must match the exports exactly. Copying these
+expected totals from the candidate export is not evidence of completeness; the
+lead must inspect the separate inventory and final billing artifacts before
+approval. An omitted infrastructure charge or any amount/count mismatch refuses
+the proposal and retains the hold.
+Missing amounts, empty/delayed bills, duplicate groups, foreign
+scope, unknown line items or ambiguous attribution remain estimated, unverified.
+Exact billed token and container line items replace estimates only after approval.
