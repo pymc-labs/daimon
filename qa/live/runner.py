@@ -16,6 +16,7 @@ from pathlib import Path
 from qa.live.config import Pricing
 from qa.live.context import Context
 from qa.live.cost import Ledger, estimate
+from qa.live.deploy_quiet import DeployNotQuiet
 from qa.live.deployment import finish_observation
 from qa.live.errors import exception_evidence
 from qa.live.evaluate import evaluate
@@ -104,6 +105,14 @@ class Executor:
             and scenario.assertions
             and all(a.kind == "http_check" for a in scenario.assertions)
         ):
+            if self.env == "staging":
+                result.deployment = DeploymentEvidence()
+                try:
+                    result.deployment.quiet = self.backend.deployment_quiet()
+                except Pending as exc:
+                    result.deployment.interrupted = isinstance(exc, DeployNotQuiet)
+                    result.checks.append(Check("deployment_quiet", "PENDING", str(exc)))
+                    return result
             context = Context(
                 {**self.backend.context(), "nonce": uuid.uuid4().hex[:8]}, result, Path(".")
             )
@@ -152,6 +161,11 @@ class Executor:
             result.deployment = DeploymentEvidence()
         try:
             if result.deployment:
+                try:
+                    result.deployment.quiet = self.backend.deployment_quiet()
+                except DeployNotQuiet:
+                    result.deployment.interrupted = True
+                    raise
                 try:
                     result.deployment.start_image = self.backend.deployment_image()
                 except Pending:
