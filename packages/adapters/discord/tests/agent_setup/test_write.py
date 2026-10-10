@@ -12,8 +12,9 @@ from daimon.adapters.discord.agent_setup import write as write_mod
 from daimon.adapters.discord.agent_setup.write import (
     create_blank_agent,
 )
+from daimon.adapters.discord.errors import render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.errors import DaimonError
+from daimon.core.errors import AgentNameCollision
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
@@ -231,7 +232,7 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
 
     runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
 
-    with pytest.raises(DaimonError, match="existing-agent"):
+    with pytest.raises(AgentNameCollision, match="existing-agent") as caught:
         await create_blank_agent(
             runtime,
             tenant_id=tenant_id,
@@ -240,6 +241,10 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
             model="claude-sonnet-4-6",
             account_id=guild_account,
         )
+
+    assert render_error(caught.value, request_id="private-rid") == (
+        "This workspace already has an agent with that name. Pick a different name."
+    )
 
 
 async def test_create_blank_agent_rejects_name_held_by_other_owner(
@@ -277,7 +282,7 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
 
     runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
 
-    with pytest.raises(DaimonError, match="taken-name"):
+    with pytest.raises(AgentNameCollision, match="taken-name") as caught:
         await create_blank_agent(
             runtime,
             tenant_id=tenant_id,
@@ -287,6 +292,9 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
             account_id=account_id,  # caller's own account; other_account owns the collision
         )
 
+    assert render_error(caught.value, request_id="private-rid") == (
+        "This workspace already has an agent with that name. Pick a different name."
+    )
     assert reconcile_calls == [], (
         "create must raise before reconcile when another owner holds the name"
     )

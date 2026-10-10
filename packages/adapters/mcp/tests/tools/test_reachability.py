@@ -64,23 +64,23 @@ async def test_non_admin_reachable_agent_raises(
         )
 
 
-async def test_non_admin_unreachable_agent_returns_none(
+async def test_non_admin_unreachable_agent_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A non-admin caller patching an agent nobody has scoped is not gated."""
+    """A non-admin caller cannot assume an unbound agent is theirs."""
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord")
 
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
     )
-    result = await require_admin_for_reachable_agent(
-        _runtime(db_session_factory),
-        auth,
-        agent_name="my-agent",
-        agent=ma_agent(id="agent_mine", name="my-agent", tenant_id=tenant.id),
-    )
-    assert result is None, "unreachable agent must not be gated for a non-admin caller"
+    with pytest.raises(ToolError, match="an admin must change its setup"):
+        await require_admin_for_reachable_agent(
+            _runtime(db_session_factory),
+            auth,
+            agent_name="my-agent",
+            agent=ma_agent(id="agent_mine", name="my-agent", tenant_id=tenant.id),
+        )
 
 
 async def test_non_admin_is_gated_when_no_agent_is_resolved(

@@ -1,19 +1,28 @@
-"""Structured error rendering for Discord adapter responses.
+"""Plain error rendering for Discord adapter responses.
 
-Maps known exception types to user-friendly markdown with emoji prefix,
-bold labels, and ULID request ID suffix for cross-referencing with logs.
+Maps known failures to plain copy. Exception bodies and trace identifiers
+stay in the logs; they are never interpolated into a chat response.
 """
 
 from __future__ import annotations
 
 import anthropic
 import structlog
+from daimon.core.channel_admins import InvalidChannelAdminIds
+from daimon.core.channel_budget import ChannelBudgetError
+from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.continuity.messages import render_responder_changed_without_handoff
+from daimon.core.cron import InvalidScheduleError
 from daimon.core.errors import (
-    DaimonError,
+    AgentNameCollision,
     SpecError,
     StoreError,
+    TurnError,
+    UserFacingError,
 )
+from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.stores.direct_messages import DirectMessageBusy
+from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
 from sqlalchemy.exc import SQLAlchemyError
 from ulid import ULID
@@ -29,8 +38,7 @@ def generate_request_id() -> str:
 def bound_request_id() -> str:
     """The `rid` this turn's handler bound for its logs, or a fresh one.
 
-    Reusing it means the id on a failed turn's card finds every log line of
-    that turn, not only the failure line.
+    Reusing it ties the failure log to every earlier log line of that turn.
     """
     rid = structlog.contextvars.get_contextvars().get("rid")
     return rid if isinstance(rid, str) and rid else generate_request_id()
@@ -45,7 +53,7 @@ def render_error(
     channel: str | None = None,
     offer_button: bool = False,
 ) -> str:
-    """Map known exceptions to structured markdown with emoji, label, and rid.
+    """Map known exceptions to plain sentences without exposing their bodies.
 
     `new_responder`/`owner`/`channel` are the contextual facts a
     `SessionAgentMismatch` render needs (who answers now, whose work this
@@ -54,41 +62,67 @@ def render_error(
     every other caller omits them and gets a generic fallback phrasing.
     `offer_button` says the notice carries the Hand over button.
     """
+    # Keep this argument for existing callers that bind the same id in logs.
+    # Exception text can contain provider JSON, credentials and internal ids.
+    del request_id
     if isinstance(exc, SessionAgentMismatch):
-        return (
-            render_responder_changed_without_handoff(
-                new_responder=new_responder or "the current responder",
-                owner=owner or "the previous agent",
-                channel=channel or "this channel",
-                offer_button=offer_button,
-            )
-            + f"\n`rid: {request_id}`"
+        return render_responder_changed_without_handoff(
+            new_responder=new_responder or "the current responder",
+            owner=owner or "the previous agent",
+            channel=channel or "this channel",
+            offer_button=offer_button,
         )
-    if isinstance(exc, SpecError):
-        return f"⚠️ **Spec validation failed**: {exc}\n`rid: {request_id}`"
-    if isinstance(exc, StoreError):
-        return f"⚠️ **Store error**: {exc}\n`rid: {request_id}`"
-    if isinstance(exc, DaimonError):
-        return f"⚠️ **Error**: {exc}\n`rid: {request_id}`"
+    if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
+        return render_error(exc.cause, request_id="")
     if isinstance(exc, anthropic.APIStatusError):
-        return f"❌ **API Error ({exc.status_code})**: {exc.message}\n`rid: {request_id}`"
+        if exc.status_code in {503, 529}:
+            return "Claude is overloaded right now. Try again in a minute."
+        if exc.status_code == 429:
+            return "Too many requests right now. Try again in a minute."
+        if exc.status_code in {401, 403}:
+            return "Daimon couldn't connect to Claude. Ask an admin to check the connection."
+        if exc.status_code == 400:
+            return "Claude couldn't accept this request. Try sending it again."
+        return "Claude is unavailable right now. Try again in a minute."
     if isinstance(exc, anthropic.APIConnectionError):
-        return (
-            f"\U0001f50c **Connection Error**: "
-            f"Could not connect to Anthropic API. Please try again.\n"
-            f"`rid: {request_id}`"
-        )
+        return "Daimon couldn't reach Claude. Try again in a minute."
     if isinstance(exc, anthropic.APIError):
-        return f"❌ **API Error**: {exc.message}\n`rid: {request_id}`"
+        return "Daimon couldn't get a reply from Claude. Try again in a minute."
     if isinstance(exc, discord.HTTPException):
-        return f"❌ **Discord Error ({exc.status})**: {exc.text}\n`rid: {request_id}`"
-    if isinstance(exc, SQLAlchemyError):
-        # Never `{exc}` here: DBAPIError stringifies to the failing statement
-        # plus its bound parameters, which would publish both to the channel.
-        # The rid is the handle for the real detail, which stays in the logs.
+        if exc.code == 160004:
+            return "A conversation already exists for this message. Continue in its thread."
+        if exc.status == 403:
+            return "Daimon doesn't have permission to post here. Ask a server admin for help."
+        return "Daimon couldn't update a message in Discord. Try again in a minute."
+    if isinstance(exc, (SQLAlchemyError, StoreError)):
+        return "Daimon couldn't load or save this change. Try again in a minute."
+    if isinstance(exc, SpecError):
+        return "Daimon couldn't read this setup. Ask an admin to check it."
+    if isinstance(exc, AgentNameCollision):
+        return "This workspace already has an agent with that name. Pick a different name."
+    if isinstance(exc, UserFacingError):
+        return str(exc)
+    if isinstance(exc, DirectMessageBusy):
         return (
-            f"❌ **Database error** ({type(exc).__name__}). Please try again.\n`rid: {request_id}`"
+            "A reply is still running. Wait for it to finish before starting another conversation."
         )
+    if isinstance(exc, HandoffRefusedInSetupThread):
+        return (
+            "This setup conversation can't change agents. Start a new thread to use another agent."
+        )
+    if isinstance(exc, ThreadHandoffRefused):
+        return (
+            "This conversation can't change agents. "
+            "Ask an admin to check the agent and channel settings."
+        )
+    if isinstance(exc, ChannelBudgetError):
+        return "That spending budget isn't valid. Check its amount and time window, then try again."
+    if isinstance(exc, NotebookRateLimitError):
+        return "The notebook publishing limit has been reached. Try again later."
+    if isinstance(exc, InvalidScheduleError):
+        return "That schedule isn't valid. Check its cron expression and timezone, then try again."
+    if isinstance(exc, InvalidChannelAdminIds):
+        return "That admin selection isn't valid. Check the selected people and try again."
     if isinstance(exc, ValueError):
-        return f"⚠️ **Invalid input**: {exc}\n`rid: {request_id}`"
-    return f"❌ **Unexpected error**: {exc}\n`rid: {request_id}`"
+        return "Daimon couldn't use that input. Check it and try again."
+    return "Something went wrong while handling your request. Try again in a minute."

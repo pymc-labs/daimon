@@ -47,13 +47,20 @@ from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
-from daimon.core.credential_requests import availability_for_request, split_skill_repo_target
+from daimon.core.credential_requests import (
+    CredentialRequestOutcome,
+    availability_for_request,
+    split_skill_repo_target,
+)
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
     begin_oauth_submit,
     consume_credential_submit,
+    credential_card_edit,
     env_name_refusal,
+    guard_credential_save,
+    note_credential_save_failure,
     prepare_env_submit,
     settle_credential_submit,
     write_repo_submit,
@@ -481,6 +488,18 @@ class TeamsCredentialRequests:
         owner_repo = normalize_owner_repo(split_skill_repo_target(row.target)[0])
         http = self._runtime.http_client
         if not await pat_can_access_repo(http, owner_repo=owner_repo, pat=pat):
+            async with self._runtime.sessionmaker.begin() as session:
+                await store.set_credential_request_outcome(
+                    session, token=row.token, outcome="token_rejected"
+                )
+            await self._edit(
+                row,
+                "requested",
+                service_url,
+                retry_reason=(
+                    "That token was rejected: it cannot read the requested repo. Try again."
+                ),
+            )
             return credential_form(
                 row,
                 f"That token cannot read {owner_repo} (or the repo does not exist). "
@@ -540,25 +559,39 @@ class TeamsCredentialRequests:
         reason: RefusalReason | None = None,
         replaces: str | None = None,
         refusal_lines: Sequence[str] = (),
+        retry_reason: str | None = None,
+        saving_notice: str | None = None,
     ) -> None:
         """Edit the posted card. Best effort: the outcome is already recorded."""
-        if row.posted_message_id is None:
-            return
-        card = card_for_request(
-            row,
-            state=state,
-            outcome=outcome,
-            refusal=reason,
-            replaces=replaces,
-            refusal_lines=refusal_lines,
-        )
-        attachment = Attachment(content_type=ADAPTIVE_CARD_TYPE, content=build_adaptive_card(card))
-        edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
-        try:
-            conversation_id = conversation_of(row.channel_id)
-            await self._sender.send(conversation_id, edit, service_url=service_url)
-        except TEAMS_SEND_ERRORS as err:
-            log.warning("teams.credential.edit_failed", state=state, err_type=type(err).__name__)
+        async with credential_card_edit(row, state):
+            if state == "partial":
+                note_credential_save_failure(row, outcome)
+            if row.posted_message_id is None:
+                return
+            card = card_for_request(
+                row,
+                state=state,
+                outcome=outcome,
+                refusal=reason,
+                replaces=replaces,
+                refusal_lines=refusal_lines,
+                retry_reason=retry_reason,
+                saving_notice=saving_notice,
+            )
+            attachment = Attachment(
+                content_type=ADAPTIVE_CARD_TYPE,
+                content=build_adaptive_card(
+                    card, token=row.token if state == "requested" else None
+                ),
+            )
+            edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
+            try:
+                conversation_id = conversation_of(row.channel_id)
+                await self._sender.send(conversation_id, edit, service_url=service_url)
+            except TEAMS_SEND_ERRORS as err:
+                log.warning(
+                    "teams.credential.edit_failed", state=state, err_type=type(err).__name__
+                )
 
     async def _resume(self, row: CredentialRequestRow, service_url: str | None) -> None:
         if row.origin_thread_id is not None:
@@ -740,36 +773,46 @@ class TeamsCredentialRequests:
         consumed = await self._consume(row, agent)
         if consumed is None:
             return
-        await self._edit(consumed, "received", service_url)
-        repo_url, branch, _path = split_skill_repo_target(consumed.target)
-        try:
-            ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
-            proof = RepoAccessProof(
-                kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
+        async with guard_credential_save(
+            self._runtime.sessionmaker,
+            row=consumed,
+            edit_retry=lambda retry, reason: self._edit(
+                retry, "requested", service_url, retry_reason=reason
+            ),
+            edit_pending=lambda pending, notice: self._edit(
+                pending, "received", service_url, saving_notice=notice
+            ),
+        ):
+            await self._edit(consumed, "received", service_url)
+            repo_url, branch, _path = split_skill_repo_target(consumed.target)
+            try:
+                ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
+                proof = RepoAccessProof(
+                    kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
+                )
+                async with self._runtime.sessionmaker.begin() as session:
+                    await write_repo_submit(
+                        session, row=consumed, ma_secret_ref=ref, proof=proof, write=set_binding
+                    )
+                    await store.set_credential_request_outcome(
+                        session, token=row.token, outcome="applied"
+                    )
+                    queued = await record_input_continuation(session, consumed, platform="teams")
+            except Exception as err:
+                # Type only: a failed write can quote the token; the card says it did not land.
+                log.warning("teams.credential.repo_write_failed", err_type=type(err).__name__)
+                return await self._refuse(consumed, "target_unavailable", service_url)
+            log.info("teams.credential.repo_bound", repo_url=repo_url, branch=branch)
+            change = ConfigurationChange(
+                target_name=consumed.target_name or "this agent",
+                kind="repo",
+                repo=normalize_owner_repo(repo_url),
+                branch=branch,
+                availability="next_message",
             )
-            async with self._runtime.sessionmaker.begin() as session:
-                await write_repo_submit(
-                    session, row=consumed, ma_secret_ref=ref, proof=proof, write=set_binding
-                )
-                await store.set_credential_request_outcome(
-                    session, token=row.token, outcome="applied"
-                )
-                queued = await record_input_continuation(session, consumed, platform="teams")
-        except Exception as err:
-            # Type only: a failed write can quote the token; the card says it did not land.
-            log.warning("teams.credential.repo_write_failed", err_type=type(err).__name__)
-            return await self._refuse(consumed, "target_unavailable", service_url)
-        log.info("teams.credential.repo_bound", repo_url=repo_url, branch=branch)
-        change = ConfigurationChange(
-            target_name=consumed.target_name or "this agent",
-            kind="repo",
-            repo=normalize_owner_repo(repo_url),
-            branch=branch,
-            availability="next_message",
-        )
-        await self._edit(consumed, "applied", service_url, outcome=change)
-        if queued:
-            await self._resume(consumed, service_url)
+            await self._edit(consumed, "applied", service_url, outcome=change)
+            if queued:
+                await self._resume(consumed, service_url)
 
     async def _save_skill_repo(
         self,
@@ -787,75 +830,85 @@ class TeamsCredentialRequests:
         consumed = await self._consume(row, agent)
         if consumed is None:
             return
-        await self._edit(consumed, "received", service_url)
-        url, branch, path = split_skill_repo_target(consumed.target)
-        owner_repo = normalize_owner_repo(url)
-        log.info("teams.credential.skill_repo_saved", repo_url=url, branch=branch, path=path)
-        stored = False
-        try:
-            ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
-            stored = True
-            proof = RepoAccessProof(
-                kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
-            )
-            async with self._runtime.sessionmaker.begin() as session:
-                seeded = await write_skill_repo_submit(
-                    session, row=consumed, ma_secret_ref=ref, proof=proof
-                )
-            outcomes = await run_skill_sync(
-                self._runtime.anthropic,
-                self._runtime.http_client,
-                url=url,
-                branch=branch,
-                path=path,
-                tenant_id=consumed.tenant_id,
-                seeded_skill_names=seeded,
-                is_admin=is_admin,
-                token=pat,
-            )
-        except Exception as err:
-            # Upstream details stay in operator logs, never on the card.
-            log.warning("teams.credential.skill_repo_sync_failed", err_type=type(err).__name__)
-            if not stored:
-                return await self._refuse(consumed, "target_unavailable", service_url)
-            return await self._skills_partial(consumed, owner_repo, None, service_url)
-        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
-        failure_detail = summarize_failed_imports(outcomes)
-        if not imported:
-            # Nothing reached the library, which an applied card must not claim.
-            return await self._skills_partial(consumed, owner_repo, failure_detail, service_url)
-        attach = await attach_imported_skills(
-            self._runtime,
-            tenant_id=consumed.tenant_id,
-            agent_id=consumed.agent_id,
-            outcomes=imported,
-        )
-        log.info(
-            "teams.credential.skill_repo_imported",
-            imported=len(imported),
-            attached=attach.attached,
-            note=attach.note,
-        )
-        queued = await settle_credential_submit(
+        async with guard_credential_save(
             self._runtime.sessionmaker,
             row=consumed,
-            platform="teams",
-            outcome="applied" if attach.attached else "write_failed",
-            carries_work=attach.attached,
-        )
-        detail = [failure_detail] if attach.attached else [attach.note, failure_detail]
-        change = ConfigurationChange(
-            target_name=consumed.target_name or attach.agent_name or "the agent",
-            kind="skills_bulk",
-            availability="next_message" if attach.attached else "saved",
-            repo=owner_repo,
-            count=len(imported),
-            detail="\n".join(line for line in detail if line) or None,
-        )
-        state: CardState = "applied" if attach.attached else "partial"
-        await self._edit(consumed, state, service_url, outcome=change)
-        if attach.attached and queued:
-            await self._resume(consumed, service_url)
+            edit_retry=lambda retry, reason: self._edit(
+                retry, "requested", service_url, retry_reason=reason
+            ),
+            edit_pending=lambda pending, notice: self._edit(
+                pending, "received", service_url, saving_notice=notice
+            ),
+        ):
+            await self._edit(consumed, "received", service_url)
+            url, branch, path = split_skill_repo_target(consumed.target)
+            owner_repo = normalize_owner_repo(url)
+            log.info("teams.credential.skill_repo_saved", repo_url=url, branch=branch, path=path)
+            stored = False
+            try:
+                ref = await store_agent_pat(self._runtime, agent_id=consumed.agent_id, pat=pat)
+                stored = True
+                proof = RepoAccessProof(
+                    kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
+                )
+                async with self._runtime.sessionmaker.begin() as session:
+                    seeded = await write_skill_repo_submit(
+                        session, row=consumed, ma_secret_ref=ref, proof=proof
+                    )
+                outcomes = await run_skill_sync(
+                    self._runtime.anthropic,
+                    self._runtime.http_client,
+                    url=url,
+                    branch=branch,
+                    path=path,
+                    tenant_id=consumed.tenant_id,
+                    seeded_skill_names=seeded,
+                    is_admin=is_admin,
+                    token=pat,
+                )
+            except Exception as err:
+                # Upstream details stay in operator logs, never on the card.
+                log.warning("teams.credential.skill_repo_sync_failed", err_type=type(err).__name__)
+                if not stored:
+                    return await self._refuse(consumed, "target_unavailable", service_url)
+                return await self._skills_partial(consumed, owner_repo, None, service_url)
+            imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+            failure_detail = summarize_failed_imports(outcomes)
+            if not imported:
+                # Nothing reached the library, which an applied card must not claim.
+                return await self._skills_partial(consumed, owner_repo, failure_detail, service_url)
+            attach = await attach_imported_skills(
+                self._runtime,
+                tenant_id=consumed.tenant_id,
+                agent_id=consumed.agent_id,
+                outcomes=imported,
+            )
+            log.info(
+                "teams.credential.skill_repo_imported",
+                imported=len(imported),
+                attached=attach.attached,
+                note=attach.note,
+            )
+            queued = await settle_credential_submit(
+                self._runtime.sessionmaker,
+                row=consumed,
+                platform="teams",
+                outcome="applied" if attach.attached else "write_failed",
+                carries_work=attach.attached,
+            )
+            detail = [failure_detail] if attach.attached else [attach.note, failure_detail]
+            change = ConfigurationChange(
+                target_name=consumed.target_name or attach.agent_name or "the agent",
+                kind="skills_bulk",
+                availability="next_message" if attach.attached else "saved",
+                repo=owner_repo,
+                count=len(imported),
+                detail="\n".join(line for line in detail if line) or None,
+            )
+            state: CardState = "applied" if attach.attached else "partial"
+            await self._edit(consumed, state, service_url, outcome=change)
+            if attach.attached and queued:
+                await self._resume(consumed, service_url)
 
     async def _skills_partial(
         self,
@@ -890,7 +943,13 @@ class TeamsCredentialRequests:
         service_url: str | None,
     ) -> None:
         """Close a spent request that wrote nothing; no work resumes on it."""
-        outcome = "token_rejected" if reason == "token_rejected" else "write_failed"
+        outcome: CredentialRequestOutcome = (
+            "token_rejected"
+            if reason == "token_rejected"
+            else "policy_refused"
+            if reason == "mcp_permission_required"
+            else "write_failed"
+        )
         async with self._runtime.sessionmaker.begin() as session:
             await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
         await self._edit(row, "refused", service_url, reason=reason)
@@ -943,64 +1002,84 @@ class TeamsCredentialRequests:
         if consumed is None:
             log.info("teams.credential.already_used", kind="mcp")
             return
-        await self._edit(consumed, "received", service_url)
-        url = consumed.mcp_server_url
-        if url is None:
-            log.error("teams.credential.mcp_missing_server_url")
-            return await self._refuse(consumed, "target_unavailable", service_url)
-        if connect.refused:
-            return await self._refuse(consumed, "replacement_admin_required", service_url)
-        log.info("teams.credential.mcp", mcp_server_url=url)
-        probe = self._runtime.mcp_token_probe
-        if await is_token_rejected(probe, mcp_server_url=url, token=secret):
-            return await self._refuse(consumed, "token_rejected", service_url)
-        # Attach first, publish the agent-wide token only after that authorized
-        # attach, then the submitter's own vault copy: no other session may ever
-        # mirror a token this submission is refused for.
-        attached = True
-        try:
-            await connect_mcp_server_with_token(
-                self._runtime.anthropic,
-                sessionmaker=self._runtime.sessionmaker,
-                fernet=self._runtime.turn_deps.fernet,
-                tenant_id=consumed.tenant_id,
-                agent_id=consumed.agent_id,
-                account_id=consumed.account_id,
-                server_name=consumed.target,
-                mcp_server_url=url,
-                token=secret,
-                replace_allowed=connect.replace_allowed,
-                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-                public_url=str(mcp.public_url),
-                now=now,
+        async with guard_credential_save(
+            self._runtime.sessionmaker,
+            row=consumed,
+            edit_retry=lambda retry, reason: self._edit(
+                retry, "requested", service_url, retry_reason=reason
+            ),
+            edit_pending=lambda pending, notice: self._edit(
+                pending, "received", service_url, saving_notice=notice
+            ),
+        ) as attempt:
+            await self._edit(consumed, "received", service_url)
+            url = consumed.mcp_server_url
+            if url is None:
+                attempt.retry_allowed = False
+                log.error("teams.credential.mcp_missing_server_url")
+                return await self._refuse(consumed, "target_unavailable", service_url)
+            if connect.refused:
+                attempt.retry_allowed = False
+                return await self._refuse(
+                    consumed,
+                    "replacement_admin_required" if connect.replaces else "mcp_permission_required",
+                    service_url,
+                )
+            log.info("teams.credential.mcp", mcp_server_url=url)
+            probe = self._runtime.mcp_token_probe
+            if await is_token_rejected(probe, mcp_server_url=url, token=secret):
+                return await self._refuse(consumed, "token_rejected", service_url)
+            # Attach first, publish the agent-wide token only after that authorized
+            # attach, then the submitter's own vault copy: no other session may ever
+            # mirror a token this submission is refused for.
+            attached = True
+            try:
+                await connect_mcp_server_with_token(
+                    self._runtime.anthropic,
+                    sessionmaker=self._runtime.sessionmaker,
+                    fernet=self._runtime.turn_deps.fernet,
+                    tenant_id=consumed.tenant_id,
+                    agent_id=consumed.agent_id,
+                    account_id=consumed.account_id,
+                    server_name=consumed.target,
+                    mcp_server_url=url,
+                    token=secret,
+                    replace_allowed=connect.replace_allowed,
+                    jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+                    public_url=str(mcp.public_url),
+                    now=now,
+                )
+            except McpServerReplaceRefusedError:
+                attempt.retry_allowed = False
+                return await self._refuse(consumed, "replacement_admin_required", service_url)
+            except (McpAgentGoneError, McpAttachFailedError) as err:
+                attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
+                log.warning(
+                    "teams.credential.mcp_attach_failed",
+                    err_type=type(err.__cause__ or err).__name__,
+                )
+                return await self._refuse(consumed, "target_unavailable", service_url)
+            except McpTokenWriteFailedError as err:
+                log.warning(
+                    "teams.credential.mcp_write_failed",
+                    err_type=type(err.__cause__ or err).__name__,
+                )
+                attached = False
+            queued = await settle_credential_submit(
+                self._runtime.sessionmaker,
+                row=consumed,
+                platform="teams",
+                outcome="applied" if attached else "write_failed",
+                carries_work=attached,
             )
-        except McpServerReplaceRefusedError:
-            return await self._refuse(consumed, "replacement_admin_required", service_url)
-        except (McpAgentGoneError, McpAttachFailedError) as err:
-            log.warning(
-                "teams.credential.mcp_attach_failed", err_type=type(err.__cause__ or err).__name__
+            change = ConfigurationChange(
+                target_name=consumed.target_name or agent.name,
+                kind="mcp",
+                detail=consumed.target,
+                availability="next_message" if attached else "preparation_failed",
             )
-            return await self._refuse(consumed, "target_unavailable", service_url)
-        except McpTokenWriteFailedError as err:
-            log.warning(
-                "teams.credential.mcp_write_failed", err_type=type(err.__cause__ or err).__name__
+            await self._edit(
+                consumed, "applied" if attached else "partial", service_url, outcome=change
             )
-            attached = False
-        async with self._runtime.sessionmaker.begin() as session:
-            outcome = "applied" if attached else "write_failed"
-            await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
-            # Attached but the token not fully stored: audited, no turn promised.
-            queued = await record_input_continuation(
-                session, consumed, platform="teams", carries_work=attached
-            )
-        change = ConfigurationChange(
-            target_name=consumed.target_name or agent.name,
-            kind="mcp",
-            detail=consumed.target,
-            availability="next_message" if attached else "preparation_failed",
-        )
-        await self._edit(
-            consumed, "applied" if attached else "partial", service_url, outcome=change
-        )
-        if queued and attached:
-            await self._resume(consumed, service_url)
+            if queued and attached:
+                await self._resume(consumed, service_url)

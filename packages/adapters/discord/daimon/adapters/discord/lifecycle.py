@@ -37,19 +37,20 @@ from daimon.adapters.discord.embed import (
     update,
     update_activity,
 )
-from daimon.adapters.discord.errors import bound_request_id
+from daimon.adapters.discord.errors import bound_request_id, render_error
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.notices import is_stuck_session, render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -154,6 +155,7 @@ class DiscordTurnLifecycle:
         requester_id: int | None = None,
         trigger_message: discord.Message | None = None,
         notify_on_completion: bool = False,
+        acknowledgment_managed: bool = False,
         render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
@@ -170,6 +172,7 @@ class DiscordTurnLifecycle:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
         self._notify_on_completion = notify_on_completion
+        self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
         self._send = send
         self._request_id = request_id
@@ -237,8 +240,14 @@ class DiscordTurnLifecycle:
             return
         if phase == "done" and not self._was_answered:
             return
+        if phase == "accepted" and self._acknowledgment_managed:
+            return
         await self._trigger_message.add_reaction("👀" if phase == "accepted" else "✅")
-        if phase == "done" and self._trigger_message.guild is not None:
+        if (
+            phase == "done"
+            and not self._acknowledgment_managed
+            and self._trigger_message.guild is not None
+        ):
             me = self._trigger_message.guild.me
             await self._trigger_message.remove_reaction("👀", me)
 
@@ -292,13 +301,42 @@ class DiscordTurnLifecycle:
         self._note_discord_time(getattr(sent, "id", None))
         return sent
 
+    async def edit_card(self, **kwargs: Any) -> None:  # noqa: ANN401
+        """Update the turn's card, recovering a deleted card before delivery.
+
+        Also used by admission and session-setup notices before the driver starts.
+        """
+        await self._edit_message(self._message_ref, **kwargs)
+
     async def _edit_message(
         self,
         message: discord.Message | None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         assert message is not None
-        replacement = await self._edit(message, **kwargs)
+        try:
+            replacement = await self._edit(message, **kwargs)
+        except discord.HTTPException as err:
+            if err.code != 10008:
+                raise
+            delivered = self._revealed_first_chunk is not None or self._summary_ref is not None
+            log.info("turn.message_missing", message_id=str(message.id), delivered=delivered)
+            if delivered:
+                return  # a stale edit must not turn a delivered answer into an error
+            send_kwargs = dict(kwargs)
+            attachments = send_kwargs.pop("attachments", None)
+            if attachments:
+                send_kwargs["files"] = [a for a in attachments if isinstance(a, discord.File)]
+            for key in ("embed", "view"):
+                if send_kwargs.get(key) is None:
+                    send_kwargs.pop(key, None)
+            if self._terminal_embed is not None and not {"embed", "embeds"} & kwargs.keys():
+                send_kwargs["embeds"] = [self._terminal_embed]
+            replacement = await self._send_message(**send_kwargs)
+            self._message_ref = replacement
+            if self._on_replacement is not None:
+                await self._on_replacement(replacement)
+            return
         edited_at = getattr(replacement, "edited_at", None)
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
@@ -691,18 +729,40 @@ class DiscordTurnLifecycle:
             log.warning("turn.terminal_failure", error=str(err), unprompted=True)
             return
         self._apply_usage(state)
-        label = str(err)[:100]
-        body = ""
+        label = "Something went wrong"
+        body = render_error(err, request_id="")
         reason = request_id = None
         # The notice is words on top of the red card, never a reason not to
-        # draw it: if building it fails, the card falls back to the raw label.
+        # draw it: if building it fails, the card keeps the plain fallback copy.
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
             notice = render_termination_notice(
-                reason, state=state, request_id=request_id, error=err
+                reason,
+                state=state,
+                request_id=request_id,
+                error=err,
+                support_hint="If it keeps happening, ask an admin for help.",
             )
             if notice is not None:
+                if (
+                    reason is TerminationReason.UPSTREAM
+                    and not is_stuck_session(reason, err)
+                    and spend_limit_error(err) is None
+                ):
+                    notice = dataclasses.replace(
+                        notice,
+                        cause=render_error(err, request_id=request_id),
+                        survived="Files that were already created may still arrive.",
+                        next_step="Wait a minute, then send your message again.",
+                    )
+                guidance_error = err.cause if isinstance(err, TurnError) else err
+                if isinstance(guidance_error, UserFacingError):
+                    notice = dataclasses.replace(
+                        notice,
+                        cause="This turn couldn't continue.",
+                        next_step=render_error(guidance_error, request_id=request_id),
+                    )
                 label, body = notice.headline, format_termination_notice(notice)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)

@@ -358,6 +358,9 @@ async def run_new_agent_submission(
                     tenant_id=tenant_id,
                     channel_id=channel_id or None,
                     is_admin=is_admin,
+                    platform="slack",
+                    thread_id=None,
+                    default=runtime.deployment_default,
                 )
             )
 
@@ -368,6 +371,7 @@ async def run_new_agent_submission(
                     agent_name=name,
                     meta=meta,
                     isolated_here=viewer is not None and viewer.inside_channel_id is not None,
+                    member_here=not is_admin,
                 ),
             )
         else:

@@ -7,15 +7,20 @@ Discord's savepoint and Slack/Teams' rollback-and-consume sequence are retained.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime
 
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_pins import consume_form_unless_pinned
 from daimon.core.continuity.continuation import record_input_continuation
+from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.credential_requests import CredentialRequestOutcome, split_skill_repo_target
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
@@ -260,6 +265,17 @@ async def settle_credential_submit(
         await credential_requests.set_credential_request_outcome(
             session, token=row.token, outcome=outcome
         )
+        attempt = _ACTIVE_SAVE_ATTEMPT.get()
+        if (
+            not carries_work
+            and attempt is not None
+            and attempt.active
+            and attempt.token == row.token
+            and attempt.retry_allowed
+        ):
+            # The failure outcome is the audit. A save-only continuation would
+            # occupy the retry's idempotency key without resuming its work.
+            return False
         return await record(session, row, platform=platform, carries_work=carries_work)
 
 
@@ -376,3 +392,132 @@ async def prepare_mcp_submit(
     """
     decision = await decide()
     return decision, clock()
+
+
+CREDENTIAL_CARD_DEADLINE_SECONDS = 90.0
+STILL_SAVING_NOTICE = "Still saving; we'll update this card when it finishes."
+
+
+@dataclass
+class CredentialSaveAttempt:
+    """A policy refusal remains terminal even inside a guarded external save."""
+
+    token: str
+    active: bool = True
+    retry_allowed: bool = True
+    failure_reason: str | None = None
+    card_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    notice_task: asyncio.Task[None] | None = None
+
+
+_ACTIVE_SAVE_ATTEMPT: ContextVar[CredentialSaveAttempt | None] = ContextVar(
+    "credential_save_attempt", default=None
+)
+
+
+@asynccontextmanager
+async def credential_card_edit(row: CredentialRequestRow, state: CardState) -> AsyncIterator[None]:
+    """Serialize deadline notices with receipts; a final receipt stops the notice."""
+    attempt = _ACTIVE_SAVE_ATTEMPT.get()
+    if attempt is None or not attempt.active or attempt.token != row.token:
+        yield
+        return
+    async with attempt.card_lock:
+        if state != "received" and attempt.notice_task is not None:
+            attempt.notice_task.cancel()
+        yield
+
+
+def note_credential_save_failure(
+    row: CredentialRequestRow, outcome: ConfigurationChange | None
+) -> None:
+    """Keep the adapter's safe partial-progress receipt on its retry card."""
+    attempt = _ACTIVE_SAVE_ATTEMPT.get()
+    if (
+        attempt is not None
+        and attempt.active
+        and attempt.token == row.token
+        and outcome is not None
+    ):
+        attempt.failure_reason = (
+            f"{render_change_confirmation(outcome)}\nTry again using the same form."
+        )
+
+
+@asynccontextmanager
+async def guard_credential_save(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    row: CredentialRequestRow,
+    edit_retry: Callable[[CredentialRequestRow, str], Awaitable[None]],
+    edit_pending: Callable[[CredentialRequestRow, str], Awaitable[None]],
+    deadline_seconds: float | None = None,
+) -> AsyncIterator[CredentialSaveAttempt]:
+    """Replace the saving placeholder at the deadline without cancelling work.
+
+    Keep the form consumed while the save continues; only a finished failure
+    releases it. Slow skill imports can complete after the notice. Adapters
+    serialize notices with final receipts via credential_card_edit. Public
+    reasons are fixed strings; exceptions can contain submitted secrets.
+    """
+    attempt = CredentialSaveAttempt(token=row.token)
+    active_token = _ACTIVE_SAVE_ATTEMPT.set(attempt)
+    reason = "Saving did not finish; some changes may have been saved. Try again."
+    cancelled = False
+
+    async def notice() -> None:
+        await asyncio.sleep(
+            CREDENTIAL_CARD_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+        )
+        try:
+            await edit_pending(row, STILL_SAVING_NOTICE)
+        except Exception as err:
+            structlog.get_logger().warning(
+                "credential_submit.notice_failed", kind=row.kind, err_type=type(err).__name__
+            )
+
+    attempt.notice_task = asyncio.create_task(notice())
+    try:
+        yield attempt
+    except asyncio.CancelledError:
+        cancelled = True
+    except Exception as err:
+        structlog.get_logger().warning(
+            "credential_submit.save_failed", kind=row.kind, err_type=type(err).__name__
+        )
+    finally:
+        attempt.notice_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await attempt.notice_task
+        attempt.active = False
+        _ACTIVE_SAVE_ATTEMPT.reset(active_token)
+        retry = None
+        try:
+            async with session_factory() as session, session.begin():
+                current = await credential_requests.peek_credential_request(
+                    session, token=row.token
+                )
+                if current is not None and (attempt.retry_allowed or current.outcome is None):
+                    outcome = current.outcome
+                    if outcome in (None, "token_rejected", "write_failed"):
+                        reason = attempt.failure_reason or reason
+                        if outcome == "token_rejected":
+                            target = (
+                                "read the requested repo"
+                                if row.kind in ("repo", "skill_repo")
+                                else "access the requested service"
+                            )
+                            reason = f"That token was rejected: it cannot {target}. Try again."
+                        retry = await credential_requests.release_failed_credential_request(
+                            session, row=row, outcome=outcome or "write_failed"
+                        )
+        except Exception as err:
+            retry = None
+            structlog.get_logger().warning(
+                "credential_submit.finalize_failed", kind=row.kind, err_type=type(err).__name__
+            )
+            await edit_pending(row, "Saving could not be confirmed. Ask Daimon for a new form.")
+        if retry is not None:
+            await edit_retry(retry, reason)
+    if cancelled:
+        raise asyncio.CancelledError

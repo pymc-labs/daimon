@@ -465,8 +465,10 @@ class TestNewThreadCreation:
         mock_run_turn.side_effect = finish_turn
         await bot.on_message(message)
         assert mock_thread.send.await_count == (2 if completion_enabled else 1)
-        if not completion_enabled:
-            message.add_reaction.assert_not_awaited()
+        assert [call.args[0] for call in message.add_reaction.await_args_list] == (
+            ["👀", "✅"] if completion_enabled else ["👀"]
+        )
+        message.remove_reaction.assert_awaited_once_with("👀", bot.user)
         async with db_session_factory() as session:
             assert not await list_recoverable_turn_card_intents(session, platform="discord")
 
@@ -810,8 +812,10 @@ class TestNewThreadCreation:
         )
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "rid:" in error_text, "error should use render_error with ULID suffix"
-        assert "Connection Error" in error_text, "should render APIConnectionError"
+        assert "rid:" not in error_text, "trace ids stay in logs"
+        assert "couldn't reach Claude" in error_text, (
+            "the connection failure should have a plain retry instruction"
+        )
         mock_run_turn.assert_not_called()
 
 
@@ -1090,14 +1094,14 @@ class TestAutoArchive:
 
 
 class TestHandleMentionErrorBoundary:
-    """_handle_mention error boundary uses render_error with ULID request ID."""
+    """The mention error boundary renders plain copy."""
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_turn_error_message_contains_rid_suffix(
+    async def test_turn_error_message_omits_trace_ids(
         self,
         mock_resolve: AsyncMock,
         mock_create_session: AsyncMock,
@@ -1108,8 +1112,7 @@ class TestHandleMentionErrorBoundary:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """When run_turn raises APIConnectionError, the error message sent to the
-        channel/thread must contain 'rid:' (render_error ULID suffix), not a
-        plain hardcoded string."""
+        channel/thread uses plain copy, with the trace id retained in logs."""
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
 
@@ -1133,9 +1136,8 @@ class TestHandleMentionErrorBoundary:
         # not the thread created inside _orchestrate (accepted edge case).
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "rid:" in error_text, (
-            "error boundary should use render_error which appends rid: ULID suffix; "
-            f"got: {error_text!r}"
+        assert "rid:" not in error_text, (
+            f"error boundary must not publish trace ids; got: {error_text!r}"
         )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -1153,8 +1155,7 @@ class TestHandleMentionErrorBoundary:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """Error from run_turn must render with emoji prefix and bold label,
-        not the legacy 'An error occurred. Please try again.' plain string."""
+        """A connection error must offer a plain retry instruction."""
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
 
@@ -1178,8 +1179,8 @@ class TestHandleMentionErrorBoundary:
         # not the thread created inside _orchestrate (accepted edge case).
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         error_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "**" in error_text, (
-            f"structured error should contain bold label via **; got: {error_text!r}"
+        assert "couldn't reach Claude" in error_text, (
+            f"the connection failure should have a plain retry instruction; got: {error_text!r}"
         )
         assert "An error occurred. Please try again." not in error_text, (
             f"should not use legacy hardcoded error string; got: {error_text!r}"

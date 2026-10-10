@@ -359,6 +359,8 @@ class SetupPanel:
                     tenant_id=tenant_id,
                     channel_id=chat,
                     is_admin=is_admin,
+                    platform="teams",
+                    default=self._runtime.deployment_default,
                 )
             )
             return await load_roster(
@@ -404,6 +406,8 @@ class SetupPanel:
                     tenant_id=tenant_id,
                     channel_id=viewer.conversation_id,
                     is_admin=viewer.is_admin,
+                    platform="teams",
+                    default=self._runtime.deployment_default,
                 ),
             )
 
@@ -567,7 +571,14 @@ class SetupPanel:
         details = await self._details(actor, name, 0)
         if ctx.activity.reply_to_id and details is not None:
             await edit_origin_card(ctx, details)  # Like Slack, the panel lands on Details.
-        return dialog_message(f"Created {name}. It does not answer anywhere yet.")
+        return dialog_message(
+            f"Created {name}. It does not answer anywhere yet."
+            + (
+                " An admin can make it answer in this chat; it will then appear in setup here."
+                if details is None and not actor.is_admin
+                else ""
+            )
+        )
 
     async def _mint(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         """Mint at once, or first ask a channel admin which of their channels it runs in."""

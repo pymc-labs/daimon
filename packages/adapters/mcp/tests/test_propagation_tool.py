@@ -7,6 +7,7 @@ Postgres (last-write-wins), and that non-admin callers are rejected with no writ
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -310,7 +311,9 @@ async def test_explain_is_readable_by_a_non_admin(
 
     result = await _explain_agent_resolution_impl(
         _runtime_with_default(committing_sessionmaker, "daimon"),
-        _non_admin_auth(tenant_id=tenant_id),
+        replace(
+            _non_admin_auth(tenant_id=tenant_id), agent_id=uuid.uuid4(), bound_channel_id="chan-1"
+        ),
         "chan-1",
     )
 
@@ -329,7 +332,11 @@ async def test_explain_says_so_when_nothing_resolves(
     )
 
     result = await _explain_agent_resolution_impl(
-        runtime, _non_admin_auth(tenant_id=tenant_id), "chan-1"
+        runtime,
+        replace(
+            _non_admin_auth(tenant_id=tenant_id), agent_id=uuid.uuid4(), bound_channel_id="chan-1"
+        ),
+        "chan-1",
     )
 
     assert result.effective_agent_name is None, "nothing set at any tier means no agent"
@@ -376,7 +383,11 @@ async def test_explanation_separates_setup_responder_target_and_parent_defaults(
             responder_name="Daimon",
         )
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        is_admin=True,
     )
     explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "thread-0")
     assert explained.effective_agent_name == "Daimon", "thread binding determines who answers"
@@ -427,7 +438,11 @@ async def test_explanation_reports_deleted_setup_without_parent_fallback(
         )
     runtime = _runtime_with_default(committing_sessionmaker, "parent-responder")
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform=platform
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform=platform,
+        is_admin=True,
     )
     with pytest.raises(ToolError, match="deleted-thread.*was deleted") as error:
         await _explain_agent_resolution_impl(runtime, auth, "parent", "deleted-thread")
@@ -468,7 +483,11 @@ async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
             kind="handoff",
         )
     auth = AuthIdentity(
-        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        is_admin=True,
     )
 
     explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "handed-over")

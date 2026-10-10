@@ -33,6 +33,7 @@ __all__ = [
     "TerminationNotice",
     "admission_refusal_text",
     "fit_notice",
+    "is_stuck_session",
     "render_termination_notice",
 ]
 
@@ -58,7 +59,7 @@ _STUCK_SESSION = (
 )
 
 
-def _stuck_session(reason: TerminationReason, error: BaseException | None) -> bool:
+def is_stuck_session(reason: TerminationReason, error: BaseException | None) -> bool:
     """Whether an upstream end came from MA still refusing a stuck session.
 
     Typed, not a text match on any error: only an upstream `TurnError` whose
@@ -76,6 +77,7 @@ class _Copy:
     cause: str
     survived: str
     next_step: str
+    offer_support: bool = False
 
 
 _COPY: dict[TerminationReason, _Copy] = {
@@ -102,7 +104,8 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Agent service error",
         "The agent service returned an error this turn could not continue past.",
         _KEPT,
-        f"{_RETRY} {_SHARE_RID}",
+        _RETRY,
+        offer_support=True,
     ),
     TerminationReason.RATE_LIMITED: _Copy(
         "Rate limited",
@@ -127,7 +130,8 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Model unavailable",
         "The model kept failing and the agent service stopped retrying before a reply.",
         _KEPT,
-        f"Wait a moment, then send your message again. {_SHARE_RID}",
+        "Wait a moment, then send your message again.",
+        offer_support=True,
     ),
     TerminationReason.REQUIRES_ACTION: _Copy(
         "Approval didn't go through",
@@ -153,7 +157,8 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Session could not be replaced",
         "The session was lost, and starting a replacement failed.",
         "Files in the lost session's workspace are gone.",
-        f"Send a new message to try again. {_SHARE_RID}",
+        "Send a new message to try again.",
+        offer_support=True,
     ),
     TerminationReason.ADMISSION_CONCURRENCY_SHED: _Copy(
         "Too busy",
@@ -319,7 +324,8 @@ _FALLBACK = _Copy(
     "Something went wrong",
     "The turn ended unexpectedly.",
     _KEPT,
-    f"{_RETRY} {_SHARE_RID}",
+    _RETRY,
+    offer_support=True,
 )
 
 
@@ -372,23 +378,25 @@ def render_termination_notice(
     state: TurnState | None = None,
     request_id: str | None = None,
     error: BaseException | None = None,
+    support_hint: str = _SHARE_RID,
 ) -> TerminationNotice | None:
     """The notice for `reason`, or None when the turn completed.
 
     `state` is optional because refusals end before any state exists; when
     given it supplies the tool work in flight, the servers that failed and
-    the rate-limit horizon.
+    the rate-limit horizon. `support_hint` lets a public surface offer admin
+    help without asking the person for an internal request identifier.
     """
     if reason is TerminationReason.COMPLETED:
         return None
     copy = _COPY.get(reason, _FALLBACK)
     if spend_limit_error(error or (state.error if state is not None else None)) is not None:
         copy = _Copy("Model usage limit reached", _SPEND_LIMIT_MESSAGE, _KEPT, "")
-    elif _stuck_session(reason, error or (state.error if state is not None else None)):
+    elif is_stuck_session(reason, error or (state.error if state is not None else None)):
         headline, cause, next_step = _STUCK_SESSION
         copy = _Copy(headline, cause, "", next_step)
     cause = copy.cause
-    next_step = copy.next_step
+    next_step = f"{copy.next_step} {support_hint}" if copy.offer_support else copy.next_step
     in_flight: tuple[str, ...] = ()
     finished = 0
     if state is not None:

@@ -537,9 +537,7 @@ async def test_topup_select_renders_an_error_when_the_checkout_call_returns_a_no
     call_args = interaction.response.send_message.call_args
     assert call_args.kwargs.get("ephemeral") is True, "the failure notice must be ephemeral"
     sent_text = call_args.args[0] if call_args.args else ""
-    assert "rid: " in sent_text, (
-        "a failed checkout must render with a request id the operator can trace in logs"
-    )
+    assert "rid: " not in sent_text, "a failed checkout must not expose trace ids"
     assert "checkout.stripe.com" not in sent_text, "no checkout URL may be sent on a failure"
     assert db_session is not None
 

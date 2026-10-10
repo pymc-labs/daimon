@@ -96,6 +96,17 @@ allow.
 | Memory writable | where `readers` is `any` | the same | also in its home |
 | Charged to | the channel it runs in | the same | its home |
 
+## Changing agent setup
+
+Server or workspace admins may change an agent's setup. A non-admin must
+administer every channel named by the agent's rule, and every place the agent
+answers or runs must stay inside those channels. This applies to instructions,
+model, description, tools, skills and MCP server attachments, including token
+forms and OAuth connections. Unbound agents, tenant defaults and agents serving
+other channels require a server or workspace admin. Creation metadata and a
+channel default alone do not grant permission to edit setup. Defaults-managed
+specs retain their existing protections, including for admins.
+
 ## Publishing
 
 A turn whose admission would refuse `PUBLISH` gets its session's publish

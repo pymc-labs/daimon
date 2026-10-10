@@ -284,3 +284,16 @@ def test_the_cap_notice_says_the_cap_is_the_persons_and_an_operator_raises_it() 
     assert notice is not None
     assert notice.cause.startswith("You've reached your monthly usage cap"), notice.cause
     assert notice.next_step == "An operator can raise it.", "no admin command raises a cap"
+
+
+def test_public_surface_can_offer_admin_help_without_request_identifier_guidance() -> None:
+    default = render_termination_notice(TerminationReason.UPSTREAM)
+    public = render_termination_notice(
+        TerminationReason.UPSTREAM,
+        support_hint="If it keeps happening, ask an admin for help.",
+    )
+    assert default is not None and public is not None
+    assert "share the request id" in default.next_step
+    assert "ask an admin for help" in public.next_step
+    assert "request id" not in public.next_step
+    assert public.cause == default.cause

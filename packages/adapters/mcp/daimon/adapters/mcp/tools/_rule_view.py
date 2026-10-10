@@ -5,7 +5,8 @@ bound to C (`token_channel_id`), when a tool that knows its turn's location
 from a verified origin says it runs in C, or when a chat turn's agent is one
 of C's own. An agent key is never inside by its agent alone. From inside C a
 caller sees only C's own agents; from anywhere else it sees every agent but
-those. A tenant with no such channel pays one policy read and sees everything.
+those. Members also see only locally routed responders or agents with an
+explicit rule allowing that location, even when no channel is isolated.
 What an agent may run, post or read is `daimon.core.authz`'s to decide.
 """
 
@@ -37,6 +38,7 @@ from daimon.core.rule_views import (
     BindingRefusal,
     RuleViewer,
     binding_refusal,
+    load_location_responders,
     render_binding_refusal,
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -138,6 +140,50 @@ async def load_caller_view(
     *,
     agents: Sequence[BetaManagedAgentsAgent] | None = None,
     location_channel_id: str | None = None,
+    location_thread_id: str | None = None,
+) -> CallerView:
+    """Agent discovery follows the member's verified location; admins see all."""
+    return await _load_view(
+        runtime,
+        auth,
+        agents=agents,
+        location_channel_id=location_channel_id,
+        location_thread_id=location_thread_id,
+        discovery=True,
+    )
+
+
+async def load_isolation_view(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agents: Sequence[BetaManagedAgentsAgent] | None = None,
+    location_channel_id: str | None = None,
+    location_thread_id: str | None = None,
+) -> CallerView:
+    """Channel isolation for operations with their own authorization rules.
+
+    This is not an agent-discovery view. Mutations, routine ownership and
+    environment reads retain their existing permissions and isolation checks.
+    """
+    return await _load_view(
+        runtime,
+        auth,
+        agents=agents,
+        location_channel_id=location_channel_id,
+        location_thread_id=location_thread_id,
+        discovery=False,
+    )
+
+
+async def _load_view(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agents: Sequence[BetaManagedAgentsAgent] | None = None,
+    location_channel_id: str | None = None,
+    location_thread_id: str | None = None,
+    discovery: bool,
 ) -> CallerView:
     """Where the caller stands. Pass `agents` when already listed; `location_channel_id`
     (a thread's parent) when the tool knows the turn's channel from its verified origin.
@@ -148,14 +194,16 @@ async def load_caller_view(
     refused while any channel is kept to its own agents.
     """
     policy = await load_policy_or_refuse(runtime, auth.tenant_id)
-    if not any_own_readers(policy):
+    restrict_to_location = discovery and (not auth.is_admin or auth.is_external)
+    if not any_own_readers(policy) and not restrict_to_location:
         return OPEN_VIEW
     if agents is None:
         agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     if auth.agent_id is not None:
         location_channel_id = None
+        location_thread_id = None
     inside = home_of(policy, location_channel_id) or home_of(policy, token_channel_id(auth))
-    if inside is None and auth.chat_agent_id is not None:
+    if inside is None and auth.chat_agent_id is not None and any_own_readers(policy):
         agent = next(
             (
                 agent
@@ -173,7 +221,29 @@ async def load_caller_view(
                 "which channel it is held to. Nothing was done. Tell the caller."
             )
         inside = agent_permissions(policy, agent_pin_names(agent.name, agent.metadata)).home
-    return CallerView(policy, inside, agent_aliases(agents))
+    location = location_channel_id or token_channel_id(auth) or inside
+    async with runtime.session_factory() as session:
+        responders: frozenset[str] = (
+            await load_location_responders(
+                session,
+                tenant_id=auth.tenant_id,
+                channel_id=location,
+                platform=auth.platform,
+                thread_id=location_thread_id,
+                default=runtime.deployment_default,
+            )
+            if restrict_to_location
+            else frozenset()
+        )
+    return CallerView(
+        policy,
+        inside,
+        agent_aliases(agents),
+        location_channel_id=location,
+        location_thread_id=location_thread_id,
+        restrict_to_location=restrict_to_location,
+        routed_agent_names=responders,
+    )
 
 
 async def load_caller_hidden_environments(
@@ -183,7 +253,7 @@ async def load_caller_hidden_environments(
     an operator sees all. Tools treat them as missing."""
     if auth.is_operator:
         return frozenset()
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         return await load_hidden_environment_names(
             session, tenant_id=auth.tenant_id, viewer=caller, default=runtime.deployment_default
@@ -197,6 +267,7 @@ __all__ = [
     "SkillOwners",
     "load_caller_hidden_environments",
     "load_caller_view",
+    "load_isolation_view",
     "load_policy_or_refuse",
     "load_skill_owners",
     "refuse",

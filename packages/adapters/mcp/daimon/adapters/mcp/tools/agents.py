@@ -35,7 +35,11 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
-from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_skill_owners
+from daimon.adapters.mcp.tools._rule_view import (
+    load_caller_view,
+    load_isolation_view,
+    load_skill_owners,
+)
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
@@ -347,7 +351,11 @@ async def _list_agents_impl(
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     caller = await load_caller_view(
-        runtime, auth, agents=rows, location_channel_id=origin_channel_id(origin)
+        runtime,
+        auth,
+        agents=rows,
+        location_channel_id=origin_channel_id(origin),
+        location_thread_id=origin.thread_id if origin is not None else None,
     )
     rows = [row for row in rows if caller.sees_agent(row)]
     skill_titles, _truncated = await resolve_custom_skill_titles(
@@ -370,7 +378,9 @@ async def _get_agent_impl(
         name=name,
         expected_ma_agent_id=expected_ma_agent_id,
         require_identity=False,
+        discovery=True,
         location_channel_id=origin_channel_id(origin),
+        location_thread_id=origin.thread_id if origin is not None else None,
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
     # The prompt is readable only by callers who could replace it on any agent:
@@ -655,7 +665,7 @@ async def _update_agent_impl(
     resolved_skills: list[BetaManagedAgentsSkillParams] | None = None
     if skills is not None:
         try:
-            caller = await load_caller_view(
+            caller = await load_isolation_view(
                 runtime, auth, location_channel_id=origin_channel_id(origin)
             )
             owners = await load_skill_owners(runtime, caller, auth.tenant_id)
@@ -971,9 +981,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_agents(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, page: str | None = None, origin_context_id: str | None = None
     ) -> list[AgentInfo]:
-        """List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
-        Pass this turn's ``origin_context_id`` so its channel counts."""
+        """List agents visible here, including their attached ``mcp_servers`` and ``skills``.
+
+        Members see the channel/thread responders and agents explicitly allowed
+        to run here; unrouted agents and other channels' agents are hidden.
+        Pass this turn's ``origin_context_id`` to verify its location. Without
+        a verified location a member cannot list unrestricted agents. Admins
+        retain their existing visibility. ``page`` is reserved for pagination.
+        """
         return await _list_agents_impl(runtime, await _auth(ctx), page, origin_context_id)
 
     @mcp.tool

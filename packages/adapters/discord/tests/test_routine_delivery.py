@@ -230,8 +230,12 @@ async def test_with_identity_a_long_result_leaves_room_for_the_fallback_label(
 
     await _poster(db_session_factory, _text_channel(), identity=identity)(row)
 
-    (sent,) = _Transport.sent
-    assert len(sent["content"]) + len(fallback_name_prefix("research", "")) == 2000
+    assert len(_Transport.sent) > 1
+    prefix = fallback_name_prefix("research", "")
+    assert all(len(sent["content"]) + len(prefix) <= 2000 for sent in _Transport.sent)
+    assert _Transport.sent[0]["_prefix_if_fallback"] is True
+    assert all(not sent["_prefix_if_fallback"] for sent in _Transport.sent[1:])
+    assert "".join(sent["content"] for sent in _Transport.sent).split("\n\n", 1)[1] == "x" * 2500
 
 
 async def test_the_built_in_agent_posts_as_the_bot_with_todays_text(
@@ -540,3 +544,30 @@ async def test_a_bot_fallback_labels_the_result_with_the_subtext_name_line(
         "research", "Routine result (0 9 * * 1, UTC):\n\nAll green @everyone."
     )
     assert content.startswith("-# research\nRoutine result ("), "the label is #530's subtext line"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_long_routine_delivers_every_word_to_channel_or_creator(
+    db_session, db_session_factory, fallback
+):
+    row = await _routine(db_session)
+    result = " ".join(f"digestword{i}" for i in range(800)) + " FINAL-COMPLETE"
+    row = row.model_copy(update={"delivery_payload": result})
+    channel = _text_channel(perms=_perms(send=not fallback))
+    dms = _Dms()
+    poster = _poster(db_session_factory, channel, dms=dms)
+    outcome = await poster(row)
+    assert outcome.status == "delivered"
+    texts = (
+        [item[2] for item in dms.sent]
+        if fallback
+        else [call.kwargs["content"] for call in channel.send.await_args_list]
+    )
+    assert len(texts) > 1 and all(len(text) <= 2000 for text in texts)
+    delivered = "".join(texts).split("\n\n", 1)[1]
+    assert delivered == result, "deliver the beginning and ending, without cutting a word"
+    if not fallback:
+        assert all(
+            call.kwargs["allowed_mentions"].everyone is False
+            for call in channel.send.await_args_list
+        )

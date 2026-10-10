@@ -39,6 +39,7 @@ from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEv
 from .conftest import (
     make_agent_message,
     make_end_turn,
+    make_mcp_tool_result,
     make_mcp_tool_use,
     make_requires_action,
     make_status_idle,
@@ -660,6 +661,76 @@ async def test_ma_repeating_the_pause_while_the_card_is_up_does_not_end_the_turn
     assert _confirmations(fa) == [
         {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_pub"}
     ]
+
+
+async def test_ma_taking_three_approvals_one_per_pause_does_not_end_the_turn() -> None:
+    """Production 2026-10-08 08:58: three approved uploads in one batch. MA takes
+    one confirmation per pause, so after the batch is sent it pauses again on the
+    ids it has not run yet. Each such pause is a duplicate, not a re-ask: the turn
+    runs all three and ends, and each call gets exactly one card and one allow."""
+    fa = FakeAnthropic()
+    ids = ["tu_0", "tu_1", "tu_2"]
+    events: list[YieldEvent] = [
+        YieldEvent(
+            make_mcp_tool_use(
+                event_id=tool_use_id,
+                name="create_attachment_upload_url",
+                mcp_server_name=DAIMON_SERVER_NAME,
+                input={"name": f"{tool_use_id}.csv", "slug": "qa"},
+            )
+        )
+        for tool_use_id in ids
+    ]
+    for index, tool_use_id in enumerate(ids):
+        events.append(
+            YieldEvent(
+                make_status_idle(
+                    event_id=f"sevt_pause_{index}",
+                    stop_reason=make_requires_action(event_ids=ids[index:]),
+                )
+            )
+        )
+        events.append(
+            YieldEvent(
+                make_tool_confirmation(event_id=f"sevt_took_{index}", tool_use_id=tool_use_id)
+            )
+        )
+        events.append(
+            YieldEvent(
+                make_mcp_tool_result(event_id=f"sevt_result_{index}", mcp_tool_use_id=tool_use_id)
+            )
+        )
+    events.append(YieldEvent(make_agent_message(event_id="sevt_msg", text="uploaded all three")))
+    events.append(YieldEvent(make_status_idle(event_id="sevt_end", stop_reason=make_end_turn())))
+    fa.beta.sessions.events.stream_scripts = [events]
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="upload the three files",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            ToolSafetyPolicy(enabled=False),
+            requester_platform_user_id="U1",
+            confirm=card,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            asks_before_publishing=True,
+        ),
+    )
+
+    assert final.error is None, "not abandoned as 'sent but not accepted'"
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert len(prompts) == 3, "one card per call, never re-shown"
+    assert sorted(c["tool_use_id"] for c in _confirmations(fa)) == ids
+    assert all(c["result"] == "allow" for c in _confirmations(fa))
 
 
 async def test_three_uploads_get_separate_cards_and_answers() -> None:

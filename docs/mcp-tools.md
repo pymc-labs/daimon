@@ -77,7 +77,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `create_agent` | all callers | Create an agent called, for example, churn-explorer. |
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
-| `list_agents` | all callers | List agents in the tenant pool, including each agent's attached ``mcp_servers`` and ``skills``. |
+| `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
 
 ## `channel_admins`
@@ -353,8 +353,8 @@ Skill tools: sync / list / get / delete.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `delete_skill` | admin only | Delete a skill such as eda from the workspace, destroying all versions for every agent. |
-| `get_skill` | all callers | Look up a skill by name. |
-| `list_skills` | all callers | List all custom skills. |
+| `get_skill` | all callers | Look up a visible skill by name, including version count. |
+| `list_skills` | all callers | List visible custom skills. |
 | `sync_skills` | admin only | Install skills from a GitHub repo into the workspace's shared skill library. |
 
 ## `task_continuity`

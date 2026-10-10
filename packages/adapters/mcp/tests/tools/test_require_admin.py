@@ -247,6 +247,7 @@ async def test_list_impl_does_not_raise_admin_gate_for_non_admin(
     from anthropic.types.beta import SkillListResponse
 
     router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     router.add(
         "GET",
         r"/v1/skills",

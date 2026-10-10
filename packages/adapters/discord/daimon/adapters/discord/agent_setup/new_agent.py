@@ -27,7 +27,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import DEFAULT_AGENT_MODEL
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import load_roster
@@ -153,7 +153,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 account_id=self.state.guild_account_id,
             )
             if created.anthropic_id is None:
-                raise DaimonError(
+                raise UserFacingError(
                     "Could not confirm the new agent. "
                     "Reopen `/agent-setup` to check before retrying."
                 )
@@ -187,15 +187,22 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             agent = next(
                 (row for row in roster.rows if row.ma_agent_id == created.anthropic_id), None
             )
+            if agent is None and not self.state.is_admin:
+                await interaction.followup.send(
+                    f"**{new_name}** was created. Not answering in any channel yet. "
+                    "An admin can make it answer in this channel; "
+                    "it will then appear in setup here.",
+                    ephemeral=True,
+                )
+                return
             if agent is None and viewer is not None and viewer.inside_channel_id is not None:
-                raise DaimonError(
-                    f"**{new_name}** was created. This channel is kept to its own agents, so it "
+                raise UserFacingError(
+                    "The agent was created. This channel is kept to its own agents, so it "
                     "shows here once it is set as the channel's agent."
                 )
             if agent is None:
-                raise DaimonError(
-                    f"**{new_name}** was created but is not listed yet. "
-                    "Reopen `/agent-setup` to see it."
+                raise UserFacingError(
+                    "The agent was created but is not listed yet. Reopen `/agent-setup` to see it."
                 )
             details = await load_details_for(self.runtime, state=self.state, agent=agent)
             if self._panel_render_seq != self.state.render_seq:

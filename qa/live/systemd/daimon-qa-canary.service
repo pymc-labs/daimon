@@ -1,0 +1,14 @@
+[Unit]
+Description=Daimon staging QA two-turn canary
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/cs/daimon-wt/qa-runner
+EnvironmentFile=-%h/.config/daimon-qa/environment
+ExecStart=%h/.local/bin/uv run python -m qa.live canary --env staging --go --catalog %h/cs/daimon-qa-driver-20261010/catalog --config %h/.config/daimon-qa/config.json --ledger %h/cs/daimon-qa-driver-20261010/cost/ledger.jsonl --results %h/.local/state/daimon-qa/results
+TimeoutStartSec=1200
+TimeoutStopSec=180
+KillSignal=SIGTERM
+UMask=0077

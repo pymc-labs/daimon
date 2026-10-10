@@ -12,6 +12,7 @@ that alignment matters."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -857,7 +858,7 @@ async def test_mcp_modal_submit_consumes_token_and_writes_vault_credential(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     assert len(creds_created) == 1, "exactly one credential must be POSTed to the per-agent vault"
@@ -904,7 +905,7 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
+    interaction = _admin_interaction()
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
@@ -930,7 +931,7 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     )
     retry_modal = McpCredentialModal(runtime=retry_runtime, request_row=row)
     retry_modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
-    retry_interaction = _interaction()
+    retry_interaction = _admin_interaction()
     await retry_modal.on_submit(retry_interaction)
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
@@ -978,14 +979,10 @@ async def test_mcp_modal_vault_write_failure_keeps_exception_details_private(
     )
 
 
-async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
+async def test_mcp_modal_restores_the_button_when_the_write_below_it_fails(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The consume is what kills the button, not the vault write after it.
-
-    A downstream failure still leaves the request spent, so a button that
-    still looks live would only ever earn an "already used" refusal.
-    """
+    """A downstream failure finalizes the card and restores its form."""
 
     def _failing_vault(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/v1/agents":
@@ -1011,7 +1008,7 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     edits = _card_edits(interaction)
@@ -1019,7 +1016,7 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
         "a consumed request moves its card to received regardless of the write's outcome"
     )
     assert _card_buttons(edits[0]) == [], "the received card offers no button to click again"
-    assert "Nothing was saved for tester." in _card_text(edits[-1]), (
+    assert "Try again" in _card_text(edits[-1]) and _card_buttons(edits[-1]), (
         "a card left on 'Saving…' would describe a save that has already stopped"
     )
     message = interaction.followup.send.call_args.args[0]
@@ -1139,7 +1136,7 @@ async def test_repo_modal_public_repo_blank_token_admin_binds_anon_against_manag
     assert binding.proof_kind == "public"
 
 
-async def test_repo_modal_public_repo_blank_token_member_binds_anon_against_own_target(
+async def test_repo_modal_public_repo_blank_token_admin_binds_anon_against_target(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1156,13 +1153,11 @@ async def test_repo_modal_public_repo_blank_token_member_binds_anon_against_own_
     )
 
     modal = RepoBindModal(runtime=runtime, request_row=row)
-    await modal.on_submit(_member_interaction())
+    await modal.on_submit(_admin_interaction())
 
     async with db_session_factory() as session:
         binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
-    assert binding is not None, (
-        "a member binding a public repo to their own, unshared agent must succeed"
-    )
+    assert binding is not None, "an admin binding a public repo to an unbound agent must succeed"
     assert binding.ma_secret_ref == "anon:"
     assert binding.proof_kind == "public"
 
@@ -1225,7 +1220,8 @@ async def test_repo_modal_pasted_token_that_github_refuses_writes_nothing(
         binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert binding is None, "a GitHub-refused token must never produce a binding"
     message = interaction.followup.send.call_args.args[0]
-    assert "can't access this repo" in message, "the panel's own refusal copy must be surfaced"
+    assert "Repository access could not be saved" in message
+    assert "Try again" in message
 
 
 async def test_repo_modal_double_submit_writes_exactly_one_binding(
@@ -1363,7 +1359,7 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert binding is not None and binding.ma_secret_ref == f"inline-pat:{row.agent_id}"
     elif scenario == "refused_by_github":
         message = _sent_message(interaction)
-        assert "can't access this repo" in message
+        assert "Repository access could not be saved" in message
     elif scenario == "unexpected_exception":
         message = _sent_message(interaction)
         assert "ConnectError" not in message, "exception classes stay in operator logs"
@@ -1684,6 +1680,9 @@ async def test_skill_repo_modal_passes_seeded_names_and_admin_status_to_the_sync
     interaction = _admin_interaction() if is_admin else _member_interaction()
     await modal.on_submit(_as_card_interaction(interaction))
 
+    if not is_admin:
+        sync.assert_not_awaited()
+        return
     assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
     assert sync.call_args.kwargs["is_admin"] is is_admin
 
@@ -1814,7 +1813,8 @@ async def test_skill_repo_failure_reports_only_confirmed_token_saves(
         assert "Token saved" not in message and "Token stored" not in message, (
             "a failure before storage must not claim that the token was saved"
         )
-    assert "retry" in message, "a consumed request needs a concrete retry instruction"
+    assert "Try again using the same form" in message
+    assert persisted is not None and persisted.used_at is None
     assert "private upstream detail" not in message and "ConnectError" not in message, (
         "unexpected exception details stay in operator logs"
     )
@@ -2357,7 +2357,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
         runtime=_runtime(sessionmaker=db_session_factory), request_row=env_row
     )
     env_modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
-    env_interaction = _card_interaction()
+    env_interaction = _as_card_interaction(_admin_interaction())
     await env_modal.on_submit(env_interaction)
     env_interaction.followup.send.assert_not_awaited()
     assert "NO_TOAST_TOKEN saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
@@ -2380,7 +2380,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     )
     mcp_modal = McpCredentialModal(runtime=mcp_runtime, request_row=mcp_row)
     mcp_modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
-    mcp_interaction = _card_interaction()
+    mcp_interaction = _as_card_interaction(_admin_interaction())
     await mcp_modal.on_submit(mcp_interaction)
     mcp_interaction.followup.send.assert_not_awaited()
     assert "tester is connected to linear." in _card_text(_card_edits(mcp_interaction)[-1]), (
@@ -2480,16 +2480,22 @@ async def test_env_file_upload_queues_its_continuation_with_the_keys(
     assert "next message" not in card, "nothing was waiting on the file, so no turn is promised"
 
 
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     """A 401/403 from the server at the door: nothing stored, nothing attached,
     the card refused with the way out named (the case a Notion token hit)."""
     import dataclasses
 
+    from daimon.core import credential_submit
     from daimon.core.mcp_oauth import McpProbe
 
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     row = await _seed_mcp_request(
         db_session_factory, mcp_server_url="https://mcp.notion.com/mcp", with_origin=True
     )
@@ -2497,9 +2503,13 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     agent_updates: list[dict[str, Any]] = []
     probed: list[tuple[str, str]] = []
 
+    accepted = False
+
     async def probe(url: str, token: str) -> McpProbe:
         probed.append((url, token))
-        return McpProbe(status_code=403, resource_metadata_url=None)
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
+        return McpProbe(status_code=200 if accepted else 403, resource_metadata_url=None)
 
     runtime = dataclasses.replace(
         _runtime(
@@ -2521,7 +2531,7 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     assert probed == [("https://mcp.notion.com/mcp", _MCP_TOKEN)], "the server is asked first"
@@ -2530,10 +2540,27 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
     assert spent is not None and spent.outcome == "token_rejected"
-    text = interaction.followup.send.call_args.args[0]
-    assert "did not accept" in text and "connect it with your account" in text, (
-        "the person learns the token was refused and that OAuth is the way out"
-    )
+    if failure == "rejection":
+        text = interaction.followup.send.call_args.args[0]
+        assert "did not accept" in text and "connect it with your account" in text, (
+            "the person learns the token was refused and that OAuth is the way out"
+        )
+
+    assert spent.used_at is None, "a rejected token keeps the form usable"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "That token was rejected" in card
+    assert "Try again" in card
+    if failure == "slow_rejection":
+        assert any("Still saving" in _card_text(edit) for edit in _card_edits(interaction))
+    assert RECEIVED_FOOTER not in card
+    accepted = True
+    monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
+    await modal.on_submit(interaction)
+    async with db_session_factory() as session:
+        saved = await peek_credential_request(session, token=row.token)
+    assert saved is not None and saved.outcome == "applied" and saved.used_at is not None
+    assert creds_created and agent_updates, "the same form can save on retry"
+    assert "✅" in _card_text(_card_edits(interaction)[-1])
 
 
 # --- key-name policy at submit ----------------------------------------------
@@ -2645,12 +2672,13 @@ async def test_mcp_agent_gone_before_the_attach_saves_nothing(
     await modal.on_submit(interaction)
 
     card = _card_text(_card_edits(interaction)[-1])
-    assert "Nothing was saved for tester." in card
+    assert "not available" in card and "Try again" not in card
     assert _MCP_TOKEN not in card, "no token may reach the card"
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
         stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
     assert persisted is not None and persisted.outcome == "write_failed"
+    assert persisted.used_at is not None, "a deleted target cannot be fixed by retrying a token"
     assert stored == 0, "no agent-wide token is published without an attach"
     assert await _queued_continuation(db_session_factory, row) is None
 
@@ -2684,11 +2712,11 @@ async def test_mcp_attach_failure_publishes_no_token(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     card = _card_text(_card_edits(interaction)[-1])
-    assert "Nothing was saved for tester." in card
+    assert "Try again" in card
     assert _MCP_TOKEN not in card, "no token may reach the card"
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
@@ -3112,3 +3140,39 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
     assert persisted is not None and persisted.outcome == "stale_replacement"
+
+
+async def test_mcp_modal_refuses_member_attachment_to_an_unbound_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_mcp_request(
+        db_session_factory, mcp_server_url="https://ext.example.com/mcp", with_origin=True
+    )
+    vault_id = "vlt_credmodal"
+    per_agent_display = f"daimon-mcp:{row.account_id}:{row.agent_id}"
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(
+            _vault_handler(
+                vault_id,
+                per_agent_display,
+                creds_created,
+                tenant_id=str(row.tenant_id),
+                agent_updates=agent_updates,
+            )
+        ),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    assert creds_created == []
+    assert agent_updates == [], "a posted token never authorizes an unbound agent spec"

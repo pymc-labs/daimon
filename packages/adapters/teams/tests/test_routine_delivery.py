@@ -156,3 +156,15 @@ async def test_an_isolated_channels_result_never_falls_back_to_a_dm(
     outcome = await poster(_row(tenant_id=tenant.id, channel_id=channel_id))
     assert outcome == DeliveryOutcome(status="skipped", note="destination_unavailable")
     assert teams.posts == [], "the result stays inside the isolated channel"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_long_routine_delivers_every_word_to_thread_or_creator(db_session_factory, fallback):
+    result = " ".join(f"digestword{i}" for i in range(1200)) + " FINAL-COMPLETE"
+    teams = _Teams(post_status=404 if fallback else None)
+    outcome = await _post(db_session_factory, teams, _row(delivery_payload=result))
+    assert outcome.status == "delivered"
+    assert len(teams.posts) > 1 and all(len(text) <= 4000 for _, text in teams.posts)
+    assert "".join(text for _, text in teams.posts).split("\n\n", 1)[1] == result
+    expected_place = f"a:dm-29:{CREATOR}" if fallback else f"{CHANNEL};messageid=17"
+    assert all(where == expected_place for where, _ in teams.posts)

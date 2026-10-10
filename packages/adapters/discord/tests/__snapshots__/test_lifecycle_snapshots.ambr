@@ -7,14 +7,13 @@
         'embeds': list([
           dict({
             'color': 15548997,
-            'description': 'Send your message again. If it keeps happening, share the request id with an admin.',
+            'description': 'Send your message again. If it keeps happening, ask an admin for help.',
             'fields': list([
               tuple(
                 'Notice',
                 list([
                   'The turn ended unexpectedly.',
                   'The conversation and its workspace are kept.',
-                  '`rid: 01TESTREQUESTID0000000000`',
                 ]),
               ),
             ]),

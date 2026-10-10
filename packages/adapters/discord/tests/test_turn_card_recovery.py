@@ -1124,3 +1124,16 @@ async def test_a_recorded_card_never_releases_its_input_for_another_turn(
     assert not await claim_message(
         db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
     )
+
+
+async def test_card_deleted_between_fetch_and_interrupt_is_already_reconciled(monkeypatch):
+    message = _fetched_message(123, _TURN_ID)
+    edit = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404, reason="Not Found"),
+            {"code": 10008, "message": "Unknown Message"},
+        )
+    )
+    monkeypatch.setattr(discord.Message, "edit", edit)
+    assert await turn_card_recovery._mark_card_interrupted(message, intent_id=_TURN_ID)
+    edit.assert_awaited_once()

@@ -102,7 +102,7 @@ def test_routine_controls_name_the_destination_and_schedule() -> None:
     text = render_routine_controls(_row(), platform="discord")
     assert text.startswith("<turn_controls>\n{")
     assert '"channel_id": "C1"' in text and '"schedule": "0 9 * * 1"' in text
-    assert "posts the end of your final reply there" in text
+    assert "posts your full final reply there" in text
     assert text.endswith("</turn_controls>")
 
 
@@ -156,10 +156,10 @@ def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
 def test_protected_controls_do_not_invite_a_post() -> None:
     text = render_routine_controls(_row(), platform="discord", direct_post="protected")
     assert "do not post there" in text
-    assert "posts the end of your final reply there" not in text
+    assert "posts your full final reply there" not in text
     unverified = render_routine_controls(_row(), platform="discord", direct_post="unverified")
     assert "Do not post to the destination yourself" in unverified
-    assert "posts the end of your final reply there" not in unverified
+    assert "posts your full final reply there" not in unverified
 
 
 @pytest.mark.parametrize(
@@ -623,3 +623,20 @@ def test_slack_creator_may_post(
         )
         is allowed
     )
+
+
+@pytest.mark.parametrize("delivery", [None, "pending", "skipped"])
+async def test_full_result_is_queued_separately_from_marked_tail(db_session, delivery):
+    row = await _routine(db_session)
+    result = "HEAD-ONLY\n" + "completeword " * 300 + "LAST COMPLETE PARAGRAPH."
+    await record_result(db_session, row.id, tail=result, error=None, delivery=delivery)
+    saved = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
+    assert saved is not None and saved.last_result_tail is not None
+    assert len(saved.last_result_tail) <= 1000
+    assert saved.last_result_tail.startswith("… (truncated)\n")
+    retained = saved.last_result_tail.split("\n", 1)[1]
+    assert result.endswith(retained), "the preview is the actual tail, not the head"
+    assert retained.startswith("completeword "), "start the preview at a whole word"
+    assert saved.last_result_tail.endswith("LAST COMPLETE PARAGRAPH.")
+    assert "HEAD-ONLY" not in saved.last_result_tail
+    assert saved.delivery_payload == (result if delivery == "pending" else None)

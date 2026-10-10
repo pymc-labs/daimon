@@ -161,21 +161,22 @@ async def test_direct_form_replacement_is_refused(
 
 
 @pytest.mark.parametrize("user", ["none", "own-routine"])
-async def test_an_agent_nobody_else_uses_stays_the_callers_to_manage(
+async def test_an_agent_nobody_else_uses_still_requires_ownership(
     db_session_factory: async_sessionmaker[AsyncSession], user: str
 ) -> None:
-    """Allowed control: an unused draft, or one only the caller's own routine runs."""
+    """An unused draft or an own routine is not evidence of mutation ownership."""
     tenant_id, me, agent_id = await _setup(db_session_factory, user=user)
     runtime, agent = _runtime(db_session_factory, tenant_id)
-    await _require_key_replacement_allowed(
-        runtime, _member(tenant_id, me, None), ma_agent=agent, key="GITHUB_TOKEN"
-    )
-    result = await _remove_agent_key_impl(
-        runtime,
-        _member(tenant_id, me, None),
-        agent_name=_NAME,
-        key="GITHUB_TOKEN",
-        expected_ma_agent_id=_MA_ID,
-    )
-    assert result.removed is True
-    assert await _value(db_session_factory, tenant_id, agent_id) is None
+    with pytest.raises(ToolError, match="admin"):
+        await _require_key_replacement_allowed(
+            runtime, _member(tenant_id, me, None), ma_agent=agent, key="GITHUB_TOKEN"
+        )
+    with pytest.raises(ToolError, match="admin"):
+        await _remove_agent_key_impl(
+            runtime,
+            _member(tenant_id, me, None),
+            agent_name=_NAME,
+            key="GITHUB_TOKEN",
+            expected_ma_agent_id=_MA_ID,
+        )
+    assert await _value(db_session_factory, tenant_id, agent_id) == "the-value-in-use"

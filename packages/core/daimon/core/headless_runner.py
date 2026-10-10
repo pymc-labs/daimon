@@ -1,10 +1,10 @@
 """Non-interactive turn execution.
 
 Open a fresh MA session, then delegate the drain to the core turn driver
-(`daimon.core.turn.driver.run_turn`), returning the truncated final-message
-tail. A routine turn inherits the driver's full liveness story — status-
-checked eventless-cycle reconnect, the per-call read timeout, the cancel
-race, the hardened render error policy — instead of a bespoke bare drain
+(`daimon.core.turn.driver.run_turn`), returning the complete final message.
+A routine turn inherits the driver's full liveness story — status-checked
+eventless-cycle reconnect, the per-call read timeout, the cancel race,
+the hardened render error policy — instead of a bespoke bare drain
 loop, and answers tool confirmations via `headless_tool_confirmation`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
@@ -78,9 +78,6 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
-
-LAST_RESULT_TAIL_MAX = 1000
-"""Final-message tail is truncated to at most this many characters."""
 
 
 class _NoOpLifecycle(TurnLifecycle):
@@ -231,7 +228,7 @@ async def run_turn_impl(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
 ) -> str:
-    """Run a single non-interactive turn end-to-end and return its tail.
+    """Run a single non-interactive turn end-to-end and return its complete final reply.
 
     Flow:
 
@@ -268,9 +265,9 @@ async def run_turn_impl(
        eventless-cycle reconnect, the per-call read timeout, the cancel race,
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
-    4. After the driver returns: ``extract_final_response(state.content)[:1000]``.
+    4. After the driver returns: ``extract_final_response(state.content)``.
        ``on_state``, when given, is called first with the final ``TurnState``
-       of a successful turn, for a caller that needs more than the tail (the
+       of a successful turn, for a caller that needs the tool trail too (the
        scheduler checks whether the agent posted a routine's result itself).
 
     Errors:
@@ -402,7 +399,7 @@ async def run_turn_impl(
 
         if on_state is not None:
             on_state(state)
-        return extract_final_response(state.content)[:LAST_RESULT_TAIL_MAX]
+        return extract_final_response(state.content)
     finally:
         if session_factory is not None:
             try:

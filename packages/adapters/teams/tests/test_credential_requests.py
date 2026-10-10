@@ -5,6 +5,7 @@ Only the Bot Framework transport, MA and the MCP vault writes are faked.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import uuid
@@ -339,25 +340,52 @@ async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
     dispatch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
-    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     row = await _request(db_session_factory, account_id, kind="mcp")
     async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
         unconfigured = await post_activity(service, _submit(row.token))
     assert "not finished being set up" in unconfigured["task"]["value"]
 
-    probe = AsyncMock(return_value=McpProbe(status_code=401, resource_metadata_url=None))
-    runtime = dataclasses.replace(_runtime(db_session_factory, mcp=True), mcp_token_probe=probe)
+    accepted = False
+
+    async def probe_impl(url: str, token: str) -> McpProbe:
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
+        return McpProbe(status_code=200 if accepted else 401, resource_metadata_url=None)
+
+    probe = AsyncMock(side_effect=probe_impl)
+    runtime = dataclasses.replace(
+        _admin_runtime(db_session_factory, mcp=True), mcp_token_probe=probe
+    )
     fake, store = TeamsApiFake(), AsyncMock()
     with patch.object(module, "connect_mcp_server_with_token", store):
         async with _running(fake, runtime) as (service, dispatch):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
+            store.assert_not_awaited()
+            dispatch.assert_not_awaited()
+            assert "That token was rejected" in _edits(fake)[-1]
+            if failure == "slow_rejection":
+                assert any("Still saving" in edit for edit in _edits(fake))
+            async with db_session_factory() as session:
+                retry = await peek_credential_request(session, token=row.token)
+            assert retry is not None and retry.used_at is None and retry.outcome == "token_rejected"
+            accepted = True
+            monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
 
-    store.assert_not_awaited()
-    dispatch.assert_not_awaited()
-    assert "did not accept that token" in _edits(fake)[-1]
+    store.assert_awaited_once()
+    dispatch.assert_awaited_once()
+    assert "✅" in _edits(fake)[-1]
 
 
 async def test_an_mcp_token_is_stored_attached_and_resumes_the_work(
@@ -366,7 +394,10 @@ async def test_an_mcp_token_is_stored_attached_and_resumes_the_work(
     row = await _request(db_session_factory, account_id, kind="mcp")
     fake, connect = TeamsApiFake(), AsyncMock()
     with patch.object(module, "connect_mcp_server_with_token", connect):
-        async with _running(fake, _runtime(db_session_factory, mcp=True)) as (service, dispatch):
+        async with _running(fake, _admin_runtime(db_session_factory, mcp=True)) as (
+            service,
+            dispatch,
+        ):
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
@@ -844,7 +875,8 @@ async def test_a_repo_token_is_checked_then_binds_the_working_repo(
             saved = await post_activity(service, _submit(row.token, secret=" ghp_right \n"))
             await service.turns.drain(5)
 
-    assert "cannot read o/r" in json.dumps(bad) and not untouched, "form open, nothing spent"
+    assert "cannot read o/r" in json.dumps(bad), "the form stays open"
+    assert untouched and "That token was rejected" in untouched[-1]
     assert not (saved or {}).get("task"), "the dialog closes"
     assert access.await_args is not None, "the token was checked"
     assert access.await_args.kwargs["pat"] == "ghp_right", "checked as stored: stripped"
@@ -896,12 +928,28 @@ def _imported() -> AsyncMock:
     return AsyncMock(return_value=[skill])
 
 
+@pytest.mark.parametrize("slow", [False, True])
 async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
-    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    slow: bool,
 ) -> None:
     """Imported skills attach to the agent; the working repo is untouched."""
     row = await _request(db_session_factory, account_id, kind="skill_repo")
     fake, sync, updates = TeamsApiFake(), _imported(), list[dict[str, Any]]()
+    started, finish = asyncio.Event(), asyncio.Event()
+    imported = sync.return_value
+
+    async def import_skills(*args: Any, **kwargs: Any) -> list[ResourceOutcome]:
+        started.set()
+        if slow:
+            await finish.wait()
+        return imported
+
+    sync.side_effect = import_skills
+    if slow:
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.01)
     runtime = _admin_runtime(db_session_factory, updates=updates)
     with (
         patch.object(module, "pat_can_access_repo", AsyncMock(return_value=True)),
@@ -909,7 +957,21 @@ async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
     ):
         async with _running(fake, runtime) as (service, dispatch):
             await post_activity(service, _submit(row.token, secret="ghp_skills"))
-            await service.turns.drain(5)
+            try:
+                if slow:
+                    async with asyncio.timeout(10):
+                        await started.wait()
+                        while not any("Still saving" in edit for edit in _edits(fake)):
+                            await asyncio.sleep(0.01)
+                    async with db_session_factory() as session:
+                        held = await peek_credential_request(session, token=row.token)
+                    assert held is not None and held.used_at is not None and held.outcome is None
+                    assert "ghp_skills" not in _edits(fake)[-1]
+                    assert not updates, "the slow import is still running, not cancelled"
+                    dispatch.assert_not_awaited()
+            finally:
+                finish.set()
+                await service.turns.drain(5)
 
     assert sync.await_args is not None, "the import ran"
     where = (sync.await_args.kwargs["branch"], sync.await_args.kwargs["path"])
@@ -1005,7 +1067,10 @@ async def test_a_skill_repo_token_that_cannot_read_the_repo_spends_nothing(
             await service.turns.drain(5)
     assert "cannot read o/skills" in json.dumps(bad), "the form stays open with why"
     sync.assert_not_awaited()
-    assert not _edits(fake), "the card stays as posted"
+    assert "That token was rejected" in _edits(fake)[-1]
+    async with db_session_factory() as session:
+        retry = await peek_credential_request(session, token=row.token)
+    assert retry is not None and retry.used_at is None and retry.outcome == "token_rejected"
 
 
 async def test_a_failed_bind_spends_the_request_and_says_so_without_the_token(

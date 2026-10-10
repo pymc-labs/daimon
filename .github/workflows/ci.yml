@@ -104,7 +104,7 @@ jobs:
           DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
         run: uv run alembic upgrade head
       - name: pytest (core + cli + scheduler + testing + integration)
-        run: uv run pytest packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration -n auto
+        run: uv run pytest qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration -n auto
 
   pytest-mcp:
     runs-on: ubuntu-latest

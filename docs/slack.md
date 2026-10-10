@@ -3,6 +3,23 @@
 This page documents how Daimon's Slack adapter handles per-user access and
 what operators should understand about the resulting trust model.
 
+### Agent visibility
+
+Members see only the effective channel and thread responders and agents whose
+explicit rules allow them to answer at that location. Unrouted agents,
+shadowed workspace or deployment defaults, and agents restricted to other
+channels are hidden from the setup panel and agent tool lookups. Agent aliases
+and channels kept to their own agents follow the same rules as on Discord.
+Admins retain their existing visibility.
+
+Agent tools verify location from the active turn origin or a channel-bound
+key. Omitting a turn origin cannot reveal the workspace roster. External
+participants retain the separate restriction on setup tools.
+
+Discovery and mutation authorization are separate: operations that already
+name an agent still apply their existing channel isolation and edit permission
+checks. Knowing an agent name does not grant permission to change it.
+
 ### `/here` card
 
 `/here` sends only the caller a compact channel card. Its title names the agent

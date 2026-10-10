@@ -592,7 +592,7 @@ async def test_handle_mention_catches_sqlalchemy_error_from_orchestrate(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "boundary should render the error via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 @pytest.mark.asyncio
@@ -621,7 +621,7 @@ async def test_handle_mention_catches_unexpected_exception_from_orchestrate(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "catch-all boundary should also render via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 @pytest.mark.asyncio
@@ -649,7 +649,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "prologue boundary should also render via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1019,8 @@ async def test_queued_mention_survives_turn_ending_during_reaction(
     reaction_release.set()
     await queued
 
+    q1.remove_reaction.assert_awaited_with("⌛", queued_bot.user)
+    assert not queued_bot._queued_reactions
     assert [c[0] for c in calls] == [m1, q1], "queued mention was stranded, not drained"
     assert calls[1][1] == "queued"
     assert 789 not in queued_bot._pending  # pyright: ignore[reportPrivateUsage]
@@ -1214,3 +1216,101 @@ async def test_a_drained_follow_up_re_queues_behind_another_tenants_waiting_turn
         await first
     assert order == ["A-first", "A-follow-up"]
     assert queued_bot.turn_queue.in_flight() == 0 and queued_bot.turn_queue.depth() == 0
+
+
+@pytest.mark.parametrize("outcome", ["done", "failed", "cancelled"])
+async def test_queue_markers_clear_for_every_message_on_settle(queued_bot, outcome):
+    messages = [_make_thread_message(author_id=111), _make_thread_message(author_id=111)]
+    queued_bot._processing.add(789)
+    for message in messages:
+        await queued_bot._queue_behind_inflight_turn(789, message)
+
+    async def turn(*args, **kwargs):
+        for message in messages:
+            message.remove_reaction.assert_not_awaited()
+        if outcome == "failed":
+            raise RuntimeError("turn failed")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+
+    queued_bot._handle_mention = turn
+    if outcome == "done":
+        await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    else:
+        with pytest.raises(RuntimeError if outcome == "failed" else asyncio.CancelledError):
+            await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    for message in messages:
+        message.add_reaction.assert_awaited_once_with("⌛")
+        message.remove_reaction.assert_awaited_once_with("⌛", queued_bot.user)
+    assert not queued_bot._queued_reactions
+
+
+async def test_queue_cleanup_failure_does_not_skip_other_messages(queued_bot):
+    messages = [_make_thread_message(), _make_thread_message()]
+    messages[0].remove_reaction.side_effect = ConnectionResetError("disconnected")
+    queued_bot._pending[789] = messages
+    queued_bot._handle_mention = AsyncMock()
+    await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    messages[1].remove_reaction.assert_awaited_once_with("⌛", queued_bot.user)
+
+
+async def test_early_eyes_precede_admission_and_clear_on_failure(queued_bot):
+    message = _make_thread_message()
+    admission_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def admission(*args, **kwargs):
+        message.add_reaction.assert_awaited_once_with("👀")
+        message.remove_reaction.assert_not_awaited()
+        admission_entered.set()
+        await release.wait()
+        raise RuntimeError("admission unavailable")
+
+    with patch("daimon.adapters.discord.bot.admit", side_effect=admission):
+        queued_bot._render_turn_error = AsyncMock()
+        task = asyncio.create_task(queued_bot._handle_mention(message, "123456", uuid.uuid4()))
+        await asyncio.wait_for(admission_entered.wait(), timeout=5)
+        assert not task.done()
+        release.set()
+        await task
+    message.remove_reaction.assert_awaited_once_with("👀", queued_bot.user)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_early_eyes_clear_after_orchestration_and_add_failure_is_cosmetic(
+    queued_bot, cancelled
+):
+    message = _make_thread_message()
+    message.add_reaction.side_effect = ConnectionResetError("disconnected")
+    queued_bot._orchestrate = AsyncMock(side_effect=asyncio.CancelledError if cancelled else None)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await queued_bot._handle_mention(message, "123456", uuid.uuid4())
+    else:
+        await queued_bot._handle_mention(message, "123456", uuid.uuid4())
+    queued_bot._orchestrate.assert_awaited_once()
+    message.remove_reaction.assert_awaited_once_with("👀", queued_bot.user)
+
+
+@pytest.mark.parametrize("unprompted,override", [(True, None), (False, "queued")])
+async def test_unprompted_and_queued_turns_do_not_add_eyes(queued_bot, unprompted, override):
+    message = _make_thread_message()
+    queued_bot._orchestrate = AsyncMock()
+    await queued_bot._handle_mention(
+        message, "123456", uuid.uuid4(), content_override=override, unprompted=unprompted
+    )
+    message.add_reaction.assert_not_awaited()
+    message.remove_reaction.assert_not_awaited()
+
+
+async def test_cancelled_drain_clears_unrun_authors_in_popped_batch(queued_bot):
+    messages = [_make_thread_message(author_id=111), _make_thread_message(author_id=222)]
+    for message in messages:
+        await queued_bot._queue_behind_inflight_turn(789, message)
+    queued_bot._handle_mention = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    assert queued_bot._handle_mention.await_count == 1
+    for message in messages:
+        message.remove_reaction.assert_awaited_with("⌛", queued_bot.user)
+    assert not queued_bot._queued_reactions

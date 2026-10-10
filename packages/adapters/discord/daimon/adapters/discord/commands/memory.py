@@ -13,7 +13,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import ScopeContext
@@ -68,7 +68,10 @@ async def _resolve_store(
         runtime.anthropic, tenant_id=tenant_id, name=config.agent_name
     )
     if agent is None:
-        raise DaimonError(f"Configured agent **{config.agent_name}** not found.")
+        log.warning("discord.memory.agent_missing", configured_name=config.agent_name)
+        raise UserFacingError(
+            "The configured agent could not be found. Ask an admin to check the agent setup."
+        )
     channel = interaction.channel
     parent = channel.parent_id if isinstance(channel, discord.Thread) else None
     if is_memory_hidden(

@@ -565,16 +565,17 @@ def render_responder_changed_without_handoff(
 
 
 def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str]) -> str:
-    """Summarize what a planned replacement session carried across."""
+    """Say what a planned replacement carried across, or, when it lost something, only that.
+
+    Shown only when `ContinuityOutcome.announces_replacement` says the person
+    would notice the replacement, so a lossy transfer says briefly what is gone.
+    """
     if transfer_kind == "full":
         base = "Your conversation, decisions and working files came across."
     elif transfer_kind == "transcript":
-        base = (
-            "Your conversation and decisions came across; the working files could not be saved "
-            "from the old workspace."
-        )
+        base = "Your working files from before could not be carried over."
     else:
-        base = "Only what was posted here came across."
+        base = "Your working files and earlier conversation could not be carried over."
     lines = [base]
     if lost:
         lines.append("Not carried: " + ", ".join(lost) + ".")

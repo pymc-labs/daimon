@@ -598,11 +598,12 @@ async def test_details_click_loads_the_agent_before_editing_the_panel(
     agent = ma_agent(id="ag_specialist", name="specialist", tenant_id=tenant.id)
     router = MARouter()
     router.add_agent(agent)
+    router.add_agent_list(agent)
     router.add("GET", r"/v1/skills", lambda _r, _m: list_response([]))
     runtime = _runtime(
         sessionmaker=db_session_factory,
         anthropic=build_fake_anthropic(router.dispatch),
-        default=DeploymentDefault(),
+        default=DeploymentDefault(agent_name="specialist"),
     )
     row = RosterAgent(
         name="specialist",
@@ -610,7 +611,7 @@ async def test_details_click_loads_the_agent_before_editing_the_panel(
         model_id="claude-sonnet-4-6",
         is_built_in=False,
     )
-    state = _state(agents=(row,))
+    state = _state(agents=(row,), deployment_default=DeploymentDefault(agent_name="specialist"))
     view = RosterView(state, runtime=runtime, allowed_user_id=42)
     interaction = _clicker(responded=True)
 
@@ -746,7 +747,7 @@ async def test_details_click_reports_a_failed_load_and_leaves_the_panel_alone(
     assert state.details is None, "a failed load must not leave a half-built Details on the state"
     interaction.edit_original_response.assert_not_awaited()
     message = interaction.followup.send.call_args.args[0]
-    assert "no longer exists" in message, (
+    assert "Something went wrong" in message, (
         f"the failure is reported through render_error; got {message!r}"
     )
 
@@ -768,7 +769,7 @@ async def test_routing_click_loads_the_answering_map_and_swaps_to_the_routing_sc
     runtime = _runtime(
         sessionmaker=db_session_factory, anthropic=MagicMock(), default=DeploymentDefault()
     )
-    state = _state(agents=(_agent("growth-bot"),), account_id=account.id)
+    state = _state(agents=(_agent("growth-bot"),), account_id=account.id, is_admin=True)
     view = RosterView(state, runtime=runtime, allowed_user_id=42)
     interaction = _clicker(responded=True)
     interaction.guild = None

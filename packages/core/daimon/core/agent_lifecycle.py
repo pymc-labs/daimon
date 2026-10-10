@@ -21,7 +21,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import ResourceOutcome
-from daimon.core.errors import DaimonError
+from daimon.core.errors import AgentNameCollision, DaimonError
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.specs import AgentSpec
@@ -50,7 +50,7 @@ async def create_blank_agent(
     defaults apply because it is not in the seeded spec list.
     """
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name):
-        raise DaimonError(
+        raise AgentNameCollision(
             f"This workspace already has an agent named {name}. Pick a different name."
         )
     try:

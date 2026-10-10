@@ -51,7 +51,7 @@ async def test_admin_channel_turn_gets_member_card_and_unknown_bot_visibility() 
     ]
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_view",
+            "daimon.adapters.mcp.tools.here.load_isolation_view",
             new=AsyncMock(return_value=caller),
         ),
         patch(
@@ -124,7 +124,7 @@ async def test_tool_checks_thread_before_loading_card() -> None:
     caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_view", new=AsyncMock(return_value=caller)
+            "daimon.adapters.mcp.tools.here.load_isolation_view", new=AsyncMock(return_value=caller)
         ),
         patch(
             "daimon.adapters.mcp.tools.here._list_channels_impl",
@@ -156,7 +156,7 @@ async def test_tool_refuses_home_boundary_and_missing_channel_access(
     caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: isolation)
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_view",
+            "daimon.adapters.mcp.tools.here.load_isolation_view",
             new=AsyncMock(return_value=caller),
         ),
         patch(
@@ -174,7 +174,7 @@ async def test_teams_channel_turn_lists_its_channels_and_names_the_setter_from_s
     rows = [SimpleNamespace(id="19:ops@thread.tacv2"), SimpleNamespace(id="19:dev@thread.tacv2")]
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_view", new=AsyncMock(return_value=caller)
+            "daimon.adapters.mcp.tools.here.load_isolation_view", new=AsyncMock(return_value=caller)
         ),
         patch(
             "daimon.adapters.mcp.tools.here._teams_list_channels_impl",
@@ -209,7 +209,7 @@ async def test_a_teams_channel_the_caller_cannot_list_is_refused() -> None:
     caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
     with (
         patch(
-            "daimon.adapters.mcp.tools.here.load_caller_view", new=AsyncMock(return_value=caller)
+            "daimon.adapters.mcp.tools.here.load_isolation_view", new=AsyncMock(return_value=caller)
         ),
         patch(
             "daimon.adapters.mcp.tools.here._teams_list_channels_impl",

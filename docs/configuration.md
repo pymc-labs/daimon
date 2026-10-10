@@ -67,11 +67,13 @@ still apply.
 
 `dict[UUID, bool]` · optional · default `{}`
 
-Per-tenant completion notification policy, keyed by tenant UUID. True enables
-accepted/done reactions and posts the final answer as a fresh reply mentioning only the
-requester on Discord and Slack. On Teams it closes the status card and posts the answer
-fresh, mentioning the requester in channels (Teams bots cannot react). Missing/false
-preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as a JSON object.
+Per-tenant completion notification policy, keyed by tenant UUID. Discord and Slack
+acknowledge mentions independently of this setting and clear the acknowledgment when the
+turn settles. True adds a success check mark and posts the final answer as a fresh reply
+mentioning only the requester on Discord and Slack. On Teams it closes the status card
+and posts the answer fresh, mentioning the requester in channels (Teams bots cannot
+react). Missing/false preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as
+a JSON object.
 
 ### `DAIMON_BUDGET_NOTICES`
 
@@ -430,6 +432,24 @@ Seconds after an admitted opening mention before reacting to it to show that its
 thread is still opening. Includes thread naming and Discord rate-limit waits. Set to 0
 to react immediately. The reaction is removed when creation finishes; a failed creation
 is answered with a visible error reply.
+
+### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`
+
+`bool` · optional · default `False`
+
+React with 🔔 to a person's reply that does not @mention the bot in a thread the bot
+opened, as a hint that only mentions start a turn. The message itself is never answered.
+At most once per thread per unmentioned_reply_hint_cooldown_h, never on a message that
+mentions someone else, never to any bot, never where the agent may not post, and never
+while the thread is followed (thread participation on). Off by default: the cooldown is
+kept in memory, so each restart allows one more hint per thread.
+
+### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H`
+
+`float` · optional · default `24.0`
+
+Hours before the unmentioned-reply hint may be shown again in the same thread. Kept in
+memory, so a restart allows one more.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
@@ -1276,6 +1296,17 @@ Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 
 Seconds between scheduler ticks (loop sleep). The usage sweep runs on its own loop and
 pauses the same interval between passes.
+
+### `DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`
+
+`bool` · optional · default `False`
+
+Run the headless usage sweep (usage backfill for MCP start_turn sessions). Off by
+default: the current sweep lists every session in the shared Managed Agents workspace
+and drains its request rate limit. While off, headless MCP turns are not metered and
+usage a live adapter missed is not recovered; turning it back on backfills them, since
+recording is idempotent and the startup pass reads every stamped session still in the
+workspace.
 
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 

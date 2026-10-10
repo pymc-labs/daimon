@@ -1,15 +1,9 @@
 # serializer version: 1
 # name: TestRenderErrorSnapshot.test_generic_exception_snapshot
-  '''
-  ⚠️ **Invalid input**: bad input
-  `rid: 01ARZ3NDEKTSV4RRFFQ69G5FAV`
-  '''
+  "Daimon couldn't use that input. Check it and try again."
 # ---
 # name: TestRenderErrorSnapshot.test_spec_error_snapshot
-  '''
-  ⚠️ **Spec validation failed**: agent 'atlas' is not configured for this tenant
-  `rid: 01ARZ3NDEKTSV4RRFFQ69G5FAV`
-  '''
+  "Daimon couldn't read this setup. Ask an admin to check it."
 # ---
 # name: test_embed_render_snapshot[minimal_thinking]
   EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='', color=3447003, footer='42s', details=None, notice=None)

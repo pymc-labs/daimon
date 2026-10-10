@@ -2413,7 +2413,7 @@ class SlackApp:
             # the outcome is known.
             replacement_summary: str | None = None
             if (
-                prepared.continuity.state == "replaced"
+                prepared.continuity.announces_replacement()
                 and prepared.continuity.transfer_kind is not None
             ):
                 # Not a separate message: the answer is an in-place edit of the

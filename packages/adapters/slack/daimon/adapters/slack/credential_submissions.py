@@ -12,10 +12,9 @@ immediately before the consume. There is deliberately NO admin gate for the
 env/mcp/skill_repo kinds; see `tools/credential_requests.py` in the MCP
 adapter for the documented trade.
 
-The atomic single-use consume runs BEFORE every write, so a request can only
-ever produce one write no matter how many times its modal is (re)submitted —
-the loser of a race, or any resubmission, gets `None` back and writes
-nothing.
+The atomic consume runs BEFORE every write and permits one in-flight attempt.
+Successful saves keep the request spent; failed external saves release only
+their own attempt and restore the form. Every retry rechecks authorization.
 """
 
 from __future__ import annotations
@@ -56,12 +55,14 @@ from daimon.core.continuity.messages import ConfigurationChange, render_env_impo
 from daimon.core.credential_requests import (
     CredentialRequestKind,
     availability_for_request,
+    mcp_permission_message,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
     consume_credential_submit,
+    guard_credential_save,
     prepare_env_submit,
     prepare_mcp_submit,
     settle_credential_submit,
@@ -821,23 +822,31 @@ async def _refuse_mcp_replacement(
     thread_ts: str | None,
     channel_id: str,
     user_id: str,
+    policy_refused: bool = False,
 ) -> None:
     """Spend the request and write nothing: no vault token, no published token."""
     await settle_credential_submit(
         runtime.sessionmaker,
         row=row,
         platform="slack",
-        outcome="write_failed",
+        outcome="policy_refused" if policy_refused else "write_failed",
         carries_work=False,
         record=record_input_continuation,
     )
-    await edit_posted_card(client, row=row, state="refused", refusal="replacement_admin_required")
+    await edit_posted_card(
+        client,
+        row=row,
+        state="refused",
+        refusal="mcp_permission_required" if policy_refused else "replacement_admin_required",
+    )
     await post_ephemeral(
         client,
         thread_ts=thread_ts,
         channel_id=channel_id,
         user_id=user_id,
-        text=(
+        text=(mcp_permission_message(row.target_name or "The agent") + " Nothing was saved.")
+        if policy_refused
+        else (
             f"{row.target_name or 'The agent'} already has `{row.target}` (or a token for "
             "that URL) and is shared here, so replacing it needs a workspace admin. "
             "Nothing was saved."
@@ -923,153 +932,170 @@ async def run_mcp_credential_submission(
         )
         return
 
-    await _mark_button_consumed(client, row=consumed)
+    async with guard_credential_save(
+        runtime.sessionmaker,
+        row=consumed,
+        edit_retry=lambda retry, reason: edit_posted_card(
+            client, row=retry, state="requested", retry_reason=reason
+        ),
+        edit_pending=lambda pending, notice: edit_posted_card(
+            client, row=pending, state="received", saving_notice=notice
+        ),
+    ) as attempt:
+        await _mark_button_consumed(client, row=consumed)
 
-    if connect.refused:
-        await _refuse_mcp_replacement(
-            runtime,
-            client,
-            row=consumed,
-            token=token,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-        )
-        return
+        if connect.refused:
+            attempt.retry_allowed = False
+            await _refuse_mcp_replacement(
+                runtime,
+                client,
+                row=consumed,
+                token=token,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                policy_refused=not connect.replaces,
+            )
+            return
 
-    mcp_server_url = consumed.mcp_server_url
-    if mcp_server_url is None:
-        log.error("credential_request.mcp_missing_server_url", agent_id=str(consumed.agent_id))
-        await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text="This request is missing its server URL — please ask again.",
-        )
-        return
+        mcp_server_url = consumed.mcp_server_url
+        if mcp_server_url is None:
+            attempt.retry_allowed = False
+            log.error("credential_request.mcp_missing_server_url", agent_id=str(consumed.agent_id))
+            await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
+            await post_ephemeral(
+                client,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                text="This request is missing its server URL — please ask again.",
+            )
+            return
 
-    log.info(
-        "credential_request.mcp.submit",
-        mcp_server_url=mcp_server_url,
-        token_present=bool(value),
-    )
-    # Ask the server first, as on Discord: a rejected token must not be
-    # stored, mirrored and attached only to fail every later turn (#79).
-    if await is_token_rejected(runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=value):
-        await _refuse_for_rejected_token(runtime, client, row=consumed, token=token)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=rejected_token_message(mcp_server_url),
-        )
-        return
-    try:
-        await write_mcp_submit(
-            runtime.anthropic,
-            session_factory=runtime.sessionmaker,
-            row=consumed,
-            fernet=runtime.turn_deps.fernet,
-            value=value,
-            replace_allowed=connect.replace_allowed,
-            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-            public_url=str(mcp.public_url),
-            now=now,
-            connect=connect_mcp_server_with_token,
-        )
-    except McpServerReplaceRefusedError:
-        # A server or token for this URL appeared after the pre-consume check.
-        await _refuse_mcp_replacement(
-            runtime,
-            client,
-            row=consumed,
-            token=token,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-        )
-        return
-    except (McpAgentGoneError, McpAttachFailedError) as err:
-        # Exception class name only: a stringified SDK error can carry the
-        # request envelope. Nothing was stored.
-        log.warning(
-            "credential_request.mcp_attach_failed",
+        log.info(
+            "credential_request.mcp.submit",
             mcp_server_url=mcp_server_url,
-            err_type=type(err.__cause__ or err).__name__,
+            token_present=bool(value),
         )
-        await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=(
-                f"The request was used up, but `{mcp_server_url}` could not be attached to "
-                "the agent. Nothing was saved. Ask for a new private form to retry."
-            ),
-        )
-        return
-    except McpTokenWriteFailedError as err:
-        log.warning(
-            "credential_request.mcp_write_failed",
-            mcp_server_url=mcp_server_url,
-            err_type=type(err.__cause__ or err).__name__,
-        )
-        await settle_credential_submit(
+        # Ask the server first, as on Discord: a rejected token must not be
+        # stored, mirrored and attached only to fail every later turn (#79).
+        if await is_token_rejected(
+            runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=value
+        ):
+            await _refuse_for_rejected_token(runtime, client, row=consumed, token=token)
+            await post_ephemeral(
+                client,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                text=rejected_token_message(mcp_server_url),
+            )
+            return
+        try:
+            await write_mcp_submit(
+                runtime.anthropic,
+                session_factory=runtime.sessionmaker,
+                row=consumed,
+                fernet=runtime.turn_deps.fernet,
+                value=value,
+                replace_allowed=connect.replace_allowed,
+                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+                public_url=str(mcp.public_url),
+                now=now,
+                connect=connect_mcp_server_with_token,
+            )
+        except McpServerReplaceRefusedError:
+            attempt.retry_allowed = False
+            # A server or token for this URL appeared after the pre-consume check.
+            await _refuse_mcp_replacement(
+                runtime,
+                client,
+                row=consumed,
+                token=token,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+            )
+            return
+        except (McpAgentGoneError, McpAttachFailedError) as err:
+            attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
+            # Exception class name only: a stringified SDK error can carry the
+            # request envelope. Nothing was stored.
+            log.warning(
+                "credential_request.mcp_attach_failed",
+                mcp_server_url=mcp_server_url,
+                err_type=type(err.__cause__ or err).__name__,
+            )
+            await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
+            await post_ephemeral(
+                client,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                text=(
+                    f"`{mcp_server_url}` could not be attached to "
+                    "the agent. Nothing was saved. Try again using the same form."
+                ),
+            )
+            return
+        except McpTokenWriteFailedError as err:
+            log.warning(
+                "credential_request.mcp_write_failed",
+                mcp_server_url=mcp_server_url,
+                err_type=type(err.__cause__ or err).__name__,
+            )
+            await settle_credential_submit(
+                runtime.sessionmaker,
+                row=consumed,
+                platform="slack",
+                outcome="write_failed",
+                carries_work=False,
+                record=record_input_continuation,
+            )
+            await edit_posted_card(
+                client,
+                row=consumed,
+                state="partial",
+                outcome=ConfigurationChange(
+                    target_name=consumed.target_name or "the agent",
+                    kind="mcp",
+                    detail=consumed.target,
+                    availability="preparation_failed",
+                ),
+            )
+            await post_ephemeral(
+                client,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                text=(
+                    f"`{mcp_server_url}` is attached, but storing its token did not finish. "
+                    "Try again using the same form."
+                ),
+            )
+            return
+
+        queued = await settle_credential_submit(
             runtime.sessionmaker,
             row=consumed,
             platform="slack",
-            outcome="write_failed",
-            carries_work=False,
+            outcome="applied",
             record=record_input_continuation,
         )
+        # The card is the receipt — no ephemeral beside it.
         await edit_posted_card(
             client,
             row=consumed,
-            state="partial",
+            state="applied",
             outcome=ConfigurationChange(
                 target_name=consumed.target_name or "the agent",
                 kind="mcp",
                 detail=consumed.target,
-                availability="preparation_failed",
+                availability="next_message",
             ),
         )
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=(
-                f"`{mcp_server_url}` is attached, but storing its token did not finish. "
-                "Request a new private token form to retry."
-            ),
-        )
-        return
-
-    queued = await settle_credential_submit(
-        runtime.sessionmaker,
-        row=consumed,
-        platform="slack",
-        outcome="applied",
-        record=record_input_continuation,
-    )
-    # The card is the receipt — no ephemeral beside it.
-    await edit_posted_card(
-        client,
-        row=consumed,
-        state="applied",
-        outcome=ConfigurationChange(
-            target_name=consumed.target_name or "the agent",
-            kind="mcp",
-            detail=consumed.target,
-            availability="next_message",
-        ),
-    )
-    if queued:
-        await _dispatch_pending(dispatch_continuations, kind="mcp")
+        if queued:
+            await _dispatch_pending(dispatch_continuations, kind="mcp")
 
 
 async def _resolve_repo_binding_credential(
@@ -1217,7 +1243,7 @@ async def _attach_skills_to_requested_agent(
             err_type=type(err).__name__,
         )
         return SkillAttachOutcome(
-            note="Attaching them did not finish. Ask again to retry.",
+            note="Attaching them did not finish. Try again using the same form.",
             attached=False,
             agent_name=agent.name,
             skill_count=len(skill_ids),
@@ -1256,7 +1282,7 @@ async def _report_skill_repo_failure(
             user_id=user_id,
             text=(
                 "Skill setup failed before token storage could be confirmed. "
-                "Ask again with a new private form to retry."
+                "Try again using the same form."
             ),
         )
         return
@@ -1288,7 +1314,7 @@ async def _report_skill_repo_failure(
         thread_ts=thread_ts,
         channel_id=channel_id,
         user_id=user_id,
-        text="Token stored, but skill setup did not finish. Ask again to retry.",
+        text="Token stored, but skill setup did not finish. Try again using the same form.",
     )
 
 
@@ -1374,156 +1400,170 @@ async def run_skill_repo_credential_submission(
         )
         return
 
-    await _mark_button_consumed(client, row=consumed)
+    async with guard_credential_save(
+        runtime.sessionmaker,
+        row=consumed,
+        edit_retry=lambda retry, reason: edit_posted_card(
+            client, row=retry, state="requested", retry_reason=reason
+        ),
+        edit_pending=lambda pending, notice: edit_posted_card(
+            client, row=pending, state="received", saving_notice=notice
+        ),
+    ):
+        await _mark_button_consumed(client, row=consumed)
 
-    url, branch, path = split_skill_repo_target(consumed.target)
-    owner_repo = normalize_owner_repo(url)
-    log.info(
-        "credential_request.skill_repo.submit",
-        repo_url=url,
-        branch=branch,
-        path=path,
-        pat_present=bool(value),
-    )
+        url, branch, path = split_skill_repo_target(consumed.target)
+        owner_repo = normalize_owner_repo(url)
+        log.info(
+            "credential_request.skill_repo.submit",
+            repo_url=url,
+            branch=branch,
+            path=path,
+            pat_present=bool(value),
+        )
 
-    is_token_stored = False
-    try:
-        # Verify BEFORE storing: a token that cannot read this repo is not a
-        # credential for it, and storing it would shadow a working one on the
-        # next `get_pat` (the overlay is last-write-wins).
-        if not await pat_can_access_repo(runtime.http_client, owner_repo=owner_repo, pat=value):
-            await post_ephemeral(
+        is_token_stored = False
+        try:
+            # Verify BEFORE storing: a token that cannot read this repo is not a
+            # credential for it, and storing it would shadow a working one on the
+            # next `get_pat` (the overlay is last-write-wins).
+            if not await pat_can_access_repo(runtime.http_client, owner_repo=owner_repo, pat=value):
+                async with runtime.sessionmaker.begin() as session:
+                    await credential_requests_store.set_credential_request_outcome(
+                        session, token=consumed.token, outcome="token_rejected"
+                    )
+                await post_ephemeral(
+                    client,
+                    thread_ts=thread_ts,
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    text=(
+                        f"That token cannot read `{owner_repo}`. Nothing was "
+                        "stored. Try again using the same form."
+                    ),
+                )
+                return
+            ma_secret_ref, proof = await _resolve_repo_binding_credential(
+                runtime,
+                runtime.http_client,
+                agent_id=consumed.agent_id,
+                account_id=consumed.account_id,
+                repo_url=url,
+                pasted_pat=value,
+                now=now,
+            )
+            is_token_stored = True
+            async with runtime.sessionmaker.begin() as session:
+                seeded_skill_names = await write_skill_repo_submit(
+                    session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof
+                )
+            outcomes = await run_skill_sync(
+                runtime.anthropic,
+                runtime.http_client,
+                url=url,
+                branch=branch,
+                path=path,
+                tenant_id=consumed.tenant_id,
+                seeded_skill_names=seeded_skill_names,
+                is_admin=await resolve_is_admin(client, user_id=user_id),
+                token=value,
+            )
+        except DaimonError as err:
+            # Keep upstream details in operator logs, never in the receipt.
+            log.warning("credential_request.skill_repo_sync_failed", err_type=type(err).__name__)
+            await _report_skill_repo_failure(
+                runtime,
                 client,
-                thread_ts=thread_ts,
+                row=consumed,
+                repo=owner_repo,
+                is_token_stored=is_token_stored,
                 channel_id=channel_id,
+                thread_ts=thread_ts,
                 user_id=user_id,
-                text=(
-                    f"That token cannot read `{owner_repo}`. Nothing was "
-                    "stored, and the request was used up — ask again to retry."
+            )
+            return
+        except Exception as err:
+            log.warning(
+                "credential_request.skill_repo_sync_failed",
+                repo_url=url,
+                err_type=type(err).__name__,
+            )
+            await _report_skill_repo_failure(
+                runtime,
+                client,
+                row=consumed,
+                repo=owner_repo,
+                is_token_stored=is_token_stored,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                user_id=user_id,
+            )
+            return
+
+        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+        failure_detail = summarize_failed_imports(outcomes)
+        if not imported:
+            # Nothing reached the library (an empty repo, or every skill refused
+            # or failed), which an applied card must not claim.
+            await settle_credential_submit(
+                runtime.sessionmaker,
+                row=consumed,
+                platform="slack",
+                outcome="write_failed",
+                carries_work=False,
+                record=record_input_continuation,
+            )
+            await edit_posted_card(
+                client,
+                row=consumed,
+                state="partial",
+                outcome=ConfigurationChange(
+                    target_name=consumed.target_name or "the agent",
+                    kind="skills_bulk",
+                    availability="preparation_failed",
+                    repo=owner_repo,
+                    # `preparation_failed` names no count but the model requires one.
+                    count=1,
+                    detail=failure_detail,
                 ),
             )
             return
-        ma_secret_ref, proof = await _resolve_repo_binding_credential(
-            runtime,
-            runtime.http_client,
-            agent_id=consumed.agent_id,
-            account_id=consumed.account_id,
-            repo_url=url,
-            pasted_pat=value,
-            now=now,
-        )
-        is_token_stored = True
-        async with runtime.sessionmaker.begin() as session:
-            seeded_skill_names = await write_skill_repo_submit(
-                session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof
-            )
-        outcomes = await run_skill_sync(
-            runtime.anthropic,
-            runtime.http_client,
-            url=url,
-            branch=branch,
-            path=path,
-            tenant_id=consumed.tenant_id,
-            seeded_skill_names=seeded_skill_names,
-            is_admin=await resolve_is_admin(client, user_id=user_id),
-            token=value,
-        )
-    except DaimonError as err:
-        # Keep upstream details in operator logs, never in the receipt.
-        log.warning("credential_request.skill_repo_sync_failed", err_type=type(err).__name__)
-        await _report_skill_repo_failure(
-            runtime,
-            client,
-            row=consumed,
-            repo=owner_repo,
-            is_token_stored=is_token_stored,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            user_id=user_id,
-        )
-        return
-    except Exception as err:
-        log.exception(
-            "credential_request.skill_repo_sync_failed",
-            repo_url=url,
-            err_type=type(err).__name__,
-        )
-        await _report_skill_repo_failure(
-            runtime,
-            client,
-            row=consumed,
-            repo=owner_repo,
-            is_token_stored=is_token_stored,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            user_id=user_id,
-        )
-        return
 
-    imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
-    failure_detail = summarize_failed_imports(outcomes)
-    if not imported:
-        # Nothing reached the library (an empty repo, or every skill refused
-        # or failed), which an applied card must not claim.
-        await settle_credential_submit(
+        attach = await _attach_skills_to_requested_agent(
+            runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=imported
+        )
+        log.info(
+            "credential_request.skill_repo.attach",
+            imported=len(imported),
+            attached=attach.attached,
+            note=attach.note,
+        )
+        queued = await settle_credential_submit(
             runtime.sessionmaker,
             row=consumed,
             platform="slack",
-            outcome="write_failed",
-            carries_work=False,
+            outcome="applied" if attach.attached else "write_failed",
+            carries_work=attach.attached,
             record=record_input_continuation,
         )
+        # The card is the receipt; the import and the attach are one outcome to
+        # the person who pasted the token, so they read as one line of copy.
+        detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
         await edit_posted_card(
             client,
             row=consumed,
-            state="partial",
+            state="applied" if attach.attached else "partial",
             outcome=ConfigurationChange(
-                target_name=consumed.target_name or "the agent",
+                target_name=consumed.target_name or attach.agent_name or "the agent",
                 kind="skills_bulk",
-                availability="preparation_failed",
+                availability="next_message" if attach.attached else "saved",
                 repo=owner_repo,
-                # `preparation_failed` names no count but the model requires one.
-                count=1,
-                detail=failure_detail,
+                count=len(imported),
+                detail="\n".join(line for line in detail_lines if line) or None,
             ),
         )
-        return
-
-    attach = await _attach_skills_to_requested_agent(
-        runtime, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id, outcomes=imported
-    )
-    log.info(
-        "credential_request.skill_repo.attach",
-        imported=len(imported),
-        attached=attach.attached,
-        note=attach.note,
-    )
-    queued = await settle_credential_submit(
-        runtime.sessionmaker,
-        row=consumed,
-        platform="slack",
-        outcome="applied" if attach.attached else "write_failed",
-        carries_work=attach.attached,
-        record=record_input_continuation,
-    )
-    # The card is the receipt; the import and the attach are one outcome to
-    # the person who pasted the token, so they read as one line of copy.
-    detail_lines = [failure_detail] if attach.attached else [attach.note, failure_detail]
-    await edit_posted_card(
-        client,
-        row=consumed,
-        state="applied" if attach.attached else "partial",
-        outcome=ConfigurationChange(
-            target_name=consumed.target_name or attach.agent_name or "the agent",
-            kind="skills_bulk",
-            availability="next_message" if attach.attached else "saved",
-            repo=owner_repo,
-            count=len(imported),
-            detail="\n".join(line for line in detail_lines if line) or None,
-        ),
-    )
-    if attach.attached and queued:
-        await _dispatch_pending(dispatch_continuations, kind="skill_repo")
+        if attach.attached and queued:
+            await _dispatch_pending(dispatch_continuations, kind="skill_repo")
 
 
 async def run_repo_bind_credential_submission(
@@ -1610,83 +1650,92 @@ async def run_repo_bind_credential_submission(
         )
         return
 
-    await _mark_button_consumed(client, row=consumed)
-
-    repo_url, branch, _path = split_skill_repo_target(consumed.target)
-    pat = value.strip()
-    # Log the repo and branch, and the token ONLY as a masked tail when
-    # present — never the plain value, never the (now-consumed) request token.
-    log.info(
-        "credential_request.repo.submit",
-        repo_url=repo_url,
-        branch=branch,
-        pat_present=bool(pat),
-    )
-
-    try:
-        ma_secret_ref, proof = await _resolve_repo_binding_credential(
-            runtime,
-            runtime.http_client,
-            agent_id=consumed.agent_id,
-            account_id=consumed.account_id,
-            repo_url=repo_url,
-            pasted_pat=pat or None,
-            now=now,
-        )
-        async with runtime.sessionmaker.begin() as session:
-            await write_repo_submit(
-                session, row=consumed, ma_secret_ref=ma_secret_ref, proof=proof, write=set_binding
-            )
-    except DaimonError as err:
-        log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=(
-                "Repository access could not be saved. Ask again to retry with a new private form."
-            ),
-        )
-        return
-    except Exception as err:
-        log.exception(
-            "credential_request.repo_write_failed",
-            repo_url=repo_url,
-            err_type=type(err).__name__,
-        )
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=(
-                "The request was used up, but binding the working repo failed. "
-                "Ask for a new private form to retry."
-            ),
-        )
-        return
-
-    queued = await settle_credential_submit(
+    async with guard_credential_save(
         runtime.sessionmaker,
         row=consumed,
-        platform="slack",
-        outcome="applied",
-        record=record_input_continuation,
-    )
-    # No `unsaved_work`: this bind copies nothing, and the copy line is a
-    # promise only the panel's own flow is in a position to make.
-    await edit_posted_card(
-        client,
-        row=consumed,
-        state="applied",
-        outcome=ConfigurationChange(
-            target_name=consumed.target_name or "this agent",
-            kind="repo",
-            repo=normalize_owner_repo(repo_url),
-            branch=branch,
-            availability="next_message",
+        edit_retry=lambda retry, reason: edit_posted_card(
+            client, row=retry, state="requested", retry_reason=reason
         ),
-    )
-    if queued:
-        await _dispatch_pending(dispatch_continuations, kind="repo")
+        edit_pending=lambda pending, notice: edit_posted_card(
+            client, row=pending, state="received", saving_notice=notice
+        ),
+    ):
+        await _mark_button_consumed(client, row=consumed)
+
+        repo_url, branch, _path = split_skill_repo_target(consumed.target)
+        pat = value.strip()
+        # Log the repo and branch, and the token ONLY as a masked tail when
+        # present — never the plain value, never the (now-consumed) request token.
+        log.info(
+            "credential_request.repo.submit",
+            repo_url=repo_url,
+            branch=branch,
+            pat_present=bool(pat),
+        )
+
+        try:
+            ma_secret_ref, proof = await _resolve_repo_binding_credential(
+                runtime,
+                runtime.http_client,
+                agent_id=consumed.agent_id,
+                account_id=consumed.account_id,
+                repo_url=repo_url,
+                pasted_pat=pat or None,
+                now=now,
+            )
+            async with runtime.sessionmaker.begin() as session:
+                await write_repo_submit(
+                    session,
+                    row=consumed,
+                    ma_secret_ref=ma_secret_ref,
+                    proof=proof,
+                    write=set_binding,
+                )
+        except DaimonError as err:
+            log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)
+            await post_ephemeral(
+                client,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                text=("Repository access could not be saved. Try again using the same form."),
+            )
+            return
+        except Exception as err:
+            log.warning(
+                "credential_request.repo_write_failed",
+                repo_url=repo_url,
+                err_type=type(err).__name__,
+            )
+            await post_ephemeral(
+                client,
+                thread_ts=thread_ts,
+                channel_id=channel_id,
+                user_id=user_id,
+                text=("Binding the working repo failed. Try again using the same form."),
+            )
+            return
+
+        queued = await settle_credential_submit(
+            runtime.sessionmaker,
+            row=consumed,
+            platform="slack",
+            outcome="applied",
+            record=record_input_continuation,
+        )
+        # No `unsaved_work`: this bind copies nothing, and the copy line is a
+        # promise only the panel's own flow is in a position to make.
+        await edit_posted_card(
+            client,
+            row=consumed,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=consumed.target_name or "this agent",
+                kind="repo",
+                repo=normalize_owner_repo(repo_url),
+                branch=branch,
+                availability="next_message",
+            ),
+        )
+        if queued:
+            await _dispatch_pending(dispatch_continuations, kind="repo")

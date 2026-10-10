@@ -63,7 +63,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import is_public_repo, pat_can_access_repo
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -272,7 +272,7 @@ async def resolve_repo_binding_credential(
     if pat:
         has_access = await pat_can_access_repo(http_client, owner_repo=owner_repo, pat=pat)
         if not has_access:
-            raise DaimonError(
+            raise UserFacingError(
                 "That token can't access this repo (or the repo doesn't "
                 "exist). Paste a PAT that has access, or connect GitHub."
             )
@@ -287,7 +287,7 @@ async def resolve_repo_binding_credential(
             http_client, owner_repo=owner_repo, pat=existing_pat
         )
         if not covers_new_repo:
-            raise DaimonError(
+            raise UserFacingError(
                 "This agent already has a stored GitHub token that can't "
                 "access this repo. Paste a token that can, or clear the "
                 "stored one, then bind again."
@@ -296,7 +296,7 @@ async def resolve_repo_binding_credential(
 
     public = await is_public_repo(http_client, owner_repo=owner_repo)
     if not public:
-        raise DaimonError(
+        raise UserFacingError(
             "This repo isn't publicly readable (it's private, or it "
             "doesn't exist) — paste a GitHub token that can read it to "
             "bind it."

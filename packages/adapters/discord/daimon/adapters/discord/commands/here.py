@@ -12,7 +12,7 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card
 from daimon.core.stores.identity import find_platform_principal
 
@@ -56,14 +56,14 @@ class HereCog(commands.Cog):
             runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             if tenant_id is None or interaction.guild is None or interaction.channel is None:
-                raise DaimonError("Run /here in a server channel.")
+                raise UserFacingError("Run /here in a server channel.")
             channel = interaction.channel
             thread_id: str | None = None
             if isinstance(channel, discord.Thread):
                 thread_id = str(channel.id)
                 channel = channel.parent
             if not isinstance(channel, discord.abc.GuildChannel):
-                raise DaimonError("Run /here in a server channel.")
+                raise UserFacingError("Run /here in a server channel.")
             member = interaction.user if isinstance(interaction.user, discord.Member) else None
             bot_member = interaction.guild.me
             visible_ids = {
