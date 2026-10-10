@@ -75,3 +75,11 @@ run establishes only the smoke's evidence; the separate matrix is still offline.
 Live fault/host adapters and all PENDING probes must be resolved before a full
 live certificate can be issued. No key watcher or automatic live invocation is
 installed, and importing this module performs no I/O.
+
+Live evidence uses stable short aliases for opaque route segments and normalized
+identity fields before the unchanged recorder. Real provider IDs remain in memory
+for routing; message/tool content is still fully audited. Revision history from
+`usage.reconcile()` is reduced to the latest revision of the single interaction.
+Response-hook usage captures terminal status and preserves known terminal counts
+through sparse cancellation replies, so failed tape export can still settle
+verified usage. Repeated polls are never summed.

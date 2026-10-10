@@ -7,12 +7,13 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import JsonValue, TypeAdapter
 
@@ -60,6 +61,50 @@ SCOPE = Scope(
     principal_id="probe",
     authorization_id="explicit-live-probe",
 )
+
+
+class EvidenceAliases:
+    """Per-run opaque identity map, applied before the unchanged recorder."""
+
+    def __init__(self) -> None:
+        self.ids: dict[str, str] = {}
+
+    def identity(self, value: str) -> str:
+        if len(value) < 24:
+            return value
+        if value not in self.ids:
+            self.ids[value] = f"resource-{len(self.ids) + 1}"
+        return self.ids[value]
+
+    def path(self, value: str) -> str:
+        return "/".join(self.identity(part) for part in value.split("/"))
+
+    def event(self, source: Event) -> Event:
+        # Only identity fields are transformed. Message/tool content continues
+        # through the recorder's full credential and encoded-content audit.
+        def project(value: JsonValue, field: str = "") -> JsonValue:
+            if isinstance(value, dict):
+                return {key: project(item, key) for key, item in value.items()}
+            if isinstance(value, list):
+                return [project(item, field) for item in value]
+            if isinstance(value, str) and field in {
+                "id",
+                "session_id",
+                "turn_id",
+                "root_turn_id",
+                "item_id",
+                "call_id",
+                "event_id",
+                "ordering_domain",
+                "observation_id",
+                "input_id",
+                "caused_by",
+                "cursor",
+            }:
+                return ":".join(self.identity(part) for part in value.split(":"))
+            return value
+
+        return Event.model_validate(project(source.model_dump(mode="json")))
 
 
 @dataclass(frozen=True)
@@ -203,6 +248,7 @@ async def smoke(
     bounded = LimitedTransport(source, settings.max_total_tokens)
     metadata_recorded = 0
     facts_recorded = False
+    aliases = EvidenceAliases()
 
     def observe(meter: UsageObservation, *, complete: bool) -> ActualSpend:
         tokens = TokenUsage(
@@ -232,12 +278,17 @@ async def smoke(
 
     def record(recorder: Recorder, events: tuple[Event, ...]) -> None:
         nonlocal metadata_recorded, facts_recorded
+        events = tuple(aliases.event(item) for item in events)
         if request_metadata:
             pending = request_metadata[metadata_recorded:]
             for metadata in pending[:-1]:
-                recorder.record(metadata, ())
+                recorder.record(
+                    metadata.model_copy(update={"path": aliases.path(metadata.path)}), ()
+                )
             if pending:
-                recorder.record(pending[-1], events)
+                recorder.record(
+                    pending[-1].model_copy(update={"path": aliases.path(pending[-1].path)}), events
+                )
             metadata_recorded = len(request_metadata)
         elif not facts_recorded:
             recorder.record(RequestMetadata(method="GET", path="/host/smoke/events"), events)
@@ -312,11 +363,11 @@ async def smoke(
                 while True:
                     projection = await ma.events.reconcile(SCOPE, s.ref)
                     measured = await ma.usage.reconcile(SCOPE, s.ref)
-                    if len(measured) != 1:
+                    if not measured or len({item.id for item in measured}) != 1:
                         raise ProviderError(
                             "upstream", retryable=False, native_code="smoke_meter_count"
                         )
-                    meter = measured[0]
+                    meter = max(measured, key=lambda item: item.revision)
                     actual = observe(meter, complete=projection.state == "idle")
                     tokens = TokenUsage(
                         input_tokens=meter.input_tokens,
@@ -463,7 +514,10 @@ def write_report(path: Path, value: Mapping[str, JsonValue]) -> None:
 class ReceiptGuard(BudgetGuard):
     """Observe public guard methods without changing its ledger/accounting rules."""
 
-    def __init__(self, guard: BudgetGuard) -> None:
+    def __init__(
+        self, guard: BudgetGuard, *, captured_actual: Callable[[], ActualSpend | None] | None = None
+    ) -> None:
+        self.captured_actual = captured_actual
         super().__init__(guard.config_path, guard.spend_path)
         self.reservation: Reservation | None = None
         self.receipt: SpendReceipt | None = None
@@ -483,7 +537,11 @@ class ReceiptGuard(BudgetGuard):
         usage: TokenUsage | None = None,
         actual: ActualSpend | None = None,
     ) -> SpendReceipt:
-        actual = actual or self.latest_actual
+        actual = (
+            (self.captured_actual() if self.captured_actual else None)
+            or actual
+            or self.latest_actual
+        )
         self.reported_usage = actual.requests[-1].tokens if actual and actual.requests else usage
         self.receipt = super().settle(
             reservation,
@@ -532,6 +590,7 @@ async def smoke_with_fallback(
     *,
     secrets: tuple[str, ...] = (),
     request_metadata: list[RequestMetadata] | None = None,
+    captured_actual: Callable[[str], ActualSpend | None] | None = None,
 ) -> ProbeRun:
     """Fresh driver/reservation per attempt; at most three explicit POSTs."""
     if settings.model != LIVE_MODEL:
@@ -540,7 +599,12 @@ async def smoke_with_fallback(
         validate_budget(guard.config_path, replace(settings, model=model))
     for index, model in enumerate(MODEL_CHAIN):
         attempt = AttemptTransport(source)
-        observed = ReceiptGuard(guard)
+        observed = ReceiptGuard(
+            guard,
+            captured_actual=(lambda selected=model: captured_actual(selected))
+            if captured_actual
+            else None,
+        )
         path = output if index == 0 else output.with_name(f"{output.stem}-attempt-{index + 1}.json")
         if request_metadata is not None:
             request_metadata.clear()
@@ -632,8 +696,10 @@ async def run_sdk_smoke(
     from mux.drivers.gemini.transport import API_REVISION, SDKTransport
 
     metadata: list[RequestMetadata] = []
+    aliases = EvidenceAliases()
     active_model = settings.model
     call_index = 0
+    captured: dict[str, ActualSpend] = {}
 
     async def capture(request: httpx.Request) -> None:
         nonlocal active_model
@@ -644,7 +710,10 @@ async def run_sdk_smoke(
             body = dict(parsed)
         metadata.append(
             RequestMetadata.from_request(
-                request.method, str(request.url), headers=request.headers, body=body
+                request.method,
+                aliases.path(urlsplit(str(request.url)).path),
+                headers=request.headers,
+                body=body,
             )
         )
 
@@ -652,6 +721,7 @@ async def run_sdk_smoke(
         nonlocal call_index
         await response.aread()
         observation_sha256: str | None = None
+        raw: Object = {}
         try:
             raw = TypeAdapter[Object](Object).validate_json(response.content)
             counts = usage_metadata(raw)
@@ -660,6 +730,63 @@ async def run_sdk_smoke(
                 observation_sha256 = hashlib.sha256(
                     f"gemini:{interaction}:usage".encode()
                 ).hexdigest()
+                if any(
+                    counts[name] is not None
+                    for name in (
+                        "promptTokenCount",
+                        "candidatesTokenCount",
+                        "cachedContentTokenCount",
+                        "thoughtsTokenCount",
+                    )
+                ):
+
+                    def counter(name: str) -> int | None:
+                        value = counts[name]
+                        return (
+                            value
+                            if isinstance(value, int) and not isinstance(value, bool)
+                            else None
+                        )
+
+                    visible, thoughts = (
+                        counter("candidatesTokenCount"),
+                        counter("thoughtsTokenCount"),
+                    )
+                    snapshot = ActualSpend(
+                        requests=(
+                            MeasuredRequest(
+                                id=observation_sha256,
+                                observed_at=datetime.now(UTC),
+                                tokens=TokenUsage(
+                                    input_tokens=counter("promptTokenCount"),
+                                    input_cached_tokens=counter("cachedContentTokenCount"),
+                                    output_tokens=visible + thoughts
+                                    if visible is not None and thoughts is not None
+                                    else None,
+                                    input_cache_write_tokens=0,
+                                ),
+                                pricing_basis="standard-global"
+                                if active_model != "gemini-flash-latest"
+                                else None,
+                            ),
+                        ),
+                        containers=(),
+                        usage_complete=raw.get("status")
+                        in ("completed", "cancelled", "failed", "incomplete", "budget_exceeded"),
+                    )
+                    prior = captured.get(active_model)
+                    # Cancel endpoints may return sparse or older snapshots.
+                    # Never erase terminal counters with a partial cleanup reply.
+                    if (
+                        prior is None
+                        or not prior.usage_complete
+                        or snapshot.usage_complete
+                        and all(
+                            getattr(snapshot.requests[0].tokens, name) is not None
+                            for name in ("input_tokens", "output_tokens", "input_cached_tokens")
+                        )
+                    ):
+                        captured[active_model] = snapshot
         except ValueError:
             # A non-JSON refusal still has an HTTP status; retain unknown facts
             # without recording the unsafe response or blocking SDK error mapping.
@@ -677,6 +804,9 @@ async def run_sdk_smoke(
                 "usageMetadata": counts,
                 "usage_observation_sha256": observation_sha256,
                 "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
+                "interaction_status": raw.get("status")
+                if isinstance(raw.get("status"), str)
+                else None,
             },
         )
 
@@ -740,6 +870,7 @@ async def run_sdk_smoke(
                 settings,
                 secrets=(key,),
                 request_metadata=metadata,
+                captured_actual=captured.get,
             )
         finally:
             await client.aio.aclose()

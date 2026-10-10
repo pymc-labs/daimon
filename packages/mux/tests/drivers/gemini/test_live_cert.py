@@ -862,3 +862,88 @@ async def test_missing_or_expired_dates_refuse_before_key(
             output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=guard.config_path
         )
     assert not list(output.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_opaque_native_identity_is_aliased_before_unchanged_recorder(tmp_path: Path) -> None:
+    from mux.conformance.recording import Recorder, RecordingError, RequestMetadata
+    from mux.drivers.gemini.live_cert import EvidenceAliases
+
+    opaque = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx"
+    aliases = EvidenceAliases()
+    raw_path = f"/v1beta/interactions/{opaque}/cancel"
+    with pytest.raises(RecordingError):
+        Recorder().record(RequestMetadata(method="POST", path=raw_path), ())
+    assert aliases.path(raw_path) == "/v1beta/interactions/resource-1/cancel"
+    assert aliases.path(raw_path.removesuffix("/cancel")).endswith("/resource-1")
+    transport = FakeTransport()
+    reply = native()
+    reply["id"] = opaque
+    transport.responses.append(reply)
+    probe = await smoke(
+        transport, budget(tmp_path), tmp_path / "aliased.json", SmokeSettings(model=LIVE_MODEL)
+    )
+    assert probe.receipt.actual_usd is not None and probe.receipt.held_usd == 0
+    tape = Tape.model_validate_json(probe.recording.read_text())
+    assert opaque not in probe.recording.read_text()
+    assert any(
+        event.type == "session.turn_ended" for batch in tape.batches for event in batch.events
+    )
+    assert opaque in transport.saved  # Native transport still gets the real identity.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("export_failure", [False, True])
+async def test_sdk_opaque_paths_and_terminal_usage_survive_export_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, export_failure: bool
+) -> None:
+    from mux.conformance.recording import Recorder, RecordingError
+
+    original = httpx.MockTransport
+    opaque = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwx"
+    requests: list[httpx.Request] = []
+
+    def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            response = (
+                native("in_progress", input_=None, output=None)
+                if request.method == "POST"
+                else native()
+            )
+            response["id"] = opaque
+            return httpx.Response(200, json=response)
+
+        return original(respond)
+
+    monkeypatch.setattr(httpx, "MockTransport", factory)
+    if export_failure:
+
+        def refused_export(self: Recorder, *args: object, **kwargs: object) -> None:
+            raise RecordingError("synthetic export failure")
+
+        monkeypatch.setattr(Recorder, "save", refused_export)
+        with pytest.raises(RecordingError):
+            await run_sdk_smoke(
+                budget(tmp_path),
+                tmp_path / "sdk.json",
+                SmokeSettings(model=LIVE_MODEL),
+                key="offline-key",
+                mock=True,
+            )
+    else:
+        probe = await run_sdk_smoke(
+            budget(tmp_path),
+            tmp_path / "sdk.json",
+            SmokeSettings(model=LIVE_MODEL),
+            key="offline-key",
+            mock=True,
+        )
+        tape = Tape.model_validate_json(probe.recording.read_text())
+        assert tape.complete and opaque not in probe.recording.read_text()
+        assert any(batch.request.path.endswith("/resource-1") for batch in tape.batches)
+        assert any(opaque in str(request.url) for request in requests)
+    receipt = json.loads((tmp_path / "sdk-receipt-1.json").read_text())
+    assert receipt["verification"] == "actual" and receipt["held_usd"] == "0"
+    assert receipt["reported_tokens"]["input_tokens"] == 64
+    assert receipt["reported_tokens"]["output_tokens"] == 8

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add explicit OpenAI Agents hosted container-size and integer-cent session spend controls; refresh the driver contract audit against official documentation fetched on 2026-10-10.
+- Alias opaque Gemini probe identities before recording and settle the latest interaction usage revision, including export failures.
+
 
 - Add replay-first OpenAI F1 default-capability evidence, paired native command/MCP records, and integrity-checked metadata chunks for eleven skill pins.
 
