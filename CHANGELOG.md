@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
 
 - Map the frozen 53-scenario QA catalog across three explicit channel backends, preserving replay inputs and reporting adapter/capability gaps separately from unscored extras.
+- Start native provider-action approval windows per prompt and safely refuse adapter hook failures.
+
 - Add a scoped provider-action callback with separate browser origin and authentication controls, preserving native responses and default Anthropic approvals.
 
 - Prepared mux recovery can publish native journal snapshots atomically under its admitted lease.

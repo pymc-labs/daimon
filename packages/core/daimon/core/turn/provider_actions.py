@@ -11,14 +11,17 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from urllib.parse import urlsplit
 
+import structlog
 from mux.contracts.events import Event, RequiredAction, RequiresActionPayload
 from mux.contracts.ids import ResourceRef, Scope
 from mux.errors import ScopeViolation, UnsupportedCapability
 from pydantic import JsonValue, TypeAdapter
+
+log = structlog.get_logger(__name__)
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -130,14 +133,17 @@ async def no_provider_action_surface(prompt: ProviderActionPrompt) -> NativeActi
 @dataclass(frozen=True)
 class ProviderActionApproval:
     requester: ProviderActionRequester
-    expires_at: datetime
+    deadline: datetime
     cancel: asyncio.Event = field(repr=False)
+    timeout: timedelta = field(default=timedelta(minutes=10), kw_only=True)
     hook: ProviderActionHook = field(default=no_provider_action_surface, repr=False)
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC), repr=False)
 
     def __post_init__(self) -> None:
-        if self.expires_at.utcoffset() is None:
-            raise ValueError("provider action expiry must be timezone-aware")
+        if self.deadline.utcoffset() is None:
+            raise ValueError("provider action deadline must be timezone-aware")
+        if self.timeout <= timedelta(0):
+            raise ValueError("provider action timeout must be positive")
 
     def bind(self, scope: Scope, session: ResourceRef) -> BoundProviderActions:
         if (
@@ -218,7 +224,7 @@ class BoundProviderActions:
         )
         key = (root_turn_id, action.id)
         async with self._lock:
-            if self.approval.cancel.is_set() or self.approval.now() >= self.approval.expires_at:
+            if self.approval.cancel.is_set() or self.approval.now() >= self.approval.deadline:
                 return None
             previous = self._answered.get(key)
             if previous is not None:
@@ -239,12 +245,13 @@ class BoundProviderActions:
         choices: tuple[NativeActionResponse, ...],
     ) -> NativeActionResponse | None:
         approval = self.approval
-        if approval.cancel.is_set() or approval.now() >= approval.expires_at:
+        if approval.cancel.is_set() or approval.now() >= approval.deadline:
             return None
+        expires_at = min(approval.deadline, approval.now() + approval.timeout)
         prompt = ProviderActionPrompt(
             action,
             ProviderActionContext(
-                self.scope, self.session, root_turn_id, approval.requester, approval.expires_at
+                self.scope, self.session, root_turn_id, approval.requester, expires_at
             ),
             surface,
         )
@@ -255,19 +262,25 @@ class BoundProviderActions:
         response_task = asyncio.create_task(invoke_hook())
         cancel_task = asyncio.create_task(approval.cancel.wait())
         try:
-            remaining = max(0.0, (approval.expires_at - approval.now()).total_seconds())
+            remaining = max(0.0, (expires_at - approval.now()).total_seconds())
             done, _ = await asyncio.wait(
                 (response_task, cancel_task), timeout=remaining, return_when=asyncio.FIRST_COMPLETED
             )
             if (
                 response_task not in done
                 or approval.cancel.is_set()
-                or approval.now() >= approval.expires_at
+                or approval.now() >= expires_at
             ):
                 return None
-            response = response_task.result()
+            try:
+                response = response_task.result()
+            except Exception:
+                log.warning("provider_action.hook_failed")
+                return None
             if response is not None and not any(response is choice for choice in choices):
-                raise ValueError("provider action hook returned an unoffered native response")
+                raise ScopeViolation(
+                    self.session.id, "provider action hook returned an unoffered native response"
+                )
             return response
         finally:
             for task in (response_task, cancel_task):

@@ -16,6 +16,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionHook,
     ProviderActionPrompt,
     ProviderActionRequester,
+    no_provider_action_surface,
 )
 from mux.contracts.events import Event, NativeProvenance, RequiredAction, RequiresActionPayload
 from mux.contracts.ids import ResourceRef, Scope
@@ -96,7 +97,7 @@ def bound(
         expiry,
         cancel or asyncio.Event(),
         now=lambda: NOW,
-        **({"hook": hook} if hook is not None else {}),
+        hook=hook if hook is not None else no_provider_action_surface,
     )
     return approval.bind(SCOPE, SESSION)
 
@@ -296,7 +297,7 @@ async def test_an_unoffered_native_response_is_never_accepted() -> None:
         # Even an equal reconstruction cannot inject a body into this callback.
         return NativeActionResponse.from_payload(surface.approve.payload)
 
-    with pytest.raises(ValueError, match="unoffered"):
+    with pytest.raises(ScopeViolation, match="unoffered"):
         await bound(hook).request(event, action, surface, root_turn_id="root")
 
 
@@ -362,3 +363,43 @@ async def test_authentication_never_accepts_generic_tool_confirmation() -> None:
         await bound().request(
             event, action, BrowserAuthentication(None, cancel), root_turn_id="root"
         )
+
+
+async def test_a_late_action_gets_a_fresh_prompt_window_capped_by_turn_deadline() -> None:
+    clock = [NOW + timedelta(minutes=11)]
+    prompts: list[ProviderActionPrompt] = []
+    surface = origin()
+
+    async def hook(prompt: ProviderActionPrompt) -> NativeActionResponse:
+        prompts.append(prompt)
+        return surface.approve
+
+    approval = ProviderActionApproval(
+        REQUESTER,
+        NOW + timedelta(minutes=25),
+        asyncio.Event(),
+        timeout=timedelta(minutes=10),
+        hook=hook,
+        now=lambda: clock[0],
+    )
+    handler = approval.bind(SCOPE, SESSION)
+    action, event = action_event()
+    assert await handler.request(event, action, surface, root_turn_id="root") is surface.approve
+    assert prompts[0].context.expires_at == NOW + timedelta(minutes=21)
+    clock[0] = NOW + timedelta(minutes=22)
+    action = action.model_copy(update={"id": "second"})
+    event = event.model_copy(update={"payload": {"actions": [action.model_dump(mode="json")]}})
+    assert await handler.request(event, action, surface, root_turn_id="root") is surface.approve
+    assert prompts[1].context.expires_at == approval.deadline
+
+
+async def test_a_raising_hook_refuses_without_logging_native_action_content() -> None:
+    from structlog.testing import capture_logs
+
+    async def hook(prompt: ProviderActionPrompt) -> NativeActionResponse:
+        raise RuntimeError("secret-hook-error-and-native-payload")
+
+    action, event = action_event()
+    with capture_logs() as records:
+        assert await bound(hook).request(event, action, origin(), root_turn_id="root") is None
+    assert records == [{"event": "provider_action.hook_failed", "log_level": "warning"}]

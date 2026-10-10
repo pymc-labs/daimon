@@ -1176,3 +1176,10 @@ rendering native payloads or collecting credentials. Missing support, expiry
 and turn cancellation leave the action unanswered. Responses still go through
 the provider's claimed mutation path. Default Anthropic confirmations retain
 their existing hook and wire requests.
+
+Each provider-native approval starts its configured confirmation window when the
+card is requested, capped by the turn deadline. An adapter hook failure refuses
+the action and logs only the boundary name. Foreign dead sessions remain failed
+outcomes; native replacement with its corresponding binding, accounting and
+approval context requires a provider-specific recovery path. Anthropic recovery
+continues to use its existing tool confirmation surface.

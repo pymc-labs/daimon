@@ -894,10 +894,8 @@ async def run_prepared_turn_impl(
         ):
             action_kwargs["provider_actions"] = ProviderActionApproval(
                 requester=ProviderActionRequester(platform, thread_id, external_user_id),
-                expires_at=min(
-                    effective_deadline,
-                    now() + timedelta(seconds=deps.tool_safety.confirmation_timeout_s),
-                ),
+                deadline=effective_deadline,
+                timeout=timedelta(seconds=deps.tool_safety.confirmation_timeout_s),
                 cancel=cancel,
                 hook=provider_action,
                 now=now,
