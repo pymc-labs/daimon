@@ -79,6 +79,12 @@ class _Copy:
 
 
 _COPY: dict[TerminationReason, _Copy] = {
+    TerminationReason.DELIVERY_FAILED: _Copy(
+        "Answer could not be posted",
+        "The agent finished, but posting the answer failed.",
+        _KEPT,
+        "Ask for the answer again.",
+    ),
     TerminationReason.INTERRUPTED: _Copy(
         "Stopped",
         "You stopped this turn before it finished.",

@@ -403,6 +403,7 @@ def test_the_value_set_is_pinned() -> None:
     """Values are storage strings. A rename or removal must fail here first."""
     assert {m.value for m in TerminationReason} == {
         "completed",
+        "delivery_failed",
         "interrupted",
         "interrupt_timeout",
         "connection_lost",

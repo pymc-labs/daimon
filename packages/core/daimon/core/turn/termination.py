@@ -45,6 +45,8 @@ class TerminationReason(StrEnum):
     # The turn ran.
     COMPLETED = "completed"
     """Terminal idle with an answer (or a degraded one that still answered)."""
+    DELIVERY_FAILED = "delivery_failed"
+    """The agent finished, but the complete answer could not reach the platform."""
     INTERRUPTED = "interrupted"
     """The user stopped the turn: acked mid-stream, or during a reconnect."""
     INTERRUPT_TIMEOUT = "interrupt_timeout"

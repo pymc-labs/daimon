@@ -18,6 +18,7 @@ from typing import Literal
 TurnKind = Literal[
     "interrupted",
     "interrupt_timeout",
+    "delivery_failed",
     "connection_lost",
     "upstream",
     "reducer_bug",

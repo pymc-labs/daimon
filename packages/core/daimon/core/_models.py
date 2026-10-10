@@ -2472,7 +2472,7 @@ class TurnOutcome(Base):
             "origin IN ('chat', 'routine', 'relay', 'handoff')", name="ck_turn_outcomes_origin"
         ),
         CheckConstraint(
-            "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
+            "reason IN ('completed', 'delivery_failed', 'interrupted', 'interrupt_timeout', "
             "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "

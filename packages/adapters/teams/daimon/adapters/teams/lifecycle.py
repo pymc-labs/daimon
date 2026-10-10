@@ -32,8 +32,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 from daimon.adapters.teams import card
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.errors import TurnError
 from daimon.core.message_split import split_fenced
-from daimon.core.observability import capture_exception_with_scope
+from daimon.core.observability import capture_exception_with_scope, redact_text
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
@@ -191,9 +192,18 @@ class TeamsTurnLifecycle:
 
     async def _send(self, activity: MessageActivityInput, *, message_id: str | None) -> str:
         activity.id = message_id
-        sent = await self._sender.send(
-            self._conversation_id, activity, service_url=self._service_url
-        )
+        try:
+            sent = await self._sender.send(
+                self._conversation_id, activity, service_url=self._service_url
+            )
+        except httpx.HTTPStatusError as exc:
+            if 400 <= exc.response.status_code < 500:
+                log.warning(
+                    "teams.turn.send_rejected",
+                    status_code=exc.response.status_code,
+                    response_body=redact_text(exc.response.text)[:2000],
+                )
+            raise
         return message_id or sent.id
 
     async def _edit(self, activity: MessageActivityInput, message_id: str | None) -> str:
@@ -218,6 +228,28 @@ class TeamsTurnLifecycle:
             return
         self._message_id = await self._send(self._status(), message_id=self._message_id)
         self._last_flush = self._clock()
+
+    async def _edit_answer(
+        self, activity: MessageActivityInput, message_id: str | None
+    ) -> tuple[str, bool]:
+        """Post a fresh answer after an edit failure; never overwrite an uncertain edit.
+
+        The bool permits retiring the old card only when the failed edit
+        definitely did not time out and potentially land as an answer.
+        """
+        try:
+            return await self._edit(activity, message_id), False
+        except TEAMS_SEND_ERRORS as exc:
+            if message_id is None:
+                raise
+            uncertain = isinstance(exc, _TIMEOUTS)
+            log.warning("teams.turn.answer_edit_failed", exc_info=True)
+            try:
+                return await self._send(activity, message_id=None), not uncertain
+            except TEAMS_SEND_ERRORS as fallback:
+                if uncertain:
+                    raise TimeoutError from fallback
+                raise
 
     def _status(self) -> MessageActivityInput:
         return card.status_card(self._state, now=self._clock(), cancel_key=self._cancel_key)
@@ -323,14 +355,15 @@ class TeamsTurnLifecycle:
     async def on_terminal_success(self, state: TurnState) -> None:
         """Replace the card with the answer; overflow follows as new messages.
 
-        A send failure is logged and captured, never raised: the turn already
-        ran and billed. `final_message_id` stays None so the watermark cannot
-        pass an answer nobody saw.
+        An unrecovered send failure raises a delivery error for the driver's
+        outcome record. `final_message_id` stays None so the watermark cannot
+        pass an answer nobody saw; the work and billing remain intact.
         """
         self._terminal = True
         answer = self._answer_text(state)
         degraded = render_degraded_notice(state.mcp_failures)
         replaced = False
+        retire_card = False
         try:
             if not answer and self._unprompted:
                 return  # an unprompted turn with nothing to say leaves the thread as it was
@@ -362,7 +395,9 @@ class TeamsTurnLifecycle:
                 mention = self._requester if index == 0 else None
                 message = card.answer_message(chunk, mention=mention)
                 if index == 0 and not fresh:
-                    current = self._message_id = await self._edit(message, current)
+                    current, retire_card = await self._edit_answer(message, current)
+                    if self._message_id is None:
+                        self._message_id = current
                     self.card_closed = True
                 else:
                     current = await self._send(message, message_id=None)
@@ -370,32 +405,36 @@ class TeamsTurnLifecycle:
                     self._answer_id, replaced = current, True
                 self._shown[current] = chunk
             self.final_message_id = current
-            if fresh:  # retire before the best-effort controls so a lost post can't strand it
+            if fresh or retire_card:
                 await self._retire_card()
             await self._post_controls(state)
         except TEAMS_SEND_ERRORS as exc:
+            failure = TurnError(
+                kind="delivery_failed", message="Could not post the complete answer.", cause=exc
+            )
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
             if replaced:
                 # A later part failed: the answer on screen may stop short.
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._send(card.notice_card(_ANSWER_CUT_SHORT), message_id=None)
-                return
+                raise failure from exc
             if self._message_id is None:
-                return
+                raise failure from exc
             if answer and isinstance(exc, _TIMEOUTS):
                 # The edit may have landed: neither this nor the boot sweep may overwrite
                 # it, so a new message covers the case where it did not.
                 self.card_closed = True
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._send(card.notice_card(_DELIVERY_UNCERTAIN), message_id=None)
-                return
+                raise failure from exc
             # Collapse the card so it does not show a live turn forever.
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 failed_text = _DELIVERY_FAILED if answer else _FINISH_FAILED
                 failed = card.notice_card(retry_hint(failed_text, direct_chat=self._direct_chat))
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
+            raise failure from exc
 
     async def _post_controls(self, state: TurnState) -> None:
         """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed."""
