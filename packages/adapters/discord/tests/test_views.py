@@ -168,3 +168,22 @@ class TestCancelView:
         assert cancel.is_set(), "adding a custom ID must preserve cancellation behavior"
         assert view._handled is True, "the existing handler should still finalize the view"
         interaction.response.edit_message.assert_called_once_with(view=view)
+
+
+@pytest.mark.parametrize("code", [10008, 10015])
+async def test_cancel_on_deleted_card_only_ignores_unknown_message(code):
+    cancel = asyncio.Event()
+    view = CancelView(allowed_user_id=123, cancel=cancel)
+    interaction = _mock_interaction(user_id=123)
+    interaction.response.edit_message.side_effect = discord.NotFound(
+        MagicMock(status=404, reason="Not Found"), {"code": code, "message": "Gone"}
+    )
+    button = _find_button(view, "Stop")
+    if code == 10008:
+        await button.callback(interaction)
+    else:
+        with pytest.raises(discord.NotFound):
+            await button.callback(interaction)
+    assert cancel.is_set()
+    assert view._handled
+    interaction.response.send_message.assert_not_awaited()
