@@ -30,6 +30,7 @@ from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.state.store import StateStore
@@ -81,6 +82,8 @@ class TurnDeps:
     # Provider owners supply transports and durable stores; no credentials
     # or SDK clients are discovered by profile dispatch.
     turn_runtimes: Mapping[str, TurnRuntime] = field(default_factory=dict[str, TurnRuntime])
+    # Built-in application composition resolves only an admitted explicit channel.
+    turn_runtime_factory: RuntimeFactory | None = None
     # Only prepared mux turns use this; default composition uses Postgres.
     state_store: StateStore | None = None
 
@@ -122,6 +125,7 @@ def build_turn_deps(
     return TurnDeps(
         anthropic=anthropic,
         messages=anthropic,
+        turn_runtime_factory=build_channel_runtime,
         turn_path=turn_settings.path if isinstance(turn_settings, TurnSettings) else None,
         channel_backends=(
             turn_settings.channel_backends if isinstance(turn_settings, TurnSettings) else False

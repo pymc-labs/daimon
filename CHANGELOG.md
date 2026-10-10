@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
 
+- Refuse ambient OpenAI custom headers before configured client construction so process headers cannot replace channel credentials or project routing.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.
@@ -21,11 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
+- Construct OpenAI turn runtimes for explicitly configured channels from scoped operator deployment plans, with deferred credential access and durable journal/usage state.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
 - Capture QA headless invocation returns with monotonic receipts, retaining exact host truncation and distinguishing empty completion from visible output.
 - Allow opt-in OpenAI Agents MCP bearer authentication through a scoped host resolver; persist references only and attach fresh credentials to session requests while preserving model and delegation controls.
+- Resolve explicitly configured provider turn runtimes per admitted channel and carry their scoped dependencies into execution, without constructing a runtime for default Anthropic channels.
 
 - Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
 

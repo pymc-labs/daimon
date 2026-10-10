@@ -35,7 +35,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
-from daimon.core.mux_backend import TurnBackendRequest
+from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -139,6 +139,7 @@ def _turn_port_kwargs(
     tenant_id: uuid.UUID,
     provider_backend: ManagedAgents | None = None,
     provider_session: ResourceRef | None = None,
+    provider_runtime: TurnRuntime | None = None,
 ) -> _TurnPortKwargs:
     """Derive a real tenant scope from the existing admitted operation."""
     selected = deps.turn_path or load_turn_settings().path
@@ -185,7 +186,7 @@ def _turn_port_kwargs(
             deps=deps,
             config=admission.backend_revision,
             session=native,
-            runtime=deps.turn_runtimes.get(profile),
+            runtime=provider_runtime or deps.turn_runtimes.get(profile),
         )
     return result
 
@@ -911,6 +912,7 @@ async def run_prepared_turn_impl(
                     tenant_id=tenant_id,
                     provider_backend=prepared.backend,
                     provider_session=prepared.session_ref,
+                    provider_runtime=prepared.runtime,
                 ),
                 anthropic=deps.anthropic,
                 session_id=ma_session_id,

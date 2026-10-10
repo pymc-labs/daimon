@@ -499,6 +499,7 @@ Usage revisions persist under the same slot lease across process restart.
 Verified dated prices plus measured container cost can settle; missing evidence
 stays pending without a zero-cost fallback or an Anthropic meter. Authenticated
 remote MCP and paid host certification ship separately.
+<<<<<<< HEAD
 
 The Gemini host turn codec accepts an explicitly selected `gemini.inline_reuse`
 channel and an injected, revision-pinned `GeminiDeployment`, driver `Storage`,
@@ -558,3 +559,20 @@ configured cap to appear unchanged in native session responses before host
 input. Omitted caps preserve existing behavior. Control failures retain scoped
 acknowledged resource references for exact cleanup, without automatic creation
 retry or an exact-spend claim.
+=======
+
+The host can register a deployment constructor through
+`daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
+receives `ProviderPreparationRequest` only when the selected provider preparer
+looks up its runtime for an explicit admitted channel revision. It must return
+the provider's public runtime with authorized native resources and durable state;
+missing deployment constructors fail closed. `PreparedTurn.runtime` retains the
+resolved dependencies for execution. No mux driver discovers host credentials.
+>>>>>>> a2438dfd3 (feat(turn): resolve explicit channel runtimes per admitted turn)
+
+Application deployment wiring can construct the public OpenAI runtime from an
+operator manifest selected by the admitted tenant/account/channel/configuration
+digest. Credential environment references are revealed only after preparation's
+policy recheck; SDK construction remains private to the OpenAI driver. Default
+channels do not inspect the manifest or provider credentials. Durable host
+journal/usage adapters are used; unknown accounting stays pending.
