@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "run_id": "96ad43c229e14590ac9b50a1c27f2999",
+  "provider": "gemini",
+  "model": "gemini-3.8-flash",
+  "fixture_id": "C06",
+  "timestamp": "2026-10-10T07:41:52.575709Z",
+  "status": "completed",
+  "tokens": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "input_cached_tokens": 0,
+    "input_cache_write_tokens": 0,
+    "input_cache_write_5m_tokens": 0,
+    "input_cache_write_1h_tokens": 0
+  },
+  "reserved_usd": "0.147456",
+  "cost_estimate_usd": "0",
+  "actual_usd": "0",
+  "held_usd": "0",
+  "accounting_status": "actual",
+  "price": {
+    "input": "0.75",
+    "cached_input": "0.075",
+    "cache_write_input": "0.75",
+    "output": "3.75",
+    "cache_write_5m_input": null,
+    "effective_from": "2026-10-10",
+    "effective_until": "2027-01-01",
+    "source": "https://ai.google.dev/gemini-api/docs/pricing",
+    "short_prompt": null,
+    "actual_input_limit": null,
+    "pricing_basis": "standard-global"
+  },
+  "limits": {
+    "input_tokens": 32768,
+    "output_tokens": 32768
+  },
+  "container_allowance": null,
+  "session_prices": [],
+  "actual_evidence": {
+    "requests": [],
+    "containers": [],
+    "usage_complete": true
+  },
+  "token_usd": "0",
+  "container_usd": "0",
+  "reconcile": null,
+  "reason": "settled"
+}

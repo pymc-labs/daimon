@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "call": 5,
+  "model": "gemini-3.8-flash",
+  "method": "GET",
+  "http_status": 200,
+  "price_review_date": "2026-10-10",
+  "usageMetadata": {
+    "source": "interactions.usage",
+    "promptTokenCount": 3527,
+    "candidatesTokenCount": 7,
+    "cachedContentTokenCount": 0,
+    "thoughtsTokenCount": 57
+  },
+  "usage_observation_sha256": "cdc61e0aa7415719ab99523441f577fbc3ff808a34d3e36b704ab46c62a2c3c2",
+  "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
+  "interaction_status": "completed"
+}

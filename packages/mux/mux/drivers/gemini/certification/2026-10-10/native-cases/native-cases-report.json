@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "head": "bfa5d0c50a37a9e37e6a47c2569878cc23ff2962",
+  "requested_model": "gemini-3.8-flash",
+  "rows": [
+    {
+      "fixture_id": "C10",
+      "status": "pass",
+      "origin": "live_provider",
+      "head": "bfa5d0c50a37a9e37e6a47c2569878cc23ff2962",
+      "evidence": [
+        "unknown/unsupported requirements and foreign refs refused before mutation",
+        "invalid extension version refused"
+      ],
+      "receipt": {
+        "version": 2,
+        "run_id": "00d18b21bc7a4a70829721bc74e7e335",
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "fixture_id": "C10",
+        "timestamp": "2026-10-10T07:58:52.087685Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 3527,
+          "output_tokens": 56,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0,
+          "input_cache_write_5m_tokens": null,
+          "input_cache_write_1h_tokens": null
+        },
+        "reserved_usd": "0.147456",
+        "cost_estimate_usd": "0.00285525",
+        "actual_usd": "0.00285525",
+        "held_usd": "0",
+        "accounting_status": "actual",
+        "price": {
+          "input": "0.75",
+          "cached_input": "0.075",
+          "cache_write_input": "0.75",
+          "output": "3.75",
+          "cache_write_5m_input": null,
+          "effective_from": "2026-10-10",
+          "effective_until": "2027-01-01",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing",
+          "short_prompt": null,
+          "actual_input_limit": null,
+          "pricing_basis": "standard-global"
+        },
+        "limits": {
+          "input_tokens": 32768,
+          "output_tokens": 32768
+        },
+        "container_allowance": null,
+        "session_prices": [],
+        "actual_evidence": {
+          "requests": [
+            {
+              "id": "484754fdf6e11b13fa4d4f6f3b100b61c0cd073261ce73a52094e5fe51dbc08a",
+              "observed_at": "2026-10-10T07:58:49.113420Z",
+              "tokens": {
+                "input_tokens": 3527,
+                "output_tokens": 56,
+                "input_cached_tokens": 0,
+                "input_cache_write_tokens": 0,
+                "input_cache_write_5m_tokens": null,
+                "input_cache_write_1h_tokens": null
+              },
+              "pricing_basis": "standard-global"
+            }
+          ],
+          "containers": [],
+          "usage_complete": true
+        },
+        "token_usd": "0.00285525",
+        "container_usd": "0",
+        "reconcile": null,
+        "reason": "settled"
+      },
+      "recording": "C10.json",
+      "cleanup": "owned-interaction DELETE completed; see normalized tape and HTTP usage sidecars"
+    },
+    {
+      "fixture_id": "C15",
+      "status": "pass",
+      "origin": "live_provider",
+      "head": "bfa5d0c50a37a9e37e6a47c2569878cc23ff2962",
+      "evidence": [
+        "migration typed unsupported, binding unchanged, no provider writes"
+      ],
+      "receipt": {
+        "version": 2,
+        "run_id": "f9caf460a5fb4395840565e8c9a78ca5",
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "fixture_id": "C15",
+        "timestamp": "2026-10-10T07:59:00.542473Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 3527,
+          "output_tokens": 64,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0,
+          "input_cache_write_5m_tokens": null,
+          "input_cache_write_1h_tokens": null
+        },
+        "reserved_usd": "0.147456",
+        "cost_estimate_usd": "0.00288525",
+        "actual_usd": "0.00288525",
+        "held_usd": "0",
+        "accounting_status": "actual",
+        "price": {
+          "input": "0.75",
+          "cached_input": "0.075",
+          "cache_write_input": "0.75",
+          "output": "3.75",
+          "cache_write_5m_input": null,
+          "effective_from": "2026-10-10",
+          "effective_until": "2027-01-01",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing",
+          "short_prompt": null,
+          "actual_input_limit": null,
+          "pricing_basis": "standard-global"
+        },
+        "limits": {
+          "input_tokens": 32768,
+          "output_tokens": 32768
+        },
+        "container_allowance": null,
+        "session_prices": [],
+        "actual_evidence": {
+          "requests": [
+            {
+              "id": "cdc61e0aa7415719ab99523441f577fbc3ff808a34d3e36b704ab46c62a2c3c2",
+              "observed_at": "2026-10-10T07:58:57.919949Z",
+              "tokens": {
+                "input_tokens": 3527,
+                "output_tokens": 64,
+                "input_cached_tokens": 0,
+                "input_cache_write_tokens": 0,
+                "input_cache_write_5m_tokens": null,
+                "input_cache_write_1h_tokens": null
+              },
+              "pricing_basis": "standard-global"
+            }
+          ],
+          "containers": [],
+          "usage_complete": true
+        },
+        "token_usd": "0.00288525",
+        "container_usd": "0",
+        "reconcile": null,
+        "reason": "settled"
+      },
+      "recording": "C15.json",
+      "cleanup": "owned-interaction DELETE completed; see normalized tape and HTTP usage sidecars"
+    },
+    {
+      "fixture_id": "C16",
+      "status": "pass",
+      "origin": "live_provider",
+      "head": "bfa5d0c50a37a9e37e6a47c2569878cc23ff2962",
+      "evidence": [
+        "no public raw handle, undeclared namespace/native-input bypass refused before writes"
+      ],
+      "receipt": {
+        "version": 2,
+        "run_id": "1ce1135281604f77ac3ad3ba8c245022",
+        "provider": "gemini",
+        "model": "gemini-3.8-flash",
+        "fixture_id": "C16",
+        "timestamp": "2026-10-10T07:59:09.250844Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 3527,
+          "output_tokens": 119,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0,
+          "input_cache_write_5m_tokens": null,
+          "input_cache_write_1h_tokens": null
+        },
+        "reserved_usd": "0.147456",
+        "cost_estimate_usd": "0.0030915",
+        "actual_usd": "0.0030915",
+        "held_usd": "0",
+        "accounting_status": "actual",
+        "price": {
+          "input": "0.75",
+          "cached_input": "0.075",
+          "cache_write_input": "0.75",
+          "output": "3.75",
+          "cache_write_5m_input": null,
+          "effective_from": "2026-10-10",
+          "effective_until": "2027-01-01",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing",
+          "short_prompt": null,
+          "actual_input_limit": null,
+          "pricing_basis": "standard-global"
+        },
+        "limits": {
+          "input_tokens": 32768,
+          "output_tokens": 32768
+        },
+        "container_allowance": null,
+        "session_prices": [],
+        "actual_evidence": {
+          "requests": [
+            {
+              "id": "4467f324f40f63865abed41e69ba0120649fe1058bfbc158df57b08c805fdd31",
+              "observed_at": "2026-10-10T07:59:06.641816Z",
+              "tokens": {
+                "input_tokens": 3527,
+                "output_tokens": 119,
+                "input_cached_tokens": 0,
+                "input_cache_write_tokens": 0,
+                "input_cache_write_5m_tokens": null,
+                "input_cache_write_1h_tokens": null
+              },
+              "pricing_basis": "standard-global"
+            }
+          ],
+          "containers": [],
+          "usage_complete": true
+        },
+        "token_usd": "0.0030915",
+        "container_usd": "0",
+        "reconcile": null,
+        "reason": "settled"
+      },
+      "recording": "C16.json",
+      "cleanup": "owned-interaction DELETE completed; see normalized tape and HTTP usage sidecars"
+    }
+  ],
+  "no_retries": true
+}
