@@ -317,7 +317,7 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
               cd /etc/daimon
               sudo -E docker compose -f compose.worker.yml pull
-              # --timeout exceeds the worker asset's 90s stop_grace_period.
+              # --timeout exceeds the 90s stop_grace_period in the worker asset.
               # The adapters drain in-flight turns for up to 60s
               # after SIGTERM (_DRAIN_GRACE_S), but docker kills a container
               # 10s after SIGTERM by default, so every recreate cut live
