@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recovered Discord turns keep their final card when an older progress edit finishes late, including when the card was replaced.
 - Turn cards on Discord, Slack, and Teams now add each Haiku 5.5 request's cost at its own prompt-length rate.
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING without root alerts; failed verdicts still fail and alert.
 - Discord answers, stopped turns and errors retain their final status when older progress edits complete late, including errors caught outside the turn driver. Repairs preserve text and files without another answer post. Failed turns preserve sealed answer text, and recovered turns take ownership of their card.

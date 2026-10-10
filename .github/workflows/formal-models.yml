@@ -37,6 +37,7 @@ on:
       - "packages/adapters/discord/daimon/adapters/discord/continuation_dispatch.py"
       - "packages/adapters/slack/daimon/adapters/slack/continuation_dispatch.py"
       - "packages/adapters/discord/daimon/adapters/discord/bot.py"
+      - "packages/adapters/discord/daimon/adapters/discord/lifecycle.py"
       - "packages/adapters/slack/daimon/adapters/slack/app.py"
       - "packages/adapters/slack/daimon/adapters/slack/lifecycle.py"
       - "packages/adapters/slack/daimon/adapters/slack/blockkit.py"
@@ -147,6 +148,7 @@ on:
       - "packages/adapters/slack/daimon/adapters/slack/continuation_dispatch.py"
       # adapter_recovery/
       - "packages/adapters/discord/daimon/adapters/discord/bot.py"
+      - "packages/adapters/discord/daimon/adapters/discord/lifecycle.py"
       - "packages/adapters/slack/daimon/adapters/slack/app.py"
       - "packages/adapters/slack/daimon/adapters/slack/boot_sweep.py"
       - "packages/adapters/slack/daimon/adapters/slack/__main__.py"

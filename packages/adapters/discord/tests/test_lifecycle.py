@@ -153,6 +153,124 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
     assert not lc._progress_edits
 
 
+@pytest.mark.parametrize("recovery_count", [1, 2])
+async def test_recovery_answer_repairs_old_progress_edit_that_lands_late(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_count: int,
+) -> None:
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
+    started, release = asyncio.Event(), asyncio.Event()
+    card: dict[str, Any] = {}
+    sends = 0
+
+    async def send(**kwargs: Any) -> object:
+        nonlocal sends
+        sends += 1
+        card.update(kwargs)
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        embeds = kwargs.get("embeds", [])
+        if embeds and embeds[0].title and "Working" in embeds[0].title:
+            started.set()
+            await release.wait()
+        card.update(kwargs)
+
+    old = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await old.post_initial()
+    old._last_flush = time.monotonic() - 11
+    tick = asyncio.create_task(old.on_render(_running_tool_turn()))
+    await asyncio.wait_for(started.wait(), 1)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    pending = set(old._progress_edits)
+    old.on_render_stopped()
+    await old.on_terminal_failure(TurnState(), RuntimeError("retry"))
+    successor = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="m",
+        adopt_message_ref=old.release_message_ref(),
+        adopt_pending_progress=old,
+    )
+    if recovery_count == 2:
+        successor = DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            agent_name="test",
+            model_id="m",
+            adopt_message_ref=successor.release_message_ref(),
+            adopt_pending_progress=successor,
+        )
+    await successor.on_terminal_success(_make_success_state("Recovered answer"))
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    if successor._terminal_reassert_task is not None:
+        await asyncio.wait_for(successor._terminal_reassert_task, 1)
+    assert card["content"] == "Recovered answer"
+    assert card["view"] is None
+    assert card["embeds"] == [successor._terminal_embed]
+    assert sends == 1
+
+
+async def test_recovery_answer_repairs_old_reassert_that_lands_late(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
+    progress_started, release_progress = asyncio.Event(), asyncio.Event()
+    repair_started, release_repair = asyncio.Event(), asyncio.Event()
+    card: dict[str, Any] = {}
+    old_repairs = 0
+
+    async def send(**kwargs: Any) -> object:
+        card.update(kwargs)
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        nonlocal old_repairs
+        embeds = kwargs.get("embeds", [])
+        if embeds and embeds[0].title and "Working" in embeds[0].title:
+            progress_started.set()
+            await release_progress.wait()
+        elif kwargs.get("_allow_replacement") is False and old_repairs == 0:
+            old_repairs += 1
+            repair_started.set()
+            await release_repair.wait()
+        card.update(kwargs)
+
+    old = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await old.post_initial()
+    old._last_flush = time.monotonic() - 11
+    tick = asyncio.create_task(old.on_render(_running_tool_turn()))
+    await asyncio.wait_for(progress_started.wait(), 1)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    old.on_render_stopped()
+    await old.on_terminal_failure(TurnState(), RuntimeError("retry"))
+    release_progress.set()
+    await asyncio.wait_for(repair_started.wait(), 1)
+    successor = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="m",
+        adopt_message_ref=old.release_message_ref(),
+        adopt_pending_progress=old,
+    )
+    await successor.on_terminal_success(_make_success_state("Recovered answer"))
+    release_repair.set()
+    await asyncio.wait_for(old._terminal_reassert_task, 1)
+    await asyncio.sleep(0)
+    if successor._terminal_reassert_task is not None:
+        await asyncio.wait_for(successor._terminal_reassert_task, 1)
+    assert card["content"] == "Recovered answer"
+    assert card["view"] is None
+    assert card["embeds"] == [successor._terminal_embed]
+
+
 @pytest.mark.parametrize("missing", [False, True])
 async def test_progress_settled_before_terminal_or_missing_needs_no_repair(
     missing: bool,
@@ -223,6 +341,22 @@ async def test_abandoned_render_does_not_leave_a_progress_task_waiting_for_termi
     await asyncio.wait_for(asyncio.gather(*pending), 1)
     assert not lc._progress_edits
     assert lc._terminal_reassert_task is None
+
+
+async def test_terminal_repair_forbids_transport_replacement() -> None:
+    flags: list[bool | None] = []
+
+    async def send(**kwargs: Any) -> object:
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        flags.append(kwargs.get("_allow_replacement"))
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await lc.post_initial()
+    lc._terminal_card_embeds = [discord.Embed(title="Done")]
+    await lc._reassert_terminal_card()
+    assert flags == [False]
 
 
 def _make_lifecycle(
@@ -2215,6 +2349,7 @@ async def test_missing_card_is_replaced_before_answer_delivery(missing_at, rende
     assert replacements == [1001], "record the replacement for reply routing"
     assert lifecycle.final_message_id == lifecycle.feedback_message_id == "1001"
     assert lifecycle.card_message_id == "1000", "retire the original durable card intent"
+    assert lifecycle._card_message_ref.id == 1001, "late edits must repair the live card"
     assert lifecycle.was_answered
     answer = sent[-1][1] if missing_at == "answer" else sent[-1][0].kwargs
     assert ("table-1.png" if render_tables else text) in answer["content"]
