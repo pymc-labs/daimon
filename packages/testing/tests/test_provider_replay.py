@@ -79,7 +79,7 @@ def updated(tape: ProviderTape, **changes: JsonValue) -> ProviderTape:
     CASES,
     ids=[f"{s.scenario_id}:{p.backend}:{t.turn}" for s, p, t in CASES],
 )
-async def test_every_authored_native_turn_traverses_actual_sdk_and_port(
+async def test_every_authored_native_turn_traverses_sdk_and_available_driver_binding(
     scenario: ScenarioFixture,
     fixture: BackendFixture,
     turn: NativeTurn,
@@ -116,7 +116,11 @@ async def test_every_authored_native_turn_traverses_actual_sdk_and_port(
             assert isinstance(replay.transport, GeminiTransport)
             # A follow-up's POST is tested below through a retained driver/binding.
             # Here validate its unchanged exact wire body using the real SDK edge.
-            if "previous_interaction_id" in turn.request:
+            if "previous_interaction_id" in turn.request or fixture.mcp_binding is not None:
+                if fixture.mcp_binding is not None:
+                    # Native authenticated wire templates do not certify the
+                    # absent Gemini driver resolver; do not strip auth to pass.
+                    assert any(g.code == "MCP_AUTH_UNBOUND" for g in fixture.gaps)
                 created = await replay.transport.create(turn.request)
                 assert created["id"] == turn.root_id
                 stream = await replay.transport.open_stream(turn.root_id)
@@ -351,7 +355,7 @@ def test_source_traversal_and_unmatched_secret_headers_are_not_recorded(tmp_path
 
 def test_pack_keeps_all_53_sources_context_numbering_and_typed_gaps() -> None:
     assert len(PACK.scenarios) == 53
-    assert sum(len(p.turns) for s in PACK.scenarios for p in s.providers) == 64
+    assert sum(len(p.turns) for s in PACK.scenarios for p in s.providers) == 96
     scenario, native = PACK.select("QA-I6-BARE-MENTION-THREAD-TITLE", "openai")
     assert [t.turn for t in native.turns] == [2]
     assert scenario.invocations[1]["operation"] == "context"

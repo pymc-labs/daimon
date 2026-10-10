@@ -259,7 +259,476 @@
       },
       "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki.",
+          "session_id": "qa-session-380e24608b9bbbad",
+          "root_id": "qa-openai-380e24608b9bbbad-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-1:running",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-1:input",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1:input",
+                "turn_id": "qa-openai-380e24608b9bbbad-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-380e24608b9bbbad-turn-1",
+                "name": "attach_mcp_server",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-channel-agent",
+                  "server_name": "deepwiki",
+                  "url": "https://mcp.deepwiki.com/mcp",
+                  "origin_context_id": "qa-origin-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"name\":\"qa-channel-agent\",\"mcp_servers\":[{\"name\":\"deepwiki\",\"url\":\"https://mcp.deepwiki.com/mcp\"}]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-1:answer",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1:answer",
+                "turn_id": "qa-openai-380e24608b9bbbad-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Attached deepwiki; its tools will be available on your next message."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-1:end",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-1",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-380e24608b9bbbad-turn-1",
+            "session_id": "qa-session-380e24608b9bbbad",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0",
+              "server": "daimon-mcp",
+              "name": "attach_mcp_server",
+              "arguments": {
+                "agent_name": "qa-channel-agent",
+                "server_name": "deepwiki",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "origin_context_id": "qa-origin-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"name\":\"qa-channel-agent\",\"mcp_servers\":[{\"name\":\"deepwiki\",\"url\":\"https://mcp.deepwiki.com/mcp\"}]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "location": "steps[6]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is.",
+          "session_id": "qa-session-380e24608b9bbbad",
+          "root_id": "qa-openai-380e24608b9bbbad-turn-2",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-2:running",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-2:input",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2:input",
+                "turn_id": "qa-openai-380e24608b9bbbad-turn-2",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-380e24608b9bbbad-turn-2",
+                "name": "ask_question",
+                "server_label": "deepwiki",
+                "arguments": {
+                  "repoName": "pymc-labs/pymc-marketing",
+                  "question": "What is this repository?"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "A Python package for Bayesian marketing models built with PyMC."
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-2:answer",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2:answer",
+                "turn_id": "qa-openai-380e24608b9bbbad-turn-2",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "pymc-marketing is a Python package for Bayesian marketing models built with PyMC."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-380e24608b9bbbad-turn-2:end",
+              "session_id": "qa-session-380e24608b9bbbad",
+              "turn": {
+                "id": "qa-openai-380e24608b9bbbad-turn-2",
+                "session_id": "qa-session-380e24608b9bbbad",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-380e24608b9bbbad-turn-2",
+            "session_id": "qa-session-380e24608b9bbbad",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0",
+              "server": "deepwiki",
+              "name": "ask_question",
+              "arguments": {
+                "repoName": "pymc-labs/pymc-marketing",
+                "question": "What is this repository?"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A Python package for Bayesian marketing models built with PyMC."
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "authored-external"
+            }
+          ]
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -287,17 +756,58 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[3]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[6]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "EXTERNAL_TOOL_SCHEMA_UNBOUND",
+          "location": "deepwiki",
+          "reason": "Deepwiki arguments are authored offline, not captured discovery. Validate discovery before claiming execution. Mixed public/auth production preparation remains a runner binding."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "attach_mcp_server"
+              ],
+              "required": true
+            }
+          },
+          {
+            "name": "deepwiki",
+            "url": "https://mcp.deepwiki.com/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-deepwiki",
+            "tool_policy": {
+              "allowed_tools": [
+                "ask_question"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     },
     {
       "backend": "gemini",
@@ -312,7 +822,266 @@
       },
       "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki.",
+          "session_id": "qa-session-380e24608b9bbbad",
+          "root_id": "qa-gemini-380e24608b9bbbad-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              },
+              {
+                "type": "mcp_server",
+                "name": "deepwiki",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-380e24608b9bbbad-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-380e24608b9bbbad-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-380e24608b9bbbad-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-380e24608b9bbbad",
+            "steps": [
+              {
+                "id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0",
+                "type": "mcp_server_tool_call",
+                "name": "attach_mcp_server",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-channel-agent",
+                  "server_name": "deepwiki",
+                  "url": "https://mcp.deepwiki.com/mcp",
+                  "origin_context_id": "qa-origin-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1"
+                }
+              },
+              {
+                "id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"name\":\"qa-channel-agent\",\"mcp_servers\":[{\"name\":\"deepwiki\",\"url\":\"https://mcp.deepwiki.com/mcp\"}]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-380e24608b9bbbad-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Attached deepwiki; its tools will be available on your next message."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1-0",
+              "server": "daimon-mcp",
+              "name": "attach_mcp_server",
+              "arguments": {
+                "agent_name": "qa-channel-agent",
+                "server_name": "deepwiki",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "origin_context_id": "qa-origin-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"name\":\"qa-channel-agent\",\"mcp_servers\":[{\"name\":\"deepwiki\",\"url\":\"https://mcp.deepwiki.com/mcp\"}]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "location": "steps[6]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is.",
+          "session_id": "qa-session-380e24608b9bbbad",
+          "root_id": "qa-gemini-380e24608b9bbbad-turn-2",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-380e24608b9bbbad",
+            "input": [
+              {
+                "type": "text",
+                "text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-380e24608b9bbbad-turn-1",
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              },
+              {
+                "type": "mcp_server",
+                "name": "deepwiki",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-380e24608b9bbbad-turn-2:end",
+              "interaction": {
+                "id": "qa-gemini-380e24608b9bbbad-turn-2",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-380e24608b9bbbad-turn-2",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-380e24608b9bbbad",
+            "steps": [
+              {
+                "id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0",
+                "type": "mcp_server_tool_call",
+                "name": "ask_question",
+                "server_name": "deepwiki",
+                "arguments": {
+                  "repoName": "pymc-labs/pymc-marketing",
+                  "question": "What is this repository?"
+                }
+              },
+              {
+                "id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "A Python package for Bayesian marketing models built with PyMC."
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-380e24608b9bbbad-turn-2:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "pymc-marketing is a Python package for Bayesian marketing models built with PyMC."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-2-0",
+              "server": "deepwiki",
+              "name": "ask_question",
+              "arguments": {
+                "repoName": "pymc-labs/pymc-marketing",
+                "question": "What is this repository?"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A Python package for Bayesian marketing models built with PyMC."
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "authored-external"
+            }
+          ]
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -340,17 +1109,64 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[3]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[6]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "MCP_AUTH_UNBOUND",
+          "location": "mcp",
+          "reason": "Gemini refuses credential_ref/tool_policy. Native decoding is scripted; authenticated preparation needs the owner's resolver seam. Never downgrade to anonymous MCP."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "EXTERNAL_TOOL_SCHEMA_UNBOUND",
+          "location": "deepwiki",
+          "reason": "Deepwiki arguments are authored offline, not captured discovery. Validate discovery before claiming execution. Mixed public/auth production preparation remains a runner binding."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "attach_mcp_server"
+              ],
+              "required": true
+            }
+          },
+          {
+            "name": "deepwiki",
+            "url": "https://mcp.deepwiki.com/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-deepwiki",
+            "tool_policy": {
+              "allowed_tools": [
+                "ask_question"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     }
   ]
 }

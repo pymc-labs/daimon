@@ -66,8 +66,8 @@ other host invocation retains a typed `BLOCKED` gap at its original location:
 manual triggers, admin/readback-only sources, host refusal/dedupe gates, unbound
 native tool schemas, artifact protocol hooks and runner hooks. Thirteen manual
 and four readback/admin-only scenarios have no automatic host trigger. Three
-artifact-output recipes and ten authenticated MCP/tool scenarios await their
-concrete bindings. Five existing Anthropic authored tapes have exact source
+artifact-output recipes await their concrete bindings. The ten MCP/tool recipes
+are described below. Five existing Anthropic authored tapes have exact source
 pointers; the other 48 have `ANTHROPIC_SOURCE_UNBOUND`, without substituting an
 unrelated golden or treating a provider fixture as an Anthropic recording.
 
@@ -95,3 +95,71 @@ The generator uses hand-authored recipes derived from user turns, never assertio
 patterns. It pins the current local G1/G2 branch commits and code hashes; run it
 only with those reviewed sources available. Review changed native blobs and
 source pins. It never touches `tests/golden/`, executes tools or calls providers.
+
+## Authenticated MCP/tool recipes
+
+This slice extends the original 64 native turns to 96 (48 per provider across
+30 scenarios). All 53 source documents and source invocations remain unchanged;
+the 43 unrelated native scenario blobs remain byte-identical. Nine Daimon tool
+input/output schemas come from the actual configured registry and carry source
+hashes in `catalog/fixtures/mcp-tools.json`. Authoring validates call arguments
+against those input schemas and results against MCP's `CallToolResult` shape.
+Result text is authored, not a capture or a claim that it satisfies a tool's
+structured output schema.
+
+| Scenario | Authored operations | Required runner observations |
+| --- | --- | --- |
+| D22 | `get_agent`, then `read_channel` | Actual answering identity and channel context |
+| D5 | Denied `update_agent` and `attach_mcp_server` | Unchanged agent/server readbacks and refusal |
+| D8 | `github_connect` | Private connection card delivered to the correct admin |
+| ISO | `read_channel`, `search_messages`, native file commands | Real channel/workspace isolation and independent sessions |
+| NEW17 | `attach_mcp_server`, then Deepwiki `ask_question` | Attached server survives follow-up, discovered schema and actual execution |
+| NEW18 | `add_skill` preview and content-hash follow-up, native skill-file read | Approval, upload/pin, persistence and skill use |
+| NEW21 | `request_agent_key` | Private form identity, owned clock advance and expiry edit |
+| NEW22 | `create_routine` with channel destination | Scheduled execution, memory effect and untruncated delivery |
+| NEW23 | `create_routine` without destination | Schedule and execution persist; no destination delivery |
+| NEW35 | `create_routine` with channel destination | Controlled routine failure and reported error |
+
+`fixture.mcp_binding` supplies explicit `MCPConnection` intent, a closed allowed
+tool list, source/schema pins and approved auth commit
+`48a1dc8ebd5f07427fdd1257d6df5a171151d701`. The OpenAI proof prepares agents and
+sessions through the real SDK and driver, resolving scoped credential references
+only into session overrides. It covers all ten recipes, including the denied
+tool results, and checks secret-free persisted agents and SDK DEBUG logs.
+Missing resolver, revocation, changed destination and foreign scope refuse
+before session or tool dispatch. The offline fixture URLs and resolver values
+are fictional; they are not credentials or a public endpoint.
+
+N2's loopback host is pinned separately. Its gate admits only `describe_agent`
+and `list_my_sessions`; it does not implement these nine channel-management
+tools. Its focused tests prove local authentication, isolation and cleanup.
+Broader tool execution and host effects require an owned runner binding; this
+slice neither widens that gate nor treats an authored output as a host mutation.
+
+Gemini requests retain the installed Interactions SDK's native `mcp_server`
+shape with `headers.Authorization`. Native requests, saved MCP call/result
+steps and normalization are replayed through the actual SDK. Its current driver
+rejects `credential_ref` or `tool_policy`, so every Gemini MCP recipe retains
+`MCP_AUTH_UNBOUND` until the owner provides that resolver seam. No anonymous
+substitution is allowed. Deepwiki's authored `ask_question` schema retains
+`EXTERNAL_TOOL_SCHEMA_UNBOUND`; discovery and mixed public/auth preparation are
+not proven offline. Every recipe also retains `RUNNER_HOOK` at `mcp` for the
+actual approvals, forms, permissions, mutations, scheduling and delivery.
+
+The fixture does not certify a scenario. The proof deliberately feeds only
+decoded terminal evidence to the outcome oracle and checks that it cannot PASS
+the source assertions without host observations. N9 must preserve the gaps,
+run the real turn with owned bindings, capture the observations, and let the
+oracle judge the resulting evidence.
+
+Extend this frozen pack without consulting the moving external catalog:
+
+```sh
+uv run python -m scripts.qa_provider_mcp_fixtures
+uv run pytest -q -n 2 packages/testing/tests/test_provider_mcp_fixtures.py packages/testing/tests/test_provider_replay.py
+```
+
+For a reproducibility check use `--index` pointing at this pack and `--output`
+pointing at a temporary directory. The generator verifies the approved auth
+source against its commit and regenerates only these ten blobs and the index;
+all other scenario bytes are copied unchanged. No golden file is edited.

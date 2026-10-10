@@ -279,7 +279,678 @@
       },
       "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Add this skill to this channel's agent.",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-openai-7b73cebe501933bd-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Add this skill to this channel's agent."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-1:running",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-1:input",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1:input",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Add this skill to this channel's agent."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-1",
+                "name": "add_skill",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-channel-agent",
+                  "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                  "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-1"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Preview the qa-echo-skill bundle before confirming."
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-1:answer",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1:answer",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Preview: qa-echo-skill. Confirm to add it."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-1:end",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-1",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-7b73cebe501933bd-turn-1",
+            "session_id": "qa-session-7b73cebe501933bd",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0",
+              "server": "daimon-mcp",
+              "name": "add_skill",
+              "arguments": {
+                "agent_name": "qa-channel-agent",
+                "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Preview the qa-echo-skill bundle before confirming."
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "location": "steps[5]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "yes please",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-openai-7b73cebe501933bd-turn-2",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "yes please"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-2:running",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-2:input",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2:input",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-2",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "yes please"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-2",
+                "name": "add_skill",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-channel-agent",
+                  "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                  "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-2",
+                  "content_hash": "500762765154184498354ff728da0675ecff81cac8b599ae20d43ecf9a3ad892"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Confirmation is linked to the preview and this follow-up; approval capture is required."
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-2:answer",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2:answer",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-2",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "I requested confirmation for qa-echo-skill."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-2:end",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-2",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-7b73cebe501933bd-turn-2",
+            "session_id": "qa-session-7b73cebe501933bd",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0",
+              "server": "daimon-mcp",
+              "name": "add_skill",
+              "arguments": {
+                "agent_name": "qa-channel-agent",
+                "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-2",
+                "content_hash": "500762765154184498354ff728da0675ecff81cac8b599ae20d43ecf9a3ad892"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Confirmation is linked to the preview and this follow-up; approval capture is required."
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "location": "steps[7]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "What is the QA echo phrase?",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-openai-7b73cebe501933bd-turn-3",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "What is the QA echo phrase?"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-3:running",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-3:input",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3:input",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-3",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "What is the QA echo phrase?"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-3:tool:0",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3:tool:0",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-3",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "cat .agents/skills/qa-echo-skill/SKILL.md",
+                "cwd": null,
+                "exit_code": 0,
+                "output": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-3:answer",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3:answer",
+                "turn_id": "qa-openai-7b73cebe501933bd-turn-3",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "ECHO-SKILL-OK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-7b73cebe501933bd-turn-3:end",
+              "session_id": "qa-session-7b73cebe501933bd",
+              "turn": {
+                "id": "qa-openai-7b73cebe501933bd-turn-3",
+                "session_id": "qa-session-7b73cebe501933bd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-7b73cebe501933bd-turn-3",
+            "session_id": "qa-session-7b73cebe501933bd",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": []
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -307,23 +978,40 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[3]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[5]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[7]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "add_skill"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     },
     {
       "backend": "gemini",
@@ -338,7 +1026,339 @@
       },
       "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Add this skill to this channel's agent.",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-gemini-7b73cebe501933bd-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Add this skill to this channel's agent."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-7b73cebe501933bd-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-7b73cebe501933bd-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-7b73cebe501933bd-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-7b73cebe501933bd",
+            "steps": [
+              {
+                "id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0",
+                "type": "mcp_server_tool_call",
+                "name": "add_skill",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-channel-agent",
+                  "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                  "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-1"
+                }
+              },
+              {
+                "id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Preview the qa-echo-skill bundle before confirming."
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-7b73cebe501933bd-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Preview: qa-echo-skill. Confirm to add it."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-1-0",
+              "server": "daimon-mcp",
+              "name": "add_skill",
+              "arguments": {
+                "agent_name": "qa-channel-agent",
+                "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Preview the qa-echo-skill bundle before confirming."
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "location": "steps[5]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "yes please",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-gemini-7b73cebe501933bd-turn-2",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-7b73cebe501933bd",
+            "input": [
+              {
+                "type": "text",
+                "text": "yes please"
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-7b73cebe501933bd-turn-1",
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-7b73cebe501933bd-turn-2:end",
+              "interaction": {
+                "id": "qa-gemini-7b73cebe501933bd-turn-2",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-7b73cebe501933bd-turn-2",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-7b73cebe501933bd",
+            "steps": [
+              {
+                "id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0",
+                "type": "mcp_server_tool_call",
+                "name": "add_skill",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-channel-agent",
+                  "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                  "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-2",
+                  "content_hash": "500762765154184498354ff728da0675ecff81cac8b599ae20d43ecf9a3ad892"
+                }
+              },
+              {
+                "id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Confirmation is linked to the preview and this follow-up; approval capture is required."
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-7b73cebe501933bd-turn-2:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I requested confirmation for qa-echo-skill."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-NEW18-SKILL-ADD-YES-PLEASE-2-0",
+              "server": "daimon-mcp",
+              "name": "add_skill",
+              "arguments": {
+                "agent_name": "qa-channel-agent",
+                "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-2",
+                "content_hash": "500762765154184498354ff728da0675ecff81cac8b599ae20d43ecf9a3ad892"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Confirmation is linked to the preview and this follow-up; approval capture is required."
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "location": "steps[7]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "What is the QA echo phrase?",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-gemini-7b73cebe501933bd-turn-3",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-7b73cebe501933bd",
+            "input": [
+              {
+                "type": "text",
+                "text": "What is the QA echo phrase?"
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-7b73cebe501933bd-turn-2",
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-7b73cebe501933bd-turn-3:end",
+              "interaction": {
+                "id": "qa-gemini-7b73cebe501933bd-turn-3",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-7b73cebe501933bd-turn-3",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-7b73cebe501933bd",
+            "steps": [
+              {
+                "id": "qa-gemini-7b73cebe501933bd-turn-3:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "cat .agents/skills/qa-echo-skill/SKILL.md"
+                }
+              },
+              {
+                "id": "qa-gemini-7b73cebe501933bd-turn-3:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-7b73cebe501933bd-turn-3:tool:0",
+                "result": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-7b73cebe501933bd-turn-3:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "ECHO-SKILL-OK"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": []
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -366,23 +1386,46 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[3]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[5]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[7]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "MCP_AUTH_UNBOUND",
+          "location": "mcp",
+          "reason": "Gemini refuses credential_ref/tool_policy. Native decoding is scripted; authenticated preparation needs the owner's resolver seam. Never downgrade to anonymous MCP."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "add_skill"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     }
   ]
 }

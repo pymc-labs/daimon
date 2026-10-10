@@ -338,7 +338,775 @@
       },
       "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 2,
+          "location": "steps[5]",
+          "channel": "B",
+          "thread": "turn2",
+          "request_text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code.",
+          "session_id": "qa-session-3ec46d2611c9f331",
+          "root_id": "qa-openai-3ec46d2611c9f331-turn-2",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-3ec46d2611c9f331-turn-2:running",
+              "session_id": "qa-session-3ec46d2611c9f331",
+              "turn": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "session_id": "qa-session-3ec46d2611c9f331",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-3ec46d2611c9f331-turn-2:input",
+              "session_id": "qa-session-3ec46d2611c9f331",
+              "turn": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "session_id": "qa-session-3ec46d2611c9f331",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2:input",
+                "turn_id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0",
+              "session_id": "qa-session-3ec46d2611c9f331",
+              "turn": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "session_id": "qa-session-3ec46d2611c9f331",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "name": "read_channel",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "channel_id": "B",
+                  "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-2"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"messages\":[{\"content\":\"QAISO_PRIVATE_B_qa-fixture-0001\"}]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-3ec46d2611c9f331-turn-2:tool:0",
+              "session_id": "qa-session-3ec46d2611c9f331",
+              "turn": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "session_id": "qa-session-3ec46d2611c9f331",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2:tool:0",
+                "turn_id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "printf %s QAISO_PRIVATE_B_qa-fixture-0001 > qa_iso_b.txt",
+                "cwd": null,
+                "exit_code": 0,
+                "output": ""
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-3ec46d2611c9f331-turn-2:answer",
+              "session_id": "qa-session-3ec46d2611c9f331",
+              "turn": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "session_id": "qa-session-3ec46d2611c9f331",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2:answer",
+                "turn_id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "QAISO_PRIVATE_B_qa-fixture-0001"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-3ec46d2611c9f331-turn-2:end",
+              "session_id": "qa-session-3ec46d2611c9f331",
+              "turn": {
+                "id": "qa-openai-3ec46d2611c9f331-turn-2",
+                "session_id": "qa-session-3ec46d2611c9f331",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-3ec46d2611c9f331-turn-2",
+            "session_id": "qa-session-3ec46d2611c9f331",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0",
+              "server": "daimon-mcp",
+              "name": "read_channel",
+              "arguments": {
+                "channel_id": "B",
+                "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-2"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"messages\":[{\"content\":\"QAISO_PRIVATE_B_qa-fixture-0001\"}]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "location": "steps[7]",
+          "channel": "A",
+          "thread": "turn3",
+          "request_text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE.",
+          "session_id": "qa-session-7d74e1a82527b0dd",
+          "root_id": "qa-openai-7d74e1a82527b0dd-turn-3",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-3:running",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-3:input",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3:input",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "name": "read_channel",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "channel_id": "qa-channel-b",
+                  "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "The channel is outside the caller's readable scope."
+                    }
+                  ],
+                  "isError": true
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "name": "search_messages",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "content": "QAISO_PRIVATE_B",
+                  "channel_ids": [
+                    "qa-channel-b"
+                  ],
+                  "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"messages\":[]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-3:answer",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3:answer",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "FOUND=NONE"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-3:end",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-7d74e1a82527b0dd-turn-3",
+            "session_id": "qa-session-7d74e1a82527b0dd",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0",
+              "server": "daimon-mcp",
+              "name": "read_channel",
+              "arguments": {
+                "channel_id": "qa-channel-b",
+                "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The channel is outside the caller's readable scope."
+                  }
+                ],
+                "isError": true
+              },
+              "schema_origin": "daimon-registry"
+            },
+            {
+              "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1",
+              "server": "daimon-mcp",
+              "name": "search_messages",
+              "arguments": {
+                "content": "QAISO_PRIVATE_B",
+                "channel_ids": [
+                  "qa-channel-b"
+                ],
+                "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"messages\":[]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 4,
+          "location": "steps[9]",
+          "channel": "A",
+          "thread": "turn3",
+          "request_text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE.",
+          "session_id": "qa-session-7d74e1a82527b0dd",
+          "root_id": "qa-openai-7d74e1a82527b0dd-turn-4",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-4:running",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-4:input",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4:input",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-4:tool:0",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4:tool:0",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "cat qa_iso_b.txt; ls /mnt",
+                "cwd": null,
+                "exit_code": 0,
+                "output": "cat: qa_iso_b.txt: No such file or directory\n"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-4:answer",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4:answer",
+                "turn_id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "FILE=NONE"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-7d74e1a82527b0dd-turn-4:end",
+              "session_id": "qa-session-7d74e1a82527b0dd",
+              "turn": {
+                "id": "qa-openai-7d74e1a82527b0dd-turn-4",
+                "session_id": "qa-session-7d74e1a82527b0dd",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-7d74e1a82527b0dd-turn-4",
+            "session_id": "qa-session-7d74e1a82527b0dd",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": []
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -372,23 +1140,41 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[5]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[7]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[9]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "read_channel",
+                "search_messages"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     },
     {
       "backend": "gemini",
@@ -403,7 +1189,399 @@
       },
       "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 2,
+          "location": "steps[5]",
+          "channel": "B",
+          "thread": "turn2",
+          "request_text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code.",
+          "session_id": "qa-session-3ec46d2611c9f331",
+          "root_id": "qa-gemini-3ec46d2611c9f331-turn-2",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-3ec46d2611c9f331-turn-2:end",
+              "interaction": {
+                "id": "qa-gemini-3ec46d2611c9f331-turn-2",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-3ec46d2611c9f331-turn-2",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-3ec46d2611c9f331",
+            "steps": [
+              {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0",
+                "type": "mcp_server_tool_call",
+                "name": "read_channel",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "channel_id": "B",
+                  "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-2"
+                }
+              },
+              {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"messages\":[{\"content\":\"QAISO_PRIVATE_B_qa-fixture-0001\"}]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-3ec46d2611c9f331-turn-2:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "printf %s QAISO_PRIVATE_B_qa-fixture-0001 > qa_iso_b.txt"
+                }
+              },
+              {
+                "id": "qa-gemini-3ec46d2611c9f331-turn-2:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-3ec46d2611c9f331-turn-2:tool:0",
+                "result": "",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-3ec46d2611c9f331-turn-2:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "QAISO_PRIVATE_B_qa-fixture-0001"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-2-0",
+              "server": "daimon-mcp",
+              "name": "read_channel",
+              "arguments": {
+                "channel_id": "B",
+                "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-2"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"messages\":[{\"content\":\"QAISO_PRIVATE_B_qa-fixture-0001\"}]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "location": "steps[7]",
+          "channel": "A",
+          "thread": "turn3",
+          "request_text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE.",
+          "session_id": "qa-session-7d74e1a82527b0dd",
+          "root_id": "qa-gemini-7d74e1a82527b0dd-turn-3",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-7d74e1a82527b0dd-turn-3:end",
+              "interaction": {
+                "id": "qa-gemini-7d74e1a82527b0dd-turn-3",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-7d74e1a82527b0dd-turn-3",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-7d74e1a82527b0dd",
+            "steps": [
+              {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0",
+                "type": "mcp_server_tool_call",
+                "name": "read_channel",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "channel_id": "qa-channel-b",
+                  "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+                }
+              },
+              {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "The channel is outside the caller's readable scope."
+                    }
+                  ],
+                  "isError": true
+                },
+                "is_error": true
+              },
+              {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1",
+                "type": "mcp_server_tool_call",
+                "name": "search_messages",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "content": "QAISO_PRIVATE_B",
+                  "channel_ids": [
+                    "qa-channel-b"
+                  ],
+                  "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+                }
+              },
+              {
+                "id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"messages\":[]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-7d74e1a82527b0dd-turn-3:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FOUND=NONE"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-0",
+              "server": "daimon-mcp",
+              "name": "read_channel",
+              "arguments": {
+                "channel_id": "qa-channel-b",
+                "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The channel is outside the caller's readable scope."
+                  }
+                ],
+                "isError": true
+              },
+              "schema_origin": "daimon-registry"
+            },
+            {
+              "call_id": "qa-call-QA-ISO-TEAM-CHANNEL-ISOLATION-3-1",
+              "server": "daimon-mcp",
+              "name": "search_messages",
+              "arguments": {
+                "content": "QAISO_PRIVATE_B",
+                "channel_ids": [
+                  "qa-channel-b"
+                ],
+                "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"messages\":[]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 4,
+          "location": "steps[9]",
+          "channel": "A",
+          "thread": "turn3",
+          "request_text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE.",
+          "session_id": "qa-session-7d74e1a82527b0dd",
+          "root_id": "qa-gemini-7d74e1a82527b0dd-turn-4",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-7d74e1a82527b0dd",
+            "input": [
+              {
+                "type": "text",
+                "text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-7d74e1a82527b0dd-turn-3",
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-7d74e1a82527b0dd-turn-4:end",
+              "interaction": {
+                "id": "qa-gemini-7d74e1a82527b0dd-turn-4",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-7d74e1a82527b0dd-turn-4",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-7d74e1a82527b0dd",
+            "steps": [
+              {
+                "id": "qa-gemini-7d74e1a82527b0dd-turn-4:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "cat qa_iso_b.txt; ls /mnt"
+                }
+              },
+              {
+                "id": "qa-gemini-7d74e1a82527b0dd-turn-4:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-7d74e1a82527b0dd-turn-4:tool:0",
+                "result": "cat: qa_iso_b.txt: No such file or directory\n",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-7d74e1a82527b0dd-turn-4:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FILE=NONE"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": []
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -437,23 +1615,47 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[5]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[7]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[9]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "MCP_AUTH_UNBOUND",
+          "location": "mcp",
+          "reason": "Gemini refuses credential_ref/tool_policy. Native decoding is scripted; authenticated preparation needs the owner's resolver seam. Never downgrade to anonymous MCP."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "read_channel",
+                "search_messages"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     }
   ]
 }

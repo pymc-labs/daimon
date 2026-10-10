@@ -167,7 +167,310 @@
       },
       "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki.",
+          "session_id": "qa-session-376437ddfa0dbb12",
+          "root_id": "qa-openai-376437ddfa0dbb12-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-376437ddfa0dbb12-turn-1:running",
+              "session_id": "qa-session-376437ddfa0dbb12",
+              "turn": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "session_id": "qa-session-376437ddfa0dbb12",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-376437ddfa0dbb12-turn-1:input",
+              "session_id": "qa-session-376437ddfa0dbb12",
+              "turn": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "session_id": "qa-session-376437ddfa0dbb12",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1:input",
+                "turn_id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0",
+              "session_id": "qa-session-376437ddfa0dbb12",
+              "turn": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "session_id": "qa-session-376437ddfa0dbb12",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "name": "update_agent",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "name": "qa-unbound-qa-fixture-0001",
+                  "description": "qa probe",
+                  "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "This agent is not bound to the caller's channel. Nothing changed."
+                    }
+                  ],
+                  "isError": true
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1",
+              "session_id": "qa-session-376437ddfa0dbb12",
+              "turn": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "session_id": "qa-session-376437ddfa0dbb12",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "name": "attach_mcp_server",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-unbound-qa-fixture-0001",
+                  "server_name": "deepwiki",
+                  "url": "https://mcp.deepwiki.com/mcp",
+                  "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "This agent is not bound to the caller's channel. Nothing changed."
+                    }
+                  ],
+                  "isError": true
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-376437ddfa0dbb12-turn-1:answer",
+              "session_id": "qa-session-376437ddfa0dbb12",
+              "turn": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "session_id": "qa-session-376437ddfa0dbb12",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1:answer",
+                "turn_id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "I cannot edit that agent from this channel. Ask an admin to bind it here first."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-376437ddfa0dbb12-turn-1:end",
+              "session_id": "qa-session-376437ddfa0dbb12",
+              "turn": {
+                "id": "qa-openai-376437ddfa0dbb12-turn-1",
+                "session_id": "qa-session-376437ddfa0dbb12",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-376437ddfa0dbb12-turn-1",
+            "session_id": "qa-session-376437ddfa0dbb12",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0",
+              "server": "daimon-mcp",
+              "name": "update_agent",
+              "arguments": {
+                "name": "qa-unbound-qa-fixture-0001",
+                "description": "qa probe",
+                "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "This agent is not bound to the caller's channel. Nothing changed."
+                  }
+                ],
+                "isError": true
+              },
+              "schema_origin": "daimon-registry"
+            },
+            {
+              "call_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1",
+              "server": "daimon-mcp",
+              "name": "attach_mcp_server",
+              "arguments": {
+                "agent_name": "qa-unbound-qa-fixture-0001",
+                "server_name": "deepwiki",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "This agent is not bound to the caller's channel. Nothing changed."
+                  }
+                ],
+                "isError": true
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -183,11 +486,41 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[1]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "attach_mcp_server",
+                "update_agent"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     },
     {
       "backend": "gemini",
@@ -202,7 +535,178 @@
       },
       "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki.",
+          "session_id": "qa-session-376437ddfa0dbb12",
+          "root_id": "qa-gemini-376437ddfa0dbb12-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-376437ddfa0dbb12-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-376437ddfa0dbb12-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-376437ddfa0dbb12-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-376437ddfa0dbb12",
+            "steps": [
+              {
+                "id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0",
+                "type": "mcp_server_tool_call",
+                "name": "update_agent",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "name": "qa-unbound-qa-fixture-0001",
+                  "description": "qa probe",
+                  "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+                }
+              },
+              {
+                "id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "This agent is not bound to the caller's channel. Nothing changed."
+                    }
+                  ],
+                  "isError": true
+                },
+                "is_error": true
+              },
+              {
+                "id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1",
+                "type": "mcp_server_tool_call",
+                "name": "attach_mcp_server",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "agent_name": "qa-unbound-qa-fixture-0001",
+                  "server_name": "deepwiki",
+                  "url": "https://mcp.deepwiki.com/mcp",
+                  "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+                }
+              },
+              {
+                "id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "This agent is not bound to the caller's channel. Nothing changed."
+                    }
+                  ],
+                  "isError": true
+                },
+                "is_error": true
+              },
+              {
+                "id": "qa-gemini-376437ddfa0dbb12-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I cannot edit that agent from this channel. Ask an admin to bind it here first."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-0",
+              "server": "daimon-mcp",
+              "name": "update_agent",
+              "arguments": {
+                "name": "qa-unbound-qa-fixture-0001",
+                "description": "qa probe",
+                "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "This agent is not bound to the caller's channel. Nothing changed."
+                  }
+                ],
+                "isError": true
+              },
+              "schema_origin": "daimon-registry"
+            },
+            {
+              "call_id": "qa-call-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1-1",
+              "server": "daimon-mcp",
+              "name": "attach_mcp_server",
+              "arguments": {
+                "agent_name": "qa-unbound-qa-fixture-0001",
+                "server_name": "deepwiki",
+                "url": "https://mcp.deepwiki.com/mcp",
+                "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "This agent is not bound to the caller's channel. Nothing changed."
+                  }
+                ],
+                "isError": true
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -218,11 +722,47 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[1]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "MCP_AUTH_UNBOUND",
+          "location": "mcp",
+          "reason": "Gemini refuses credential_ref/tool_policy. Native decoding is scripted; authenticated preparation needs the owner's resolver seam. Never downgrade to anonymous MCP."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "attach_mcp_server",
+                "update_agent"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     }
   ]
 }

@@ -14,6 +14,9 @@ dependencies = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "starlette>=0.40",
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
+    "mcp>=1.0",
 ]
 
 [project.urls]

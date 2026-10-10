@@ -20,6 +20,8 @@ from daimon.testing.provider_replay import (
     WireFrame,
     WireReply,
 )
+from mcp.types import CallToolResult
+from mux.contracts.resources import MCPConnection
 from pydantic import Field, TypeAdapter, model_validator
 
 TARGET_SHA256 = "fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4"
@@ -36,9 +38,57 @@ class FixtureGap(Record):
         "HOST_GATE",
         "RUNNER_HOOK",
         "ANTHROPIC_SOURCE_UNBOUND",
+        "MCP_AUTH_UNBOUND",
+        "EXTERNAL_TOOL_SCHEMA_UNBOUND",
     ]
     location: str
     reason: str = Field(min_length=1)
+
+
+class NativeMCPCall(Record):
+    call_id: str = Field(min_length=1)
+    server: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    arguments: Object
+    # Actual JSON-RPC CallToolResult shape, not a claimed host mutation.
+    result: Object
+    schema_origin: Literal["daimon-registry", "authored-external"] = "daimon-registry"
+
+    @model_validator(mode="after")
+    def valid_result(self) -> NativeMCPCall:
+        CallToolResult.model_validate(self.result)
+        if set(self.result) != {"content", "isError"} or type(self.result["isError"]) is not bool:
+            raise ValueError("fixture result requires explicit bounded MCP content/error fields")
+        return self
+
+
+class MCPFixtureBinding(Record):
+    connections: tuple[MCPConnection, ...]
+    schemas: SourcePin
+    auth_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    auth_source: SourcePin
+    host_source: SourcePin
+
+    @model_validator(mode="after")
+    def closed_connections(self) -> MCPFixtureBinding:
+        if not self.connections or len({c.name for c in self.connections}) != len(self.connections):
+            raise ValueError("MCP fixture requires distinct, nonempty connections")
+        for connection in self.connections:
+            policy = connection.tool_policy
+            allowed = policy.get("allowed_tools")
+            if (
+                not connection.credential_ref
+                or set(policy) != {"allowed_tools", "required"}
+                or policy["required"] is not True
+                or not isinstance(allowed, list)
+                or not allowed
+                or any(not isinstance(name, str) or not name for name in allowed)
+                or len(set(str(name) for name in allowed)) != len(allowed)
+            ):
+                raise ValueError(
+                    "MCP fixture requires explicit credential refs and closed tool policies"
+                )
+        return self
 
 
 class NativeTurn(Record):
@@ -54,6 +104,7 @@ class NativeTurn(Record):
     frames: tuple[Object, ...]
     snapshot: Object
     completion_gate: str | None = None
+    mcp_calls: tuple[NativeMCPCall, ...] = ()
 
 
 class BackendFixture(Record):
@@ -68,6 +119,7 @@ class BackendFixture(Record):
     provenance: Literal["authored-sdk-wire"] = "authored-sdk-wire"
     turns: tuple[NativeTurn, ...]
     gaps: tuple[FixtureGap, ...]
+    mcp_binding: MCPFixtureBinding | None = None
 
     @model_validator(mode="after")
     def turn_integrity(self) -> BackendFixture:
@@ -88,6 +140,63 @@ class BackendFixture(Record):
         if len({t.root_id for t in self.turns}) != len(self.turns):
             raise ValueError("duplicate native root identities")
         for t in self.turns:
+            if len({c.call_id for c in t.mcp_calls}) != len(t.mcp_calls):
+                raise ValueError("duplicate native MCP call identities")
+            if t.mcp_calls and self.mcp_binding is None:
+                raise ValueError("native MCP calls lack explicit connection intent")
+            for call in t.mcp_calls:
+                connections = self.mcp_binding.connections if self.mcp_binding else ()
+                server = next((c for c in connections if c.name == call.server), None)
+                allowed = server.tool_policy.get("allowed_tools") if server else None
+                if not isinstance(allowed, list) or call.name not in allowed:
+                    raise ValueError("native MCP call is outside fixture connection policy")
+                if (
+                    call.result.get("isError") is not False
+                    and call.result.get("isError") is not True
+                ):
+                    raise ValueError("native MCP result lacks explicit error disposition")
+                if self.backend == "openai":
+                    items = [
+                        f.get("item")
+                        for f in t.frames
+                        if f.get("type") == "agent.session.turn.item.done"
+                    ]
+                    expected: Object = {
+                        "id": call.call_id,
+                        "type": "mcp_call",
+                        "turn_id": t.root_id,
+                        "name": call.name,
+                        "server_label": call.server,
+                        "arguments": call.arguments,
+                        "output": call.result,
+                        "error": None,
+                        "status": "completed",
+                    }
+                    if items.count(expected) != 1:
+                        raise ValueError("OpenAI native MCP wire differs from its script")
+                else:
+                    steps = t.snapshot.get("steps")
+                    use: Object = {
+                        "id": call.call_id,
+                        "type": "mcp_server_tool_call",
+                        "name": call.name,
+                        "server_name": call.server,
+                        "arguments": call.arguments,
+                    }
+                    reply: Object = {
+                        "id": call.call_id + ":result",
+                        "type": "mcp_server_tool_result",
+                        "call_id": call.call_id,
+                        "result": call.result,
+                        "is_error": call.result["isError"],
+                    }
+                    if (
+                        not isinstance(steps, list)
+                        or steps.count(use) != 1
+                        or steps.count(reply) != 1
+                        or steps.index(use) >= steps.index(reply)
+                    ):
+                        raise ValueError("Gemini native MCP wire differs from its script")
             if self.backend == "openai":
                 if t.request != {
                     "events": [
@@ -203,6 +312,9 @@ class FixturePack(Record):
                 raise ValueError("embedded scenario differs from pinned catalog bytes")
             for asset in scenario.assets:
                 asset.verify(root)
+            for fixture in scenario.providers:
+                if fixture.mcp_binding is not None:
+                    fixture.mcp_binding.schemas.verify(root)
 
     def select(self, scenario_id: str, backend: Backend) -> tuple[ScenarioFixture, BackendFixture]:
         scenario = next((s for s in self.scenarios if s.scenario_id == scenario_id), None)

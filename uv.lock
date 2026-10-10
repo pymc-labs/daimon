@@ -1136,8 +1136,11 @@ dependencies = [
     { name = "asyncpg" },
     { name = "daimon-core" },
     { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "starlette" },
 ]
@@ -1148,8 +1151,11 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "daimon-core", editable = "packages/core" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "jsonschema", specifier = ">=4.0" },
+    { name = "mcp", specifier = ">=1.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "starlette", specifier = ">=0.40" },
 ]

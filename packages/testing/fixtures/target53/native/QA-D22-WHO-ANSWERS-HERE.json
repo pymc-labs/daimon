@@ -185,7 +185,472 @@
       },
       "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Which agent are you, and which agent answers in this channel? Name them exactly.",
+          "session_id": "qa-session-6fa51e21abf64e0a",
+          "root_id": "qa-openai-6fa51e21abf64e0a-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Which agent are you, and which agent answers in this channel? Name them exactly."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-6fa51e21abf64e0a-turn-1:running",
+              "session_id": "qa-session-6fa51e21abf64e0a",
+              "turn": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "session_id": "qa-session-6fa51e21abf64e0a",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-6fa51e21abf64e0a-turn-1:input",
+              "session_id": "qa-session-6fa51e21abf64e0a",
+              "turn": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "session_id": "qa-session-6fa51e21abf64e0a",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1:input",
+                "turn_id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Which agent are you, and which agent answers in this channel? Name them exactly."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0",
+              "session_id": "qa-session-6fa51e21abf64e0a",
+              "turn": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "session_id": "qa-session-6fa51e21abf64e0a",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "name": "get_agent",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "name": "daimon",
+                  "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-1"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"name\":\"daimon\",\"answering_agent_name\":\"qa-channel-agent\"}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-6fa51e21abf64e0a-turn-1:answer",
+              "session_id": "qa-session-6fa51e21abf64e0a",
+              "turn": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "session_id": "qa-session-6fa51e21abf64e0a",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1:answer",
+                "turn_id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "I am daimon. qa-channel-agent answers in this channel."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-6fa51e21abf64e0a-turn-1:end",
+              "session_id": "qa-session-6fa51e21abf64e0a",
+              "turn": {
+                "id": "qa-openai-6fa51e21abf64e0a-turn-1",
+                "session_id": "qa-session-6fa51e21abf64e0a",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-6fa51e21abf64e0a-turn-1",
+            "session_id": "qa-session-6fa51e21abf64e0a",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0",
+              "server": "daimon-mcp",
+              "name": "get_agent",
+              "arguments": {
+                "name": "daimon",
+                "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"name\":\"daimon\",\"answering_agent_name\":\"qa-channel-agent\"}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "location": "steps[4]",
+          "channel": "default",
+          "thread": "turn3",
+          "request_text": "Read this channel's recent messages with your Discord tools and reply with only the release codename.",
+          "session_id": "qa-session-e02fc4ecdf4c906f",
+          "root_id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Read this channel's recent messages with your Discord tools and reply with only the release codename."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-e02fc4ecdf4c906f-turn-3:running",
+              "session_id": "qa-session-e02fc4ecdf4c906f",
+              "turn": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "session_id": "qa-session-e02fc4ecdf4c906f",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-e02fc4ecdf4c906f-turn-3:input",
+              "session_id": "qa-session-e02fc4ecdf4c906f",
+              "turn": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "session_id": "qa-session-e02fc4ecdf4c906f",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3:input",
+                "turn_id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Read this channel's recent messages with your Discord tools and reply with only the release codename."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0",
+              "session_id": "qa-session-e02fc4ecdf4c906f",
+              "turn": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "session_id": "qa-session-e02fc4ecdf4c906f",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0",
+                "type": "mcp_call",
+                "turn_id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "name": "read_channel",
+                "server_label": "daimon-mcp",
+                "arguments": {
+                  "channel_id": "default",
+                  "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-3"
+                },
+                "output": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"messages\":[{\"content\":\"QA-SEED-qa-fixture-0001 is the release codename.\"}]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "error": null,
+                "status": "completed"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-e02fc4ecdf4c906f-turn-3:answer",
+              "session_id": "qa-session-e02fc4ecdf4c906f",
+              "turn": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "session_id": "qa-session-e02fc4ecdf4c906f",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3:answer",
+                "turn_id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "QA-SEED-qa-fixture-0001"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-e02fc4ecdf4c906f-turn-3:end",
+              "session_id": "qa-session-e02fc4ecdf4c906f",
+              "turn": {
+                "id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+                "session_id": "qa-session-e02fc4ecdf4c906f",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-e02fc4ecdf4c906f-turn-3",
+            "session_id": "qa-session-e02fc4ecdf4c906f",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0",
+              "server": "daimon-mcp",
+              "name": "read_channel",
+              "arguments": {
+                "channel_id": "default",
+                "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-3"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"messages\":[{\"content\":\"QA-SEED-qa-fixture-0001 is the release codename.\"}]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -195,17 +660,41 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[1]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
-        },
-        {
-          "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[4]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "get_agent",
+                "read_channel"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     },
     {
       "backend": "gemini",
@@ -220,7 +709,248 @@
       },
       "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
       "provenance": "authored-sdk-wire",
-      "turns": [],
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Which agent are you, and which agent answers in this channel? Name them exactly.",
+          "session_id": "qa-session-6fa51e21abf64e0a",
+          "root_id": "qa-gemini-6fa51e21abf64e0a-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Which agent are you, and which agent answers in this channel? Name them exactly."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-6fa51e21abf64e0a-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-6fa51e21abf64e0a-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-6fa51e21abf64e0a-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-6fa51e21abf64e0a",
+            "steps": [
+              {
+                "id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0",
+                "type": "mcp_server_tool_call",
+                "name": "get_agent",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "name": "daimon",
+                  "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-1"
+                }
+              },
+              {
+                "id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"name\":\"daimon\",\"answering_agent_name\":\"qa-channel-agent\"}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-6fa51e21abf64e0a-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I am daimon. qa-channel-agent answers in this channel."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-1-0",
+              "server": "daimon-mcp",
+              "name": "get_agent",
+              "arguments": {
+                "name": "daimon",
+                "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-1"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"name\":\"daimon\",\"answering_agent_name\":\"qa-channel-agent\"}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        },
+        {
+          "turn": 3,
+          "location": "steps[4]",
+          "channel": "default",
+          "thread": "turn3",
+          "request_text": "Read this channel's recent messages with your Discord tools and reply with only the release codename.",
+          "session_id": "qa-session-e02fc4ecdf4c906f",
+          "root_id": "qa-gemini-e02fc4ecdf4c906f-turn-3",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Read this channel's recent messages with your Discord tools and reply with only the release codename."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": [
+              {
+                "type": "mcp_server",
+                "name": "daimon-mcp",
+                "url": "https://qa.invalid/mcp",
+                "headers": {
+                  "Authorization": "Bearer offline-mcp-fixture"
+                }
+              }
+            ]
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-e02fc4ecdf4c906f-turn-3:end",
+              "interaction": {
+                "id": "qa-gemini-e02fc4ecdf4c906f-turn-3",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-e02fc4ecdf4c906f-turn-3",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-e02fc4ecdf4c906f",
+            "steps": [
+              {
+                "id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0",
+                "type": "mcp_server_tool_call",
+                "name": "read_channel",
+                "server_name": "daimon-mcp",
+                "arguments": {
+                  "channel_id": "default",
+                  "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-3"
+                }
+              },
+              {
+                "id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0:result",
+                "type": "mcp_server_tool_result",
+                "call_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0",
+                "result": {
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "{\"messages\":[{\"content\":\"QA-SEED-qa-fixture-0001 is the release codename.\"}]}"
+                    }
+                  ],
+                  "isError": false
+                },
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-e02fc4ecdf4c906f-turn-3:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "QA-SEED-qa-fixture-0001"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null,
+          "mcp_calls": [
+            {
+              "call_id": "qa-call-QA-D22-WHO-ANSWERS-HERE-3-0",
+              "server": "daimon-mcp",
+              "name": "read_channel",
+              "arguments": {
+                "channel_id": "default",
+                "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-3"
+              },
+              "result": {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "{\"messages\":[{\"content\":\"QA-SEED-qa-fixture-0001 is the release codename.\"}]}"
+                  }
+                ],
+                "isError": false
+              },
+              "schema_origin": "daimon-registry"
+            }
+          ]
+        }
+      ],
       "gaps": [
         {
           "status": "BLOCKED",
@@ -230,17 +960,47 @@
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[1]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
         },
         {
           "status": "BLOCKED",
-          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
-          "location": "steps[4]",
-          "reason": "Native tool/artifact recipe needs the owner's real schema."
+          "code": "MCP_AUTH_UNBOUND",
+          "location": "mcp",
+          "reason": "Gemini refuses credential_ref/tool_policy. Native decoding is scripted; authenticated preparation needs the owner's resolver seam. Never downgrade to anonymous MCP."
         }
-      ]
+      ],
+      "mcp_binding": {
+        "connections": [
+          {
+            "name": "daimon-mcp",
+            "url": "https://qa.invalid/mcp",
+            "transport": "streamable_http",
+            "credential_ref": "host:qa-daimon-mcp",
+            "tool_policy": {
+              "allowed_tools": [
+                "get_agent",
+                "read_channel"
+              ],
+              "required": true
+            }
+          }
+        ],
+        "schemas": {
+          "path": "fixtures/mcp-tools.json",
+          "sha256": "cb6c1d1f549bf3a0011f1234bd4315d49fec2e6a5055d932fff925cb16db1659"
+        },
+        "auth_commit": "48a1dc8ebd5f07427fdd1257d6df5a171151d701",
+        "auth_source": {
+          "path": "packages/mux/mux/drivers/openai/mcp_auth.py",
+          "sha256": "57dbfb47b770bc38eb1d2e9723149a8a42d72d1419ef620a2d632e3d46adf2e6"
+        },
+        "host_source": {
+          "path": "packages/testing/daimon/testing/qa_mcp_host.py",
+          "sha256": "0e9e28c25c7e3e4749b5d1bc5b6cd8d3f99db8522b8f6f694fe88c3f7a756ea9"
+        }
+      }
     }
   ]
 }
