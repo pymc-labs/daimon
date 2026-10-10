@@ -41,6 +41,8 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_connect_cards import repos_come_too_line
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import any_agent_rules
 from daimon.core.routing_facts import (
     build_clear_default_note,
@@ -56,6 +58,7 @@ from daimon.core.scope import (
     merge,
 )
 from daimon.core.stores.domain import CHAT_PLATFORMS, ThreadAgentBindingRow
+from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from daimon.core.stores.thread_agent_bindings import get_binding, list_active_bindings
@@ -151,9 +154,19 @@ async def _set_agent_default_impl(
         scope = TenantScopeRef(tenant_id=tenant_id)
         scope_label = "workspace"
 
+    if agent is None:
+        agent = await find_agent_by_daimon_tag(
+            runtime.client, tenant_id=auth.tenant_id, name=agent_name
+        )
     async with runtime.session_factory.begin() as session:
         prior = await get_scope(session, scope=scope)
         prior_agent: str | None = prior.agent_name if prior is not None else None
+        # The agent answers in one more place, so its repos reach that place too.
+        brings_repos = agent is not None and bool(
+            (await agent_repo_summary(session, tenant_id=tenant_id)).by_agent.get(
+                derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id))
+            )
+        )
         await set_fields(
             session,
             scope=scope,
@@ -169,7 +182,8 @@ async def _set_agent_default_impl(
         scope=scope_label,
         agent_name=agent_name,
         previous_agent_name=prior_agent,
-        routing_note=build_set_default_note(agent_name=agent_name, scope_label=scope_label),
+        routing_note=build_set_default_note(agent_name=agent_name, scope_label=scope_label)
+        + (f" {repos_come_too_line(agent_name)}" if brings_repos else ""),
     )
 
 
