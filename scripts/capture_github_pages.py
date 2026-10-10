@@ -78,7 +78,12 @@ INSTALLATION = _Installation(
 )
 
 
-def confirmation(*, agent: bool) -> Response:
+def confirmation(
+    *,
+    agent: bool,
+    already_added: frozenset[int] = frozenset(),
+    needed: dict[int, bool] | None = None,
+) -> Response:
     return _confirmation_page(
         root="https://mcp.test",
         state="review",
@@ -90,6 +95,8 @@ def confirmation(*, agent: bool) -> Response:
         platform="discord",
         workspace="Example Lab",
         agent_name="ResearchBot" if agent else None,
+        already_added=already_added,
+        needed=needed,
     )
 
 
@@ -116,6 +123,10 @@ def pages() -> dict[str, Response]:
         "picker_read_only": confirmation(agent=True),
         "picker_connecting": confirmation(agent=True),
         "picker_workspace": confirmation(agent=False),
+        "picker_already_added": confirmation(agent=True, already_added=frozenset({101, 102})),
+        "picker_needs_write": confirmation(
+            agent=True, already_added=frozenset({102}), needed={101: True}
+        ),
         "install": _install_page("https://github.com/apps/example/installations/new", "#cancel"),
         "pending": _pending_page("#check", "#cancel", "example-org"),
         "no_repos": _no_repos_page("https://mcp.test/connect/example", "#another"),
@@ -136,6 +147,26 @@ def pages() -> dict[str, Response]:
             same_person=True,
             agent_name="ResearchBot",
             update_pending=True,
+        ),
+        "done_key_retired": _done_page(
+            count=2,
+            platform="slack",
+            external_id="U123",
+            requester_label="Carlos",
+            same_person=True,
+            agent_name="ResearchBot",
+            update_pending=False,
+            retired_saved_key=True,
+        ),
+        "done_key_waiting": _done_page(
+            count=2,
+            platform="slack",
+            external_id="U123",
+            requester_label="Carlos",
+            same_person=True,
+            agent_name="ResearchBot",
+            update_pending=True,
+            missing_repos=(("example-org/research", True),),
         ),
         "done_discord": _done_page(
             count=12,
@@ -272,23 +303,41 @@ def main() -> None:
                     assert page.locator("#selection-status").inner_text() == (
                         "12 selected. Read only."
                     )
+                    assert page.locator("#connect-repos").inner_text() == "Add 12 repos"
                 if state == "picker_selected":
                     assert page.locator("#selection-status").inner_text() == (
-                        "12 selected. Read and write."
+                        "12 selected. Read only."
                     )
                     assert page.locator("#change-access").is_visible()
                     page.locator(".gh-repo-list").evaluate("element => element.scrollTop = 0")
                     page.evaluate("window.scrollTo({top: 0, behavior: 'instant'})")
                     page.screenshot(path=ROOT / "screenshots" / f"{state}-{width}.png")
                     page.locator("#change-access").click()
-                    assert page.locator('input[name="access"][value="write"]').evaluate(
+                    assert page.locator('input[name="access"][value="read"]').evaluate(
                         "element => document.activeElement === element"
                     )
                 if state == "done_agent":
-                    assert page.locator("h1").inner_text() == "Connected 12 repos"
-                    assert (
-                        "ResearchBot can use them from your next message."
-                        in page.locator("main").inner_text()
+                    assert page.locator("h1").inner_text() == "Added 12 repos to ResearchBot."
+                    assert "You can close this tab." in page.locator("main").inner_text()
+                    assert "old GitHub token" not in page.locator("main").inner_text()
+                if state == "picker_needs_write":
+                    assert page.locator("input[name=repo]:checked:not(:disabled)").count() == 1
+                    assert page.locator(".gh-added").all_inner_texts() == [
+                        "Needs write",
+                        "Already added",
+                    ]
+                    assert page.locator("#connect-repos").inner_text() == "Add 1 repo"
+                if state == "picker_already_added":
+                    assert page.locator("h1").inner_text() == "Add repos to ResearchBot"
+                    assert page.locator("input[name=repo]:disabled:checked").count() == 2
+                    assert page.locator(".gh-added").count() == 2
+                    assert page.locator("#connect-repos").is_disabled()
+                    assert page.locator("#connect-repos").inner_text() == "Add repos"
+                    page.locator('input[name="repo"]:not(:disabled)').first.check()
+                    assert page.locator("#connect-repos").inner_text() == "Add 1 repo"
+                    page.locator('input[name="access"][value="write"]').check()
+                    assert page.locator("#audience").inner_text() == (
+                        "Anyone who talks to ResearchBot can ask it to read and change them."
                     )
                 if state == "picker_connecting":
                     page.locator(".gh-repo-list").evaluate("element => element.scrollTop = 0")
@@ -300,7 +349,7 @@ def main() -> None:
                     page.locator("#connect-repos").click()
                     assert page.locator(".gh-flow.is-connecting").count() == 1
                     assert page.locator("#connect-repos").is_disabled()
-                    assert page.locator("#selection-status").inner_text() == "Connecting 12 repos…"
+                    assert page.locator("#selection-status").inner_text() == "Adding 12 repos…"
                     assert (
                         page.locator("#github-connect-form").evaluate(
                             "form => new FormData(form).getAll('repo').length"
@@ -311,7 +360,7 @@ def main() -> None:
                         page.locator("#github-connect-form").evaluate(
                             "form => new FormData(form).get('access')"
                         )
-                        == "write"
+                        == "read"
                     )
                 if state == "picker_empty":
                     assert page.locator("input[name=repo]:checked").count() == 0
@@ -338,7 +387,7 @@ def main() -> None:
                     ) == page.locator("body").evaluate(
                         "element => getComputedStyle(element).fontFamily"
                     )
-                if not state.startswith("picker"):
+                if not state.startswith("picker") and state != "done_key_waiting":
                     assert "example-org/" not in page.locator("body").inner_text()
                 assert " · " not in page.locator("body").inner_text()
                 if state not in {"picker_empty", "picker_selected"}:
@@ -357,11 +406,11 @@ def main() -> None:
 
                 page.route("https://mcp.test/oauth/github/confirm", collect_form(posted))
                 page.goto("https://mcp.test/preview")
-                radio = page.locator('input[name="access"][value="write"]')
+                radio = page.locator('input[name="access"][value="read"]')
                 assert radio.is_checked()
                 radio.focus()
                 page.keyboard.press("ArrowDown")
-                assert page.locator('input[name="access"][value="read"]').is_checked()
+                assert page.locator('input[name="access"][value="write"]').is_checked()
                 page.keyboard.press("ArrowUp")
                 assert radio.is_checked()
                 first = page.locator('input[name="repo"]').first
@@ -370,7 +419,7 @@ def main() -> None:
                 assert first.is_checked()
                 page.locator("#connect-repos").click()
                 assert posted and posted[0]["repo"] == ["101"]
-                assert posted[0]["access"] == ["write"]
+                assert posted[0]["access"] == ["read"]
                 no_js.close()
             context.close()
         browser.close()

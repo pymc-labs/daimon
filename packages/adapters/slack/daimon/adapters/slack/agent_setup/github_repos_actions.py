@@ -15,20 +15,25 @@ from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.github_connect_cards import resolve_connect_card
+from daimon.core.github_connect_cards import (
+    AgentRepoLine,
+    ask_manager_line,
+    load_agent_repo_lines,
+    picker_title,
+    resolve_connect_card,
+)
 from daimon.core.github_panel import (
     GrantsPanel,
     activate_grants,
     connect_link,
     load_grants_panel,
-    remove_panel_grant,
     safe_github_error,
     stage_panel_grant,
     sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.github_access import deactivate_agent
+from daimon.core.stores.github_access import deactivate_agent, remove_agent_repo
 from daimon.core.stores.github_connect import CLIENT_AGENT_MESSAGE
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
@@ -50,6 +55,7 @@ _ACTIONS = frozenset(
         github_repos.ACTION_SETTINGS,
         github_repos.ACTION_SETTINGS_CHOICE,
         github_repos.ACTION_BACK,
+        github_repos.ACTION_ADD_FOR,
         *github_add_repos.ACTIONS,
     }
 )
@@ -134,61 +140,6 @@ async def _handle_add(
             )
             return True
         next_meta = dataclasses.replace(next_meta, github_step="pick")
-    elif action_id == github_add_repos.ACTION_CONNECT_MORE:
-        if not is_admin:
-            return True
-        try:
-            async with runtime.sessionmaker.begin() as session:
-                await sync_connect_admin(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="slack",
-                    platform_user_id=user_id,
-                    verified_tenant_admin=is_admin,
-                )
-                url = await connect_link(
-                    session,
-                    settings=runtime.settings,
-                    tenant_id=tenant_id,
-                    platform="slack",
-                    platform_user_id=user_id,
-                    verified_tenant_admin=is_admin,
-                    agent_id=agent_id,
-                    agent_name=meta.agent_name,
-                    origin_parent_channel_id=channel_id,
-                    origin_thread_id=meta.thread_id,
-                    origin_followup_token=str(payload.get("response_url") or "") or None,
-                    origin_followup_expires_at=(
-                        datetime.now(UTC) + timedelta(minutes=30)
-                        if payload.get("response_url")
-                        else None
-                    ),
-                )
-        except ValueError as error:
-            await post_ephemeral(
-                client,
-                channel_id=channel_id,
-                user_id=user_id,
-                text=safe_github_error(error),
-            )
-            return True
-        await send_link(
-            client,
-            channel_id=channel_id,
-            thread_id=meta.thread_id,
-            user_id=user_id,
-            url=url,
-            line=f"Connect GitHub for {meta.agent_name}.",
-            card=await resolve_connect_card(
-                runtime.sessionmaker,
-                runtime.settings,
-                tenant_id=tenant_id,
-                platform="slack",
-                workspace_id=meta.team_id,
-                agent_name=meta.agent_name,
-            ),
-        )
-        return True
     elif action_id == github_add_repos.ACTION_ADD:
         if not selected:
             await post_ephemeral(
@@ -348,7 +299,7 @@ async def handle(
     is_admin = await resolve_is_admin(client, user_id=user_id)
     name = (
         str(action.get("value") or "")
-        if action_id == github_repos.ACTION_OPEN
+        if action_id in (github_repos.ACTION_OPEN, github_repos.ACTION_ADD_FOR)
         else meta.agent_name or ""
     )
     if not name:
@@ -380,11 +331,32 @@ async def handle(
         agent_name=name,
         channel_id=channel_id,
         user_id=user_id,
+        refusal_text=ask_manager_line(name),
     )
     if refused:
         return True
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
-    if action_id in github_add_repos.ACTIONS or action_id in (github_repos.ACTION_OPEN,):
+    if action_id in (
+        github_repos.ACTION_ADD_OPEN,
+        github_repos.ACTION_ADD_FOR,
+        github_add_repos.ACTION_CONNECT_MORE,
+    ):
+        await _send_agent_connect_link(
+            runtime,
+            client,
+            payload,
+            agent_name=name,
+            ma_agent_id=agent.ma_agent_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_id=meta.thread_id,
+            team_id=team_id,
+            is_admin=is_admin,
+        )
+        return True
+    if action_id in github_add_repos.ACTIONS:
         async with runtime.sessionmaker() as session:
             add_panel = await load_grants_panel(
                 session, tenant_id=tenant_id, agent_id=agent_id, agent_name=name
@@ -403,7 +375,7 @@ async def handle(
                     agent_name=name,
                     page=0,
                     selected_repo_ids=None,
-                    github_ability="write",
+                    github_ability="read",
                     github_step="pick",
                 )
                 if initial
@@ -436,10 +408,12 @@ async def handle(
             view=github_repos.build_view(
                 dataclasses.replace(
                     meta,
-                    github_settings=meta.github_step.startswith("settings_"),
+                    # Change access returns to Details; Remove returns to the section.
+                    github_settings=meta.github_step == "settings_ability",
                     github_step="pick",
                 ),
                 panel,
+                detail_lines=await _detail_lines(runtime, tenant_id=tenant_id, agent_id=agent_id),
             ),
         )
         return True
@@ -464,7 +438,9 @@ async def handle(
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=str(view_info.get("id") or ""),
             view=github_repos.build_view(
-                dataclasses.replace(meta, github_settings=True, github_step="pick"), panel
+                dataclasses.replace(meta, github_settings=True, github_step="pick"),
+                panel,
+                detail_lines=await _detail_lines(runtime, tenant_id=tenant_id, agent_id=agent_id),
             ),
         )
         return True
@@ -547,21 +523,13 @@ async def handle(
                 elif action_id == github_repos.ACTION_CONFIRM_REMOVE:
                     if repo is None:
                         raise ValueError("Choose a connected repo first.")
-                    await remove_panel_grant(
+                    await remove_agent_repo(
                         session,
                         tenant_id=tenant_id,
                         agent_id=agent_id,
                         repo_id=repo.repo_id,
                         account_id=actor,
                     )
-                    if panel.mode == "app":
-                        await activate_grants(
-                            session,
-                            tenant_id=tenant_id,
-                            agent_id=agent_id,
-                            account_id=actor,
-                            agent_name=name,
-                        )
                 elif action_id == github_repos.ACTION_ACTIVATE:
                     if panel.saved_state:
                         raise ValueError(CLIENT_AGENT_MESSAGE)
@@ -627,7 +595,11 @@ async def handle(
             github_repos.ACTION_NEXT,
         )
         and confirmation is not None
-        else github_repos.build_view(next_meta, panel)
+        else github_repos.build_view(
+            next_meta,
+            panel,
+            detail_lines=await _detail_lines(runtime, tenant_id=tenant_id, agent_id=agent_id),
+        )
     )
     if action_id == github_repos.ACTION_OPEN:
         await client.views_push(trigger_id=str(payload.get("trigger_id") or ""), view=view)  # pyright: ignore[reportUnknownMemberType]
@@ -636,3 +608,85 @@ async def handle(
         view_id = str(view_info.get("id") or "")
         await client.views_update(view_id=view_id, view=view)  # pyright: ignore[reportUnknownMemberType]
     return True
+
+
+async def _detail_lines(
+    runtime: SlackRuntime, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> tuple[AgentRepoLine, ...]:
+    async with runtime.sessionmaker() as session:
+        return await load_agent_repo_lines(
+            session, tenant_id=tenant_id, agent_id=agent_id, platform="slack"
+        )
+
+
+async def _send_agent_connect_link(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    payload: dict[str, Any],
+    *,
+    agent_name: str,
+    ma_agent_id: str,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    user_id: str,
+    channel_id: str,
+    thread_id: str | None,
+    team_id: str,
+    is_admin: bool,
+) -> None:
+    """Send the private link that adds repos to one agent.
+
+    The caller has checked that the person manages the agent; the repos they
+    tick on GitHub are for this agent only.
+    """
+    try:
+        async with runtime.sessionmaker.begin() as session:
+            if is_admin:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    platform_user_id=user_id,
+                    verified_tenant_admin=True,
+                )
+            url = await connect_link(
+                session,
+                settings=runtime.settings,
+                tenant_id=tenant_id,
+                platform="slack",
+                platform_user_id=user_id,
+                verified_tenant_admin=is_admin,
+                verified_agent_manager=True,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                agent_ma_id=ma_agent_id,
+                origin_parent_channel_id=channel_id,
+                origin_thread_id=thread_id,
+                origin_followup_token=str(payload.get("response_url") or "") or None,
+                origin_followup_expires_at=(
+                    datetime.now(UTC) + timedelta(minutes=30)
+                    if payload.get("response_url")
+                    else None
+                ),
+            )
+    except ValueError as error:
+        await post_ephemeral(
+            client, channel_id=channel_id, user_id=user_id, text=safe_github_error(error)
+        )
+        return
+    await send_link(
+        client,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        url=url,
+        line=picker_title(agent_name),
+        card=await resolve_connect_card(
+            runtime.sessionmaker,
+            runtime.settings,
+            tenant_id=tenant_id,
+            platform="slack",
+            workspace_id=team_id,
+            agent_name=agent_name,
+        ),
+    )

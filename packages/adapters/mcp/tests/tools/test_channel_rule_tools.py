@@ -167,3 +167,69 @@ async def test_a_protection_change_waits_out_a_held_policy_fence(
         assert not writer.done(), "the write must wait for the fence, not fail as busy"
     done = await asyncio.wait_for(writer, 10)
     assert (done.writers, done.changed) == ("none", True), done
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "widens"),
+    [
+        ((ROOM,), (ROOM, OTHER), True),
+        ((ROOM,), None, True),
+        ((ROOM, OTHER), (ROOM,), False),
+        ((ROOM,), (), False),
+        (None, (ROOM,), False),
+    ],
+)
+def test_only_a_rule_that_adds_a_place_widens(
+    before: tuple[str, ...] | None, after: tuple[str, ...] | None, widens: bool
+) -> None:
+    from daimon.adapters.mcp.tools.channel_rules import (
+        _widens,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _widens(before, after) is widens
+
+
+@pytest.mark.parametrize(
+    ("runs_in", "come_too"), [((ROOM, OTHER, "555555555555555555"), True), ((ROOM,), False)]
+)
+async def test_widening_an_agent_rule_says_its_repos_come_too(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    runs_in: tuple[str, ...],
+    come_too: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools import channel_rules as tools
+    from daimon.core.channel_rules import AgentRuleChange
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.github_connected_repos import AgentRepoSummary
+
+    tenant_id, account_id, runtime = await _world(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_rules={"bot": AgentRule(runs_in=(ROOM, OTHER))}),
+        )
+
+    async def set_rule(*_args: object, **_kwargs: object) -> AgentRuleChange:
+        return AgentRuleChange("bot", runs_in, True)
+
+    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+        return SimpleNamespace(id="ag_bot", metadata={})
+
+    async def summary(_session: object, *, tenant_id: uuid.UUID) -> AgentRepoSummary:
+        bot = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bot")
+        return AgentRepoSummary(pairs=1, agents=1, by_agent={bot: ("ana/thesis",)})
+
+    monkeypatch.setattr(tools, "set_agent_rule", set_rule)
+    monkeypatch.setattr(tools, "find_agent_by_daimon_tag", find)
+    monkeypatch.setattr(tools, "agent_repo_summary", summary)
+    result = await _set_agent_rule_impl(
+        runtime,
+        _auth(tenant_id, account_id, admin=True),
+        agent_name="bot",
+        runs_in=list(runs_in),
+    )
+    assert result.note.endswith("bot's repos come too.") is come_too

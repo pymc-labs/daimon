@@ -180,12 +180,14 @@ the Daimon operator to switch it. Existing Slack installations need the
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
 Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
-Anyone can run `/github` to see their personal GitHub link. Admins also see
-pending connection links and **Requests waiting**. The ephemeral button opens GitHub to
-confirm repos. Each agent's Details view has
-**🐙 GitHub repos** to add connected repos to an agent. **Settings** changes or
-removes the agent's repos; **Manage connected repos** changes or disconnects
-them for the workspace. New repos appear in a grouped **Connect more repos**
+Anyone can run `/github` to see their personal GitHub link. The GitHub home
+lists each agent with its repo count; workspace admins and channel admins see
+**Add repos** beside each agent, which sends them a link for that agent. Each
+agent's Details view has **🐙 GitHub repos**: "<Agent>'s repos", who can use
+them, **Add repos**, **Remove from <Agent>** and **Details** (who added each
+repo, when, and its access). Someone who can't manage the agent is told to ask
+whoever manages it. The ephemeral button opens GitHub to confirm repos. New
+repos appear in a grouped **Connect more repos**
 or **Not now** card when an admin opens GitHub setup after the UTC day closes.
 Installation removals appear as an ephemeral reconnect button when an admin opens setup.
 GitHub request cards use ephemeral replies in their originating thread; no

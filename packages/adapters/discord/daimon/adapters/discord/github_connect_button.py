@@ -11,11 +11,18 @@ import structlog
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import is_member_guild_admin
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, resolve_connect_card
+from daimon.adapters.discord.checks import channel_admin_caller, is_member_guild_admin
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_connect_cards import (
+    CONNECT_GITHUB_EMOJI,
+    ask_manager_line,
+    resolve_connect_card,
+)
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
-from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.github_connect import bind_discord_connect_click
+from daimon.core.github_panel import can_manage_agent_github
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.stores.github_connect import bind_discord_connect_click, connect_intent_agent
 
 import discord
 from discord.ext import commands
@@ -91,12 +98,15 @@ class GitHubConnectButton(
                 "This connection is no longer available.", ephemeral=True
             )
             return
-        if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
-            await interaction.followup.send(
-                "Only a server admin can connect GitHub.", ephemeral=True
-            )
-            return
         bot = cast(DaimonBot, interaction.client)
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+        manages = False
+        if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
+            refusal = await _manager_refusal(bot, member, tenant_id, self.intent_id)
+            if refusal is not None:
+                await interaction.followup.send(refusal, ephemeral=True)
+                return
+            manages = True
         settings = bot.runtime.settings
         root = settings.mcp.app_root_url
         if root is None:
@@ -119,6 +129,7 @@ class GitHubConnectButton(
                     credentials, f"{interaction.application_id}:{interaction.token}"
                 ),
                 followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+                requester_manages_agent=manages,
             )
         if link is None:
             await interaction.followup.send(
@@ -143,3 +154,35 @@ class GitHubConnectButton(
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+
+async def _manager_refusal(
+    bot: DaimonBot, member: discord.Member, tenant_id: uuid.UUID, intent_id: uuid.UUID
+) -> str | None:
+    """Why a clicker who is not a server admin may not add repos, or None if they manage it."""
+    async with bot.runtime.sessionmaker() as session:
+        target = await connect_intent_agent(session, intent_id=intent_id)
+    if target is None:
+        return "This connection is no longer available."
+    agent_name, ma_agent_id = target
+    if ma_agent_id is None:
+        return ask_manager_line(agent_name)
+    live = await find_agent_by_derived_uuid(
+        bot.runtime.anthropic,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+    )
+    if live is None:
+        return "This connection is no longer available."
+    async with bot.runtime.sessionmaker() as session:
+        manages = await can_manage_agent_github(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            caller=channel_admin_caller(member),
+            agent_names=(agent_name, live.name),
+            ma_agent_id=ma_agent_id,
+            is_daimon_managed=live.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            default=bot.runtime.deployment_default,
+        )
+    return None if manages else ask_manager_line(agent_name)

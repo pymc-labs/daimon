@@ -10,6 +10,7 @@ closures; they delegate to ``_set_channel_rule_impl`` and
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import cast
 
@@ -36,9 +37,13 @@ from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule, set_channel_rule
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
+from daimon.core.github_connect_cards import repos_come_too_line
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_authz_denial
-from daimon.core.stores.access_policy import AccessPolicyUnreadable
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.github_connected_repos import agent_repo_summary
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
@@ -155,6 +160,11 @@ async def _set_channel_rule_impl(
         raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
     except DaimonError as exc:
         raise _refused(exc, Action.SET_CHANNEL_RULE) from exc
+    notes = list(change.notes)
+    # A released agent runs wherever it is set to answer again.
+    for name in change.released:
+        if await _has_repos(runtime, tenant_id=auth.tenant_id, agent_name=name):
+            notes.append(repos_come_too_line(name))
     return SetChannelRuleResult(
         channel_id=change.channel_id,
         readers=change.rule.readers,
@@ -163,7 +173,7 @@ async def _set_channel_rule_impl(
         copied_from=change.copied_from,
         released_agents=list(change.released),
         changed=change.changed,
-        note=" ".join(change.notes),
+        note=" ".join(notes),
     )
 
 
@@ -177,6 +187,11 @@ async def _set_agent_rule_impl(
     require_scope(auth, "channels:write")
     channels = [_channel(auth, channel) for channel in runs_in] if runs_in is not None else None
     try:
+        async with runtime.session_factory() as session:
+            prior = (await load_access_policy(session, tenant_id=auth.tenant_id)).agent_rules.get(
+                agent_name.strip()
+            )
+        before = prior.runs_in if prior is not None else None
         change = await set_agent_rule(
             runtime.client,
             runtime.session_factory,
@@ -191,12 +206,39 @@ async def _set_agent_rule_impl(
         raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
     except DaimonError as exc:
         raise _refused(exc, Action.SET_AGENT_RULE) from exc
+    notes = list(change.notes)
+    if (
+        change.changed
+        and _widens(before, change.runs_in)
+        and await _has_repos(runtime, tenant_id=auth.tenant_id, agent_name=change.agent_name)
+    ):
+        notes.append(repos_come_too_line(change.agent_name))
     return SetAgentRuleResult(
         agent_name=change.agent_name,
         runs_in=list(change.runs_in) if change.runs_in is not None else None,
         changed=change.changed,
-        note=" ".join(change.notes),
+        note=" ".join(notes),
     )
+
+
+def _widens(before: tuple[str, ...] | None, after: tuple[str, ...] | None) -> bool:
+    """Whether a rule change lets the agent run somewhere it couldn't before.
+
+    No rule (None) runs it wherever it is set to answer, so dropping a rule or
+    naming a new channel widens it; narrowing never does.
+    """
+    if before is None:
+        return False
+    return after is None or bool(set(after) - set(before))
+
+
+async def _has_repos(runtime: McpRuntime, *, tenant_id: uuid.UUID, agent_name: str) -> bool:
+    agent = await find_agent_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=agent_name)
+    if agent is None:
+        return False
+    async with runtime.session_factory() as session:
+        summary = await agent_repo_summary(session, tenant_id=tenant_id)
+    return bool(summary.by_agent.get(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)))
 
 
 def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

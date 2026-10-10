@@ -1300,11 +1300,19 @@ admission before any of this runs.
 
 - **GitHub connection invitations** are issued with `daimon github connect-link`
   for a tenant admin, `/github connect` on Discord and Slack, or the
-  `github_connect` MCP tool from a conversation. They can target one agent;
-  self-serve links are refused for legacy-mode agents with a saved GitHub key,
-  working or skill repo credential, or a channel pin. An operator-issued agent
-  link may stage an update for an operator to finish with
-  `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
+  `github_connect` MCP tool from a conversation. They can target one agent.
+  Repos confirmed through a link for one agent belong to that agent
+  (`tenant_github_repos.scope_agent_id`): no other agent can be granted them
+  or get them in a token, and the same repo on two agents is two rows. A
+  server admin, or a channel admin for a non-managed agent local to and held
+  by their channels (the `github_grant` terms), may make such a link; the
+  confirm step checks again that the requester still manages the agent. A
+  confirmed link retires the agent's saved GitHub key only when its working
+  repo (with write) and private skill repos are among its repos; otherwise the
+  repos stay staged until the agent's GitHub panel saves a complete set. An
+  agent limited to channels by a rule may use only repos connected for it.
+  An operator-issued agent link may stage an update for an operator to finish
+  with `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
   credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
@@ -1312,8 +1320,13 @@ admission before any of this runs.
   GitHub admin access before authorizing tenant repositories. These routes
   are absent when GitHub connection is unconfigured.
   Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
-  expose connected repos, agent grants, personal links, waiting requests, and
-  disconnects.
+  list each agent with its repo count and an **Add repos** button, plus
+  personal links and waiting requests. An agent's GitHub section ("<Agent>'s
+  repos") lists its repos, says who can use them, and offers **Add repos**,
+  **Remove from <Agent>** and **Details** (who added each repo, when, and its
+  access). **Add repos** sends whoever manages the agent a link for that
+  agent; anyone else is told to ask whoever manages it. The shared words live
+  in `daimon.core.github_connect_cards`.
   Connect links appear as buttons where the person asked. Discord slash
   commands answer ephemerally; a conversational mention posts a requester-bound
   button in the thread and mints the single-use invitation only when that
@@ -1326,7 +1339,17 @@ admission before any of this runs.
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
   The connection page offers a searchable repo picker and confirms each repo
-  against the signed-in GitHub account. The same browser can safely repeat a
+  against the signed-in GitHub account. For one agent it is titled "Add repos
+  to <Agent>", shows repos the agent already has ticked and greyed, defaults
+  to Read only for the repos added now, and counts only new repos on its
+  button. A repo the agent still needs before it can drop its old key stays
+  ticked and changeable ("Needs write" or "Needed"), and one that needs write
+  is added with write; adding never lowers access. The done page says how many repos were added and, only once the
+  switch to the GitHub App has finished, that the agent no longer uses its old
+  GitHub token; while it waits on a missing working or skill repo it names
+  that repo instead. Setting an agent as a default in more places adds
+  "<Agent>'s repos come too." to `set_agent_default`'s confirmation when the
+  agent has repos. The same browser can safely repeat a
   successful submission; a signed invitation receipt also handles concurrent
   submissions. New installation repos appear in the GitHub setup panel after
   the UTC day closes. Confirmed installation removal cancels affected requests

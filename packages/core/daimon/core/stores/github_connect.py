@@ -14,6 +14,7 @@ from daimon.core._models import (
     AccountGitHubLink,
     AgentFile,
     AgentGitHubGrant,
+    AgentGitHubGrantDraft,
     AgentRepoBinding,
     AgentSkillRepoCredential,
     CliPrincipal,
@@ -36,6 +37,7 @@ from daimon.core.stores.github_credentials import delete_credential_for_principa
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_session_lineage import request_fresh_start
+from daimon.core.stores.thread_sessions import mark_github_key_restart
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -50,16 +52,76 @@ class ClientAgentConnectionError(ValueError):
 
 
 async def require_app_eligible_agent(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, agent_name: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    agent_name: str,
+    switch_saved_key: bool = False,
 ) -> None:
+    """Refuse a self-serve switch the operator owns.
+
+    An agent pinned to channels by a rule may use only repos connected for it,
+    never a server-wide one. `switch_saved_key` is for callers that retire the
+    agent's saved key themselves when it switches (`activate_confirmed_agent`,
+    `activate_grants`).
+    """
     policy = await load_access_policy(session, tenant_id=tenant_id)
     rule = policy.agent_rules.get(agent_name)
-    if rule is not None and rule.runs_in is not None:
+    if (
+        rule is not None
+        and rule.runs_in is not None
+        and await uses_server_wide_repo(session, tenant_id=tenant_id, agent_id=agent_id)
+    ):
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
     if await github_access.get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app":
         return
-    if await has_saved_github_state(session, tenant_id=tenant_id, agent_id=agent_id):
+    if not switch_saved_key and await has_saved_github_state(
+        session, tenant_id=tenant_id, agent_id=agent_id
+    ):
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
+
+
+async def uses_server_wide_repo(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    """Whether a grant or a pending draft of the agent rests on a repo not connected for it."""
+    for model in (AgentGitHubGrant, AgentGitHubGrantDraft):
+        own = select(TenantGitHubRepo.id).where(
+            TenantGitHubRepo.tenant_id == model.tenant_id,
+            TenantGitHubRepo.repo_id == model.repo_id,
+            TenantGitHubRepo.scope_agent_id == agent_id,
+        )
+        query = select(model.repo_id).where(
+            model.tenant_id == tenant_id, model.agent_id == agent_id, ~own.exists()
+        )
+        if model is AgentGitHubGrantDraft:
+            query = query.where(AgentGitHubGrantDraft.operation == "upsert")
+        if await session.scalar(query.limit(1)) is not None:
+            return True
+    return False
+
+
+async def retire_saved_key(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    """Remove the agent's per-agent PAT and token keys; open chats restart on their next turn."""
+    overlay = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
+    if overlay is not None:
+        await agent_github_binding.delete_for_agent(session, agent_id=agent_id)
+        if overlay.principal_id == agent_id:
+            await delete_credential_for_principal(session, principal_id=agent_id)
+    removed_token = False
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if await session.get(AgentFile, (tenant_id, agent_id, key)) is not None:
+            await agent_files.delete_agent_file(
+                session, tenant_id=tenant_id, agent_id=agent_id, key=key
+            )
+            removed_token = True
+    if overlay is None and not removed_token:
+        return False
+    await mark_github_key_restart(session, tenant_id=tenant_id, agent_id=agent_id)
+    return True
 
 
 async def has_saved_github_state(
@@ -95,6 +157,22 @@ async def revoke_invitation(session: AsyncSession, *, token: str) -> None:
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _may_hold_link(
+    account: Account | None, *, tenant_id: uuid.UUID, agent_id: uuid.UUID | None
+) -> bool:
+    """A workspace admin's link, or a member's link for one agent.
+
+    Whether the member manages that agent is checked where the link is made
+    and again when the repos are confirmed, by the caller of `confirm`.
+    """
+    return (
+        account is not None
+        and account.tenant_id == tenant_id
+        and not account.is_external
+        and (account.role == "admin" or agent_id is not None)
+    )
 
 
 async def cli_account_id(
@@ -139,6 +217,7 @@ class Invitation(BaseModel):
     requester_platform_user_id: str | None
     agent_id: uuid.UUID | None
     agent_name: str | None
+    agent_ma_id: str | None = None
     operator_issued: bool
     activation_status: Literal["activated", "update_pending"] | None
     connected_repo_count: int | None
@@ -183,6 +262,8 @@ async def mint_invitation(
     workspace_label: str | None = None,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
+    agent_ma_id: str | None = None,
+    agent_manager_verified: bool = False,
     operator_issued: bool = False,
     origin_platform: str | None = None,
     origin_parent_channel_id: str | None = None,
@@ -193,13 +274,14 @@ async def mint_invitation(
     encrypted_origin_followup: bytes | None = None,
     origin_followup_expires_at: datetime | None = None,
 ) -> str:
+    """Mint a single-use link. A non-admin needs an agent target the caller
+    has checked they manage (`agent_manager_verified`)."""
     account = await session.get(Account, requester_account_id)
-    if (
-        account is None
-        or account.tenant_id != tenant_id
-        or account.role != "admin"
-        or account.is_external
+    if account is None or (
+        account.role != "admin" and not (agent_id is not None and agent_manager_verified)
     ):
+        raise ValueError("requester must be a tenant admin")
+    if not _may_hold_link(account, tenant_id=tenant_id, agent_id=agent_id):
         raise ValueError("requester must be a tenant admin")
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
@@ -210,7 +292,11 @@ async def mint_invitation(
         await agent_files.lock_agent_keys(session, tenant_id=tenant_id, agent_id=agent_id)
         if not operator_issued:
             await require_app_eligible_agent(
-                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                switch_saved_key=True,
             )
     token = secrets.token_urlsafe(32)
     session.add(
@@ -224,6 +310,7 @@ async def mint_invitation(
             requester_platform_user_id=requester_platform_user_id,
             agent_id=agent_id,
             agent_name=agent_name,
+            agent_ma_id=agent_ma_id,
             operator_issued=operator_issued,
             origin_platform=origin_platform,
             origin_parent_channel_id=origin_parent_channel_id,
@@ -316,13 +403,47 @@ async def sweep_expired_click_intents(session: AsyncSession, *, now: datetime) -
     return cast(CursorResult[Any], result).rowcount
 
 
+_ACCESS_RANK: dict[str, int] = {"none": 0, "read": 1, "write": 2}
+_ACCESS_BY_RANK: tuple[Literal["none", "read", "write"], ...] = ("none", "read", "write")
+
+
+def _higher_access(existing: str, chosen: str, limit: int) -> Literal["none", "read", "write"]:
+    return _ACCESS_BY_RANK[min(max(_ACCESS_RANK[existing], _ACCESS_RANK[chosen]), limit)]
+
+
+class MissingRepo(BaseModel):
+    """A repo the agent needs before its saved key can be retired."""
+
+    model_config = ConfigDict(frozen=True)
+    full_name: str
+    # The working repo needs read and write; a private skill repo, any access.
+    needs_write: bool
+
+
+class ConfirmedActivation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    status: Literal["activated", "update_pending"]
+    # True only when this activation removed a saved PAT or GH_TOKEN.
+    retired_saved_key: bool = False
+    # Why a chat Connect stayed `update_pending`: repos to add before the switch.
+    missing_repos: tuple[MissingRepo, ...] = ()
+
+
 async def activate_confirmed_agent(
     session: AsyncSession,
     *,
     invitation: Invitation,
     repos: list[RepoConfirmation],
-) -> Literal["activated", "update_pending"] | None:
-    """Apply the person's choice to one agent; leave saved-key agents staged."""
+) -> ConfirmedActivation | None:
+    """Add the person's repos to one agent and switch it to them.
+
+    Additive: grants the agent already has stay. An operator-issued update of
+    a saved-key agent stays staged for the operator; a chat Connect, confirmed
+    by someone who manages the agent, retires the saved key itself, but only
+    when the agent's working repo (with write) and private skill repos are
+    among its repos. Otherwise it stays `update_pending`, key kept, until the
+    agent's GitHub panel saves a complete set (`activate_grants`).
+    """
     if invitation.agent_id is None:
         return None
     agent_id = invitation.agent_id
@@ -333,6 +454,7 @@ async def activate_confirmed_agent(
             tenant_id=invitation.tenant_id,
             agent_id=agent_id,
             agent_name=invitation.agent_name or "",
+            switch_saved_key=True,
         )
     has_pat = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
     working = await session.get(AgentRepoBinding, (invitation.tenant_id, agent_id))
@@ -357,19 +479,30 @@ async def activate_confirmed_agent(
     )
     staged: list[RepoConfirmation] = []
     for repo in repos:
-        authorized = await session.get(TenantGitHubRepo, (invitation.tenant_id, repo.repo_id))
+        authorized = await github_access.repo_for_agent(
+            session, tenant_id=invitation.tenant_id, repo_id=repo.repo_id, agent_id=agent_id
+        )
         if authorized is None or authorized.status != "active":
             continue
         existing = await session.get(
             AgentGitHubGrant, (invitation.tenant_id, agent_id, repo.repo_id)
+        )
+        # Connecting only adds: never lower what the agent already has, up to
+        # what the repo's confirmation allows.
+        limit = _ACCESS_RANK[authorized.max_access]
+        baseline = _higher_access(
+            existing.baseline_access if existing is not None else "none", repo.max_access, limit
+        )
+        ceiling = _higher_access(
+            existing.ceiling_access if existing is not None else "read", repo.max_access, limit
         )
         await github_access.stage_grant(
             session,
             tenant_id=invitation.tenant_id,
             agent_id=agent_id,
             repo_id=repo.repo_id,
-            baseline_access=repo.max_access,
-            ceiling_access=repo.max_access,
+            baseline_access=baseline,
+            ceiling_access=cast(Literal["read", "write"], ceiling),
             granted_by_account_id=invitation.requester_account_id,
             mount_path=existing.mount_path if existing is not None else None,
             is_working_repo=existing.is_working_repo if existing is not None else False,
@@ -378,18 +511,33 @@ async def activate_confirmed_agent(
     if not staged:
         raise ValueError("No authorized repositories remain. Start a new GitHub connection.")
     await _drop_stale_grants(session, tenant_id=invitation.tenant_id, agent_id=agent_id)
+    missing: list[MissingRepo] = []
     if not app_active:
-        await _check_required_repos(
-            session,
-            tenant_id=invitation.tenant_id,
-            agent_id=agent_id,
-            working=working,
-            skill_repos=skill_repos,
-        )
-    if not app_active and (
-        has_pat is not None or has_token_env or working is not None or skill_repos
+        if invitation.operator_issued:
+            await _check_required_repos(
+                session,
+                tenant_id=invitation.tenant_id,
+                agent_id=agent_id,
+                working=working,
+                skill_repos=skill_repos,
+            )
+        else:
+            # Switching now would cut the agent off its working or skill repo:
+            # keep the saved key and stage the repos until those are added too.
+            missing = await _missing_required_repos(
+                session,
+                tenant_id=invitation.tenant_id,
+                agent_id=agent_id,
+                working=working,
+                skill_repos=skill_repos,
+            )
+    if missing or (
+        invitation.operator_issued
+        and not app_active
+        and (has_pat is not None or has_token_env or working is not None or skill_repos)
     ):
         status: Literal["activated", "update_pending"] = "update_pending"
+        retired = False
     else:
         await github_access.activate_agent(
             session,
@@ -397,6 +545,22 @@ async def activate_confirmed_agent(
             agent_id=agent_id,
             changed_by_account_id=invitation.requester_account_id,
         )
+        retired = not app_active and await retire_saved_key(
+            session, tenant_id=invitation.tenant_id, agent_id=agent_id
+        )
+        if retired:
+            await append_event(
+                session,
+                tenant_id=invitation.tenant_id,
+                account_id=invitation.requester_account_id,
+                agent_id=agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="github_connect",
+                operation="github_grant",
+                outcome="allowed",
+                reason="saved key retired after confirmation",
+            )
         await session.execute(
             delete(GitHubConnectRequest).where(
                 GitHubConnectRequest.tenant_id == invitation.tenant_id,
@@ -409,7 +573,9 @@ async def activate_confirmed_agent(
         raise ValueError("connection was not confirmed")
     row.activation_status = status
     await session.flush()
-    return status
+    return ConfirmedActivation(
+        status=status, retired_saved_key=retired, missing_repos=tuple(missing)
+    )
 
 
 async def queue_connect_followup(
@@ -569,7 +735,9 @@ async def _drop_stale_grants(
         )
     )
     for grant in grants:
-        repo = await session.get(TenantGitHubRepo, (tenant_id, grant.repo_id))
+        repo = await github_access.repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
         installation = (
             await session.get(GitHubAppInstallation, repo.installation_id)
             if repo is not None
@@ -586,15 +754,15 @@ async def _drop_stale_grants(
     await session.flush()
 
 
-async def _check_required_repos(
+async def _missing_required_repos(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     working: AgentRepoBinding | None = None,
     skill_repos: list[AgentSkillRepoCredential] | None = None,
-) -> None:
-    """Ensure switching credentials will not strand working or private skill repos."""
+) -> list[MissingRepo]:
+    """The working and private skill repos switching credentials would strand."""
     grants = list(
         await session.scalars(
             select(AgentGitHubGrant).where(
@@ -605,15 +773,18 @@ async def _check_required_repos(
     )
     connected: dict[str, AgentGitHubGrant] = {}
     for grant in grants:
-        repo = await session.get(TenantGitHubRepo, (tenant_id, grant.repo_id))
+        repo = await github_access.repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
         if repo is not None and repo.status == "active":
             connected[repo.repo_full_name.casefold()] = grant
+    missing: list[MissingRepo] = []
     if working is None:
         working = await session.get(AgentRepoBinding, (tenant_id, agent_id))
     if working is not None:
         grant = connected.get(working.repo_url.casefold())
         if grant is None or grant.ceiling_access != "write":
-            raise ValueError("Connect the working repo with write access first.")
+            missing.append(MissingRepo(full_name=working.repo_url, needs_write=True))
     if skill_repos is None:
         skill_repos = list(
             await session.scalars(
@@ -625,7 +796,78 @@ async def _check_required_repos(
         )
     for skill in skill_repos:
         if skill.proof_kind != "public" and skill.repo_url.casefold() not in connected:
-            raise ValueError("Connect the agent's skill repo first.")
+            missing.append(MissingRepo(full_name=skill.repo_url, needs_write=False))
+    # One repo can be both the working repo and a skill repo: list it once,
+    # needing write if either use does.
+    merged: dict[str, MissingRepo] = {}
+    for repo in missing:
+        key = repo.full_name.casefold()
+        seen = merged.get(key)
+        merged[key] = (
+            repo
+            if seen is None
+            else seen.model_copy(update={"needs_write": seen.needs_write or repo.needs_write})
+        )
+    return list(merged.values())
+
+
+async def missing_required_repos(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[MissingRepo]:
+    """The working repo (needing write) and private skill repos the agent's grants don't cover."""
+    return await _missing_required_repos(session, tenant_id=tenant_id, agent_id=agent_id)
+
+
+async def _check_required_repos(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    working: AgentRepoBinding | None = None,
+    skill_repos: list[AgentSkillRepoCredential] | None = None,
+) -> None:
+    """Ensure switching credentials will not strand working or private skill repos."""
+    missing = await _missing_required_repos(
+        session, tenant_id=tenant_id, agent_id=agent_id, working=working, skill_repos=skill_repos
+    )
+    if any(repo.needs_write for repo in missing):
+        raise ValueError("Connect the working repo with write access first.")
+    if missing:
+        raise ValueError("Connect the agent's skill repo first.")
+
+
+async def has_pending_connect_update(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    """A chat Connect confirmed for the agent but left staged to keep its saved key."""
+    return (
+        await session.scalar(
+            select(GitHubConnectInvitation.token_hash)
+            .where(
+                GitHubConnectInvitation.tenant_id == tenant_id,
+                GitHubConnectInvitation.agent_id == agent_id,
+                GitHubConnectInvitation.activation_status == "update_pending",
+                GitHubConnectInvitation.operator_issued.is_(False),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+async def finish_pending_connect_updates(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    await session.execute(
+        update(GitHubConnectInvitation)
+        .where(
+            GitHubConnectInvitation.tenant_id == tenant_id,
+            GitHubConnectInvitation.agent_id == agent_id,
+            GitHubConnectInvitation.activation_status == "update_pending",
+            GitHubConnectInvitation.operator_issued.is_(False),
+        )
+        .values(activation_status="activated")
+    )
 
 
 async def pending_update_for_agent(
@@ -650,12 +892,7 @@ async def get_invitation(session: AsyncSession, token_hash: str) -> Invitation |
     if row is None or row.used_at is not None or row.expires_at <= datetime.now(UTC):
         return None
     account = await session.get(Account, row.requester_account_id)
-    if (
-        account is None
-        or account.tenant_id != row.tenant_id
-        or account.role != "admin"
-        or account.is_external
-    ):
+    if not _may_hold_link(account, tenant_id=row.tenant_id, agent_id=row.agent_id):
         return None
     return Invitation.model_validate(row)
 
@@ -672,12 +909,7 @@ async def invitation_status(
     if row.expires_at <= datetime.now(UTC):
         return "expired", invitation
     account = await session.get(Account, row.requester_account_id)
-    if (
-        account is None
-        or account.tenant_id != row.tenant_id
-        or account.role != "admin"
-        or account.is_external
-    ):
+    if not _may_hold_link(account, tenant_id=row.tenant_id, agent_id=row.agent_id):
         return "requester_left", invitation
     return "active", invitation
 
@@ -722,6 +954,7 @@ async def create_discord_connect_intent(
     origin_ma_agent_id: str,
     origin_responder_name: str,
     requested_work: str | None,
+    agent_ma_id: str | None = None,
 ) -> uuid.UUID:
     await session.execute(
         delete(GitHubConnectClickIntent).where(
@@ -737,6 +970,7 @@ async def create_discord_connect_intent(
             requester_platform_user_id=requester_platform_user_id,
             agent_id=agent_id,
             agent_name=agent_name,
+            agent_ma_id=agent_ma_id,
             origin_parent_channel_id=parent_channel_id,
             origin_thread_id=thread_id,
             origin_ma_agent_id=origin_ma_agent_id,
@@ -755,6 +989,16 @@ async def revoke_discord_connect_intent(session: AsyncSession, *, intent_id: uui
     )
 
 
+async def connect_intent_agent(
+    session: AsyncSession, *, intent_id: uuid.UUID
+) -> tuple[str, str | None] | None:
+    """The (agent name, Managed Agents id) a live connect button is bound to."""
+    intent = await session.get(GitHubConnectClickIntent, intent_id)
+    if intent is None or intent.expires_at <= datetime.now(UTC):
+        return None
+    return intent.agent_name, intent.agent_ma_id
+
+
 async def bind_discord_connect_click(
     session: AsyncSession,
     *,
@@ -765,8 +1009,13 @@ async def bind_discord_connect_click(
     fernet: MultiFernet,
     encrypted_followup: bytes,
     followup_expires_at: datetime,
+    requester_manages_agent: bool = False,
 ) -> tuple[bytes, str | None] | None:
-    """Mint once on the first authorized click and reuse that invitation."""
+    """Mint once on the first authorized click and reuse that invitation.
+
+    A clicker who is not a workspace admin needs the caller's live check that
+    they manage the intent's agent (`requester_manages_agent`).
+    """
     intent = await session.get(GitHubConnectClickIntent, intent_id, with_for_update=True)
     if (
         intent is None
@@ -786,12 +1035,12 @@ async def bind_discord_connect_click(
         )
     )
     if (
-        account is None
-        or account.tenant_id != tenant_id
-        or account.role != "admin"
-        or account.is_external
+        not _may_hold_link(account, tenant_id=tenant_id, agent_id=intent.agent_id)
         or principal is None
     ):
+        return None
+    assert account is not None
+    if account.role != "admin" and not requester_manages_agent:
         return None
     if intent.encrypted_token is None:
         token = await mint_invitation(
@@ -801,6 +1050,8 @@ async def bind_discord_connect_click(
             requester_platform_user_id=requester_platform_user_id,
             agent_id=intent.agent_id,
             agent_name=intent.agent_name,
+            agent_ma_id=intent.agent_ma_id,
+            agent_manager_verified=requester_manages_agent,
             origin_platform="discord",
             origin_parent_channel_id=intent.origin_parent_channel_id,
             origin_thread_id=intent.origin_thread_id,
@@ -1003,8 +1254,14 @@ async def confirm(
     cookie: str,
     github_user_id: int,
     repos: list[RepoConfirmation],
+    requester_manages_agent: bool = False,
 ) -> bool:
-    """Consume the invitation and write confirmed rows in the caller's transaction."""
+    """Consume the invitation and write confirmed rows in the caller's transaction.
+
+    A link for one agent writes rows only that agent may use. A non-admin's
+    link needs the caller to have checked again, in this transaction, that the
+    requester still manages the agent (`requester_manages_agent`).
+    """
     flow = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
     if (
         flow is None
@@ -1023,20 +1280,31 @@ async def confirm(
     ):
         return False
     account = await session.get(Account, invitation.requester_account_id, with_for_update=True)
-    if (
-        account is None
-        or account.tenant_id != invitation.tenant_id
-        or account.role != "admin"
-        or account.is_external
-    ):
+    if not _may_hold_link(account, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id):
+        return False
+    assert account is not None
+    if account.role != "admin" and not requester_manages_agent:
         return False
     if len({repo.repo_id for repo in repos}) != len(repos):
         return False
     now = datetime.now(UTC)
+    scope = invitation.agent_id
     for repo in repos:
-        existing = await session.get(TenantGitHubRepo, (invitation.tenant_id, repo.repo_id))
+        existing = await session.scalar(
+            select(TenantGitHubRepo)
+            .where(
+                TenantGitHubRepo.tenant_id == invitation.tenant_id,
+                TenantGitHubRepo.repo_id == repo.repo_id,
+                TenantGitHubRepo.scope_agent_id.is_(None)
+                if scope is None
+                else TenantGitHubRepo.scope_agent_id == scope,
+            )
+            .with_for_update()
+        )
         if existing is None:
-            existing = TenantGitHubRepo(tenant_id=invitation.tenant_id, repo_id=repo.repo_id)
+            existing = TenantGitHubRepo(
+                tenant_id=invitation.tenant_id, repo_id=repo.repo_id, scope_agent_id=scope
+            )
             session.add(existing)
             keep_higher = False
         else:

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from typing import Any, Final, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.modal_limits import finish_modal
@@ -20,7 +20,6 @@ from daimon.core.stores.github_connected_repos import (
     disconnect_github,
     disconnect_repo,
     set_repo_ability,
-    summary,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
@@ -246,15 +245,7 @@ async def handle(
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     view_info = cast("dict[str, Any]", payload.get("view") or {})
     if action_id == ACTION_BACK and meta.github_step == "pick":
-        async with runtime.sessionmaker() as session:
-            home = await summary(session, tenant_id=tenant_id)
-        view = panel_views.build_github_home_view(
-            meta,
-            public_base_url=str(runtime.settings.mcp.app_root_url or ""),
-            connected_count=home.count,
-            owners=home.owners,
-            agent_count=home.agent_count,
-        )
+        view = await _home(runtime, tenant_id=tenant_id, meta=meta, user_id=user_id)
     else:
         selected_id = meta.repo_id
         step = meta.github_step
@@ -285,15 +276,7 @@ async def handle(
                     await disconnect_github(session, tenant_id=tenant_id, account_id=account.id)
                 step = "pick"
                 selected_id = None
-                async with runtime.sessionmaker() as session:
-                    home = await summary(session, tenant_id=tenant_id)
-                view = panel_views.build_github_home_view(
-                    meta,
-                    public_base_url=str(runtime.settings.mcp.app_root_url or ""),
-                    connected_count=home.count,
-                    owners=home.owners,
-                    agent_count=home.agent_count,
-                )
+                view = await _home(runtime, tenant_id=tenant_id, meta=meta, user_id=user_id)
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                     view_id=str(view_info.get("id") or ""), view=view
                 )
@@ -363,3 +346,13 @@ async def handle(
             view=view,
         )
     return True
+
+
+async def _home(
+    runtime: SlackRuntime, *, tenant_id: uuid.UUID, meta: PanelMetadata, user_id: str
+) -> dict[str, Any]:
+    from daimon.adapters.slack.agent_setup.actions import github_home_view
+
+    return await github_home_view(
+        runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=True
+    )

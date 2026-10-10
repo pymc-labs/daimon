@@ -284,7 +284,12 @@ async def test_panel_activation_refuses_each_saved_state(
     panel = await load_grants_panel(
         db_session, tenant_id=tenant_id, agent_id=agent_id, agent_name="Helper"
     )
-    assert panel.saved_state
+    if saved_kind == "channel_pin":
+        # A pinned agent manages only repos connected for it, so the panel
+        # offers none of the server's; a server-wide grant still refuses.
+        assert not panel.saved_state and panel.repos == ()
+    else:
+        assert panel.saved_state
     await stage_panel_grant(
         db_session,
         tenant_id=tenant_id,
@@ -702,9 +707,9 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         )
     )
     await db_session.flush()
-    with pytest.raises(
-        ValueError, match="This agent uses a saved GitHub key. Ask your Daimon operator"
-    ):
+    # A link for one agent may switch its saved key; confirming checks the
+    # working and skill repos are covered before the key is retired.
+    assert (
         await connect_link(
             db_session,
             settings=settings,
@@ -715,3 +720,4 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
             agent_id=agent_id,
             agent_name="ResearchBot",
         )
+    ).startswith("https://example.invalid/oauth/github/connect/")

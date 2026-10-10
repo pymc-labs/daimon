@@ -44,7 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, build_connect_card
+from daimon.core.github_connect_cards import ADD_REPOS_LABEL, repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -141,22 +141,20 @@ ACTION_GITHUB_UNLINK: Final = "agent_setup__github_unlink"
 ACTION_GITHUB_UNLINK_CONFIRM: Final = "agent_setup__github_unlink_confirm"
 ACTION_GITHUB_UNLINK_BACK: Final = "agent_setup__github_unlink_back"
 ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"
+ACTION_GITHUB_ADD_FOR: Final = "agent_setup__github_add_for"
+"""[Add repos] beside one agent on the GitHub home; the value is the agent name."""
+GITHUB_HOME_AGENT_LIMIT: Final = 20
 
 
 def build_github_home_view(
     meta: PanelMetadata,
     *,
-    connected_count: int,
-    public_base_url: str | None = None,
-    is_admin: bool = True,
-    owners: tuple[str, ...] = (),
-    agent_count: int = 0,
-    pending_url: str | None = None,
+    agent_counts: tuple[tuple[str, int], ...] = (),
     linked_login: str | None = None,
     can_choose_agent: bool = False,
     own_waiting_count: int = 0,
 ) -> dict[str, Any]:
-    """The private GitHub entry screen for workspace admins."""
+    """Every agent with how many repos it has, each with its own [Add repos]."""
     if meta.github_step == "personal_unlink":
         return finish_modal(
             title="GitHub",
@@ -173,107 +171,58 @@ def build_github_home_view(
             private_metadata=encode_panel_metadata(meta.with_view("github_home")),
             callback_id="agent_setup__github_home",
         )
-    if is_admin and pending_url:
-        summary = "Connection in progress."
-        actions: list[dict[str, Any]] = [
-            {
-                "type": "button",
-                "action_id": "github_link__open",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
-                    "emoji": True,
-                },
-                "url": pending_url,
-            },
-            _button(action_id=ACTION_GITHUB_START, label="Start over"),
-        ]
-    elif not is_admin:
-        summary = "Workspace admins connect repos here."
-        actions = (
-            [_button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent")]
-            if can_choose_agent
-            else []
-        )
-    elif connected_count:
-        source = f" from {', '.join(owners)}" if owners else ""
-        summary = f"Connected: {connected_count} repos{source}."
-        actions = [
-            _button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"),
-            _button(action_id=ACTION_GITHUB_START, label="Connect more repos"),
-            _button(action_id=ACTION_GITHUB_MANAGE, label="Manage connected repos"),
-        ]
-    else:
-        summary = "Connect repos here, then choose which agents can use them."
-        actions = [
-            _button(action_id=ACTION_GITHUB_START, label=f"{CONNECT_GITHUB_EMOJI} Connect GitHub")
-        ]
-    actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
-    status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
-    fields = [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}]
-    if connected_count:
-        fields.insert(0, {"type": "mrkdwn", "text": f"*Agents*\n{agent_count} using these repos"})
-    blocks: list[dict[str, Any]] = []
-    if is_admin and not connected_count and public_base_url:
-        card = build_connect_card(
-            agent_name=None,
-            identity_enabled=False,
-            avatar_url=None,
-            public_base_url=public_base_url,
-        )
-        blocks.extend(
-            [
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "image",
-                            "image_url": card.author_icon_url,
-                            "alt_text": card.author_name,
-                        },
-                        {"type": "plain_text", "text": card.author_name},
-                    ],
-                },
-                {"type": "header", "text": {"type": "plain_text", "text": card.title}},
-                {
-                    "type": "section",
-                    "text": {"type": "plain_text", "text": card.description},
-                    "accessory": {
-                        "type": "image",
-                        "image_url": card.github_mark_url,
-                        "alt_text": "GitHub",
-                    },
-                },
-            ]
-        )
-        if card.detail:
-            blocks.append({"type": "section", "text": {"type": "plain_text", "text": card.detail}})
-        if card.footer:
-            blocks.append(
-                {"type": "context", "elements": [{"type": "plain_text", "text": card.footer}]}
+    blocks: list[dict[str, Any]] = [
+        _section("Each agent uses its own repos." if agent_counts else "No agents here yet.")
+    ]
+    for name, count in agent_counts[:GITHUB_HOME_AGENT_LIMIT]:
+        line = f"{name}: {repo_count(count)}" if count else f"{name}: no repos yet"
+        row = _section(line)
+        if can_choose_agent:
+            row["accessory"] = _button(
+                action_id=ACTION_GITHUB_ADD_FOR, label=ADD_REPOS_LABEL, value=name
             )
-    else:
-        blocks.append(_section(summary))
-    blocks.extend([{"type": "section", "fields": fields}, {"type": "divider"}])
-    if actions:
-        blocks.append({"type": "actions", "elements": actions})
-    personal = [
+        blocks.append(row)
+    if len(agent_counts) > GITHUB_HOME_AGENT_LIMIT:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "plain_text",
+                        "text": f"and {len(agent_counts) - GITHUB_HOME_AGENT_LIMIT} more",
+                    }
+                ],
+            }
+        )
+    status = f"Linked as @{linked_login}" if linked_login else "GitHub isn't linked."
+    blocks.extend(
+        [
+            {
+                "type": "section",
+                "fields": [{"type": "mrkdwn", "text": f"*Personal link*\n{status}"}],
+            },
+            {"type": "divider"},
+        ]
+    )
+    actions: list[dict[str, Any]] = [
         _button(
             action_id=ACTION_GITHUB_PERSONAL_LINK,
             label="Use another account" if linked_login else "Link GitHub",
         )
     ]
     if linked_login:
-        personal.append(_button(action_id=ACTION_GITHUB_UNLINK, label="Unlink"))
-    blocks.append({"type": "actions", "elements": personal})
-    if is_admin or can_choose_agent or own_waiting_count:
+        actions.append(_button(action_id=ACTION_GITHUB_UNLINK, label="Unlink"))
+    if len(agent_counts) > GITHUB_HOME_AGENT_LIMIT and can_choose_agent:
+        actions.append(_button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"))
+    actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
+    blocks.append({"type": "actions", "elements": actions})
+    if can_choose_agent or own_waiting_count:
         blocks.append(
             {
                 "type": "actions",
                 "elements": [_button(action_id=ACTION_GITHUB_WAITING, label="Requests waiting")],
             }
         )
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return finish_modal(
         title="GitHub",
         blocks=blocks,

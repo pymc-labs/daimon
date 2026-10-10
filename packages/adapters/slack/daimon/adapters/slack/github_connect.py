@@ -115,7 +115,11 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             return
         async with runtime.sessionmaker() as session:
             await require_app_eligible_agent(
-                session, tenant_id=tenant_id, agent_id=agent_id, agent_name=target_name
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                agent_name=target_name,
+                switch_saved_key=True,
             )
         async with runtime.sessionmaker.begin() as session:
             principal = await get_or_create_platform_principal(
@@ -133,6 +137,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 requester_platform_user_id=user_id,
                 agent_id=agent_id,
                 agent_name=target_name,
+                agent_ma_id=target_ma_id,
                 origin_platform="slack",
                 origin_parent_channel_id=channel_id,
                 encrypted_origin_followup=(

@@ -10,12 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Haiku 5.5 can be picked as an agent model and is metered.** It is billed at Anthropic's list price by prompt length: $0.10 input and $0.50 output per million tokens up to a 100,000-token prompt, and five times that above it. Before this, turns on `claude-haiku-5-5` were recorded as free.
+
+- A channel admin can connect GitHub repos, including personal ones, to an agent they manage (one limited to their channels and not a Daimon default agent), from the agent's Connect GitHub or by asking the agent. Repos connected for an agent belong to it: no other agent can be given them, by anyone. Connecting again adds repos and keeps the ones it has. A server admin's Connect for one agent works the same way. Whoever manages the agent can remove its repos, which removes only that agent's access. If the agent had a saved GitHub key, the key is retired once its working repo and skill repos are among its repos.
+
 - An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.
 
 ### Changed
 
 - The privacy policy now describes account deletion across linked servers and workspaces, Anthropic transcript deletion failures, and records and files that remain afterward.
 - Setup, error, file and limit notices on Discord, Slack and Teams use plain words, one line for what happened and one for what to do, with a blank line between. A channel with no agent or environment says "Daimon isn't set up in this channel yet." and one whose agent or environment was removed says "This channel's setup is out of date."; both point at `/agent-setup` (`setup` on Teams). Discord and Slack errors name the cause (the AI service busy, unreachable or refusing the request, the usage limit, a missing Slack permission, an unreadable Slack token, Slack or Discord rejecting the call, or "Something went wrong on our side.") and end with a small `Ref` line, the last six characters of the request id; the full id and the exception are logged as `error.rendered`. No exception text reaches the chat; errors whose text is written for people (a deleted setup conversation, a repo nothing can clone, opening Slack setup outside a channel) keep their words, with the same `Ref` line. Slack's file-upload and `/dm` notices are shorter, the `/dm` setup steps are logged and documented in the Slack guide, Discord's usage-limit card no longer mentions the tenant, and a channel budget DM reads "#team-020 has used its $5.00 monthly budget." with how to resume.
+- The GitHub screens on Discord and Slack are agent-first. The GitHub home lists each agent with its repo count and an **Add repos** button. An agent's section reads "<Agent>'s repos", says who can use them ("Anyone who talks to <Agent> can ask it to read them."), and has **Add repos**, **Remove from <Agent>** and **Details** (who added each repo, when, and its access). Channel admins who manage an agent get **Add repos** too; anyone else is told to ask whoever manages the agent. The connect and "Manage connected repos" buttons for the whole server are gone from the home.
+- The GitHub repo picker for an agent is titled "Add repos to <Agent>", shows repos the agent already has as ticked and "Already added" (a repo it still needs, such as a working repo it has read only, stays ticked and changeable as "Needs write" and is added with write), defaults to Read only, and its button counts only new repos ("Add 2 repos"). The done page says "Added 2 repos to <Agent>." It says the agent no longer uses its old GitHub token only once that switch has finished; while the agent still needs its working or skill repo, it names the repo to add, also when the page is opened again.
+- Setting an agent as a default in another place adds "<Agent>'s repos come too." to the confirmation when the agent has repos.
 - Live QA now shares one approved cheap-model map across the judge and pre/post-turn guards, with a temporary staging-only Haiku 4.5 exception and HTTP-503-only Gemini fallback helper.
 - QA catalog validation now refuses unknown kinds in hourly canaries while preserving isolated PENDING entries for other tiers.
 
@@ -851,7 +857,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before.
 
 - Per-turn token, cache and estimated provider-cost telemetry shares the terminal outcome row; operators can query tenant usage by channel and origin with `daimon usage turns`. MCP SDK polling outcomes retain unknown usage rather than zero. Billing and admission behavior are unchanged.
-
 
 - Opt-in Discord and Slack DM conversations: admins enable with `/dm enable`;
   `/dm` moves recent channel context into a private, resettable session. Every

@@ -13,7 +13,8 @@ from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.github_connect_cards import repos_come_too_line
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import (
@@ -27,6 +28,7 @@ from daimon.core.scope import (
 )
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import (
@@ -407,6 +409,13 @@ async def _config_set_entry(
             actor_account_id=account_id,
         )
     console.print(f"[green]✓ set {key}={value} at {scope_str}[/green]")
+    if key == "agent_name" and anthropic is not None:
+        agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=value)
+        summary = await agent_repo_summary(session, tenant_id=tenant_id)
+        if agent is not None and summary.by_agent.get(
+            derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+        ):
+            console.print(repos_come_too_line(value))
 
 
 # -- unset -----------------------------------------------------------------

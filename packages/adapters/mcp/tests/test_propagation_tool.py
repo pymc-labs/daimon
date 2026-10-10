@@ -504,3 +504,40 @@ async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
     assert explained.recent_setup_conversations == (), (
         "a handoff binding is not a setup conversation and must not be listed as one"
     )
+
+
+@pytest.mark.parametrize("has_repos", [True, False])
+async def test_set_agent_default_says_the_agents_repos_come_too(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    has_repos: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools import propagation
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.github_connected_repos import AgentRepoSummary
+
+    tenant_id, account_id = await _seed(committing_sessionmaker)
+
+    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+        return SimpleNamespace(id="ag_writer", metadata={})
+
+    async def summary(_session: object, *, tenant_id: uuid.UUID) -> AgentRepoSummary:
+        agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_writer")
+        return AgentRepoSummary(
+            pairs=int(has_repos),
+            agents=int(has_repos),
+            by_agent={agent_id: ("ana/thesis",)} if has_repos else {},
+        )
+
+    monkeypatch.setattr(propagation, "find_agent_by_daimon_tag", find)
+    monkeypatch.setattr(propagation, "agent_repo_summary", summary)
+    result = await _set_agent_default_impl(
+        _runtime(committing_sessionmaker),
+        _admin_auth(tenant_id=tenant_id, account_id=account_id),
+        "writer",
+        None,
+    )
+    base = build_set_default_note(agent_name="writer", scope_label="workspace")
+    assert result.routing_note == (f"{base} writer's repos come too." if has_repos else base)

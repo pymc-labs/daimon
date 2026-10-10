@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.agent_setup.panel_views import build_github_home_view
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -16,7 +15,6 @@ from daimon.core.github_connect_cards import (
 )
 from daimon.core.github_panel import CONNECT_COPY
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.github_connected_repos import summary
 from slack_sdk.web.async_client import AsyncWebClient
 
 ACTION_BACK = "github_link__back"
@@ -63,28 +61,24 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     client = await resolve_web_client(runtime, team_id=str(team.get("id") or ""))
     if client is None:
         return
-    from daimon.adapters.slack.agent_setup.actions import github_pending_url
+    from daimon.adapters.slack.agent_setup.actions import github_home_view
 
     team_id = str(team.get("id") or "")
     user_id = str(user.get("id") or "")
     if not await resolve_is_admin(client, user_id=user_id):
         return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    async with runtime.sessionmaker() as session:
-        home = await summary(session, tenant_id=tenant_id)
-    pending_url = await github_pending_url(runtime, tenant_id=tenant_id, user_id=user_id)
     await client.views_open(  # pyright: ignore[reportUnknownMemberType]
         trigger_id=str(payload.get("trigger_id") or ""),
-        view=build_github_home_view(
-            PanelMetadata(
+        view=await github_home_view(
+            runtime,
+            tenant_id=tenant_id,
+            meta=PanelMetadata(
                 team_id=team_id,
                 channel_id=str(channel.get("id") or user_id),
                 view="github_home",
             ),
-            connected_count=home.count,
-            owners=home.owners,
-            agent_count=home.agent_count,
-            pending_url=pending_url,
-            public_base_url=str(runtime.settings.mcp.app_root_url or ""),
+            user_id=user_id,
+            is_admin=True,
         ),
     )

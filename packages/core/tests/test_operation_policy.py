@@ -41,16 +41,32 @@ def test_attachment_allows_admin_on_managed_agent() -> None:
     )
 
 
-def test_github_connect_requires_server_admin() -> None:
-    held = TargetFacts(
-        is_daimon_managed=False,
-        is_reachable_in_tenant=True,
-        is_local_to_caller_channels=True,
-        is_held_by_caller=True,
-    )
-    assert decide_operation("github_connect", is_admin=False, target=held) == "needs_admin"
-    assert decide_operation("github_connect", is_admin=True, target=held) == "allow"
-    assert not needs_reachability_read("github_connect", is_admin=False, is_daimon_managed=False)
+def test_github_connect_for_an_agent_follows_github_grant() -> None:
+    assert "github_connect" in WIDE_SHARING_OPERATIONS
+    for managed in (False, True):
+        for local in (False, True):
+            for held in (False, True):
+                target = TargetFacts(
+                    is_daimon_managed=managed,
+                    is_reachable_in_tenant=True,
+                    is_local_to_caller_channels=local,
+                    is_held_by_caller=held,
+                )
+                for is_admin in (False, True):
+                    assert decide_operation(
+                        "github_connect", is_admin=is_admin, target=target
+                    ) == decide_operation("github_grant", is_admin=is_admin, target=target)
+                assert decide_operation("github_connect", is_admin=False, target=target) == (
+                    "allow" if local and held and not managed else "needs_admin"
+                )
+    assert needs_reachability_read("github_connect", is_admin=False, is_daimon_managed=False)
+    assert not needs_reachability_read("github_connect", is_admin=True, is_daimon_managed=False)
+
+
+def test_server_wide_github_connect_stays_admin_only() -> None:
+    no_target = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
+    assert decide_operation("github_connect", is_admin=False, target=no_target) == "needs_admin"
+    assert decide_operation("github_connect", is_admin=True, target=no_target) == "allow"
 
 
 def test_github_grant_requires_server_admin_or_local_channel_admin_holding_agent() -> None:

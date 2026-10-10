@@ -187,9 +187,11 @@ The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
-The admin gets a private, agent-bound link; the selected repos activate for
-that agent when confirmed. Self-serve links refuse legacy-mode agents with a
-saved GitHub key, working repo or skill repo credential, or a channel pin. An
+A server admin, or a channel admin of the channels an agent is limited to,
+gets a private link bound to that agent; the selected repos are for that agent
+only and activate for it when confirmed. If the agent has a saved GitHub key,
+the key is retired once its working repo and private skill repos are among
+its repos; until then the repos wait in the agent's GitHub panel. An
 operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
 --requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
 That link stages an update. After the recipient confirms repos on the web, run

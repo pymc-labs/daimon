@@ -3017,8 +3017,10 @@
       'description': '''
         Connect this agent to GitHub when someone asks to set up GitHub.
         <blank line>
-        Show the admin a single-use connection button bound to the selected agent.
-        Members get Ask an admin and a recorded request. Never repeat a private
+        Show a single-use connection button bound to the selected agent to a
+        server admin, or to a channel admin who manages that agent; repos
+        connected this way are for that agent only. Other members get Ask an
+        admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.
         When GitHub access interrupted a task, pass a short restatement as

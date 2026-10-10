@@ -522,23 +522,10 @@ async def handle(
         and meta.view == "github_waiting"
         and meta.github_step != "request_review"
     ):
-        from daimon.adapters.slack.agent_setup.actions import github_can_choose_agent
-        from daimon.core.stores.github_connected_repos import summary
+        from daimon.adapters.slack.agent_setup.actions import github_home_view
 
-        async with runtime.sessionmaker() as session:
-            home = await summary(session, tenant_id=tenant_id) if is_admin else None
-            linked_login = await account_link_status(session, account_id=principal.account_id)
-        view = panel_views.build_github_home_view(
-            meta,
-            public_base_url=str(runtime.settings.mcp.app_root_url or ""),
-            connected_count=home.count if home else 0,
-            is_admin=is_admin,
-            owners=home.owners if home else (),
-            agent_count=home.agent_count if home else 0,
-            linked_login=linked_login,
-            can_choose_agent=await github_can_choose_agent(
-                runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-            ),
+        view = await github_home_view(
+            runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=is_admin
         )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id, view=view
