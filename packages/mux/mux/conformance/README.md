@@ -300,8 +300,9 @@ One scripted turn reads the exact pinned SKILL.md, successfully invokes distinct
 greps its edited content, globs its basename and runs bash. Checks reject
 failed/unpaired/duplicate calls, wrong routes or servers, missing capabilities,
 altered readback, previews, cross-session/root records, gaps, errors and multiple
-turns. Loading the pinned instructions is the skill invocation; scripted output
-does not establish model quality.
+turns. The first running record must name a nonempty root that matches its own
+turn ID before it establishes the stream's root. Loading the pinned instructions
+is the skill invocation; scripted output does not establish model quality.
 
 Use `run_default_capability(manifest, adapter, recorder=recorder)` for a scripted
 turn, then save a complete F1 tape. Replay uses

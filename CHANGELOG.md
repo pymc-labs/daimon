@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refuse a default-capability turn whose running record omits or mismatches its declared root identity.
+
 - Route MCP repository credentials, vault summaries, bundle uploads, hosted charts, hub sessions and skill-version counts through scoped mux resource ports while preserving native request bytes and existing host policy.
 - Refuse manual live probes outside the fixed cheapest-model allowlist before invocation, even when another model has configured prices.
 - Add a supplementary offline default-agent capability scenario with eleven skill uploads and pins, adapter-mapped tools, MCP checks and normalized Anthropic replay; report unavailable mappings and atomic revision gaps explicitly.

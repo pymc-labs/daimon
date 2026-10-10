@@ -249,6 +249,10 @@ def check_turn(
         elif event.type == "session.status_running":
             require(isinstance(payload, StatusRunningPayload), "F1: untyped running record")
             if isinstance(payload, StatusRunningPayload):
+                require(
+                    bool(payload.root_turn_id) and event.turn_id == payload.root_turn_id,
+                    "F1: running record root identity missing or mismatched",
+                )
                 running.append(payload)
         elif event.type == "agent.tool_use":
             require(len(running) == 1, "F1: tool invocation outside one root turn")

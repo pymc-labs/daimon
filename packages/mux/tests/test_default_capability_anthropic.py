@@ -523,6 +523,8 @@ CORRUPTIONS = (
     "duplicate_call",
     "duplicate_result",
     "orphan_result",
+    "null_running_start",
+    "mismatched_running_start",
     "foreign_root",
     "foreign_session",
     "preview",
@@ -573,6 +575,9 @@ def corrupt(data, fault: str) -> None:
         events.insert(events.index(source) + 1, duplicate)
     elif fault == "orphan_result":
         results["call_f1_3"]["payload"]["call_id"] = "orphan"
+    elif fault in ("null_running_start", "mismatched_running_start"):
+        running = next(e for e in events if e["type"] == "session.status_running")
+        running["turn_id"] = None if fault == "null_running_start" else "foreign-root"
     elif fault in ("foreign_root", "foreign_session", "preview"):
         key, value = {
             "foreign_root": ("turn_id", "another-root"),
@@ -624,13 +629,16 @@ async def test_corrupted_f1_tape_never_certifies(tmp_path: Path, fault: str) -> 
     async with script.client() as client:
         result = await replay_default_capability(path, expected, partial(adapter, client, script))
     assert result.status == "fail", (fault, result.evidence)
+    if fault in ("null_running_start", "mismatched_running_start"):
+        assert result.evidence == ("F1: running record root identity missing or mismatched",)
     assert all(not r.path.endswith(("/events", "/stream")) for r in script.requests)
 
 
-def test_corrupt_f1_checks_survive_python_optimization(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fault", ("failed_edit", "null_running_start", "mismatched_running_start"))
+def test_corrupt_f1_checks_survive_python_optimization(tmp_path: Path, fault: str) -> None:
     path = tmp_path / "optimized.json"
     data = json.loads(TAPE.read_text())
-    corrupt(data, "failed_edit")
+    corrupt(data, fault)
     path.write_text(json.dumps(data))
     code = """
 import asyncio, runpy, sys
@@ -644,10 +652,13 @@ async def check():
             Path(sys.argv[2]), expected, lambda tape: qa['adapter'](client, script, tape))
     if result.status != 'fail':
         raise SystemExit('optimized F1 checks vanished')
+    if sys.argv[3] in ('null_running_start', 'mismatched_running_start'):
+        if result.evidence != ('F1: running record root identity missing or mismatched',):
+            raise SystemExit('optimized F1 start rejected without the identity diagnostic')
 asyncio.run(check())
 """
     subprocess.run(
-        [sys.executable, "-O", "-c", code, __file__, str(path)],
+        [sys.executable, "-O", "-c", code, __file__, str(path), fault],
         check=True,
         capture_output=True,
         timeout=30,
