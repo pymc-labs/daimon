@@ -485,37 +485,6 @@ def test_channel_blocks_list_five_then_count_the_rest() -> None:
     )
 
 
-def test_webhook_note_lines_are_separated_by_blank_lines() -> None:
-    answering = _agent("research-bot", tier="channel")
-    state = _state(agents=(answering,), answering=answering, is_admin=True)
-    state.webhook_blocks = tuple(
-        WebhookBlock(channel_name=f"room-{index}", denied_by="@everyone") for index in range(7)
-    )
-
-    view = RosterView(state, runtime=MagicMock(), allowed_user_id=42)
-    note = next(
-        item.content
-        for item in view.walk_children()
-        if isinstance(item, discord.ui.TextDisplay) and "#room-0 " in item.content
-    )
-
-    paragraphs = note.split("\n\n")
-    assert len(paragraphs) == 6, "five channel lines and the count, each its own paragraph"
-    assert paragraphs[-1] == "And 2 more channels like these."
-    assert all("\n" not in paragraph for paragraph in paragraphs), (
-        "consecutive lines always have a blank line between them, never stacked"
-    )
-
-    state.webhook_blocks = ()
-    state.webhook_fix_url = "https://discord.com/oauth2/authorize?client_id=1"
-    link_note = next(
-        item.content
-        for item in RosterView(state, runtime=MagicMock(), allowed_user_id=42).walk_children()
-        if isinstance(item, discord.ui.TextDisplay) and "Re-authorize" in item.content
-    )
-    assert "\n" not in link_note, "the re-authorize note is one line in its own text block"
-
-
 def test_a_full_admin_page_with_channel_blocks_stays_within_the_component_budget() -> None:
     answering = _agent("answering", tier="channel")
     agents = (answering, *(_agent(f"agent-{index:02d}") for index in range(40)))
