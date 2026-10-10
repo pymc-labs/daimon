@@ -29,6 +29,7 @@ from mux.drivers.anthropic.resources._secrets import (
 )
 from mux.drivers.anthropic.resources.vaults import operation
 from mux.drivers.anthropic.schemas import NativeConfig
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import UnsupportedCapability
 
 
@@ -185,5 +186,5 @@ class AnthropicSessionAdmin:
 
     async def archive(self, scope: Scope, session: ResourceRef, *, key: str) -> Operation:
         self._check(scope, session)
-        await provider_call(self._client.beta.sessions.archive(session.id))
+        await provider_call(mutation_client(self._client).beta.sessions.archive(session.id))
         return operation(session, key, "archive_session")
