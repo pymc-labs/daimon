@@ -142,6 +142,7 @@ async def create_session(
     agent_github_app: GithubAppSettings | None = None,
     is_external: bool = False,
     requester_is_headless: bool = False,
+    hide_personal_for: uuid.UUID | None = None,
     app_session_unmapped: bool = False,
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
@@ -504,8 +505,11 @@ async def create_session(
         # stores, so every new session is gated however the agent was written.
         agent_argument: Agent = agent.id
         hidden: frozenset[str] = frozenset()
+        # A shared thread's session has no account; its synthetic owner, who
+        # connected nothing, hides every server someone connected personally.
+        hiding_for = account_id if account_id is not None else hide_personal_for
         if (
-            account_id is not None
+            hiding_for is not None
             and tenant_id is not None
             and agent_uuid is not None
             and session_factory is not None
@@ -514,14 +518,14 @@ async def create_session(
                 session_factory,
                 tenant_id=tenant_id,
                 agent_id=agent_uuid,
-                account_id=account_id,
+                account_id=hiding_for,
                 server_urls={server.name: server.url for server in agent.mcp_servers},
             )
             if hidden:
                 _log.info(
                     "session.personal_mcp_servers_hidden",
                     agent_uuid=str(agent_uuid),
-                    account_id=str(account_id),
+                    account_id=str(hiding_for),
                     server_names=sorted(hidden),
                 )
         public_url = (

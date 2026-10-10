@@ -175,6 +175,57 @@ async def latest_config_revision(
     return ConfigRevision.model_validate(body) if body is not None else None
 
 
+async def latest_config_revision_and_sharing(
+    session: AsyncSession, channel: ChannelRef
+) -> tuple[ConfigRevision | None, bool]:
+    """The channel's newest revision, and whether any of its revisions was shared.
+
+    One statement, so reading the sharing history costs admission nothing more
+    than the revision it already reads.
+    """
+    ever_shared = (
+        select(ChannelConfigRevision.local)
+        .where(
+            *_channel_where(channel),
+            ChannelConfigRevision.revision["thread_mode"].astext == "shared",
+        )
+        .exists()
+    )
+    row = (
+        await session.execute(
+            select(ChannelConfigRevision.revision, ever_shared)
+            .where(*_channel_where(channel))
+            .order_by(ChannelConfigRevision.local.desc())
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None, False
+    return ConfigRevision.model_validate(row[0]), bool(row[1])
+
+
+async def thread_has_caller_sessions(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    except_account: uuid.UUID,
+) -> bool:
+    """Whether anyone but `except_account` has a session row in the thread, of any status."""
+    found = await session.scalar(
+        select(ThreadSession.id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+            ThreadSession.account_id.is_distinct_from(except_account),
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 # Bindings
 
 

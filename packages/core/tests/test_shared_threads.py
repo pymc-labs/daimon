@@ -13,7 +13,7 @@ import inspect
 import json
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -24,8 +24,13 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core._models import AgentGitHubMode
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
-from daimon.core.channel_backend import channel_ref, set_channel_backend
+from daimon.core.channel_backend import (
+    channel_ref,
+    current_backend_and_sharing,
+    set_channel_backend,
+)
 from daimon.core.config import McpSettings
+from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mux_backend import managed_agents
@@ -37,6 +42,8 @@ from daimon.core.shared_threads import (
     shared_owner,
     shared_slot,
 )
+from daimon.core.stores import credential_requests as requests_store
+from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
@@ -58,7 +65,7 @@ from daimon.testing.ma import (
     resolved_agent_env_router,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
-from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.contracts.config import BackendConfig, CapabilityRequirement, ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
 from mux.errors import (
@@ -128,7 +135,7 @@ class _Fake:
             "id": f"sess_{self.sessions}",
             "type": "session",
             "agent": {
-                "id": body["agent"],
+                "id": body["agent"] if isinstance(body["agent"], str) else body["agent"]["id"],
                 "mcp_servers": [],
                 "model": {"id": "claude-sonnet-4-6"},
                 "name": "daimon",
@@ -188,6 +195,8 @@ def _admission(
     agent: BetaManagedAgentsAgent,
     env: BetaEnvironment,
     revision: ConfigRevision | None,
+    *,
+    ever_shared: bool = False,
 ) -> Admission:
     return Admission(
         account_id=account_id,
@@ -196,6 +205,8 @@ def _admission(
         config=ResolvedConfig(agent_name="daimon", environment_name="default"),
         origin_channel_id="chan-1",
         backend_revision=revision,
+        backend_ever_shared=ever_shared
+        or (revision is not None and revision.thread_mode == "shared"),
     )
 
 
@@ -244,10 +255,12 @@ def test_only_a_revision_that_can_share_makes_a_thread_read_its_binding() -> Non
     per_caller_once = ConfigRevision.create(channel, 1, resolve_default(None))
     per_caller_changed = ConfigRevision.create(channel, 2, resolve_default(None))
     shared = ConfigRevision.create(channel, 1, resolve_default(_SHARED))
-    assert may_have_shared_binding(None) is False
-    assert may_have_shared_binding(per_caller_once) is False
-    assert may_have_shared_binding(per_caller_changed) is True
-    assert may_have_shared_binding(shared) is True
+    assert may_have_shared_binding(None, ever_shared=False) is False
+    assert may_have_shared_binding(per_caller_once, ever_shared=False) is False
+    # Changed but never shared: still nothing to read.
+    assert may_have_shared_binding(per_caller_changed, ever_shared=False) is False
+    assert may_have_shared_binding(per_caller_changed, ever_shared=True) is True
+    assert may_have_shared_binding(shared, ever_shared=True) is True
 
 
 # C01
@@ -331,6 +344,7 @@ async def test_legacy_private_history_is_never_the_shared_session(
 ) -> None:
     tenant = await make_tenant(db_session)
     alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
     agent, env = await _app_agent(db_session, tenant)
     await create_thread_session(
         db_session,
@@ -354,17 +368,26 @@ async def test_legacy_private_history_is_never_the_shared_session(
     )
     await db_session.commit()
     fake = _Fake()
+    deps = _deps(db_session_factory, fake)
 
-    prepared = await _bind(
-        _deps(db_session_factory, fake),
-        tenant,
-        _admission(alice.id, agent, env, revision),
-        user="alice",
+    # A thread with history is not new: it stays per caller, and bob gets his own.
+    bobs = await _bind(deps, tenant, _admission(bob.id, agent, env, revision), user="bob")
+    # A new thread in the same channel shares, under an owner no legacy row has.
+    fresh = await _bind(
+        deps, tenant, _admission(alice.id, agent, env, revision), user="alice", thread_id="thread-2"
     )
 
-    assert prepared.ma_session_id not in ("sess_private", "sess_legacy_shared")
-    assert prepared.reused is False and fake.sessions == 1
+    assert bobs.session_account_id == bob.id
+    assert bobs.ma_session_id not in ("sess_private", "sess_legacy_shared")
+    assert fresh.session_account_id == shared_owner(_slot(tenant, "thread-2"))
+    assert fresh.ma_session_id not in ("sess_private", "sess_legacy_shared")
     async with db_session_factory() as s:
+        for thread_id in ("thread-1", "thread-2"):
+            owner = shared_owner(_slot(tenant, thread_id))
+            row = await get_live_thread_session(
+                s, tenant_id=tenant.id, platform="discord", thread_id="thread-1", account_id=owner
+            )
+            assert row is None
         private = await get_live_thread_session(
             s, tenant_id=tenant.id, platform="discord", thread_id="thread-1", account_id=alice.id
         )
@@ -389,11 +412,13 @@ async def test_c14_a_thread_stays_on_the_revision_it_was_bound_under(
 
     per_caller = await set_channel_backend(db_session, channel, BackendConfig())
     await db_session.commit()
-    again = await _bind(deps, tenant, _admission(alice.id, agent, env, per_caller), user="alice")
+    again = await _bind(
+        deps, tenant, _admission(alice.id, agent, env, per_caller, ever_shared=True), user="alice"
+    )
     t2 = await _bind(
         deps,
         tenant,
-        _admission(alice.id, agent, env, per_caller),
+        _admission(alice.id, agent, env, per_caller, ever_shared=True),
         user="alice",
         thread_id="thread-2",
     )
@@ -425,7 +450,7 @@ async def test_c14_a_thread_stays_on_the_revision_it_was_bound_under(
         await _bind(
             deps,
             tenant,
-            _admission(alice.id, agent, env, per_caller),
+            _admission(alice.id, agent, env, per_caller, ever_shared=True),
             user="alice",
             thread_id="thread-3",
         )
@@ -477,6 +502,13 @@ async def test_unconfigured_and_per_caller_binds_read_nothing_new(
     per_caller = await set_channel_backend(
         db_session, channel_ref(tenant.id, "discord", "chan-1"), BackendConfig()
     )
+    # Configured again, still never shared: revision 2 reads no binding either.
+    reconfigured = await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, "discord", "chan-1"),
+        BackendConfig(requires={"artifacts": CapabilityRequirement(level="required")}),
+    )
+    assert reconfigured.local == 2
     await db_session.commit()
     statements: list[str] = []
 
@@ -498,7 +530,7 @@ async def test_unconfigured_and_per_caller_binds_read_nothing_new(
             user="alice",
             thread_id="t-warm",
         )
-        for index, revision in enumerate((None, per_caller)):
+        for index, revision in enumerate((None, per_caller, reconfigured)):
             statements.clear()
             prepared = await _bind(
                 _deps(db_session_factory, fake),
@@ -512,8 +544,8 @@ async def test_unconfigured_and_per_caller_binds_read_nothing_new(
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 
-    assert traces[0] == traces[1]
-    touched = " ".join(traces[1])
+    assert traces[0] == traces[1] == traces[2]
+    touched = " ".join(traces[1] + traces[2])
     for table in (
         "provider_binding",
         "journal_session",
@@ -706,3 +738,133 @@ def test_c16_the_port_exposes_no_raw_client_and_refuses_undeclared_extensions() 
     offered = backend.capabilities().extensions[0]
     with pytest.raises(ExtensionVersionError):
         backend.extension(object, namespace=offered.namespace, version=offered.version + 99)
+
+
+# Review round 2: new threads only, no personal servers, sharing history in one read
+
+
+async def test_an_existing_thread_stays_per_caller_when_the_channel_starts_sharing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    agent, env = await _app_agent(db_session, tenant)
+    channel = channel_ref(tenant.id, "discord", "chan-1")
+    per_caller = await set_channel_backend(db_session, channel, BackendConfig())
+    await db_session.commit()
+    fake = _Fake()
+    deps = _deps(db_session_factory, fake)
+    private = await _bind(deps, tenant, _admission(alice.id, agent, env, per_caller), user="alice")
+
+    shared = await set_channel_backend(db_session, channel, _SHARED)
+    await db_session.commit()
+    again = await _bind(deps, tenant, _admission(alice.id, agent, env, shared), user="alice")
+    bobs = await _bind(deps, tenant, _admission(bob.id, agent, env, shared), user="bob")
+    new_thread = await _bind(
+        deps, tenant, _admission(alice.id, agent, env, shared), user="alice", thread_id="thread-2"
+    )
+
+    assert again.ma_session_id == private.ma_session_id
+    assert again.session_account_id == alice.id
+    assert bobs.session_account_id == bob.id and bobs.ma_session_id != private.ma_session_id
+    assert new_thread.session_account_id == shared_owner(_slot(tenant, "thread-2"))
+    async with db_session_factory() as s:
+        assert await mux_state.get_binding(s, _slot(tenant)) is None
+
+
+async def test_the_sharing_history_comes_with_the_revision(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    channel = channel_ref(tenant.id, "discord", "chan-1")
+    assert await current_backend_and_sharing(db_session, channel) == (None, False)
+    first = await set_channel_backend(db_session, channel, BackendConfig())
+    assert await current_backend_and_sharing(db_session, channel) == (first, False)
+    await set_channel_backend(db_session, channel, _SHARED)
+    back = await set_channel_backend(db_session, channel, BackendConfig())
+    assert await current_backend_and_sharing(db_session, channel) == (back, True)
+
+
+async def test_a_shared_session_carries_no_personally_connected_server(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_personal")
+    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
+    await _record_personal_sign_in(
+        db_session, tenant_id=tenant.id, account_id=alice.id, agent_uuid=agent_uuid
+    )
+    toolset: dict[str, object] = {
+        "type": "mcp_toolset",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+    agent = ma_agent(
+        id="ag_personal",
+        tenant_id=tenant.id,
+        mcp_servers=[
+            {"name": "docs", "type": "url", "url": "https://mcp.example.com/docs"},
+            {"name": "team", "type": "url", "url": "https://mcp.example.com/team"},
+        ],
+        tools=[{**toolset, "mcp_server_name": "docs"}, {**toolset, "mcp_server_name": "team"}],
+    )
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await db_session.commit()
+    fake = _Fake()
+
+    # Alice herself connected `docs`; her turn in the shared thread still leaves it off.
+    await _bind(
+        _deps(db_session_factory, fake),
+        tenant,
+        _admission(alice.id, agent, env, revision),
+        user="alice",
+    )
+
+    (create,) = [r for r in fake.requests if r.method == "POST" and r.url.path == "/v1/sessions"]
+    sent = json.loads(create.content)["agent"]
+    assert sent["type"] == "agent_with_overrides"
+    assert [server["name"] for server in sent["mcp_servers"]] == ["team"]
+    assert [tool["mcp_server_name"] for tool in sent["tools"]] == ["team"]
+    assert b"mcp.example.com/docs" not in create.content
+
+
+async def _record_personal_sign_in(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, agent_uuid: uuid.UUID
+) -> None:
+    """One member's finished OAuth sign-in for the agent's `docs` server."""
+    now = datetime(2026, 9, 16, 9, 0, tzinfo=UTC)
+    request = await requests_store.create_credential_request(
+        session,
+        token=mint_request_token(),
+        kind="mcp_oauth",
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        account_id=account_id,
+        target="docs",
+        mcp_server_url="https://mcp.example.com/docs",
+        requester_platform_user_id="requester-connected",
+        channel_id="chan-1",
+        expires_at=now + timedelta(minutes=30),
+        idempotency_key=uuid.uuid4(),
+        target_ma_agent_id="ag_personal",
+        target_name="daimon",
+        requested_work=None,
+    )
+    flow = await flows_store.create_flow(
+        session,
+        state="st_" + uuid.uuid4().hex,
+        request_token=request.token,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_id=agent_uuid,
+        server_name="docs",
+        mcp_server_url="https://mcp.example.com/docs",
+        redirect_uri="https://d.example/oauth/mcp/callback",
+        code_verifier="verifier",
+        expires_at=now + timedelta(minutes=10),
+    )
+    await flows_store.consume_flow(session, state=flow.state, now=now)
+    await flows_store.mark_flow_completed(session, state=flow.state, now=now)

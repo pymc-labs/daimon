@@ -52,6 +52,13 @@ async def current_backend(session: AsyncSession, channel: ChannelRef) -> ConfigR
     return await mux_state.latest_config_revision(session, channel)
 
 
+async def current_backend_and_sharing(
+    session: AsyncSession, channel: ChannelRef
+) -> tuple[ConfigRevision | None, bool]:
+    """The newest revision and whether any revision ever shared threads, in one read."""
+    return await mux_state.latest_config_revision_and_sharing(session, channel)
+
+
 async def set_channel_backend(
     session: AsyncSession, channel: ChannelRef, config: BackendConfig
 ) -> ConfigRevision:

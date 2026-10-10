@@ -298,6 +298,8 @@ async def create_ma_session(
         mcp_settings=deps.mcp,
         # A shared thread's session carries no caller's credentials.
         account_id=None if admission.shared_owner is not None else admission.account_id,
+        # Leaves off every server somebody connected through their own OAuth.
+        hide_personal_for=admission.shared_owner,
         tenant_id=tenant_id,
         agent_uuid=agent_uuid,
         session_factory=deps.sessionmaker,
@@ -574,7 +576,7 @@ async def _shared_thread(
     revision = admission.backend_revision
     channel_id = admission.origin_channel_id
     if (
-        not may_have_shared_binding(revision)
+        not may_have_shared_binding(revision, ever_shared=admission.backend_ever_shared)
         or channel_id is None
         or admission.private_dm_id is not None
         or admission.config.thread_binding_kind == "setup"
@@ -586,6 +588,7 @@ async def _shared_thread(
             shared = await resolve_shared_thread(
                 session,
                 revision,
+                ever_shared=admission.backend_ever_shared,
                 tenant_id=tenant_id,
                 platform=platform,
                 channel_id=channel_id,

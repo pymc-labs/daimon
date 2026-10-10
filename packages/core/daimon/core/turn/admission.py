@@ -54,7 +54,7 @@ from daimon.core.channel_backend import (
     BackendUnsupported,
     channel_ref,
     check_backend,
-    current_backend,
+    current_backend_and_sharing,
 )
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
@@ -213,6 +213,9 @@ class Admission:
     # the synthetic owner of its session row. The session is then created and
     # refreshed with no caller credentials. None for every per-caller turn.
     shared_owner: uuid.UUID | None = field(default=None, compare=False, repr=False)
+    # Whether any revision of the channel ever shared threads, read with the
+    # revision itself; a channel never shared reads no thread binding.
+    backend_ever_shared: bool = field(default=False, compare=False, repr=False)
 
 
 async def admit(
@@ -376,10 +379,10 @@ async def admit_impl(
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
         # Off by default: with the flag unset this reads nothing.
-        backend_revision = (
-            await current_backend(session, channel_ref(tenant_id, platform, channel_id))
+        backend_revision, backend_ever_shared = (
+            await current_backend_and_sharing(session, channel_ref(tenant_id, platform, channel_id))
             if deps.channel_backends
-            else None
+            else (None, False)
         )
     mark("config")
 
@@ -612,6 +615,7 @@ async def admit_impl(
 
     result = Admission(
         backend_revision=backend_revision,
+        backend_ever_shared=backend_ever_shared,
         backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),

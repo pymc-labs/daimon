@@ -2,8 +2,10 @@
 
 A thread is shared only when its channel's backend configuration says
 `thread_mode="shared"` and `DAIMON_TURN__CHANNEL_BACKENDS` is on (otherwise
-admission carries no revision at all), and never for a setup conversation.
-Everything else keeps today's per-caller session, decided without a read.
+admission carries no revision at all), it is new (nobody has a session in it
+yet), and it is not a setup conversation or a DM. Everything else keeps
+today's per-caller session; a channel that never shared decides it without
+a read.
 
 A shared thread's session row belongs to a synthetic owner derived from the
 thread itself, never a person's account and never the sentinel the removed
@@ -15,8 +17,9 @@ applies to new threads, while this one stays on its revision, and is refused
 visibly if that revision can no longer run.
 
 A shared workspace must not act as any one caller, so it is created with no
-caller credentials (no personal vault, MCP identity, personal servers or
-GitHub user grant) and only agent-owned ones: the agent must run in app mode.
+caller credentials (no personal vault, MCP identity or GitHub user grant)
+and only agent-owned ones, so the agent must run in app mode. Every MCP
+server somebody connected through their own OAuth sign-in is left off it.
 Charges stay with each caller, as the turn recorder writes them by the
 writer's platform user.
 """
@@ -67,22 +70,23 @@ def shared_owner(slot: Slot) -> uuid.UUID:
     return uuid.uuid5(SHARED_OWNER_NAMESPACE, key)
 
 
-def may_have_shared_binding(revision: ConfigRevision | None) -> bool:
+def may_have_shared_binding(revision: ConfigRevision | None, *, ever_shared: bool) -> bool:
     """Whether a thread under `revision` can be shared, so its binding must be read.
 
-    No revision (unconfigured, or the flag off) and a channel configured once,
-    per caller, read nothing. A channel whose configuration changed may have
-    threads bound shared under an earlier revision, which stay shared.
+    No revision (unconfigured, or the flag off) and a channel never configured
+    to share read nothing. A channel shared before may have threads bound
+    shared under an earlier revision, which stay shared.
     """
     if revision is None:
         return False
-    return revision.thread_mode == "shared" or revision.local > 1
+    return revision.thread_mode == "shared" or ever_shared
 
 
 async def resolve_shared_thread(
     session: AsyncSession,
     revision: ConfigRevision | None,
     *,
+    ever_shared: bool,
     tenant_id: uuid.UUID,
     platform: str,
     channel_id: str,
@@ -90,27 +94,39 @@ async def resolve_shared_thread(
 ) -> SharedThread | None:
     """The thread's shared binding, or None when the thread runs per caller.
 
-    A thread already bound shared keeps the revision it was bound under; one
-    not yet bound is shared only if the channel's current revision says so.
+    A thread already bound shared keeps the revision it was bound under. One
+    not yet bound is shared only if the channel's current revision says so
+    and it is a new thread: one where someone already has a session (of any
+    status) stays per caller, so configuring a channel to share never moves
+    an existing conversation.
     Raises `BackendUnsupported` if the revision the thread runs under cannot
     run here.
     """
-    if not may_have_shared_binding(revision):
+    if not may_have_shared_binding(revision, ever_shared=ever_shared):
         return None
     assert revision is not None
     slot = shared_slot(tenant_id, platform, channel_id, thread_id)
+    owner = shared_owner(slot)
     binding = await mux_state.get_binding(session, slot)
     if binding is None:
         if revision.thread_mode != "shared":
             return None
-        return SharedThread(slot=slot, owner=shared_owner(slot), revision=revision, binding=None)
+        if await mux_state.thread_has_caller_sessions(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            except_account=owner,
+        ):
+            return None
+        return SharedThread(slot=slot, owner=owner, revision=revision, binding=None)
     pinned = await mux_state.get_config_revision(
         session, slot.thread.channel, binding.config_revision
     )
     if pinned is None:
         raise BackendUnsupported(f"revision {binding.config_revision} of the thread is missing")
     check_backend(pinned)
-    return SharedThread(slot=slot, owner=shared_owner(slot), revision=pinned, binding=binding)
+    return SharedThread(slot=slot, owner=owner, revision=pinned, binding=binding)
 
 
 async def record_shared_binding(
