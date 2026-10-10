@@ -43,6 +43,8 @@ class Replay:
         self.obj = SimpleNamespace(
             _processing=set(),
             _pending={},
+            _queued_reactions=set(),
+            user=SimpleNamespace(id=999),
             _deferred_dispatch={},
             _inflight={},
             turn_queue=TurnQueue(
@@ -73,6 +75,8 @@ class Replay:
             ],
             "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"],
         }[platform]
+        if platform == "discord" and not old:
+            names += ["_remove_mention_reaction", "_clear_queued_reactions"]
         for name in names:
             setattr(self.obj, name, MethodType(getattr(cls, name), self.obj))
         self.obj._dispatch_continuations = self.dispatch
@@ -178,12 +182,17 @@ class Replay:
                 self.effects.append(("wait", number, emoji))
                 await self.stop("reaction")
 
+            async def unreact(emoji, user):
+                self.cleared.append(number)
+
             return SimpleNamespace(
                 author=SimpleNamespace(id=author, display_name=str(author)),
                 id=number,
                 content=text,
                 attachments=[number],
                 add_reaction=react,
+                remove_reaction=unreact,
+                guild=SimpleNamespace(me=self.obj.user),
             )
         if self.platform == "slack":
             return dict(
