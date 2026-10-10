@@ -42,6 +42,9 @@ class FakeBackend:
     def current_messages(self, turn: Turn) -> list[Message]:
         return turn.messages
 
+    def created_threads(self, turns: list[Turn]) -> set[str]:
+        return {turn.thread_id for turn in turns if turn.thread_id}
+
     def preflight(self, roles: set[str]) -> None:
         self.events.append("preflight")
 

@@ -573,3 +573,97 @@ def test_model_skip_requires_positive_scoped_pre_admission_log(
         assert usage.skip_evidence["channel_id"] == "parent"
     else:
         assert usage is None
+
+
+@pytest.mark.parametrize(
+    "exit_code,output,allow,process_code,expected",
+    [
+        (1, "ConnectionError: database transport unavailable", True, 0, RuntimeError),
+        (1, "refused: skill still attached", True, 0, None),
+        (2, "refused: skill still attached", True, 0, RuntimeError),
+        (1, "refused: skill still attached", False, 0, RuntimeError),
+        (0, "ok", False, 1, RuntimeError),
+        (1, "refused: skill still attached", True, 1, RuntimeError),
+        (True, "refused: skill still attached", True, 0, ValueError),
+        (-1, "refused: skill still attached", True, 0, ValueError),
+    ],
+)
+def test_admin_expected_refusal_never_hides_transport_or_unexpected_exit(
+    backend: DiscordBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: object,
+    output: str,
+    allow: bool,
+    process_code: int,
+    expected: type[Exception] | None,
+) -> None:
+    backend.owned.add("parent")
+    backend.config.admin_hooks["cli"] = ["fixture"]
+
+    def command(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args, process_code, json.dumps({"exit_code": exit_code, "stdout": output}), ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", command)
+    step = Step(
+        do="admin",
+        tool="cli",
+        args="daimon skills delete qa-test",
+        allow_fail=allow,
+        allow_fail_pattern="(?i)still attached|refus" if allow else None,
+    )
+    if expected:
+        with pytest.raises(expected):
+            backend.admin(step, "parent")
+    else:
+        backend.admin(step, "parent")
+        assert backend.bindings["last_admin_exit_code"] == "1"
+
+
+def test_refresh_and_empty_thread_inventory_require_owned_matching_evidence(
+    backend: DiscordBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn = Turn(1, "111", "parent", utcnow(), settled=True)
+    turn.messages = [{"id": "message", "channel_id": "foreign"}]
+    with pytest.raises(ValueError, match="outside"):
+        backend.current_messages(turn)
+    backend.owned.add("parent")
+    turn.messages[0]["channel_id"] = "parent"
+    monkeypatch.setattr(backend.driver, "call", lambda method, path, **kwargs: {"id": "different"})
+    with pytest.raises(Pending, match="matching"):
+        backend.current_messages(turn)
+    turn.messages = []
+    other = Turn(2, "222", "parent", utcnow(), settled=True)
+    monkeypatch.setattr(
+        backend.driver,
+        "call",
+        lambda method, path, **kwargs: {
+            "id": path.rsplit("/", 1)[1],
+            "type": 11,
+            "parent_id": "parent",
+        },
+    )
+    assert backend.created_threads([turn, other]) == {"111", "222"}
+    from qa.live.evaluate import evaluate
+    from qa.live.tests.conftest import FakeJudge
+
+    assert (
+        evaluate(
+            Assertion(kind="threads_created", maximum=1), [turn, other], backend, FakeJudge()
+        ).status
+        == "FAIL"
+    )
+
+    def denied(method: str, path: str, **kwargs: object) -> JsonValue:
+        raise SystemExit("HTTP 403 on GET " + path + ": denied")
+
+    monkeypatch.setattr(backend.driver, "call", denied)
+    with pytest.raises(Pending, match="unavailable"):
+        backend.created_threads([turn])
+
+    def missing(method: str, path: str, **kwargs: object) -> JsonValue:
+        raise SystemExit("HTTP 404 on GET " + path + ": absent")
+
+    monkeypatch.setattr(backend.driver, "call", missing)
+    assert backend.created_threads([turn]) == set()

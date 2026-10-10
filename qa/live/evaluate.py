@@ -67,7 +67,7 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                     str(m["id"]) for t in turns for m in answers(t, backend) if m.get("id")
                 }
             else:
-                identities = {t.thread_id for t in turns if t.thread_id}
+                identities = backend.created_threads(turns)
             count = len(identities)
             maximum = assertion.maximum or 0
             if count <= maximum and any(not t.settled for t in turns):
@@ -168,7 +168,9 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 if not messages:
                     raise Pending("no answer messages: delivery gaps are unavailable")
                 events = [
-                    message_visible_at(m, turn.started_at, reused=bool(m.get("edited_timestamp")))
+                    message_visible_at(
+                        m, turn.started_at, reused=str(m.get("id")) in turn.baseline_message_ids
+                    )
                     for m in messages
                 ]
                 if any(event is None for event in events):

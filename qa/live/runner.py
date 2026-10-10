@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import signal
 import tempfile
 import threading
@@ -151,11 +152,18 @@ class Executor:
         if self.env == "staging":
             result.deployment = DeploymentEvidence()
         try:
-            for step in [*scenario.setup, *scenario.steps]:
+            for step in [*scenario.setup, *scenario.steps, *scenario.teardown]:
                 if step.guild is not None:
                     requested = self.context.resolve(step.guild)
                     if requested != self.context.values.get("guild_id"):
                         raise Pending("new_channel guild requires a separately approved QA target")
+                if step.do == "admin" and step.tool == "cli" and isinstance(step.args, str):
+                    args = shlex.split(step.args)
+                    prefix = [self.context.resolve(arg) for arg in args[:3]]
+                    if prefix == ["daimon", "tenants", "credit"]:
+                        raise Pending(
+                            "tenant credit mutations require a separately approved isolated target"
+                        )
             if result.deployment:
                 try:
                     result.deployment.start_image = self.backend.deployment_image()

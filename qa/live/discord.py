@@ -399,6 +399,7 @@ class DiscordBackend:
                 after=turn.trigger_id,
                 daimon_id=self.target.daimon_id,
             )
+            turn.baseline_message_ids = sorted(self.baseline_ids.get(turn.trigger_id, set()))
             raw = self.driver.messages(turn.channel_id, after=None, limit=100)
             if self.driver.exists(turn.trigger_id):
                 raw.extend(self.driver.messages(turn.trigger_id, after=None, limit=100))
@@ -520,6 +521,29 @@ class DiscordBackend:
             rows.append(row)
         return rows
 
+    def created_threads(self, turns: list[Turn]) -> set[str]:
+        """Probe every trigger, including threads with no Daimon messages."""
+        identities = {turn.thread_id for turn in turns if turn.thread_id}
+        for turn in turns:
+            self._owned(turn.channel_id)
+            path = f"/channels/{turn.trigger_id}"
+            try:
+                row = obj(self.driver.call("GET", path))
+            except SystemExit as exc:
+                if str(exc).startswith(f"HTTP 404 on GET {path}:"):
+                    continue
+                raise Pending("thread inventory read unavailable") from None
+            except Exception as exc:
+                raise Pending("thread inventory read unavailable") from exc
+            if (
+                str(row.get("id")) != turn.trigger_id
+                or row.get("type") not in {10, 11, 12}
+                or str(row.get("parent_id")) != turn.channel_id
+            ):
+                raise Pending("thread inventory returned incomplete or mismatched evidence")
+            identities.add(turn.trigger_id)
+        return identities
+
     def channel_messages(self, turn: Turn) -> list[Message]:
         self._owned(turn.channel_id)
         if not turn.settled or turn.ended_at is None:
@@ -570,6 +594,8 @@ class DiscordBackend:
             "role": step.role,
             "args": step.args,
             "allow_fail": step.allow_fail,
+            "allow_fail_pattern": step.allow_fail_pattern,
+            "allow_fail_exit_codes": step.allow_fail_exit_codes,
         }
         result = subprocess.run(
             command,
@@ -588,8 +614,19 @@ class DiscordBackend:
                 raise ValueError("admin hook must return a nonnegative CLI exit_code")
             self.bindings["last_admin_exit_code"] = str(exit_code)
             if exit_code:
-                if not step.allow_fail:
-                    raise RuntimeError("staging CLI command failed")
+                output = obj(data).get("stdout", "")
+                stderr = obj(data).get("stderr", "")
+                if (
+                    not step.allow_fail
+                    or exit_code not in step.allow_fail_exit_codes
+                    or not step.allow_fail_pattern
+                    or not isinstance(output, str)
+                    or not isinstance(stderr, str)
+                    or not re.search(step.allow_fail_pattern, output + "\n" + stderr, re.MULTILINE)
+                ):
+                    raise RuntimeError(
+                        "staging CLI command failed without expected refusal evidence"
+                    )
                 return
             bindings = obj(data).get("context", {})
             if not isinstance(bindings, dict) or any(

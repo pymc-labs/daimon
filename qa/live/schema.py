@@ -36,6 +36,8 @@ class Step(Contract):
     channel: str | None = None
     guild: str | None = None
     allow_fail: bool = False
+    allow_fail_pattern: str | None = None
+    allow_fail_exit_codes: list[int] = Field(default_factory=lambda: [1])
     mention: bool = False
     reply_to: str | None = Field(default=None, pattern=r"^turn[1-9][0-9]*\.chunk[1-9][0-9]*$")
     text: str | None = None
@@ -69,6 +71,19 @@ class Step(Contract):
             raise ValueError("guild requires new_channel")
         if self.allow_fail and (self.do != "admin" or self.tool != "cli"):
             raise ValueError("allow_fail requires admin cli")
+        if self.allow_fail:
+            if not self.allow_fail_pattern:
+                raise ValueError("allow_fail requires an explicit expected refusal pattern")
+            try:
+                re.compile(self.allow_fail_pattern)
+            except re.error as exc:
+                raise ValueError("expected refusal pattern is invalid") from exc
+            if not self.allow_fail_exit_codes or any(
+                code <= 0 for code in self.allow_fail_exit_codes
+            ):
+                raise ValueError("allow_fail requires positive expected exit codes")
+        elif self.allow_fail_pattern is not None:
+            raise ValueError("expected refusal pattern requires allow_fail")
         return self
 
 

@@ -95,6 +95,7 @@ def test_running_edits_are_distinct_and_exclude_terminal_edits() -> None:
 
 def test_chunk_gap_uses_answer_edit_instead_of_progress_card_creation() -> None:
     turn = observed(1, "1")
+    turn.baseline_message_ids = ["1"]
     turn.messages = [
         {
             "id": "1",
@@ -142,3 +143,60 @@ def test_step_scope_validation_and_nested_judge_budget(
         )
     ]
     assert estimate(scenario, pricing) > scenario.est_turns * pricing.per_turn_usd
+
+
+def test_late_answer_edits_cannot_hide_or_invent_chunk_gaps() -> None:
+    turn = observed(1, "1")
+    turn.messages = [
+        {
+            "id": "1",
+            "content": "one",
+            "timestamp": turn.started_at.isoformat(),
+            "edited_timestamp": (turn.started_at + timedelta(seconds=40)).isoformat(),
+        },
+        {
+            "id": "2",
+            "content": "two",
+            "timestamp": (turn.started_at + timedelta(seconds=43)).isoformat(),
+            "edited_timestamp": (turn.started_at + timedelta(seconds=100)).isoformat(),
+        },
+    ]
+    assertion = Assertion(kind="chunks_gap_max_s", turn=1, maximum=5)
+    # Creation-to-creation stall remains a failure despite later edits.
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+    turn.messages[1]["timestamp"] = (turn.started_at + timedelta(seconds=3)).isoformat()
+    # A late footer edit cannot invent a stall.
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+
+
+def test_shared_guild_credit_is_refused_before_any_mutation(
+    scenario: Scenario, ledger: Ledger, pricing: Pricing
+) -> None:
+    scenario.setup = [
+        Step(
+            do="admin",
+            tool="cli",
+            args="daimon tenants credit discord 1435062989119295640 -999 --note qa",
+        )
+    ]
+    scenario.steps[0].guild = "1435062989119295640"
+    backend = FakeBackend()
+    result = Executor(backend, FakeJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING" and not backend.events
+    assert any("credit mutations" in c.reason for c in result.checks)
+    assert ledger.charged({result.run_id}) == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"allow_fail": True},
+        {"allow_fail": True, "allow_fail_pattern": "["},
+        {"allow_fail": True, "allow_fail_pattern": "refus", "allow_fail_exit_codes": [0]},
+    ],
+)
+def test_expected_refusal_is_explicit_and_validated(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        Step.model_validate(
+            {"do": "admin", "tool": "cli", "args": "daimon skills delete qa-test", **payload}
+        )

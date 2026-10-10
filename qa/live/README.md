@@ -339,3 +339,13 @@ failures require the hook's JSON `exit_code`; a transport failure is still a
 harness error. `new_channel.guild` must resolve to the configured approved QA
 guild before any setup mutation; a separate depleted-tenant scenario remains
 PENDING until its target is independently approved.
+
+An admin CLI step with `allow_fail: true` must declare `allow_fail_pattern` (a
+required stdout/stderr refusal regex) and may narrow `allow_fail_exit_codes`
+(default `[1]`). Both the code and pattern must match. An unexpected exit, empty
+or transport-looking output, malformed exit code, or failed hook is a harness
+error; an exit code alone never proves the intended refusal.
+Thread counts probe every trigger even if its thread has no bot answer. Permission
+errors do not prove absence. Chunk delivery uses creation timestamps except for
+recorded baseline messages or messages predating the trigger. Tenant-credit CLI
+mutations are refused before setup, including the shared QA guild.
