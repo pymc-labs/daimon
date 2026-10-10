@@ -64,7 +64,7 @@ async def test_set_working_repo_admin_none_and_member_refusal(
         repo_name="none",
     )
     assert result.working_repo is None
-    assert result.message == "Agent has no working repo."
+    assert result.message == "Agent has no working repo now. To set one, ask me for a repo."
     with pytest.raises(ToolError, match="Connect GitHub"):
         await working_tool.set_working_repo_impl(
             runtime,  # type: ignore[arg-type]
@@ -97,6 +97,7 @@ async def test_set_working_repo_admin_none_and_member_refusal(
         repo_name="none",
     )
     assert allowed.working_repo is None
+    assert allowed.message == "Agent has no working repo now. To set one, ask me for a repo."
     manage_check.assert_awaited_once()
     monkeypatch.setattr(working_tool, "set_working_repo", AsyncMock(return_value="owner/repo"))
     monkeypatch.setattr(
@@ -113,6 +114,18 @@ async def test_set_working_repo_admin_none_and_member_refusal(
     assert pending.pending
     assert pending.message == (
         "Agent will use owner/repo as its working repo when GitHub setup finishes."
+    )
+    working_tool.list_agent_repos.return_value = [  # type: ignore[attr-defined]
+        SimpleNamespace(full_name="owner/repo", staged=False)
+    ]
+    active = await working_tool.set_working_repo_impl(
+        runtime,  # type: ignore[arg-type]
+        admin,
+        origin_context_id=str(uuid.uuid4()),
+        repo_name="owner/repo",
+    )
+    assert active.message == (
+        "Agent's working repo is now owner/repo. To switch back, ask me for another repo or none."
     )
 
 

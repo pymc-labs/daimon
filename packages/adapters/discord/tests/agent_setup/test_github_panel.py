@@ -305,7 +305,10 @@ def test_discord_github_panels_are_read_only() -> None:
     text = _embed_text(view)
     assert "ana/thesis\nben/scraper" in text
     assert "Working repo: ana/thesis" in text
-    assert "To change repos, ask helper in chat." in text
+    assert (
+        "Open Connect GitHub to add or remove repos and choose a working repo, or ask helper in chat."
+        in text
+    )
     assert " · " not in text
     assert _labels(view) == ["Connect GitHub", "◀ Back"]
     empty = GitHubReposView(

@@ -167,7 +167,10 @@ def test_slack_github_panels_are_read_only() -> None:
     text = _section_text(view)
     assert "helper's repos" in text and "example/work" in text
     assert "Working repo: example/work" in text
-    assert "To change repos, ask helper in chat." in text
+    assert (
+        "Open Connect GitHub to add or remove repos and choose a working repo, or ask helper in chat."
+        in text
+    )
     assert " · " not in text
     assert _button_labels(view) == ["Connect GitHub", "◀ Back"]
     assert "https://example.invalid/connect" in str(view)
