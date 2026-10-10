@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2170,
+  "files_scanned": 2181,
   "parse_errors": [],
   "calls": [
     {
@@ -14011,6 +14011,32 @@
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/turn/openai_codec.py",
+      "line": 12,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsAgentMCPToolUseEvent",
+        "BetaManagedAgentsAgentMessageEvent",
+        "BetaManagedAgentsAgentToolResultEvent",
+        "BetaManagedAgentsAgentToolUseEvent",
+        "BetaManagedAgentsSessionStatusIdleEvent",
+        "BetaManagedAgentsSessionStatusRunningEvent",
+        "BetaManagedAgentsSessionStatusTerminatedEvent",
+        "BetaManagedAgentsUserMessageEvent"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/turn/openai_io.py",
+      "line": 19,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsEventParams",
+        "BetaManagedAgentsSessionEvent"
       ],
       "category": "production"
     },
