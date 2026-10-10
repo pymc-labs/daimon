@@ -32,8 +32,9 @@ LEDGER_PREFIX = "<!-- mux-ledger "
 LIVE_MODEL_ALLOWLIST: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "openai": frozenset({"gpt-6-luna"}),
-        "anthropic": frozenset({"claude-haiku-4-5-20251001"}),
-        "gemini": frozenset({"gemini-3.5-flash-lite"}),
+        "anthropic": frozenset({"claude-haiku-5-5"}),
+        # The Gemini harness owns 3.8 Flash-first and 503-only fallback.
+        "gemini": frozenset({"gemini-3.8-flash", "gemini-flash-latest", "gemini-3.5-flash-lite"}),
     }
 )
 

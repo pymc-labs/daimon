@@ -48,10 +48,19 @@ receipts without recorder or SDK imports. Its pinned ledger, checkpoint and
 stable sequence lock refuse reset/rollback attempts. Authorized operators supply
 reviewed model prices and enforce token bounds across the whole probe. Admission
 also requires an exact model in the immutable `LIVE_MODEL_ALLOWLIST`: OpenAI
-`gpt-6-luna`, Anthropic `claude-haiku-4-5-20251001`, or Gemini `gemini-3.5-flash-lite`.
-Unknown providers, aliases and other models receive a blocked receipt with zero
-spend before the callback can access a key. An allowed model without reviewed
-prices still refuses; policy membership alone cannot enable a live call.
+`gpt-6-luna`; Anthropic `claude-haiku-5-5`; Gemini `gemini-3.8-flash`,
+`gemini-flash-latest` or `gemini-3.5-flash-lite`. The Gemini harness must start
+with 3.8 Flash and may use the latter two IDs only after a 503 from 3.8 Flash.
+Unknown providers, unlisted aliases and other models receive a blocked receipt
+with zero spend before the callback can access a key. An allowed model without
+reviewed prices still refuses; policy membership alone cannot enable a live call.
+Anthropic documents Haiku 5.5 on its official
+[model page](https://platform.claude.com/docs/en/models/haiku-5-5/overview#model-ids).
+The canonical budget config uses the conservative Haiku 5.5 rates for prompts
+over 100,000 tokens: input $0.50, cache read $0.05, cache write $1 (1h upper bound),
+output $2.50 per million tokens. Its flat price schema cannot select a tier per
+request, so shorter prompts are overestimated. See the official
+[pricing table](https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
 
 `mux.conformance.recording` retains only normalized mux events and request
 metadata, excluding raw HTTP bodies, body values and opaque native provenance.

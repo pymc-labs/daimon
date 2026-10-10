@@ -186,6 +186,19 @@ not authentication. Never delete state to retry. The lead reconciles corrupted
 state and actual provider spend; the guard has no automatic reset or repair.
 Recording, provider adapters and live certification are separate features.
 
+Live model admission accepts OpenAI `gpt-6-luna`; Anthropic `claude-haiku-5-5`;
+Gemini `gemini-3.8-flash`, `gemini-flash-latest` and `gemini-3.5-flash-lite`.
+Every accepted ID still requires reviewed prices. The Gemini harness owns the
+stricter 3.8 Flash-first policy and permits the latter two IDs only after 3.8
+Flash returns 503. The guard does not perform provider fallback.
+Anthropic lists Haiku 5.5 on its official
+[model ID page](https://platform.claude.com/docs/en/models/haiku-5-5/overview#model-ids).
+The canonical flat price map uses the upper prompt tier and 1h cache-write rate:
+input $0.50, cache read $0.05, cache write $1 and output $2.50 per million tokens.
+This bounds both prompt tiers and both cache-write durations; estimates for
+shorter prompts can exceed actual cost. Source:
+[Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
+
 ## Normalized conformance recordings
 
 `recording.Recorder` records only request metadata and fixed, validated mux

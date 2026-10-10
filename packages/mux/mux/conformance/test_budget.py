@@ -29,7 +29,7 @@ from mux.conformance.budget import (
     TokenUsage,
 )
 
-TEST_MODELS = {"openai": "gpt-6-luna", "anthropic": "claude-haiku-4-5-20251001"}
+TEST_MODELS = {"openai": "gpt-6-luna", "anthropic": "claude-haiku-5-5"}
 
 
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
@@ -248,7 +248,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
 def plan(tokens: int = 1_000_000, provider: str = "openai") -> ProbePlan:
     return ProbePlan(
         provider=provider,
-        model="gpt-6-luna" if provider == "openai" else "claude-haiku-4-5-20251001",
+        model="gpt-6-luna" if provider == "openai" else "claude-haiku-5-5",
         fixture_id="C16",
         limits=TokenLimits(input_tokens=tokens, output_tokens=0),
     )
