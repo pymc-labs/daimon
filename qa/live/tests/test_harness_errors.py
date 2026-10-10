@@ -84,7 +84,7 @@ def test_model_probe_retries_transient_transport_but_not_wrong_model(
     assert len(calls) == 3
 
 
-def test_harness_pending_never_alerts_but_product_failure_still_does(
+def test_harness_pending_alerts_once_after_three_and_product_failure_still_does(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -105,10 +105,15 @@ def test_harness_pending_never_alerts_but_product_failure_still_does(
         "PENDING",
         [Check("execution", "PENDING", "harness error: ValueError")],
     )
-    for _ in range(6):
+    for _ in range(2):
         alerts.notify(result, tmp_path / "run.json")
-    assert not calls and not alerts.state_path.exists()
+    assert not calls
+    for _ in range(4):
+        alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 1
+    assert json.loads(alerts.state_path.read_text())["staging:QA-D1-TEST"]["pending_count"] == "6"
+    result.scenario = "QA-D1-PRODUCT-FAILURE"
     result.checks.append(Check("text_present", "FAIL", "missing expected product answer"))
     result.finalize()
     alerts.notify(result, tmp_path / "run.json")
-    assert len(calls) == 1
+    assert len(calls) == 2

@@ -106,12 +106,15 @@ def message_created_at(message: Message) -> datetime | None:
     return None
 
 
-def message_visible_at(message: Message, trigger_at: datetime) -> tuple[datetime, str] | None:
+def message_visible_at(
+    message: Message, trigger_at: datetime, *, reused: bool = False
+) -> tuple[datetime, str] | None:
     created = message_created_at(message)
     # Allow the legacy driver's documented 5s cross-worker snowflake skew.
     # A reused card predating this trigger needs an edit from this turn.
-    if created and (created - trigger_at).total_seconds() >= -5:
-        return created, "message_created"
+    if created and not reused and (created - trigger_at).total_seconds() >= -5:
+        source = "message_created" if created >= trigger_at else "message_created_clock_skew"
+        return created, source
     edited = message.get("edited_timestamp")
     if isinstance(edited, str):
         timestamp = datetime.fromisoformat(edited.replace("Z", "+00:00"))
@@ -131,6 +134,7 @@ class DiscordBackend:
         self.owned: set[str] = set()
         self.threads: set[str] = set()
         self.baselines: dict[str, set[str]] = {}
+        self.baseline_ids: dict[str, set[str]] = {}
         self.parent = ""
         self.thread_parents: dict[str, str] = {}
         self.fallback_watch_s = config.fallback_watch_s
@@ -339,6 +343,7 @@ class DiscordBackend:
         if not message_id.isdigit():
             raise ValueError("driver did not return a Discord message id")
         self.baselines[message_id] = {fingerprint(m) for m in baseline}
+        self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
         self.driver.set_role("user")
         return message_id
 
@@ -415,7 +420,11 @@ class DiscordBackend:
             ]
             elapsed = (utcnow() - turn.started_at).total_seconds()
             for message in messages:
-                event = message_visible_at(message, trigger_at)
+                event = message_visible_at(
+                    message,
+                    trigger_at,
+                    reused=str(message.get("id")) in self.baseline_ids.get(turn.trigger_id, set()),
+                )
                 if event:
                     timestamp, source = event
                     visible_s = max(0, (timestamp - trigger_at).total_seconds())

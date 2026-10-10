@@ -6,7 +6,17 @@ import re
 
 from qa.live.errors import exception_evidence
 from qa.live.schema import Assertion
-from qa.live.types import Backend, Check, Judge, Pending, Turn, obj, objects, text_of
+from qa.live.types import (
+    Backend,
+    Check,
+    Judge,
+    Pending,
+    Turn,
+    obj,
+    objects,
+    text_components,
+    text_of,
+)
 
 
 def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: Judge) -> Check:
@@ -40,17 +50,14 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                     raise Pending("no messages: text absence is unproven")
                 # Match each content/embed component independently. Anchored
                 # answers must not be joined to another message or its footer.
-                components = [str(m.get("content") or "") for m in turn.messages]
-                for message in turn.messages:
-                    for embed in objects(message.get("embeds")):
-                        components.extend(str(embed.get(k) or "") for k in ("title", "description"))
-                        components.append(str(obj(embed.get("footer")).get("text") or ""))
-                        for field in objects(embed.get("fields")):
-                            components.extend(str(field.get(k) or "") for k in ("name", "value"))
-                match = any(
-                    re.search(assertion.pattern or "", component, re.MULTILINE)
-                    for component in components
+                pattern = assertion.pattern or ""
+                components = [component for m in turn.messages for component in text_components(m)]
+                # Plain ^...$ is an exact component assertion. Inline (?m)
+                # remains available for explicitly requested per-line searches.
+                matcher = (
+                    re.fullmatch if pattern.startswith("^") and pattern.endswith("$") else re.search
                 )
+                match = any(matcher(pattern, component, re.MULTILINE) for component in components)
                 passed = match if kind == "text_present" else not match
                 reason = f"regex {assertion.pattern!r}; matched={match}"
             elif kind == "in_thread":

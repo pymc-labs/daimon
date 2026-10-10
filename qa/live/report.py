@@ -74,19 +74,6 @@ class Alerter:
         )
         key = f"{result.env}:{result.scenario}"
         prior = state.get(key, {})
-        unavailable = [c for c in result.checks if c.status != "PASS"]
-        if (
-            result.status == "PENDING"
-            and unavailable
-            and all(
-                c.reason.startswith("harness error")
-                or (c.kind == "judge" and c.reason.startswith("judge execution unavailable"))
-                for c in unavailable
-            )
-        ):
-            # Suppress evaluator errors only, preserving other evidence's
-            # PENDING streak and its eventual recovery state.
-            return
         now = utcnow()
         pending_count = (
             int(prior.get("pending_count", "0")) + 1 if result.status == "PENDING" else 0

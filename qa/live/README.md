@@ -43,12 +43,12 @@ Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 Haiku 5.5 rejects the deprecated `temperature` parameter, so requests omit it.
 Judge execution errors become PENDING checks, preserve deterministic product
-checks and record the exception type/status in run notes. Only reasons starting
-with `judge execution unavailable` suppress root alerts; model/key/GO/budget
-refusals still alert after three PENDING runs. Suppression preserves existing
-PENDING streaks. A completed judge's failed
-verdict still fails and alerts. Server/network errors retain the conservative
-judge reservation when actual usage is unavailable; requests are never retried.
+checks, and record exception type/status in run notes. Harness execution errors
+also become PENDING. Every PENDING counts toward the three-consecutive-run alert
+threshold, including judge and harness errors; individual unavailable runs stay
+silent. A completed judge's failed verdict fails and alerts. Server/network
+errors retain the conservative judge reservation when actual usage is
+unavailable; requests are never retried.
 The one backend map contains Claude `claude-haiku-5-5`, OpenAI `gpt-6-luna`,
 and Gemini `gemini-3.8-flash`. Unknown or expensive replacements refuse.
 The Gemini fallback helper advances to `gemini-flash-latest`, then
@@ -111,7 +111,7 @@ left by SIGKILL or host loss while protecting other QA workers' allocations.
 `wait_done` execute through the Discord backend. `thread_reply` accepts `mention: true` and `reply_to: turnN.chunkM`; a false or
 omitted `mention` posts without a mention. Reply references must resolve to an
 observed message in an owned conversation. A combined file and reply reference
-currently returns PENDING because the reused uploader cannot encode that reference. `burst` verifies the channel model once before its scheduled posts and starts a concurrent read-only watcher immediately after each trigger. Each post is scheduled from the burst start, so probes and earlier turns cannot delay later triggers. Watchers finish before channel cleanup. Message creation timestamps (or snowflakes) measure first visibility; edits measure reused cards. Timing evidence is retained in each turn. Text patterns match each content/embed component independently with `re.MULTILINE`, so anchored answers are not concatenated with footers. `burst` posts mentions in the latest observed
+currently returns PENDING because the reused uploader cannot encode that reference. `burst` verifies the channel model once before its scheduled posts and starts a concurrent read-only watcher immediately after each trigger. Each post is scheduled from the burst start, so probes and earlier turns cannot delay later triggers. Watchers finish before channel cleanup. Message creation timestamps (or snowflakes) measure first visibility; edits measure reused cards. Timing evidence is retained in each turn. Text patterns match each content/embed component independently with `re.MULTILINE` (plain `^...$` uses a whole-component match; explicit `(?m)` permits per-line searches), so anchored answers are not concatenated with footers. `burst` posts mentions in the latest observed
 thread, or the owned parent if there is no thread. Each trigger receives an index;
 queued triggers can share a composite answer. Fingerprints exclude previous turns'
 unchanged messages from follow-up evidence. The collector settles after terminal
@@ -123,7 +123,7 @@ Watch timeouts preserve evidence and evaluate assertions: a silent or stuck bot
 fails the canary and alerts. The fallback watch is bounded to 180 seconds, and
 the service allows 1200 seconds for watches, probes, log ingestion and cleanup.
 Unexpected harness execution, cleanup or usage exceptions are PENDING rather
-than product failures and do not alert root by themselves. Result JSON retains
+than product failures. They alert only after three consecutive PENDING runs, with the same six-hour dedupe. Result JSON retains
 their type, message, frames and formatted traceback without captured locals;
 credential values are redacted. Read-only model probes retry one transient
 transport failure; valid metadata outside the approved policy still refuses

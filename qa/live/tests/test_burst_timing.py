@@ -93,7 +93,7 @@ def test_late_poll_uses_message_creation_or_reused_card_edit(
     )
     backend = DiscordBackend(config, "staging", driver=driver)
     backend.owned.add("parent")
-    created = origin + timedelta(seconds=-20 if reused else 3.2)
+    created = origin + timedelta(seconds=-1 if reused else 3.2)
     driver.current = [
         {
             "id": snowflake(created),
@@ -107,6 +107,8 @@ def test_late_poll_uses_message_creation_or_reused_card_edit(
     driver.trigger["reactions"] = [{"emoji": {"name": "👀"}}]
     monkeypatch.setattr("qa.live.discord.utcnow", lambda: origin + timedelta(seconds=47))
     turn = Turn(1, snowflake(origin), "parent", origin - timedelta(seconds=1))
+    if reused:
+        backend.baseline_ids[turn.trigger_id] = {str(driver.current[0]["id"])}
     backend.collect(turn, 0.1)
     assert turn.first_visible_s == pytest.approx(expected)
     assert turn.first_visible_evidence["source"] == source
@@ -126,6 +128,8 @@ def test_anchored_answer_uses_content_and_multiline_without_footer_join(
     assertion = Assertion(kind="text_present", turn=1, pattern=r"^\s*\**B1\**\.?\s*$")
     assert evaluate(assertion, [turn], backend, judge).status == "PASS"
     turn.messages[0]["content"] = "preface\nB1\nother line"
+    assert evaluate(assertion, [turn], backend, judge).status == "FAIL"
+    assertion.pattern = "(?m)^B1$"
     assert evaluate(assertion, [turn], backend, judge).status == "PASS"
     turn.messages = [{"content": "B"}, {"content": "1"}]
     assertion.pattern = r"B\s+1"
@@ -150,3 +154,55 @@ def test_every_failed_burst_watcher_retains_its_traceback(
     assert len(result.errors) == 3
     assert all(e["type"] == "ValueError" and e["frames"] for e in result.errors)
     assert backend.events[-1] == "delete"
+
+
+def test_mixed_timeout_and_harness_failure_retains_product_watch_failure(
+    judge: FakeJudge, ledger: Ledger, pricing: Pricing, scenario: Scenario
+) -> None:
+    from qa.live.types import WatchTimeout
+
+    class MixedBackend(FakeBackend):
+        def collect(self, turn: Turn, timeout: float) -> None:
+            if turn.number == 1:
+                raise WatchTimeout("silent bot")
+            if turn.number == 2:
+                raise ValueError("offline poll failure")
+            super().collect(turn, timeout)
+
+    backend = MixedBackend()
+    scenario.tier = "full"
+    scenario.est_turns = 3
+    scenario.steps = [Step(do="burst", texts=["B1", "B2", "B3"]), Step(do="wait_done")]
+    result = Executor(backend, judge, ledger, pricing, "staging").run(scenario)
+    assert result.status == "FAIL"
+    assert any(c.kind == "watch" and c.status == "FAIL" and c.turn == 1 for c in result.checks)
+    assert any(c.kind == "execution" and c.status == "PENDING" for c in result.checks)
+    assert result.errors[0]["type"] == "ValueError"
+    assert backend.events[-1] == "delete"
+
+
+def test_admin_post_cannot_race_active_burst_watcher_roles(
+    backend: FakeBackend, judge: FakeJudge, ledger: Ledger, pricing: Pricing, scenario: Scenario
+) -> None:
+    scenario.tier = "full"
+    scenario.est_turns = 3
+    scenario.steps = [
+        Step(do="burst", texts=["B1", "B2"]),
+        Step(do="channel_message", text="admin", role="admin"),
+        Step(do="wait_done"),
+    ]
+    result = Executor(backend, judge, ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING"
+    assert backend.sent == 2
+    assert "non-user steps" in result.checks[0].reason
+    assert backend.events[-1] == "delete"
+
+
+def test_snowflake_skew_retains_explicit_provenance(pricing: Pricing) -> None:
+    from qa.live.discord import message_visible_at
+
+    trigger_at = datetime(2026, 10, 10, 8, 0, tzinfo=UTC)
+    card = {"id": snowflake(trigger_at - timedelta(milliseconds=187))}
+    event = message_visible_at(card, trigger_at)
+    assert event is not None and event[1] == "message_created_clock_skew"
+    assert message_visible_at(card, trigger_at, reused=True) is None

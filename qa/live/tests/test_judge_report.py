@@ -90,7 +90,7 @@ def test_judge_http_errors_are_pending_without_retry(
         assert judge.usage[0].models == [JUDGE_MODEL]
 
 
-def test_judge_only_pending_never_alerts_but_failed_verdict_does(
+def test_judge_execution_pending_counts_toward_threshold(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[list[str]] = []
@@ -114,14 +114,18 @@ def test_judge_only_pending_never_alerts_but_failed_verdict_does(
             Check("judge", "PENDING", "judge execution unavailable: HTTP 400"),
         ],
     )
-    for _ in range(6):
+    for _ in range(2):
         alerts.notify(result, tmp_path / "run.json")
     assert not calls
     assert not (tmp_path / "inbox").exists()
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 1
+    assert "PENDING" in calls[0][-1]
+    result.scenario = "QA-D1-PRODUCT-VERDICT"
     result.checks[-1] = Check("judge", "FAIL", "incorrect answer")
     result.finalize()
     alerts.notify(result, tmp_path / "run.json")
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -177,10 +181,10 @@ def test_judge_execution_pending_preserves_other_evidence_streak(
     )
     alerts.notify(result, tmp_path / "run.json")
     alerts.notify(result, tmp_path / "run.json")
-    before = alerts.state_path.read_text()
     result.checks = [Check("judge", "PENDING", "judge execution unavailable: TypeError")]
     alerts.notify(result, tmp_path / "run.json")
-    assert alerts.state_path.read_text() == before
+    assert json.loads(alerts.state_path.read_text())["staging:QA-D1-TEST"]["pending_count"] == "3"
+    assert len(calls) == 1
     result.checks = [Check("log_absent", "PENDING", "logs unavailable")]
     alerts.notify(result, tmp_path / "run.json")
     assert len(calls) == 1

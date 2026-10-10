@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Turn cards on Discord, Slack, and Teams now add each Haiku 5.5 request's cost at its own prompt-length rate.
+- Judge and harness PENDINGs count toward the three-run alert threshold while individual unavailable runs stay silent; mixed burst timeouts retain their watch FAIL evidence.
+
 - Live QA alerts advance dedupe after durable inbox delivery and record queued or failed tsend status without halting a catalog pass.
 
 - Live QA burst posts follow their declared cadence with concurrent per-trigger watchers; first-response latency uses Discord creation/edit timestamps, and anchored text checks keep content separate from embed footers.
@@ -39,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING without root alerts; failed verdicts still fail and alert.
 - Discord answers, stopped turns and errors retain their final status when older progress edits complete late, including errors caught outside the turn driver. Repairs preserve text and files without another answer post. Failed turns preserve sealed answer text, and recovered turns take ownership of their card.
 
+- Live QA records private redacted tracebacks for harness errors, reports them as PENDING with consecutive-unavailability alerts, and retries a transient read-only model-probe failure once before refusing a trigger.
+- Live QA preserves PENDING streaks and records the sanitized judge exception type/status in run notes.
+- Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING with consecutive-unavailability alerts; failed verdicts still fail and alert.
 - Older live QA configs that omit `dated_snapshots` now inherit the approved backend default when loaded. Explicit conflicting settings still refuse.
 
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.

@@ -253,32 +253,40 @@ class Executor:
 
     def watch(self, turn: Turn, started: threading.Event) -> None:
         started.set()
-        self.backend.collect(turn, self.burst_timeout)
+        try:
+            self.backend.collect(turn, self.burst_timeout)
+        except WatchTimeout:
+            turn.ended_at = turn.ended_at or utcnow()
+            raise
 
     def join_watchers(self, result: Result) -> None:
-        errors: list[BaseException] = []
-        for future in self.watchers.values():
+        errors: list[tuple[int, BaseException]] = []
+        for number, future in self.watchers.items():
             try:
                 future.result()
+            except WatchTimeout:
+                result.checks.append(
+                    Check("watch", "FAIL", "watch ended without terminal proof", number)
+                )
             except BaseException as exc:
-                errors.append(exc)
+                errors.append((number, exc))
         self.watchers.clear()
         if errors:
-            # Prefer harness exceptions to a timeout so an unavailable watcher
-            # cannot be mistaken for a silent product failure. Preserve every
-            # other execution traceback too, not only the first future's error.
-            primary_index = next(
-                (i for i, e in enumerate(errors) if not isinstance(e, WatchTimeout)), 0
-            )
-            for index, exc in enumerate(errors):
-                if index != primary_index and not isinstance(exc, Pending):
+            for number, exc in errors[1:]:
+                if not isinstance(exc, Pending):
                     result.errors.append(exception_evidence(exc, "watcher"))
                     result.checks.append(
-                        Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
+                        Check(
+                            "execution", "PENDING", f"harness error: {type(exc).__name__}", number
+                        )
                     )
-            raise errors[primary_index]
+            raise errors[0][1]
 
     def step(self, step: Step, result: Result, channel: str) -> None:
+        if self.watchers and step.role != "user":
+            raise Pending(
+                "harness error: non-user steps are forbidden while burst watchers are active"
+            )
         if self.context:
             step = self.context.step(step)
         kind = step.do
