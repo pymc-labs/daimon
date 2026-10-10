@@ -8,8 +8,10 @@ channel. A call is inside C when it executes as ``local``.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from dataclasses import replace
+from typing import Any
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools._channel_policy as channel_policy_mod
@@ -31,6 +33,7 @@ from daimon.adapters.mcp.tools._channel_policy import (
     require_reader_source_publishable,
     turn_origin_place,
 )
+from daimon.adapters.mcp.tools._session_gate import CardGap
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
@@ -89,9 +92,10 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.core.stores.turn_origins import create_origin, get_active_origin
+from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing import ma_agent, ma_environment
+from daimon.testing import ma_agent, ma_environment, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import (
@@ -104,6 +108,7 @@ from daimon.testing.ma import (
 )
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 ROOM = "111111111111111111"
 OTHER = "222222222222222222"
@@ -115,6 +120,7 @@ OWN = ChannelRule(readers="own", writers="own")
 class _World:
     def __init__(self, tenant_id: uuid.UUID, account_id: uuid.UUID, state: FakeMAState) -> None:
         self.tenant_id, self.account_id, self.state = tenant_id, account_id, state
+        self.sessions: dict[str, dict[str, Any]] = {}
 
     def auth(self, *, admin: bool = True, executing: str | None = None) -> AuthIdentity:
         return AuthIdentity(
@@ -212,8 +218,18 @@ async def _world(
             return list_response(skills)
         raise NotHandled
 
-    client = build_fake_anthropic(combine_handlers(skills_handler, make_fake_ma_handler(state)))
-    return _World(tenant.id, account.id, state), _runtime(sessionmaker, client)
+    world = _World(tenant.id, account.id, state)
+
+    def sessions_handler(request: httpx.Request) -> httpx.Response:
+        found = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)", request.url.path)
+        if request.method != "GET" or found is None or found["id"] not in world.sessions:
+            raise NotHandled
+        return httpx.Response(200, json=world.sessions[found["id"]])
+
+    client = build_fake_anthropic(
+        combine_handlers(skills_handler, sessions_handler, make_fake_ma_handler(state))
+    )
+    return world, _runtime(sessionmaker, client)
 
 
 async def test_nothing_changes_until_a_channel_is_kept_to_its_own_agents(
@@ -762,11 +778,11 @@ async def test_an_own_agent_publishes_only_once_approved_and_renames_daimon_nowh
     world, runtime = await _world(committing_sessionmaker)
     asked: list[str] = []
 
-    async def no_card(*args: object, tool_name: str) -> bool:
+    async def no_card(*args: object, tool_name: str) -> CardGap:
         asked.append(tool_name)
-        return False
+        return "no_origin"
 
-    monkeypatch.setattr(channel_policy_mod, "session_asks_first", no_card)
+    monkeypatch.setattr(channel_policy_mod, "session_card_gap", no_card)
     for auth in _own_agent_callers(world).values():
         with pytest.raises(ToolError, match="presses Approve"):
             await require_publishable(runtime, auth, tool_name=_PUBLISH, origin_context_id=None)
@@ -784,10 +800,10 @@ async def test_an_approved_call_publishes_from_inside(
 
     async def approved(
         runtime: McpRuntime, auth: AuthIdentity, origin: object, *, tool_name: str
-    ) -> bool:
-        return origin is not None  # as `session_asks_first`: no origin, no card
+    ) -> CardGap | None:
+        return None if origin is not None else "no_origin"  # as `session_card_gap`
 
-    monkeypatch.setattr(channel_policy_mod, "session_asks_first", approved)
+    monkeypatch.setattr(channel_policy_mod, "session_card_gap", approved)
     local = world.auth(admin=False, executing="agent_local")
     own = await _setup_thread_origin(committing_sessionmaker, world, responder="local")
     await require_publishable(runtime, local, tool_name=_PUBLISH, origin_context_id=own)
@@ -836,6 +852,124 @@ async def test_an_agent_with_a_rule_publishes_only_once_approved_even_for_an_adm
         )
     await require_publishable(
         runtime, world.auth(executing="agent_shared"), tool_name=_PUBLISH, origin_context_id=None
+    )
+
+
+CHAT_THREAD = "666666666666666666"
+_UPLOAD = "create_attachment_upload_url"
+
+
+async def _chat_turn_in_room(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    world: _World,
+    *,
+    gated: str | None = _UPLOAD,
+    live: bool = True,
+) -> str:
+    """A chat turn of C's own agent in C, as the 2026-10-08 publish ran: its verified
+    origin, and its thread's live session holding `gated` on `always_ask`, as MA
+    reports a session paused on the card."""
+    now = dt.datetime.now(dt.UTC)
+    async with sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=world.tenant_id,
+            account_id=world.account_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id=CHAT_THREAD,
+            responder_ma_agent_id="agent_local",
+            responder_name="local",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + dt.timedelta(minutes=10),
+            now=now,
+        )
+        if not live:
+            return str(origin.id)
+        await create_thread_session(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            thread_id=CHAT_THREAD,
+            account_id=world.account_id,
+            ma_session_id="sesn_chat",
+            ma_agent_id="agent_local",
+        )
+    configs = (
+        []
+        if gated is None
+        else [{"name": gated, "enabled": True, "permission_policy": {"type": "always_ask"}}]
+    )
+    toolset = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": configs,
+    }
+    frozen = ma_session_agent(id="agent_local", name="local", tools=[toolset])
+    world.sessions["sesn_chat"] = ma_session(id="sesn_chat", agent=frozen).model_dump(mode="json")
+    return str(origin.id)
+
+
+async def test_an_approved_publish_from_a_rule_held_channel_runs(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Production 2026-10-08 (D2): C's own agent asked to upload a notebook attachment,
+    the person pressed Approve, and MA ran the call. Read from the session itself, with
+    no stand-in for the gate, that call publishes."""
+    world, runtime = await _world(committing_sessionmaker)
+    origin = await _chat_turn_in_room(committing_sessionmaker, world)
+    local = world.auth(admin=False, executing="agent_local")
+
+    with capture_logs() as logs:
+        await require_publishable(runtime, local, tool_name=_UPLOAD, origin_context_id=origin)
+
+    assert not [log for log in logs if log["event"] == "publish_gate.needs_approval"]
+
+
+@pytest.mark.parametrize(
+    ("case", "gap", "named"),
+    [
+        ("turn_ended", "no_origin", True),
+        ("no_origin_named", "no_origin", False),
+        ("another_tool", "session_not_gated", True),
+        ("session_not_gated", "session_not_gated", True),
+        ("no_live_session", "no_live_session", True),
+    ],
+)
+async def test_a_publish_without_its_card_stays_refused_and_says_why(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], case: str, gap: str, named: bool
+) -> None:
+    """A rule-held channel still asks (#412): a call whose turn already ended (the
+    origin is gone, as when the driver dropped the 2026-10-08 turns), one naming no
+    origin, a tool the session does not hold on the card, or a thread with no live
+    session is refused. The refusal logs which proof of the card was missing."""
+    world, runtime = await _world(committing_sessionmaker)
+    origin = await _chat_turn_in_room(
+        committing_sessionmaker,
+        world,
+        gated=None if case == "session_not_gated" else _UPLOAD,
+        live=case != "no_live_session",
+    )
+    if case == "turn_ended":
+        async with committing_sessionmaker.begin() as session:
+            await delete_origin(session, origin_id=uuid.UUID(origin))
+    tool = _PUBLISH if case == "another_tool" else _UPLOAD
+    local = world.auth(admin=False, executing="agent_local")
+
+    with capture_logs() as logs, pytest.raises(ToolError, match="presses Approve"):
+        await require_publishable(
+            runtime, local, tool_name=tool, origin_context_id=origin if named else None
+        )
+
+    refused = [log for log in logs if log["event"] == "publish_gate.needs_approval"]
+    assert len(refused) == 1
+    assert (refused[0]["tool"], refused[0]["card_gap"], refused[0]["origin_named"]) == (
+        tool,
+        gap,
+        named,
     )
 
 
