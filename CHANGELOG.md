@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
+
 - Map the frozen 53-scenario QA catalog across three explicit channel backends, preserving replay inputs and reporting adapter/capability gaps separately from unscored extras.
 
 - Add explicit OpenAI Agents hosted container-size and integer-cent session spend controls; refresh the driver contract audit against official documentation fetched on 2026-10-10.

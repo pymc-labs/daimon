@@ -57,7 +57,9 @@ uv run python tests/judge/catalog_runner.py /path/to/catalog \
 
 The catalog supplies `scenarios/*.yaml`, `SCHEMA.md`, `PROPOSED-KINDS.md` and
 `TARGET-53.txt`. Exactly 53 distinct frozen targets produce the scored denominator
-of 159 across Anthropic, OpenAI and Gemini. Other scenarios are retained as
+of 159 across Anthropic, OpenAI and Gemini. The CLI and replay validator enforce
+the frozen TARGET-53 SHA256 `fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4`;
+replay also verifies that the ordered target IDs reproduce that digest. Other scenarios are retained as
 unscored extras. Missing targets refuse the matrix; an unknown kind or malformed
 scenario affects only that scenario. Source, schema, target and attached fixture
 hashes pin the inputs for replay. Setup, steps, assertions, human instructions

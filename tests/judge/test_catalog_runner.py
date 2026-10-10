@@ -239,12 +239,22 @@ def matrix_fixture(root: Path) -> None:
 
 def test_frozen_53_denominator_excludes_extras_and_roundtrips_replay_plan(tmp_path: Path) -> None:
     matrix_fixture(tmp_path)
-    matrix = catalog.build_matrix(tmp_path, integration_sha=HEAD, run_id="fixture")
+    matrix = catalog.build_matrix(
+        tmp_path,
+        integration_sha=HEAD,
+        run_id="fixture",
+        expected_target_sha256=catalog.sha((tmp_path / "TARGET-53.txt").read_bytes()),
+    )
     assert matrix.scored_denominator == 159 and len(matrix.target_ids) == 53
     assert sum(p.scored for p in matrix.plans) == 159
     assert len([p for p in matrix.plans if not p.scored]) == 3
     assert matrix.target_sha256 == catalog.sha((tmp_path / "TARGET-53.txt").read_bytes())
-    assert catalog.CatalogMatrix.model_validate_json(matrix.model_dump_json()) == matrix
+    assert (
+        catalog.CatalogMatrix.model_validate_json(
+            matrix.model_dump_json(), context={"expected_target_sha256": matrix.target_sha256}
+        )
+        == matrix
+    )
     assert {p.evidence_status for p in matrix.plans} == {"pending"}
 
 
@@ -259,13 +269,18 @@ def test_missing_or_changed_denominator_refuses_matrix(tmp_path: Path, failure: 
     else:
         target_file.write_text("QA-TARGET-00\n")
     with pytest.raises(ValueError):
-        catalog.build_matrix(tmp_path, integration_sha=HEAD, run_id="fixture")
+        catalog.build_matrix(
+            tmp_path,
+            integration_sha=HEAD,
+            run_id="fixture",
+            expected_target_sha256=catalog.sha((tmp_path / "TARGET-53.txt").read_bytes()),
+        )
 
 
-def test_cli_under_optimized_python_retains_pending_and_frozen_denominator(tmp_path: Path) -> None:
+def test_cli_under_optimized_python_refuses_unfrozen_targets(tmp_path: Path) -> None:
     matrix_fixture(tmp_path)
     output = tmp_path / "plans.json"
-    subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             "-O",
@@ -278,15 +293,46 @@ def test_cli_under_optimized_python_retains_pending_and_frozen_denominator(tmp_p
             "--output",
             str(output),
         ],
-        check=True,
+        check=False,
         capture_output=True,
         timeout=30,
     )
-    document = json.loads(output.read_text())
-    if document["scored_denominator"] != 159 or sum(p["scored"] for p in document["plans"]) != 159:
-        raise AssertionError("frozen denominator changed under -O")
-    if any(p["evidence_status"] != "pending" for p in document["plans"]):
-        raise AssertionError("mapping claimed execution credit under -O")
+    if result.returncode == 0 or output.exists() or b"frozen target digest" not in result.stderr:
+        raise AssertionError("unfrozen target accepted under -O")
+
+
+def test_swapped_target_file_is_refused(tmp_path: Path) -> None:
+    matrix_fixture(tmp_path)
+    target = tmp_path / "TARGET-53.txt"
+    pinned = catalog.sha(target.read_bytes())
+    target.write_text(target.read_text().replace("QA-TARGET-00", "QA-EXTRA"))
+    with pytest.raises(ValueError, match="frozen target digest"):
+        catalog.build_matrix(
+            tmp_path, integration_sha=HEAD, run_id="fixture", expected_target_sha256=pinned
+        )
+
+
+def test_replay_rescoring_with_original_hash_is_refused(tmp_path: Path) -> None:
+    matrix_fixture(tmp_path)
+    matrix = catalog.build_matrix(
+        tmp_path,
+        integration_sha=HEAD,
+        run_id="fixture",
+        expected_target_sha256=catalog.sha((tmp_path / "TARGET-53.txt").read_bytes()),
+    )
+    body = json.loads(matrix.model_dump_json())
+    body["target_ids"][0] = "QA-EXTRA"
+    for plan in body["plans"]:
+        if plan["scenario"]["id"] in {"QA-EXTRA", "QA-TARGET-00"}:
+            plan["scored"] = not plan["scored"]
+    with pytest.raises(ValueError, match="frozen target digest"):
+        catalog.CatalogMatrix.model_validate_json(
+            json.dumps(body), context={"expected_target_sha256": matrix.target_sha256}
+        )
+    # Even a self-consistent rewritten digest cannot change the production replay pin.
+    body["target_sha256"] = catalog.sha(("\n".join(body["target_ids"]) + "\n").encode())
+    with pytest.raises(ValueError, match="frozen target digest"):
+        catalog.CatalogMatrix.model_validate_json(json.dumps(body))
 
 
 def test_implicit_followup_and_wait_target_last_trigger_channel(tmp_path: Path) -> None:
@@ -312,7 +358,12 @@ def test_implicit_followup_and_wait_target_last_trigger_channel(tmp_path: Path) 
 def test_replayed_matrix_cannot_change_scored_coverage(tmp_path: Path, mutation: str) -> None:
     matrix_fixture(tmp_path)
     body = json.loads(
-        catalog.build_matrix(tmp_path, integration_sha=HEAD, run_id="fixture").model_dump_json()
+        catalog.build_matrix(
+            tmp_path,
+            integration_sha=HEAD,
+            run_id="fixture",
+            expected_target_sha256=catalog.sha((tmp_path / "TARGET-53.txt").read_bytes()),
+        ).model_dump_json()
     )
     if mutation == "missing_backend":
         body["plans"].pop()
@@ -323,7 +374,12 @@ def test_replayed_matrix_cannot_change_scored_coverage(tmp_path: Path, mutation:
     else:
         body["target_ids"][0] = "QA-FOREIGN"
     with pytest.raises(ValueError):
-        catalog.CatalogMatrix.model_validate_json(json.dumps(body))
+        catalog.CatalogMatrix.model_validate_json(
+            json.dumps(body),
+            context={
+                "expected_target_sha256": catalog.sha((tmp_path / "TARGET-53.txt").read_bytes())
+            },
+        )
 
 
 def test_replayed_plan_cannot_claim_another_provider_model(tmp_path: Path) -> None:

@@ -12,11 +12,12 @@ from typing import Any, Literal, cast
 import yaml
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, Provider
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 
 Classification = Literal[
     "runnable_headless", "needs_adapter_surface", "needs_unsupported_capability"
 ]
+FROZEN_TARGET_SHA256 = "fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4"
 PROVIDERS: tuple[Provider, ...] = ("anthropic", "openai", "gemini")
 SELECTIONS: dict[Provider, tuple[str, str]] = {
     "anthropic": ("anthropic.managed_agents", "claude-haiku-5-5"),
@@ -165,7 +166,13 @@ class CatalogMatrix(Record):
     plans: tuple[ScenarioPlan, ...]
 
     @model_validator(mode="after")
-    def frozen_denominator(self) -> CatalogMatrix:
+    def frozen_denominator(self, info: ValidationInfo) -> CatalogMatrix:
+        expected = cast(dict[str, Any], info.context or {}).get(
+            "expected_target_sha256", FROZEN_TARGET_SHA256
+        )
+        canonical = sha(("\n".join(self.target_ids) + "\n").encode())
+        if canonical != self.target_sha256 or self.target_sha256 != expected:
+            raise ValueError("matrix target IDs differ from the frozen target digest")
         targets = set(self.target_ids)
         if len(self.target_ids) != 53 or len(targets) != 53:
             raise ValueError("matrix must retain exactly 53 distinct target IDs")
@@ -470,29 +477,40 @@ def expand_text(text: str, values: dict[str, str]) -> str:
     return PLACEHOLDER.sub(replace, text)
 
 
-def build_matrix(root: Path, *, integration_sha: str, run_id: str) -> CatalogMatrix:
+def build_matrix(
+    root: Path,
+    *,
+    integration_sha: str,
+    run_id: str,
+    expected_target_sha256: str = FROZEN_TARGET_SHA256,
+) -> CatalogMatrix:
     if not re.fullmatch(r"[a-f0-9]{40}", integration_sha):
         raise ValueError("integration_sha must name an exact head")
     entries = load_catalog(root)
     target_bytes = (root / "TARGET-53.txt").read_bytes()
+    if sha(target_bytes) != expected_target_sha256:
+        raise ValueError("TARGET-53.txt differs from the frozen target digest")
     targets = tuple(line.strip() for line in target_bytes.decode().splitlines() if line.strip())
     if len(targets) != 53 or len(set(targets)) != 53:
         raise ValueError("TARGET-53.txt must name exactly 53 distinct scenarios")
     if set(targets) - {entry.id for entry in entries}:
         raise ValueError("frozen target scenario missing from catalog")
-    return CatalogMatrix(
-        integration_sha=integration_sha,
-        schema_sha256=sha((root / "SCHEMA.md").read_bytes()),
-        proposed_kinds_sha256=sha((root / "PROPOSED-KINDS.md").read_bytes()),
-        target_sha256=sha(target_bytes),
-        target_ids=targets,
-        plans=tuple(
-            plan_scenario(e, root, backend, run_id=run_id).model_copy(
-                update={"scored": e.id in targets}
-            )
-            for e in entries
-            for backend in PROVIDERS
+    return CatalogMatrix.model_validate(
+        dict(
+            integration_sha=integration_sha,
+            schema_sha256=sha((root / "SCHEMA.md").read_bytes()),
+            proposed_kinds_sha256=sha((root / "PROPOSED-KINDS.md").read_bytes()),
+            target_sha256=sha(target_bytes),
+            target_ids=targets,
+            plans=tuple(
+                plan_scenario(e, root, backend, run_id=run_id).model_copy(
+                    update={"scored": e.id in targets}
+                )
+                for e in entries
+                for backend in PROVIDERS
+            ),
         ),
+        context={"expected_target_sha256": expected_target_sha256},
     )
 
 
