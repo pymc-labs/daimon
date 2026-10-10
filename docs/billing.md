@@ -764,3 +764,11 @@ the proposal and retains the hold.
 Missing amounts, empty/delayed bills, duplicate groups, foreign
 scope, unknown line items or ambiguous attribution remain estimated, unverified.
 Exact billed token and container line items replace estimates only after approval.
+An `ObservationBilled` callback is an accounting posture, not provider
+enablement. Prepared foreign turns require authorized native resources and
+profiles, genuine usage frames, bounded authoritative post-run usage fetches,
+and the admitted persistence lease/journal. Explicit host registration and
+adapter support must supply those prerequisites. Foreign `ProviderUsageTotals`
+compatibility counters are lower bounds; footer consumers omit cost when
+verified provider prices and actual infrastructure are unavailable. They do not
+reconstruct an Anthropic meter or price foreign counts through Anthropic rates.

@@ -33,6 +33,11 @@ captured effective requests must cover the full project, and billed line-item
 amounts and usage counts must match independent complete-project evidence.
 The command never discovers an Admin key or approves/applies a ledger correction.
 The existing `BudgetGuard` remains the sole append-only application path.
+Foreign host billing adoption requires authorized native preparation, genuine
+usage observations, bounded authoritative usage replay within the admitted
+journal lease, and an adapter that omits unverified cost. An accounting posture
+does not enable a profile. Aggregates require disjoint transitive coverage,
+including absent descendants; their coverage sets remain fixed across revisions.
 
 Conformance adapters can declare individual fixtures PENDING with typed capability,
 live-key or dependency reasons. Declarations remain visible and never certify.
