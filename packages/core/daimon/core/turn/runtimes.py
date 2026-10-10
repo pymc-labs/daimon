@@ -51,6 +51,10 @@ def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     ):
         raise ScopeViolation(request.thread_id, "runtime differs from admitted channel scope")
     factory = _RUNTIME_FACTORIES.get(revision.profile)
+    if factory is None and revision.profile == "openai.persistent_workspace":
+        from daimon.core.turn.openai_deployment import build_openai_runtime
+
+        factory = build_openai_runtime
     if factory is None:
         raise AdmissionDenied(reason="backend_unsupported")
     return factory(request)

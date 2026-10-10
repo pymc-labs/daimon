@@ -1197,3 +1197,50 @@ runtime and authorized scope; runtime lookup does not cache one channel's native
 plan for another channel or configuration revision. Default Anthropic channels
 do not construct provider runtimes. An explicitly selected provider whose
 deployment constructor is absent is refused before provider transport access.
+
+### OpenAI deployment runtime
+
+The application resolves `openai.persistent_workspace` per admitted turn when
+`DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` are explicitly
+enabled. Injected runtimes remain supported. Without an injection, export
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE` in the application's process environment
+pointing to an operator-owned JSON file. Its entries authorize provisioned native
+resources for one exact tenant, account, channel and backend configuration digest:
+
+```json
+[
+  {
+    "profile": "openai.persistent_workspace",
+    "tenant_id": "<tenant UUID>",
+    "platform": "slack",
+    "channel_id": "<channel ID>",
+    "account_id": "<authorized account UUID>",
+    "config_digest": "<admitted ConfigRevision.digest>",
+    "project": "<actual OpenAI project ID>",
+    "agent_id": "<provisioned OpenAI agent ID>",
+    "environment_id": "<provisioned OpenAI environment template ID>",
+    "api_key_env": "OPENAI_CHANNEL_KEY",
+    "skill_ids": []
+  }
+]
+```
+
+Export the referenced key variable through the deployment's secret mechanism.
+The manifest contains environment variable names, never credentials; unknown
+fields, ambiguous matches, stale configuration digests and missing resources
+refuse. `skill_ids` grants only explicitly named native skills used by the saved
+agent. The selected plan pins real native resources to the authorized account and
+project; admission's Anthropic agent/environment IDs are never reused for OpenAI.
+An optional positive integer `spend_limit_usd_cents` is passed through the
+provider's public session controls only when an operator supplies it for a
+verified project. Omission uses the provider fix's unset control; its native
+representation belongs to the OpenAI driver. The host fixes `gpt-6-luna`,
+small containers and disabled delegation.
+
+Unconfigured channels and the default Anthropic path read neither the manifest
+nor any provider key and construct no foreign client. G1 rechecks policy before
+the selected transport reads its key. Missing credentials refuse; another
+provider's entry is never used as a fallback. Native SDK request and stream
+lifetimes belong to the driver. Journal and usage revisions use the persisted
+host binding/lease, with unknown prices and container costs left pending for
+reconciliation. Gemini deployment construction follows in a separate delta.

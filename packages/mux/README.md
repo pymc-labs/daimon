@@ -560,6 +560,7 @@ input. Omitted caps preserve existing behavior. Control failures retain scoped
 acknowledged resource references for exact cleanup, without automatic creation
 retry or an exact-spend claim.
 =======
+
 The host can register a deployment constructor through
 `daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
 receives `ProviderPreparationRequest` only when the selected provider preparer
@@ -568,3 +569,10 @@ the provider's public runtime with authorized native resources and durable state
 missing deployment constructors fail closed. `PreparedTurn.runtime` retains the
 resolved dependencies for execution. No mux driver discovers host credentials.
 >>>>>>> a2438dfd3 (feat(turn): resolve explicit channel runtimes per admitted turn)
+
+Application deployment wiring can construct the public OpenAI runtime from an
+operator manifest selected by the admitted tenant/account/channel/configuration
+digest. Credential environment references are revealed only after preparation's
+policy recheck; SDK construction remains private to the OpenAI driver. Default
+channels do not inspect the manifest or provider credentials. Durable host
+journal/usage adapters are used; unknown accounting stays pending.
