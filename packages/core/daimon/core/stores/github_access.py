@@ -216,8 +216,6 @@ async def set_working_repo(
     selected_name: str | None = None
     if repo_name is not None:
         for grant in rows:
-            if grant.staged:
-                continue
             repo = await repo_for_agent(
                 session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
             )

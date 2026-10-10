@@ -92,3 +92,19 @@ async def test_set_working_repo_admin_none_and_member_refusal(
     )
     assert allowed.working_repo is None
     manage_check.assert_awaited_once()
+    monkeypatch.setattr(working_tool, "set_working_repo", AsyncMock(return_value="owner/repo"))
+    monkeypatch.setattr(
+        working_tool,
+        "list_agent_repos",
+        AsyncMock(return_value=[SimpleNamespace(full_name="owner/repo", staged=True)]),
+    )
+    pending = await working_tool.set_working_repo_impl(
+        runtime,  # type: ignore[arg-type]
+        admin,
+        origin_context_id=str(uuid.uuid4()),
+        repo_name="owner/repo",
+    )
+    assert pending.pending
+    assert pending.message == (
+        "Agent will use owner/repo as its working repo when GitHub setup finishes."
+    )

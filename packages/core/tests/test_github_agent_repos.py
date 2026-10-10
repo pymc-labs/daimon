@@ -294,6 +294,39 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
 
 
 @pytest.mark.asyncio
+async def test_working_repo_can_be_saved_while_a_grant_waits_for_activation(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    agent_id = world.agent("ma_loose")
+    await _server_wide(db_session, world, 101)
+    grant = await github_access.stage_grant(
+        db_session,
+        tenant_id=world.tenant_id,
+        agent_id=agent_id,
+        repo_id=101,
+        baseline_access="read",
+        ceiling_access="read",
+        granted_by_account_id=world.admin_id,
+    )
+    assert grant.staged
+    assert (
+        await github_access.set_working_repo(
+            db_session,
+            tenant_id=world.tenant_id,
+            agent_id=agent_id,
+            repo_name="team-a/app",
+            account_id=world.admin_id,
+        )
+        == "team-a/app"
+    )
+    [grant] = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=agent_id
+    )
+    assert grant.staged and grant.is_working_repo
+
+
+@pytest.mark.asyncio
 async def test_channel_admin_connects_for_their_agent_and_rows_are_scoped(
     db_session: AsyncSession,
 ) -> None:
