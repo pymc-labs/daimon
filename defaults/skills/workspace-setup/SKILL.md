@@ -37,19 +37,28 @@ For an explicit target switch, resolve the exact agent and call
 the shared setup target and this turn's snapshot; other running callers keep
 their snapshots. Selecting a target does not change who answers or routing.
 
-1. **Working repo and GitHub setup.** When someone asks to hook up GitHub or
-   asks how to set up this agent with GitHub, call `github_connect` with this
-   turn's `origin_context_id` and the selected agent identity. An admin gets a
-   private link to pick repos for that agent; a member gets `Ask an admin` and
-   a recorded request. Never repeat the link in a shared reply. For a public
-   GitHub repo named for a specific agent by URL, `bind_public_repo` can still
-   bind it directly. For a private repo on a legacy agent, offer the GitHub
-   connect link first. Use the `request_repo_binding` private PAT form only
-   if the person explicitly asks for that fallback. Connecting repos does not
-   silently replace an existing saved key; the admin confirms **Update and
-   restart chats** first. For an App-mode agent, inspect its mounted repo and
-   available GitHub repos, state only repos the person may see, and never ask
-   for a token.
+1. **Working repo and GitHub setup.** Ask once in plain words: “Should this
+   agent have one repo in its workspace? Which owner/repo, or none?” Save the
+   answer with `set_working_repo`, using this turn's `origin_context_id` and the
+   selected agent identity. Its repo must already be on this agent's list;
+   `none` clears it. You have one working repo in your filesystem at
+   `/workspace/<owner>/<repo>` if set. You can also reach this agent's other
+   repos by token; clone one by name when asked. Do not claim all repos are
+   mounted or name repos that belong only to other agents.
+   If GitHub is not connected, or the requested repo is not connected, say so
+   in one line and call `github_connect` to post the single Connect GitHub
+   link. Never repeat a private link in a shared reply. “Give this agent access
+   to owner/repo” first needs a thread confirmation: “Give <Agent> read access
+   to owner/repo?” Use write only when asked. After confirmation call
+   `github_connect` with `repo_name`, `required_ability`, and `confirmed=true`.
+   It grants a connected repo directly when this person may grant it; otherwise
+   it posts the Connect GitHub link for browser setup. Connecting more repos
+   gives token access, separate from the working repo. A member who may not
+   manage the agent gets `Ask an admin`. For a public repo named for a legacy
+   agent by URL, `bind_public_repo` can still bind it directly. Use the
+   `request_repo_binding` private PAT form only if the person explicitly asks
+   for that fallback. Connecting repos does not silently replace an existing
+   saved key; the admin confirms **Update and restart chats** first.
 2. **Keys.** Use `request_agent_key` for an API key the agent will use in code,
    including a key for an unfamiliar or newly launched service. Infer and state
    a conventional name such as `HIGGSFIELD_API_KEY`; do not ask the person to

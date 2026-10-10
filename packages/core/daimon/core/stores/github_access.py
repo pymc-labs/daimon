@@ -14,6 +14,7 @@ from daimon.core._models import (
     GitHubAppInstallation,
     TenantGitHubRepo,
 )
+from daimon.core.stores import agent_repo_binding
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, or_, select
@@ -188,6 +189,77 @@ async def list_agent_repos(
             )
         )
     return sorted(result, key=lambda repo: repo.full_name.casefold())
+
+
+async def set_working_repo(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    repo_name: str | None,
+    account_id: uuid.UUID,
+) -> str | None:
+    """Select one live grant as the filesystem repo, or clear the selection.
+
+    The caller verifies that the account manages this agent. Locking the
+    agent's grant rows serializes changes to an existing grant set.
+    """
+    rows = list(
+        await session.scalars(
+            select(AgentGitHubGrant)
+            .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+            .order_by(AgentGitHubGrant.repo_id)
+            .with_for_update()
+        )
+    )
+    selected: AgentGitHubGrant | None = None
+    selected_name: str | None = None
+    if repo_name is not None:
+        for grant in rows:
+            repo = await repo_for_agent(
+                session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+            )
+            if repo is None or repo.status != "active":
+                continue
+            installation = await session.get(GitHubAppInstallation, repo.installation_id)
+            if installation is None or installation.suspended_at is not None:
+                continue
+            if repo.repo_full_name.casefold() == repo_name.casefold():
+                selected, selected_name = grant, repo.repo_full_name
+                break
+        if selected is None:
+            raise ValueError("That repo is not on this agent's list. Offer Connect GitHub.")
+    changed_ids: list[int] = []
+    cleared_binding = False
+    if selected is None:
+        binding = await agent_repo_binding.get_binding(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+        if binding is not None:
+            await agent_repo_binding.clear_binding(session, tenant_id=tenant_id, agent_id=agent_id)
+            cleared_binding = True
+    for grant in rows:
+        wanted = grant is selected
+        if grant.is_working_repo != wanted:
+            grant.is_working_repo = wanted
+            grant.version += 1
+            changed_ids.append(grant.repo_id)
+    await session.flush()
+    if changed_ids or cleared_binding:
+        await append_event(
+            session,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            agent_id=agent_id,
+            platform=None,
+            platform_user_id=None,
+            tool_name="set_working_repo",
+            operation="github_grant",
+            outcome="allowed",
+            reason="working repo selected" if selected else "working repo cleared",
+            github_repo_ids=changed_ids,
+        )
+    return selected_name
 
 
 async def remove_agent_repo(

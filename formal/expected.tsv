@@ -3,6 +3,8 @@
 # A violates: row is a deliberately unsafe config: its counterexample is the
 # evidence that the model can still see the bug the safe config rules out.
 # ---- GitHub Connect cancellation ----
+github_grant_proposals	GrantProposal	GrantProposalSafe	clean	60	-	user yes in a later turn and current permission required before grant
+github_grant_proposals	GrantProposal	GrantProposalUnsafe	violates:ValidGrant	9	-	model-supplied confirmed=true grants in the proposal turn without human yes
 github_connect_cancel	ConnectCancel	ConnectCancelSafe	clean	31	-	cancellation excludes confirmation and rechecks pending revocation after sweep selection
 github_connect_cancel	ConnectCancel	ConnectCancelNoLock	violates:NoConfirmAfterCancel	9	-	pre-fix cancel leaves the flow confirmable
 github_connect_cancel	ConnectCancel	ConnectCancelDropsToken	violates:PendingTokenRetained	28	-	unsafe expiry sweep deletes a token after failed revocation

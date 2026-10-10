@@ -2822,6 +2822,40 @@ class GitHubAccessRequest(Base):
     expiry_notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class GitHubGrantProposal(Base):
+    """A repo grant proposed in one chat turn for confirmation in a later turn."""
+
+    __tablename__ = "github_grant_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "requester_account_id",
+            "platform",
+            "requester_platform_user_id",
+            "thread_id",
+            name="uq_github_grant_proposal",
+        ),
+        Index("github_grant_proposals_expiry_idx", "expires_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    repo_name: Mapped[str] = mapped_column(Text, nullable=False)
+    ability: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    approved_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class GitHubAccessRequestDelivery(Base):
     """One request card slot per recipient in the originating conversation."""
 

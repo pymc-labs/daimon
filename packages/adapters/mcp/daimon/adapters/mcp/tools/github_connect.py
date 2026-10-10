@@ -31,10 +31,19 @@ from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_access import (
+    activate_agent,
+    get_agent_mode,
+    list_agent_grants,
+    list_authorized_repos,
+    stage_grant,
+)
+from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
     create_discord_connect_intent,
+    has_saved_github_state,
     mint_invitation,
     record_connect_request,
     require_app_eligible_agent,
@@ -42,6 +51,7 @@ from daimon.core.stores.github_connect import (
     revoke_invitation,
     set_invitation_encrypted_token,
 )
+from daimon.core.stores.github_grant_proposals import consume, propose
 from daimon.core.stores.security_audit import append_event
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -51,7 +61,7 @@ from pydantic import BaseModel, ConfigDict
 class ConnectResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "ask_admin", "delivery_failed", "client_agent"]
+    status: Literal["sent", "proposed", "granted", "ask_admin", "delivery_failed", "client_agent"]
     message: str
 
 
@@ -132,6 +142,9 @@ async def _github_connect_impl(
     agent_name: str | None = None,
     expected_ma_agent_id: str | None = None,
     requested_work: str | None = None,
+    repo_name: str | None = None,
+    required_ability: Literal["read", "write"] = "read",
+    confirmed: bool = False,
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord and Slack.")
@@ -219,6 +232,117 @@ async def _github_connect_impl(
                 reason="admin requested",
             )
             return ConnectResult(status="ask_admin", message="Ask an admin")
+        if repo_name is not None:
+            requested_repo = repo_name.strip()
+            if requested_repo.count("/") != 1 or any(c.isspace() for c in requested_repo):
+                raise ToolError("Name one repo as owner/repo.")
+            question = (
+                f"Give {agent.name} "
+                f"{'read and change' if required_ability == 'write' else 'read'} "
+                f"access to {requested_repo}?"
+            )
+            if not confirmed:
+                await propose(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    account_id=auth.account_id,
+                    platform_user_id=auth.platform_user_id,
+                    platform=auth.platform,
+                    thread_id=origin.thread_id,
+                    agent_id=agent_id,
+                    repo_name=requested_repo,
+                    ability=required_ability,
+                    origin_id=origin.id,
+                )
+                return ConnectResult(status="proposed", message=question)
+            if not await consume(
+                session,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform_user_id=auth.platform_user_id,
+                platform=auth.platform,
+                thread_id=origin.thread_id,
+                agent_id=agent_id,
+                repo_name=requested_repo,
+                ability=required_ability,
+                origin_id=origin.id,
+                origin_created_at=origin.created_at,
+            ):
+                return ConnectResult(
+                    status="proposed",
+                    message=f"Please confirm in a new message: {question}",
+                )
+            mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=agent_id)
+            can_activate = mode == "app" or not await has_saved_github_state(
+                session, tenant_id=auth.tenant_id, agent_id=agent_id
+            )
+            if can_activate:
+                repos = await list_authorized_repos(
+                    session, tenant_id=auth.tenant_id, agent_id=agent_id
+                )
+                repo = next(
+                    (
+                        row
+                        for row in repos
+                        if row.repo_full_name.casefold() == requested_repo.casefold()
+                        and row.status == "active"
+                    ),
+                    None,
+                )
+                if repo is not None:
+                    installation = await get_app_installation(
+                        session, installation_id=repo.installation_id
+                    )
+                    grantable = (
+                        installation is not None
+                        and installation.suspended_at is None
+                        and repo.repo_full_name in installation.repo_full_names
+                        and (is_admin or repo.scope_agent_id == agent_id)
+                    )
+                    if grantable:
+                        if required_ability == "write" and repo.max_access != "write":
+                            raise ToolError(
+                                "GitHub confirmed read access only. "
+                                "Ask for write access in Connect GitHub."
+                            )
+                        existing = next(
+                            (
+                                row
+                                for row in await list_agent_grants(
+                                    session, tenant_id=auth.tenant_id, agent_id=agent_id
+                                )
+                                if row.repo_id == repo.repo_id
+                            ),
+                            None,
+                        )
+                        ability: Literal["read", "write"] = (
+                            "write"
+                            if required_ability == "write"
+                            or (existing is not None and existing.ceiling_access == "write")
+                            else "read"
+                        )
+                        await stage_grant(
+                            session,
+                            tenant_id=auth.tenant_id,
+                            agent_id=agent_id,
+                            repo_id=repo.repo_id,
+                            baseline_access=ability,
+                            ceiling_access=ability,
+                            granted_by_account_id=auth.account_id,
+                            mount_path=existing.mount_path if existing else None,
+                            is_working_repo=existing.is_working_repo if existing else False,
+                        )
+                        if mode == "legacy":
+                            await activate_agent(
+                                session,
+                                tenant_id=auth.tenant_id,
+                                agent_id=agent_id,
+                                changed_by_account_id=auth.account_id,
+                            )
+                        return ConnectResult(
+                            status="granted",
+                            message=f"{agent.name} has {ability} access to {repo.repo_full_name}.",
+                        )
         intent_id: uuid.UUID | None = None
         token: str | None = None
         if auth.platform == "discord":
@@ -304,7 +428,13 @@ async def _github_connect_impl(
             status="delivery_failed",
             message="I couldn't show the GitHub connection button. Try again.",
         )
-    return ConnectResult(status="sent", message="Posted a Connect GitHub button for you here.")
+    return ConnectResult(
+        status="sent",
+        message=(
+            "The Connect GitHub button is posted and speaks for itself. "
+            "Don't announce or describe it; reply nothing more about it."
+        ),
+    )
 
 
 def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -315,8 +445,11 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent_name: str | None = None,
         expected_ma_agent_id: str | None = None,
         requested_work: str | None = None,
+        repo_name: str | None = None,
+        required_ability: Literal["read", "write"] = "read",
+        confirmed: bool = False,
     ) -> ConnectResult:
-        """Connect this agent to GitHub when someone asks to set up GitHub.
+        """Give this agent token access to more repos through GitHub.
 
         Show a single-use connection button bound to the selected agent to a
         server admin, or to a channel admin who manages that agent; repos
@@ -327,6 +460,14 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
+        For 'give this agent access to owner/repo', first call with repo_name and
+        confirmed=false. Ask the returned question in the thread. Only after
+        that person answers yes in a later turn, call again with confirmed=true.
+        Use write only if asked. A connected repo is granted
+        directly when this person may grant it. Otherwise the single Connect
+        GitHub link lets them connect that repo in a browser. Connecting repos
+        gives token access; it does not put them all in the filesystem.
+        The posted button speaks for itself: do not announce or describe it.
         """
         return await _github_connect_impl(
             runtime,
@@ -335,4 +476,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             agent_name=agent_name,
             expected_ma_agent_id=expected_ma_agent_id,
             requested_work=requested_work,
+            repo_name=repo_name,
+            required_ability=required_ability,
+            confirmed=confirmed,
         )

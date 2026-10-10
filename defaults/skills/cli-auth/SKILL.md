@@ -9,13 +9,15 @@ Use the daimon MCP server's `get_cli_token(service)` tool to obtain access
 tokens for external CLIs. Export the result under the appropriate name
 before running CLI commands.
 
-For a GitHub App session, use its mounted repository and session-scoped
-`GH_TOKEN` instead. Check the repos available to this agent with
-`gh api installation/repositories --jq '.repositories[].full_name'` when a
-repo list is needed. Do not name a private repo to someone who cannot see it.
+For a GitHub App session, the filesystem has at most one working repo at
+`/workspace/<owner>/<repo>`. Other repos granted to this agent have
+`GH_TOKEN_*` credentials; clone one by name when asked. Inspect only this
+agent's granted repos when a list is needed. Do not name a private repo to
+someone who cannot see it.
 The `get_cli_token("github")` tool is unavailable in App mode. Never ask for a
-token in App mode. If `gh` is not installed, use `curl` for GitHub API calls
-or the GitHub Copilot MCP tools for repository operations.
+token in App mode. `GH_TOKEN` is for the working repo when set. If `gh` is not
+installed, use `curl` for GitHub API calls or the GitHub Copilot MCP tools for
+repository operations.
 
 | Service                  | Tool call                  | Name to export                |
 |--------------------------|----------------------------|-------------------------------|

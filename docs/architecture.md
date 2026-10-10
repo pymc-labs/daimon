@@ -1312,6 +1312,14 @@ admission before any of this runs.
   repo (with write) and private skill repos are among its repos; otherwise the
   repos stay staged until the agent's GitHub panel saves a complete set. An
   agent limited to channels by a rule may use only repos connected for it.
+  In a setup conversation the agent asks whether it should keep one working
+  repo in its filesystem. `set_working_repo` selects an existing grant or
+  clears it with `none`; other grants provide token access for clones by name.
+  The tool checks the live server or channel-admin permission for that agent.
+  A request to give an agent access to an already connected repo is confirmed
+  in the thread, then `github_connect` grants read access (write only when
+  requested) if the caller may grant it. Otherwise it posts the existing
+  Connect GitHub browser link for that repo.
   An operator-issued agent link may stage an update for an operator to finish
   with `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
   credentials and
