@@ -10,15 +10,17 @@ import json
 import logging
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode
 
 import httpx
 from anthropic import APIError, AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.web_icons import icon, platform_mark
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.channel_admins import GroupMembers
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -28,6 +30,8 @@ from daimon.core.github_connect_cards import (
     ADD_REPOS_LABEL,
     ALREADY_ADDED,
     CLOSE_TAB,
+    NEEDED,
+    NEEDS_WRITE,
     added_line,
     audience_line,
     old_token_line,
@@ -150,6 +154,7 @@ def _already_connected_page(
     *,
     agent_name: str | None = None,
     update_pending: bool = False,
+    missing_repos: tuple[tuple[str, bool], ...] = (),
 ) -> Response:
     label = (
         added_line(count, agent_name)
@@ -161,7 +166,9 @@ def _already_connected_page(
         )
     )
     detail = (
-        f"<p>An operator will finish switching {html.escape(agent_name)}.</p>"
+        _still_uses_token(agent_name, missing_repos)
+        if agent_name and update_pending and missing_repos
+        else f"<p>An operator will finish switching {html.escape(agent_name)}.</p>"
         if agent_name and update_pending
         else (
             "" if agent_name else "<p>The repos are connected. Choose an agent in GitHub setup.</p>"
@@ -181,6 +188,13 @@ def _missing_phrase(missing: tuple[tuple[str, bool], ...]) -> str:
     """`a/b with read and write and c/d`: each repo the switch still needs."""
     names = [f"{name} with read and write" if write else name for name, write in missing]
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _still_uses_token(agent_name: str, missing: tuple[tuple[str, bool], ...]) -> str:
+    return (
+        f"<p>{html.escape(agent_name)} still uses its old GitHub token. "
+        f"Add {html.escape(_missing_phrase(missing))} to finish switching.</p>"
+    )
 
 
 def _done_page(
@@ -205,8 +219,7 @@ def _done_page(
     if agent_name:
         # The old-token line only once the switch has finished, never while pending.
         token = (
-            f"<p>{html.escape(agent_name)} still uses its old GitHub token. "
-            f"Add {html.escape(_missing_phrase(missing_repos))} to finish switching.</p>"
+            _still_uses_token(agent_name, missing_repos)
             if update_pending
             else (f"<p>{html.escape(old_token_line(agent_name))}</p>" if retired_saved_key else "")
         )
@@ -451,11 +464,15 @@ def _confirmation_page(
     agent_name: str | None,
     selection_error: str | None = None,
     already_added: frozenset[int] = frozenset(),
+    needed: Mapping[int, bool] | None = None,
 ) -> Response:
     """Render the same picker used by the live route and screenshot capture.
 
     Repos in `already_added` show ticked and greyed; only new ticks are sent.
+    Repos in `needed` (repo id: needs write) are what the agent still needs
+    before it can drop its old GitHub token: ticked, and still changeable.
     """
+    needed = needed or {}
     place = "Server" if platform == "discord" else "Workspace"
     audience = (
         f'<p class="gh-audience" id="audience" data-agent="{html.escape(agent_name, quote=True)}">'
@@ -509,14 +526,21 @@ def _confirmation_page(
         for repo in owned:
             prefix, _, name = repo.full_name.rpartition("/")
             added = repo.id in already_added
+            note = (
+                ALREADY_ADDED
+                if added
+                else (NEEDS_WRITE if needed[repo.id] else NEEDED)
+                if repo.id in needed
+                else None
+            )
             parts.append(
                 f'<label class="gh-choice repo-choice{" is-added" if added else ""}">'
                 f'<input type="checkbox" name="repo" value="{repo.id}"'
-                + (" checked disabled" if added else "")
+                + (" checked disabled" if added else " checked" if repo.id in needed else "")
                 + ">"
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
                 f'<span class="gh-repo-name">{html.escape(name)}</span>'
-                + (f'<span class="gh-added">{ALREADY_ADDED}</span>' if added else "")
+                + (f'<span class="gh-added">{note}</span>' if note else "")
                 + "</span></label>"
             )
         parts.append("</div>")
@@ -666,19 +690,29 @@ def build_oauth_github_routes(
             return False
         return True
 
-    async def live_is_daimon_managed(invitation: github_connect.Invitation) -> bool | None:
-        """Whether the link's agent is a Daimon default agent now; None if it can't be read."""
+    async def live_agent(invitation: github_connect.Invitation) -> BetaManagedAgentsAgent | None:
+        """The link's agent as Managed Agents has it now; None if it can't be read."""
         if anthropic is None or invitation.agent_id is None or not invitation.agent_ma_id:
             return None
         try:
-            live = await find_agent_by_derived_uuid(
+            return await find_agent_by_derived_uuid(
                 anthropic, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
             )
         except APIError:
             return None
-        if live is None:
-            return None
-        return live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+
+    async def _missing(
+        session: AsyncSession, invitation: github_connect.Invitation
+    ) -> tuple[tuple[str, bool], ...]:
+        """The working and skill repos the agent still needs before it can drop its old key."""
+        if invitation.agent_id is None or invitation.activation_status != "update_pending":
+            return ()
+        return tuple(
+            (missing.full_name, missing.needs_write)
+            for missing in await github_connect.missing_required_repos(
+                session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
+            )
+        )
 
     async def successful_page(
         state: str, cookie: str, invitation_hash: str = ""
@@ -696,12 +730,14 @@ def build_oauth_github_routes(
             requester = await get_account_with_tenant(
                 session, account_id=invitation.requester_account_id
             )
+            missing = await _missing(session, invitation)
         back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
         return _already_connected_page(
             invitation.connected_repo_count,
             back,
             agent_name=invitation.agent_name,
             update_pending=invitation.activation_status == "update_pending",
+            missing_repos=missing,
         )
 
     async def connect(request: Request) -> Response:
@@ -922,15 +958,31 @@ def build_oauth_github_routes(
             if requester is None or requester.is_external:
                 return _error()
             clients_present = await has_external_accounts(session, tenant_id=invitation.tenant_id)
-            already_added = (
-                frozenset(
-                    repo.repo_id
-                    for repo in await list_agent_repos(
-                        session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
-                    )
+            agent_repos = (
+                await list_agent_repos(
+                    session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
                 )
                 if invitation.agent_id is not None
-                else frozenset[int]()
+                else []
+            )
+            # A staged or inactive repo, or one the agent still needs more of,
+            # can be ticked again; only a repo it fully has is settled.
+            missing_access = {
+                missing.full_name.casefold(): missing.needs_write
+                for missing in (
+                    await github_connect.missing_required_repos(
+                        session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
+                    )
+                    if invitation.agent_id is not None
+                    else []
+                )
+            }
+            already_added = frozenset(
+                repo.repo_id
+                for repo in agent_repos
+                if not repo.staged
+                and repo.status == "active"
+                and repo.full_name.casefold() not in missing_access
             )
         token = decrypt_token(fernet, flow.encrypted_user_token)
         try:
@@ -941,6 +993,12 @@ def build_oauth_github_routes(
             if used is not None:
                 return used
             return _error("Couldn't reach GitHub", 502, str(request.url))
+        needed = {
+            repo.id: missing_access[repo.full_name.casefold()]
+            for installation in installations
+            for repo in installation.repos
+            if repo.admin and repo.full_name.casefold() in missing_access
+        }
         if request.method == "POST":
             try:
                 selected_ids = [int(value) for value in fields.get("repo", [])]
@@ -964,6 +1022,7 @@ def build_oauth_github_routes(
                     agent_name=invitation.agent_name,
                     selection_error="Select at least one repo",
                     already_added=already_added,
+                    needed=needed,
                 )
             visible = {
                 repo.id: repo for install in installations for repo in install.repos if repo.admin
@@ -978,6 +1037,9 @@ def build_oauth_github_routes(
                 access = fields.get("access", ["read"])[0]
                 if access not in ("read", "write"):
                     return _error("Selection could not be verified.", retry_url=retry_confirm_url)
+                # A repo the agent needs write on is added with write; never lower.
+                if needed.get(repo_id):
+                    access = "write"
                 repos.append(
                     github_connect.RepoConfirmation(
                         repo_id=repo.id,
@@ -1007,7 +1069,10 @@ def build_oauth_github_routes(
                 for detail in details
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
-            is_daimon_managed = await live_is_daimon_managed(invitation)
+            live = await live_agent(invitation)
+            is_daimon_managed = (
+                None if live is None else live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+            )
             members = (
                 group_members(requester.platform, requester.external_id)
                 if group_members is not None
@@ -1034,6 +1099,9 @@ def build_oauth_github_routes(
                             default=deployment_default,
                             is_daimon_managed=is_daimon_managed,
                             members=members,
+                            other_names=agent_pin_names(live.name, live.metadata)
+                            if live is not None
+                            else (),
                         ),
                     )
                     if saved:
@@ -1173,6 +1241,7 @@ def build_oauth_github_routes(
             or ("this server" if requester.platform == "discord" else "this workspace"),
             agent_name=invitation.agent_name,
             already_added=already_added,
+            needed=needed,
         )
 
     return connect, callback, setup, confirm

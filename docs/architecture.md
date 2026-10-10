@@ -1342,7 +1342,9 @@ admission before any of this runs.
   against the signed-in GitHub account. For one agent it is titled "Add repos
   to <Agent>", shows repos the agent already has ticked and greyed, defaults
   to Read only for the repos added now, and counts only new repos on its
-  button. The done page says how many repos were added and, only once the
+  button. A repo the agent still needs before it can drop its old key stays
+  ticked and changeable ("Needs write" or "Needed"), and one that needs write
+  is added with write; adding never lowers access. The done page says how many repos were added and, only once the
   switch to the GitHub App has finished, that the agent no longer uses its old
   GitHub token; while it waits on a missing working or skill repo it names
   that repo instead. Setting an agent as a default in more places adds

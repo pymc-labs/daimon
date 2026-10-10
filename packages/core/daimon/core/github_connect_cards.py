@@ -194,6 +194,10 @@ def discord_embed_payload(card: ConnectCard) -> dict[str, Any]:
 ADD_REPOS_LABEL = "Add repos"
 DETAILS_LABEL = "Details"
 ALREADY_ADDED = "Already added"
+NEEDS_WRITE = "Needs write"
+"""A repo the agent has, or must have, read only but needs to change."""
+NEEDED = "Needed"
+"""A repo the agent must have before it can drop its old GitHub token."""
 CLOSE_TAB = "You can close this tab."
 
 

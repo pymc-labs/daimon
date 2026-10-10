@@ -78,7 +78,12 @@ INSTALLATION = _Installation(
 )
 
 
-def confirmation(*, agent: bool, already_added: frozenset[int] = frozenset()) -> Response:
+def confirmation(
+    *,
+    agent: bool,
+    already_added: frozenset[int] = frozenset(),
+    needed: dict[int, bool] | None = None,
+) -> Response:
     return _confirmation_page(
         root="https://mcp.test",
         state="review",
@@ -91,6 +96,7 @@ def confirmation(*, agent: bool, already_added: frozenset[int] = frozenset()) ->
         workspace="Example Lab",
         agent_name="ResearchBot" if agent else None,
         already_added=already_added,
+        needed=needed,
     )
 
 
@@ -118,6 +124,9 @@ def pages() -> dict[str, Response]:
         "picker_connecting": confirmation(agent=True),
         "picker_workspace": confirmation(agent=False),
         "picker_already_added": confirmation(agent=True, already_added=frozenset({101, 102})),
+        "picker_needs_write": confirmation(
+            agent=True, already_added=frozenset({102}), needed={101: True}
+        ),
         "install": _install_page("https://github.com/apps/example/installations/new", "#cancel"),
         "pending": _pending_page("#check", "#cancel", "example-org"),
         "no_repos": _no_repos_page("https://mcp.test/connect/example", "#another"),
@@ -311,6 +320,13 @@ def main() -> None:
                     assert page.locator("h1").inner_text() == "Added 12 repos to ResearchBot."
                     assert "You can close this tab." in page.locator("main").inner_text()
                     assert "old GitHub token" not in page.locator("main").inner_text()
+                if state == "picker_needs_write":
+                    assert page.locator("input[name=repo]:checked:not(:disabled)").count() == 1
+                    assert page.locator(".gh-added").all_inner_texts() == [
+                        "Needs write",
+                        "Already added",
+                    ]
+                    assert page.locator("#connect-repos").inner_text() == "Add 1 repo"
                 if state == "picker_already_added":
                     assert page.locator("h1").inner_text() == "Add repos to ResearchBot"
                     assert page.locator("input[name=repo]:disabled:checked").count() == 2

@@ -735,7 +735,9 @@ async def test_connection_happy_path_and_rechecks(
     assert sum(request.url.path == "/applications/client/token" for request in requests) == 4
 
 
-def _agent_picker(*, already_added: frozenset[int] = frozenset()) -> str:
+def _agent_picker(
+    *, already_added: frozenset[int] = frozenset(), needed: dict[int, bool] | None = None
+) -> str:
     repos = tuple(oauth_github._Repo(index, 5, 7, f"lab/repo-{index}", True) for index in (1, 2, 3))
     installation = oauth_github._Installation(
         id=7, owner_id=5, owner_login="lab", repository_selection="all", repos=repos
@@ -752,6 +754,7 @@ def _agent_picker(*, already_added: frozenset[int] = frozenset()) -> str:
         workspace="Test Server",
         agent_name="ResearchBot",
         already_added=already_added,
+        needed=needed,
     ).body.decode()
 
 
@@ -774,6 +777,35 @@ def test_agent_picker_ticks_and_greys_repos_already_added() -> None:
     assert body.count("Already added") == 1
     # Only new ticks count toward the button and are sent.
     assert "const boxes = all.filter(box => !box.disabled);" in body
+
+
+def test_agent_picker_offers_what_the_agent_still_needs() -> None:
+    body = _agent_picker(already_added=frozenset({1}), needed={2: True, 3: False})
+    assert '<input type="checkbox" name="repo" value="1" checked disabled>' in body
+    assert '<input type="checkbox" name="repo" value="2" checked>' in body
+    assert '<input type="checkbox" name="repo" value="3" checked>' in body
+    assert 'repo-2</span><span class="gh-added">Needs write</span>' in body
+    assert 'repo-3</span><span class="gh-added">Needed</span>' in body
+    assert body.count("Already added") == 1
+
+
+def test_reopened_done_page_names_the_missing_repo() -> None:
+    body = oauth_github._already_connected_page(
+        2,
+        agent_name="ResearchBot",
+        update_pending=True,
+        missing_repos=(("lab/work", True),),
+    ).body.decode()
+    assert "Added 2 repos to ResearchBot." in body
+    assert (
+        "ResearchBot still uses its old GitHub token. "
+        "Add lab/work with read and write to finish switching."
+    ) in body
+    assert "operator" not in body
+    operator = oauth_github._already_connected_page(
+        2, agent_name="ResearchBot", update_pending=True
+    ).body.decode()
+    assert "An operator will finish switching ResearchBot." in operator
 
 
 def _agent_done(**changes: object) -> str:
@@ -812,11 +844,14 @@ def test_agent_done_page_mentions_old_token_only_after_the_switch() -> None:
     assert "no longer uses" not in pending
 
 
-@pytest.mark.parametrize("still_channel_admin", [True, False])
+@pytest.mark.parametrize(
+    ("still_channel_admin", "needs_write"), [(True, False), (False, False), (True, True)]
+)
 async def test_channel_admin_completes_connect_for_their_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     still_channel_admin: bool,
+    needs_write: bool,
 ) -> None:
     """A channel admin's link for the agent pinned to their channel adds repos for it only."""
     from types import SimpleNamespace
@@ -914,10 +949,18 @@ async def test_channel_admin_completes_connect_for_their_agent(
 
     async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
         looked_up.append(agent_id)
-        return SimpleNamespace(metadata={})
+        return SimpleNamespace(name="Bot", metadata={})
+
+    async def missing(
+        _session: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    ) -> list[github_connect.MissingRepo]:
+        # Its working repo, which it has read only and needs to change.
+        return [github_connect.MissingRepo(full_name="ana/thesis", needs_write=True)]
 
     monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
     monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    if needs_write:
+        monkeypatch.setattr(oauth_github.github_connect, "missing_required_repos", missing)
     key = Fernet.generate_key().decode()
     connect, callback, setup, confirm = build_oauth_github_routes(
         settings=_settings(key),
@@ -945,6 +988,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
         picker = await browser.get("/oauth/github/confirm", params={"state": state})
         assert "Add repos to Bot" in picker.text
         assert "Anyone who talks to Bot can ask it to read them." in picker.text
+        assert ("Needs write" in picker.text) is needs_write
         if not still_channel_admin:
             async with sessionmaker.begin() as session:
                 await delete_channel_admins(
@@ -966,8 +1010,9 @@ async def test_channel_admin_completes_connect_for_their_agent(
     if still_channel_admin:
         assert done.status_code == 200
         assert "Added 1 repo to Bot." in done.text
+        # Read only was chosen; a repo the agent needs to change is added with write.
         assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
-            (101, agent_id, "read")
+            (101, agent_id, "write" if needs_write else "read")
         ]
     else:
         assert "Added" not in done.text
