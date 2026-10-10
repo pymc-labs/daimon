@@ -30,6 +30,10 @@ class DaimonError(Exception):
     """Base class for all daimon-raised errors. Adapters catch this at the edge."""
 
 
+class AgentNameCollision(DaimonError):
+    """An agent already uses the requested name in this workspace."""
+
+
 class ConfigError(DaimonError):
     """Bad env vars or missing required keys at command start."""
 

@@ -8,7 +8,7 @@ import anthropic
 import discord
 import httpx
 from daimon.adapters.discord.errors import generate_request_id, render_error
-from daimon.core.errors import DaimonError, SpecError, StoreError, TurnError
+from daimon.core.errors import AgentNameCollision, DaimonError, SpecError, StoreError, TurnError
 from sqlalchemy.exc import DBAPIError
 
 TEST_RID = "01JTZXTEST000000000000000"
@@ -18,6 +18,7 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
     body = "sesn_private agent_private access_token=private SELECT secret"
     for error, expected in [
         (SpecError(body), "Daimon couldn't read this setup."),
+        (AgentNameCollision(body), "This workspace already has an agent with that name."),
         (StoreError(body), "Daimon couldn't load or save this change."),
         (DaimonError(body), "Something went wrong while handling your request."),
         (ValueError(body), "Daimon couldn't use that input."),

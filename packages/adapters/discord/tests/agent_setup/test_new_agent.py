@@ -528,12 +528,12 @@ async def test_a_daimon_error_is_rendered_without_a_sentry_capture(
     monkeypatch: pytest.MonkeyPatch, account_id: uuid.UUID
 ) -> None:
     """A name collision is an expected outcome, not a defect to page someone about."""
-    from daimon.core.errors import DaimonError
+    from daimon.core.errors import AgentNameCollision
 
     captured: list[BaseException] = []
 
     async def _collide(*_args: Any, **_kwargs: Any) -> ResourceOutcome:
-        raise DaimonError("This server already has an agent named **churn-explorer**.")
+        raise AgentNameCollision("This server already has an agent named **churn-explorer**.")
 
     monkeypatch.setattr(
         new_agent_mod, "capture_exception_with_scope", lambda err: captured.append(err)
@@ -552,4 +552,6 @@ async def test_a_daimon_error_is_rendered_without_a_sentry_capture(
     assert captured == [], "an expected refusal must not be captured as an exception"
     interaction.followup.send.assert_called_once()
     message = interaction.followup.send.call_args.args[0]
-    assert "already has an agent named" in message, "the caller sees the real reason"
+    assert message == (
+        "This workspace already has an agent with that name. Pick a different name."
+    ), "the caller sees the reason without an exception body"

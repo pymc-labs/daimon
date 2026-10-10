@@ -10,6 +10,7 @@ import anthropic
 import structlog
 from daimon.core.continuity.messages import render_responder_changed_without_handoff
 from daimon.core.errors import (
+    AgentNameCollision,
     SpecError,
     StoreError,
     TurnError,
@@ -89,6 +90,8 @@ def render_error(
         return "Daimon couldn't load or save this change. Try again in a minute."
     if isinstance(exc, SpecError):
         return "Daimon couldn't read this setup. Ask an admin to check it."
+    if isinstance(exc, AgentNameCollision):
+        return "This workspace already has an agent with that name. Pick a different name."
     if isinstance(exc, ValueError):
         return "Daimon couldn't use that input. Check it and try again."
     return "Something went wrong while handling your request. Try again in a minute."
