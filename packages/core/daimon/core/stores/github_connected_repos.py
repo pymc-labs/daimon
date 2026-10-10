@@ -66,6 +66,39 @@ async def _server_wide_row(
     )
 
 
+@dataclass(frozen=True)
+class AgentRepoSummary:
+    pairs: int
+    """Active repo connections that belong to one agent, counted per repo and agent."""
+    agents: int
+    by_agent: dict[uuid.UUID, tuple[str, ...]]
+    """Each agent's own repos, by full name."""
+
+
+async def agent_repo_summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> AgentRepoSummary:
+    """The repos connected for one agent each, for the server admins' overview."""
+    rows = await session.execute(
+        select(TenantGitHubRepo.scope_agent_id, TenantGitHubRepo.repo_full_name)
+        .where(
+            TenantGitHubRepo.tenant_id == tenant_id,
+            TenantGitHubRepo.scope_agent_id.is_not(None),
+            TenantGitHubRepo.status == "active",
+        )
+        .order_by(TenantGitHubRepo.repo_full_name)
+    )
+    by_agent: dict[uuid.UUID, list[str]] = {}
+    pairs = 0
+    for agent_id, full_name in rows:
+        assert agent_id is not None
+        by_agent.setdefault(agent_id, []).append(full_name)
+        pairs += 1
+    return AgentRepoSummary(
+        pairs=pairs,
+        agents=len(by_agent),
+        by_agent={agent_id: tuple(names) for agent_id, names in by_agent.items()},
+    )
+
+
 async def summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> ConnectedRepoSummary:
     repos = list(
         await session.scalars(

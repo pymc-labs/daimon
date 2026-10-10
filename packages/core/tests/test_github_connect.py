@@ -1028,7 +1028,8 @@ async def test_agent_bound_connection_activates_without_a_saved_key_and_waits_wi
         assert [(row.baseline_access, row.ceiling_access, row.staged) for row in grants] == [
             ("write", "write", has_key)
         ]
-        assert status == ("update_pending" if has_key else "activated")
+        assert status is not None
+        assert status.status == ("update_pending" if has_key else "activated")
         assert await github_access.get_agent_mode(
             db_session, tenant_id=tenant_id, agent_id=agent_id
         ) == ("legacy" if has_key else "app")

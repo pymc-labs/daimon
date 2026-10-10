@@ -402,12 +402,19 @@ async def sweep_expired_click_intents(session: AsyncSession, *, now: datetime) -
     return cast(CursorResult[Any], result).rowcount
 
 
+class ConfirmedActivation(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    status: Literal["activated", "update_pending"]
+    # True only when this activation removed a saved PAT or GH_TOKEN.
+    retired_saved_key: bool = False
+
+
 async def activate_confirmed_agent(
     session: AsyncSession,
     *,
     invitation: Invitation,
     repos: list[RepoConfirmation],
-) -> Literal["activated", "update_pending"] | None:
+) -> ConfirmedActivation | None:
     """Add the person's repos to one agent and switch it to them.
 
     Additive: grants the agent already has stay. An operator-issued update of
@@ -486,6 +493,7 @@ async def activate_confirmed_agent(
         and (has_pat is not None or has_token_env or working is not None or skill_repos)
     ):
         status: Literal["activated", "update_pending"] = "update_pending"
+        retired = False
     else:
         await github_access.activate_agent(
             session,
@@ -493,9 +501,10 @@ async def activate_confirmed_agent(
             agent_id=agent_id,
             changed_by_account_id=invitation.requester_account_id,
         )
-        if not app_active and await retire_saved_key(
+        retired = not app_active and await retire_saved_key(
             session, tenant_id=invitation.tenant_id, agent_id=agent_id
-        ):
+        )
+        if retired:
             await append_event(
                 session,
                 tenant_id=invitation.tenant_id,
@@ -520,7 +529,7 @@ async def activate_confirmed_agent(
         raise ValueError("connection was not confirmed")
     row.activation_status = status
     await session.flush()
-    return status
+    return ConfirmedActivation(status=status, retired_saved_key=retired)
 
 
 async def queue_connect_followup(
