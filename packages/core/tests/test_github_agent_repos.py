@@ -22,7 +22,12 @@ from daimon.core.channel_admins import ChannelAdminCaller, GroupLookupFailed, Gr
 from daimon.core.github_panel import can_manage_agent_github, requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import github_access, github_app_installations, github_connect
+from daimon.core.stores import (
+    agent_repo_binding,
+    github_access,
+    github_app_installations,
+    github_connect,
+)
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 from daimon.core.stores.github_connected_repos import agent_repo_summary
@@ -204,6 +209,88 @@ async def _live_ids(db_session: AsyncSession, world: World, agent_id: uuid.UUID)
             db_session, tenant_id=world.tenant_id, agent_id=agent_id
         )
     }
+
+
+@pytest.mark.asyncio
+async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    agent_id = world.agent("ma_team_a")
+    assert await _connect(
+        db_session,
+        world,
+        requester_id=world.channel_admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101, 102),
+        manages=True,
+    ) == github_connect.ConfirmedActivation(status="activated")
+    with pytest.raises(ValueError, match="not on this agent's list"):
+        await github_access.set_working_repo(
+            db_session,
+            tenant_id=world.tenant_id,
+            agent_id=agent_id,
+            repo_name="team-b/app",
+            account_id=world.channel_admin_id,
+        )
+    assert (
+        await github_access.set_working_repo(
+            db_session,
+            tenant_id=world.tenant_id,
+            agent_id=agent_id,
+            repo_name="TEAM-A/APP",
+            account_id=world.channel_admin_id,
+        )
+        == "team-a/app"
+    )
+    grants = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=agent_id
+    )
+    assert {grant.repo_id for grant in grants if grant.is_working_repo} == {101}
+    assert (
+        await github_access.set_working_repo(
+            db_session,
+            tenant_id=world.tenant_id,
+            agent_id=agent_id,
+            repo_name="team-a/docs",
+            account_id=world.channel_admin_id,
+        )
+        == "team-a/docs"
+    )
+    grants = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=agent_id
+    )
+    assert {grant.repo_id for grant in grants if grant.is_working_repo} == {102}
+    await agent_repo_binding.set_binding(
+        db_session,
+        tenant_id=world.tenant_id,
+        agent_id=agent_id,
+        repo_url="team-a/old",
+        default_branch="main",
+        ma_secret_ref="legacy",
+        proof=None,
+    )
+    assert (
+        await github_access.set_working_repo(
+            db_session,
+            tenant_id=world.tenant_id,
+            agent_id=agent_id,
+            repo_name=None,
+            account_id=world.channel_admin_id,
+        )
+        is None
+    )
+    grants = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=agent_id
+    )
+    assert not any(grant.is_working_repo for grant in grants)
+    assert (
+        await agent_repo_binding.get_binding(
+            db_session, tenant_id=world.tenant_id, agent_id=agent_id
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
