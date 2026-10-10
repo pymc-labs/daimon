@@ -957,3 +957,16 @@ early sentinel exit and the environment archive fallback.
 
 Responder identity retains its SDK read and response for configuration snapshot
 backfill, including null channel and thread metadata, without an additional read.
+
+### Default capability conformance
+
+The supplementary F1 runner provisions the authored default agent's eleven
+skills and immutable pins, adapter-mapped builtin tools and `daimon-mcp`. One
+scripted turn loads a skill, uses two read-only MCP tools, exercises file and
+bash capabilities and completes one root. The initial Anthropic tape supports
+offline normalized replay, with corruption checks; it is synthetic evidence.
+Incomplete tool mappings are typed PENDING. Missing atomic session revision
+pinning is an explicit capability gap, while skill pins remain required.
+Replay retains omitted tool arguments and does not certify their contents.
+The standard eighteen-case matrix stays unchanged. See the package-local
+`packages/mux/mux/conformance/README.md` for the adapter contract.

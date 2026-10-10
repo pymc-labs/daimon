@@ -154,7 +154,17 @@ def check_agent(actual: AgentSpec, desired: AgentSpec) -> None:
         actual.model.provider == desired.model.provider and actual.model.id == desired.model.id,
         "F1: probe model changed",
     )
-    require(actual.tools == desired.tools, "F1: deployed toolset mapping changed")
+    require(
+        actual.tools is not None and desired.tools is not None,
+        "F1: deployed toolset mapping missing",
+    )
+    if actual.tools is None or desired.tools is None:
+        raise ConformanceFailure("F1: deployed toolset mapping missing")
+    require(
+        sorted(actual.tools, key=lambda tool: (tool.kind, tool.name))
+        == sorted(desired.tools, key=lambda tool: (tool.kind, tool.name)),
+        "F1: deployed toolset mapping changed",
+    )
     require(actual.mcp_servers == desired.mcp_servers, "F1: deployed MCP attachment changed")
     require(
         actual.skills is not None and desired.skills is not None, "F1: skill attachment missing"
@@ -162,11 +172,13 @@ def check_agent(actual: AgentSpec, desired: AgentSpec) -> None:
     if actual.skills is None or desired.skills is None:
         raise ConformanceFailure("F1: skill attachment missing")
     require(
-        tuple((s.id, s.version) for s in actual.skills)
-        == tuple((s.id, s.version) for s in desired.skills),
+        sorted((s.id, s.version) for s in actual.skills)
+        == sorted((s.id, s.version) for s in desired.skills),
         "F1: default skill pins changed",
     )
-    for observed, expected in zip(actual.skills, desired.skills, strict=True):
+    expected_by_id = {pin.id: pin for pin in desired.skills}
+    for observed in actual.skills:
+        expected = expected_by_id[observed.id]
         require(
             observed.source is None
             or expected.source is None
@@ -426,6 +438,12 @@ async def scenario(
         ),
         key="f1-session",
     )
+    if adapter.atomic_revision_pin:
+        require(
+            session.requested_revision == agent.revision
+            and session.effective_revision == agent.revision,
+            "F1: session did not freeze the requested agent revision",
+        )
     require(
         session.ref.provider == adapter.model.provider
         and session.ref.tenant_id == scope.tenant_id
