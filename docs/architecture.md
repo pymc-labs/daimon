@@ -1353,8 +1353,12 @@ admission before any of this runs.
   every recorded repo grant with its access, working-repo marker, and staged
   or unavailable status, including repos the signed-in GitHub account cannot
   edit. The person may add repos, remove repos, and select or clear the one
-  working repo, then confirm with **Save changes**. Adding defaults to Read
-  only, permits at most ten repos per save, and never lowers existing access.
+  working repo, then confirm with **Save changes**. **Add repos** opens a
+  centered dialog on desktop and a bottom sheet on mobile. Each addition has
+  its own access choice, defaulting to Read only. Added and removed rows stay
+  visible as pending changes, and removals can be undone before saving.
+  Working-repo actions live on the repo row. Adding permits at most ten repos
+  per save and never lowers existing access.
   A missing working or skill repo remains visible as a setup requirement.
   Repos that need more access can be confirmed again to finish setup.
   The invitation requester must still manage the agent when the page opens

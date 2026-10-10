@@ -9,8 +9,9 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from daimon.adapters.mcp import oauth_github
 from daimon.adapters.mcp.oauth_github import (
     _agent_editor_page,
     _error,
@@ -23,7 +24,7 @@ from daimon.adapters.mcp.oauth_github import (
 from daimon.core.stores.github_access import AgentRepo
 from playwright.sync_api import Route, sync_playwright
 
-STATIC = Path(__file__).resolve().parents[1] / "packages/adapters/mcp/daimon/adapters/mcp/static"
+STATIC = Path(oauth_github.__file__).with_name("static")
 ROOT = Path(os.environ.get("GITHUB_EDITOR_CAPTURE_OUT", "/tmp/daimon-github-page-evidence"))
 STAMP = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -65,7 +66,7 @@ def pages() -> dict[str, str]:
     current = [
         grant(11, "example-org/analysis", is_working_repo=True, ceiling_access="write"),
         grant(12, "example-org/datasets"),
-        grant(20, "another-org/shared-library"),
+        grant(20, "another-org/library"),
     ]
     base = {
         "root": "https://mcp.test",
@@ -88,7 +89,7 @@ def pages() -> dict[str, str]:
         ),
         "unavailable": _agent_editor_page(
             **{**base, "installations": []},
-            grants=[grant(20, "another-org/shared-library", status="suspended")],
+            grants=[grant(20, "another-org/library", status="suspended")],
         ),
         "pending": _agent_editor_page(
             **{**base, "installations": []},
@@ -123,6 +124,14 @@ def html_route(content: str):
     return fulfill
 
 
+def submission_route(submitted: list[dict[str, list[str]]]):
+    def submit(route: Route) -> None:
+        submitted.append(parse_qs(route.request.post_data or ""))
+        route.fulfill(content_type="text/html", body="<p>Saved.</p>")
+
+    return submit
+
+
 def main() -> None:
     ROOT.mkdir(parents=True, exist_ok=True)
     states = pages()
@@ -140,35 +149,101 @@ def main() -> None:
                 )
                 page.goto("https://mcp.test/preview")
                 if name == "current":
-                    save = page.get_by_role("button", name="Save changes")
+                    save = page.locator("#save-repos")
+                    opener = page.locator("#open-repo-picker")
+                    dialog = page.locator("#repo-picker")
                     assert save.is_disabled()
-                    page.locator('input[name="repo"][value="13"]').check()
+                    page.screenshot(path=ROOT / f"current-{width}.png")
+                    if width == 390:
+                        page.screenshot(path=ROOT / "mobile-top.png")
+                    opener.click()
+                    assert dialog.is_visible()
+                    choice = page.locator('.gh-picker-choice[data-repo-id="13"]')
+                    choice.locator('input[type="checkbox"]').check()
                     page.get_by_role("searchbox").fill("website")
-                    assert page.locator('input[name="repo"][value="13"]').is_checked()
-                    assert not save.is_disabled()
+                    assert choice.locator('input[type="checkbox"]').is_checked()
                     page.get_by_role("searchbox").fill("")
-                    page.locator('input[name="remove"][value="11"]').check()
-                    page.locator('select[name="working"]').select_option("13")
+                    page.screenshot(path=ROOT / f"picker-{width}.png")
+                    page.locator("#stage-repos").click()
+                    assert not dialog.is_visible()
+                    assert not save.is_disabled()
+                    opener.click()
+                    second = page.locator('.gh-picker-choice[data-repo-id="14"]')
+                    second.locator('input[type="checkbox"]').check()
+                    page.keyboard.press("Escape")
+                    assert not dialog.is_visible()
+                    assert opener.evaluate("element => element === document.activeElement")
+                    assert page.locator('.gh-agent-row[data-repo-id="13"]').count() == 1
+                    assert page.locator('.gh-agent-row[data-repo-id="14"]').count() == 0
+                    other_row = page.locator('.gh-agent-row[data-repo-id="12"]')
+                    other_row.locator('[data-action="remove"]').click()
+                    page.screenshot(path=ROOT / f"selected-{width}.png", full_page=True)
+                    if width == 390:
+                        page.screenshot(path=ROOT / "mobile-changes.png")
+                    other_row.locator('[data-action="undo"]').click()
+                    added_row = page.locator('.gh-agent-row[data-repo-id="13"]')
+                    added_row.locator('[data-action="menu"]').click()
+                    added_row.locator('[data-action="working"]').click()
+                    old_row = page.locator('.gh-agent-row[data-repo-id="11"]')
+                    old_row.locator('[data-action="remove"]').click()
+                    assert added_row.locator(".gh-working-badge").is_visible()
                     selected = page.evaluate(
                         "Object.fromEntries(new FormData(document.querySelector('form')))"
                     )
                     assert selected["repo"] == "13"
                     assert selected["remove"] == "11"
                     assert selected["working"] == "13"
-                    assert selected["access"] == "read"
-                    page.screenshot(path=ROOT / f"selected-{width}.png", full_page=True)
-                    page.reload()
-                    if width == 390:
-                        page.screenshot(path=ROOT / "mobile-top.png")
-                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.screenshot(path=ROOT / "mobile-controls.png")
-                        page.evaluate("window.scrollTo(0, 0)")
+                    assert selected["access_13"] == "read"
+                    page.screenshot(path=ROOT / f"working-change-{width}.png", full_page=True)
+                    old_row.locator('[data-action="undo"]').click()
+                    assert added_row.locator(".gh-working-badge").is_visible()
+                    page.locator("#discard-repos").click()
+                    assert save.is_disabled()
+                    assert old_row.locator(".gh-working-badge").is_visible()
+                    old_row.locator('[data-action="remove"]').click()
+                    old_row.locator('[data-action="undo"]').click()
+                    assert save.is_disabled()
+                    assert old_row.locator(".gh-working-badge").is_visible()
+                    opener.click()
+                    choice.locator('input[type="checkbox"]').check()
+                    second.locator('input[type="checkbox"]').check()
+                    second.locator("select").select_option("write")
+                    page.locator("#stage-repos").click()
+                    payload = page.evaluate(
+                        "Object.fromEntries(new FormData(document.querySelector('form')))"
+                    )
+                    assert payload["access_13"] == "read"
+                    assert payload["access_14"] == "write"
+                    submitted: list[dict[str, list[str]]] = []
+
+                    page.route("https://mcp.test/oauth/github/confirm", submission_route(submitted))
+                    save.click()
+                    page.get_by_text("Saved.", exact=True).wait_for()
+                    assert len(submitted) == 1
+                    assert submitted[0]["repo"] == ["13", "14"]
+                    assert submitted[0]["access_13"] == ["read"]
+                    assert submitted[0]["access_14"] == ["write"]
+                    assert submitted[0]["working"] == ["keep"]
+                    page.goto("https://mcp.test/preview")
                 page.screenshot(path=ROOT / f"{name}-{width}.png", full_page=True)
                 assert not errors, errors
                 assert page.evaluate("document.documentElement.scrollWidth") <= width, name
                 assert " · " not in page.locator("body").inner_text(), name
                 (ROOT / f"{name}.html").write_text(content)
                 page.close()
+        page = browser.new_page(java_script_enabled=False)
+        page.route("https://mcp.test/web/*", local_asset)
+        page.route("https://mcp.test/preview", html_route(states["current"]))
+        page.goto("https://mcp.test/preview")
+        page.locator('input[type="checkbox"][name="repo"][value="13"]').check()
+        page.locator('select[name="access_13"]').select_option("write")
+        page.locator('select[name="working"]').select_option("13")
+        fallback = page.evaluate("Object.fromEntries(new FormData(document.querySelector('form')))")
+        assert fallback["repo"] == "13"
+        assert fallback["access_13"] == "write"
+        assert fallback["working"] == "13"
+        assert page.get_by_role("button", name="Save changes").is_enabled()
+        page.close()
         browser.close()
     print(f"Captured {len(states)} states at two widths in {ROOT}")
 

@@ -206,37 +206,10 @@
   .gh-actions .gh-link { width: 100%; }
 }
 
-/* Agent repository editor: current access stays first at every width. */
-.gh-editor .gh-results > h2:first-child { margin-top: 0; }
-.gh-editor .gh-current-list, .gh-editor .gh-add-list { border: 1px solid var(--border); border-radius: 12px; background: var(--card); overflow: hidden; }
-.gh-editor .gh-current-row { align-items: flex-start; cursor: default; padding: 16px; flex-wrap: wrap; }
-.gh-editor .gh-repo-details { flex: 1; min-width: 160px; }
-.gh-editor .gh-repo-details strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
-.gh-editor .gh-repo-details small { display: block; margin-top: 5px; color: var(--muted-foreground); font-size: 13px; }
-.gh-editor .gh-repo-actions { display: flex; flex-direction: column; align-items: flex-start; flex-shrink: 0; gap: 4px; }
-.gh-editor .gh-repo-actions label { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; cursor: pointer; }
-.gh-editor .gh-repo-locked { color: var(--muted-foreground); font-size: 12px; max-width: 150px; }
-.gh-editor .gh-working-badge { display: inline-block; margin-top: 8px; padding: 2px 8px; background: var(--accent); border-radius: 5px; font-size: 12px; font-weight: 600; }
-.gh-editor .gh-current-row:has(input[name=remove]:checked) { background: #FFF4F2; }
-.gh-editor .gh-search-wrap { display: block; margin-bottom: 12px; }
-.gh-editor .gh-working-select { display: block; width: 100%; min-height: 44px; padding: 8px; margin-top: 14px; background: var(--card); border: 1px solid var(--input); border-radius: 6px; font-size: 14px; }
-.gh-editor .gh-working-note { font-size: 13px; }
-.gh-editor .gh-install-link { font-size: 13px; margin-top: 8px; }
-.gh-editor .gh-results > .gh-empty { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
 .gh-saved-repos { width: 100%; margin: 16px 0; }
 .gh-saved-repos li { padding: 14px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .gh-saved-repos strong, .gh-saved-repos span { display: block; }
 .gh-saved-repos span { margin-top: 4px; font-size: 13px; color: var(--muted-foreground); }
-@media (max-width: 900px) {
-  .gh-editor .gh-side { order: 0; }
-  .gh-editor .gh-side-card:last-child { display: block; }
-}
-@media (max-width: 600px) {
-  .gh-editor .gh-repo-details { min-width: 175px; }
-  .gh-editor .gh-repo-locked { max-width: none; flex-basis: 100%; }
-}
-.gh-editor-note { margin: 0 0 22px; font-size: 14px; }
-.gh-editor .gh-finish-status { display: block; }
 
 /* One-list agent repo editor. The tenant-wide connection picker keeps its own layout. */
 .gh-editor { padding-bottom: 105px; }
@@ -250,6 +223,11 @@
 .gh-add-button { align-items: center; gap: 7px; min-height: 42px; padding: 9px 14px; border: 1px solid #d3dce7; border-radius: 8px; background: #fff; color: #132d4e; font-size: 14px; font-weight: 650; cursor: pointer; }
 .gh-add-button:hover, .gh-add-button:focus-visible { background: #edf4f8; }
 .gh-add-button .web-icon { width: 17px; height: 17px; }
+.gh-access-help { margin-top: 18px; color: #62738a; font-size: 13px; }
+.gh-access-help summary { display: flex; align-items: center; gap: 7px; cursor: pointer; list-style: none; }
+.gh-access-help summary::-webkit-details-marker { display: none; }
+.gh-access-help summary .web-icon { width: 16px; height: 16px; }
+.gh-access-help p { margin: 10px 0 0 23px; max-width: 620px; line-height: 1.6; }
 .gh-connected-list { border: 1px solid #dbe2ea; border-radius: 12px; background: #fff; }
 .gh-editor-empty { margin: 0; padding: 30px 20px; color: #62738a; }
 .gh-agent-row { position: relative; padding: 21px 20px; border-bottom: 1px solid #e5e9ef; }
