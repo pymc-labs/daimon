@@ -144,10 +144,10 @@ async def test_injected_admin_transport_covers_all_keys_models_sources_and_pages
         ("end_time", str(END + 86400)),
         ("bucket_width", "1d"),
         ("limit", "31"),
-        ("project_ids", "proj-isolated"),
-        ("group_by", "project_id"),
-        ("group_by", "api_source"),
-        ("group_by", "line_item" if endpoint == "costs" else "model"),
+        ("project_ids[]", "proj-isolated"),
+        ("group_by[]", "project_id"),
+        ("group_by[]", "api_source"),
+        ("group_by[]", "line_item" if endpoint == "costs" else "model"),
     ]
     assert list(requests[0].url.params.multi_items()) == expected
     assert list(requests[1].url.params.multi_items()) == [*expected, ("page", "next-offline")]

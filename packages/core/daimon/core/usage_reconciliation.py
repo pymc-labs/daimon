@@ -63,8 +63,8 @@ class AdminScope(_Evidence):
             ("end_time", str(self.end_time)),
             ("bucket_width", "1d"),
             ("limit", "31"),
-            ("project_ids", self.project_id),
-            *(("group_by", group) for group in groups),
+            ("project_ids[]", self.project_id),
+            *(("group_by[]", group) for group in groups),
         ]
         if cursor is not None:
             result.append(("page", cursor))
