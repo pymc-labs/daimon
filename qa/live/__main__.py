@@ -77,8 +77,16 @@ def main() -> int:
     failed = False
     for scenario in scenarios:
         backend = DiscordBackend(config, args.env)
-        judge = HaikuJudge(config.pricing, go=args.go, model=config.model)
-        executor = Executor(backend, judge, ledger, config.pricing, args.env)
+        judge = HaikuJudge(config.pricing, go=args.go, models=config.models)
+        executor = Executor(
+            backend,
+            judge,
+            ledger,
+            config.pricing,
+            args.env,
+            models=config.models,
+            model_backend=backend.target.backend,
+        )
         result = executor.run(scenario)
         path = report(result, args.results)
         try:

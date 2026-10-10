@@ -16,8 +16,9 @@ from qa.live.config import Pricing
 from qa.live.context import Context
 from qa.live.cost import Ledger, estimate
 from qa.live.evaluate import evaluate
+from qa.live.models import BackendName, ModelPolicy
 from qa.live.report import Result
-from qa.live.schema import MODEL, Assertion, CatalogScenario, ProposedScenario, Step
+from qa.live.schema import Assertion, CatalogScenario, ProposedScenario, Step
 from qa.live.types import Backend, Check, Judge, Pending, Turn, WatchTimeout, utcnow
 
 GLOBAL_PATTERNS = (
@@ -43,8 +44,18 @@ def deferred_interrupts() -> Iterator[None]:
 
 class Executor:
     def __init__(
-        self, backend: Backend, judge: Judge, ledger: Ledger, pricing: Pricing, env: str
+        self,
+        backend: Backend,
+        judge: Judge,
+        ledger: Ledger,
+        pricing: Pricing,
+        env: str,
+        *,
+        models: ModelPolicy | None = None,
+        model_backend: BackendName = "anthropic",
     ) -> None:
+        self.models = models or ModelPolicy()
+        self.model_backend: BackendName = model_backend
         self.backend = backend
         self.judge = judge
         self.ledger = ledger
@@ -156,12 +167,15 @@ class Executor:
             for turn in result.turns:
                 try:
                     turn.usage = self.backend.usage(turn)
-                    if not turn.usage.models or any(model != MODEL for model in turn.usage.models):
+                    if not turn.usage.models or any(
+                        not self.models.accepts(self.model_backend, model, self.env)
+                        for model in turn.usage.models
+                    ):
                         result.checks.append(
                             Check(
                                 "model",
                                 "FAIL",
-                                "Daimon model is missing or outside the approved Haiku pin",
+                                "Daimon model is missing or outside the approved cheap-model pin",
                                 turn.number,
                             )
                         )

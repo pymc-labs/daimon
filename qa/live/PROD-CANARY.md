@@ -20,7 +20,7 @@ The driver must obtain approval and make these changes before enabling it:
    Manage Messages and Attach Files; grant Daimon View Channel, Send Messages,
    Read Message History, Create Public Threads, Manage Threads and Embed Links.
    Verify inherited overwrites. Grant no access to customer guilds/channels.
-4. Provision a dedicated QA agent using `claude-haiku-4-5-20251001`, and a
+4. Provision a dedicated QA agent using `claude-haiku-5-5`, and a
    channel-specific binding for each QA-created canary channel. Set
    `prod.qa_agent_name` and `prod.model_probe` to the reviewed read-only probe
    command running with production's settings (the shipped `qa.live.model_probe`

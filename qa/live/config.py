@@ -8,7 +8,8 @@ from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
-from qa.live.schema import MODEL, Contract
+from qa.live.models import BackendName, ModelPolicy
+from qa.live.schema import Contract
 
 STAGING_GUILD = "1435062989119295640"
 STAGING_CATEGORY = "1558361838960382032"
@@ -28,6 +29,7 @@ class Target(Contract):
     warm_url: str = "https://staging-daimon-mcp-251774259661.us-east4.run.app/readyz"
     model_probe: list[str] = Field(default_factory=list)
     qa_agent_name: str | None = None
+    backend: BackendName = "anthropic"
 
 
 class Pricing(Contract):
@@ -58,7 +60,7 @@ class Schedule(Contract):
 
 class Config(Contract):
     driver_path: str = str(Path.home() / ".config/daimon-qa/qa.py")
-    model: Literal["claude-haiku-4-5-20251001"] = MODEL
+    models: ModelPolicy = Field(default_factory=ModelPolicy)
     pricing: Pricing
     staging: Target = Field(default_factory=Target)
     prod: Target = Field(
@@ -86,6 +88,8 @@ class Config(Contract):
             raise ValueError("staging logs must use pymc-daimon-staging")
         if not set(self.prod.guild_allowlist) <= PROD_GUILDS:
             raise ValueError("production guild allow-list contains a customer guild")
+        if self.prod.enabled and self.prod.backend != "anthropic":
+            raise ValueError("Scenario B production canaries require a Claude Haiku QA agent")
         if self.prod.enabled and self.prod.guild_id not in self.prod.guild_allowlist:
             raise ValueError("production guild must be an explicitly allowed internal guild")
         return self

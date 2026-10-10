@@ -36,20 +36,27 @@ install the driver. Keep installation-specific paths in the private local config
 Edit the local config's `pricing` before approval. The example prices are sample
 values, not measured turn estimates. Include the worst expected Daimon turn cost,
 judge input/output token prices, and a bounded judge input allowance. Judge calls
-always use `claude-haiku-4-5-20251001`, `max_tokens=300`, `temperature=0` and the
+always use the Anthropic primary from `models.backends` (`claude-haiku-5-5`), `max_tokens=300`, `temperature=0` and the
 Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
-No model override is allowed. Every trigger first runs the target's read-only
+The one backend map contains Claude `claude-haiku-5-5`, OpenAI `gpt-6-luna`,
+and Gemini `gemini-3.8-flash`. Unknown or expensive replacements refuse.
+Gemini fallback selection advances to `gemini-flash-latest`, then
+`gemini-3.5-flash-lite`, only for HTTP 503. The shipped judge transport is
+Anthropic only; the other backends do not enable new paid judge transports.
+A temporary staging-only override admits `claude-haiku-4-5` and its dated
+`claude-haiku-4-5-20251001` snapshot until the driver confirms Haiku 5.5
+deployment. Judges and production canaries never use that override. Every trigger first runs the target's read-only
 `model_probe` argv command, passing the owned channel/guild/category as JSON on
 stdin. Set `qa_agent_name` to the dedicated QA agent. The shipped
 `python -m qa.live.model_probe` helper must execute with the chosen deployment's
 settings, directly there or through an operator-reviewed IAP wrapper forwarding
 stdin/stdout. It reads the same core config cascade and actual MA agent metadata;
 it neither creates a turn nor changes configuration. The returned model must be
-Haiku and its agent must match the QA agent. Production additionally requires a
+the target backend's approved Daimon model and its agent must match the QA agent. Production additionally requires a
 channel-specific agent binding, refusing tenant/deployment Sonnet/Opus defaults.
 An absent probe is PENDING; missing/wrong model evidence fails. The post-turn
-receipt also fails the run when a model ID is missing or differs from Haiku.
+receipt also fails the run when a model ID is missing or differs from the target backend's approved model.
 Configure all required QA identities, including
 the admin bot when scenarios use `as: admin`.
 

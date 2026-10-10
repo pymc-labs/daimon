@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Live QA now shares one approved cheap-model map across the judge and pre/post-turn guards, with a temporary staging-only Haiku 4.5 exception and HTTP-503-only Gemini fallback selection.
+
 ### Added
 
 - An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.

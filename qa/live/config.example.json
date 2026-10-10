@@ -1,6 +1,35 @@
 {
   "driver_path": "/home/clsandoval/.config/daimon-qa/qa.py",
-  "model": "claude-haiku-4-5-20251001",
+  "models": {
+    "backends": {
+      "anthropic": {
+        "primary": "claude-haiku-5-5",
+        "fallback": [],
+        "fallback_status": null,
+        "staging_override": "claude-haiku-4-5",
+        "staging_aliases": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "openai": {
+        "primary": "gpt-6-luna",
+        "fallback": [],
+        "fallback_status": null,
+        "staging_override": null,
+        "staging_aliases": []
+      },
+      "gemini": {
+        "primary": "gemini-3.8-flash",
+        "fallback": [
+          "gemini-flash-latest",
+          "gemini-3.5-flash-lite"
+        ],
+        "fallback_status": 503,
+        "staging_override": null,
+        "staging_aliases": []
+      }
+    }
+  },
   "pricing": {
     "per_turn_usd": 0.05,
     "judge_input_per_million": 1.0,
@@ -21,7 +50,8 @@
     "context": {},
     "warm_url": "https://staging-daimon-mcp-251774259661.us-east4.run.app/readyz",
     "model_probe": [],
-    "qa_agent_name": null
+    "qa_agent_name": null,
+    "backend": "anthropic"
   },
   "prod": {
     "guild_id": "1435062989119295640",
@@ -37,7 +67,8 @@
     "context": {},
     "warm_url": "",
     "model_probe": [],
-    "qa_agent_name": null
+    "qa_agent_name": null,
+    "backend": "anthropic"
   },
   "alerts": {
     "inbox": "/home/clsandoval/cs/root-opus-handoff-20260923/inbox",
