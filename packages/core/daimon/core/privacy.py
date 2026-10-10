@@ -142,14 +142,15 @@ def delete_scope_lines(display_name: str) -> tuple[str, str]:
     """What Delete removes and what it leaves, true to `purge_account`.
 
     The purge deletes the deployment's own rows about the account and, upstream,
-    every Managed Agents session tagged with it (the conversations it started).
-    Agents and their memory stores are shared and stay; see the carve-outs in
-    `daimon.core.purge`.
+    tries to delete every Managed Agents session tagged with it (the
+    conversations it started); that upstream delete can fail, so the confirm
+    promises only the attempt. Shared agents and their memory stores stay; see
+    the carve-outs in `daimon.core.purge`.
     """
     return (
-        f"This deletes {display_name}'s records about you and your conversations "
-        "stored at Anthropic.",
-        "Agents and their memory stay, and other people may keep using them.",
+        f"This deletes {display_name}'s records about you and tries to delete your "
+        "conversations stored at Anthropic.",
+        "Shared agents and their memory stay, and other people may keep using them.",
     )
 
 

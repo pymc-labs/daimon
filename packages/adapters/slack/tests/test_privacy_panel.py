@@ -478,7 +478,8 @@ def test_delete_modal_opens_on_what_delete_removes_and_what_stays() -> None:
         display_name="Daimon",
     )
     assert view["blocks"][0]["text"]["text"] == (
-        "This deletes Daimon's records about you and your conversations stored at Anthropic."
-        "\n\nAgents and their memory stay, and other people may keep using them."
+        "This deletes Daimon's records about you and tries to delete your conversations "
+        "stored at Anthropic."
+        "\n\nShared agents and their memory stay, and other people may keep using them."
     ), "the scope comes first, two lines a blank line apart"
     assert "Session transcripts" not in _extract_text(view), "transcripts do not stay"

@@ -231,7 +231,8 @@ def test_the_panel_and_the_confirm_put_a_blank_line_between_lines() -> None:
         by_alias=True
     )
     assert [b.get("text") for b in confirm["body"][1:3]] == [
-        "This deletes Daimon's records about you and your conversations stored at Anthropic.",
-        "Agents and their memory stay, and other people may keep using them.",
+        "This deletes Daimon's records about you and tries to delete your conversations "
+        "stored at Anthropic.",
+        "Shared agents and their memory stay, and other people may keep using them.",
     ], "the confirm opens on what Delete removes and what stays"
     assert "Session transcripts" not in json.dumps(confirm), "transcripts do not stay"

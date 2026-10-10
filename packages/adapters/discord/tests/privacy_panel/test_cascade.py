@@ -137,8 +137,9 @@ def test_cascade_container_says_what_delete_removes_and_what_stays() -> None:
         item.content for item in container.children if isinstance(item, discord.ui.TextDisplay)
     ]
     assert texts[1] == (
-        "This deletes Daimon's records about you and your conversations stored at Anthropic."
-        "\n\nAgents and their memory stay, and other people may keep using them."
+        "This deletes Daimon's records about you and tries to delete your conversations "
+        "stored at Anthropic."
+        "\n\nShared agents and their memory stay, and other people may keep using them."
     ), "the scope sits right under the title, two lines a blank line apart"
     assert "Session transcripts" not in _joined_text(container), "transcripts do not stay"
 
