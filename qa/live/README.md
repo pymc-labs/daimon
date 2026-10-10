@@ -24,8 +24,8 @@ arguments, missing files and invalid turn indices
 fail validation before any live action. `notes` is optional descriptive metadata.
 Approved catalog extensions that are not implemented are inventoried as typed PENDING entries, without
 executing their supported-looking steps. This lets a supported scenario coexist
-with pending extensions in one catalog. Unknown undeclared kinds and invalid arguments for
-implemented kinds still fail validation. Template placeholders also remain PENDING
+with pending extensions in one catalog. Unknown step/assertion kinds mark only their scenario PENDING, preserving the
+rest of the catalog. Invalid arguments for implemented kinds still fail validation. Template placeholders also remain PENDING
 for unavailable values; numeric regex quantifiers stay literal.
 `est_turns` is the driver's billed-turn estimate, which may differ from trigger
 count when triggers coalesce. The driver must set a conservative estimate.

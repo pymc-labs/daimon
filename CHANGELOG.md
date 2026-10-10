@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
-- Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress.
+- Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress. Unknown catalog kinds mark their scenario PENDING without blocking supported scenarios.
 
 - Rejected or failed MCP and GitHub token forms on Discord, Slack and Teams now show an error with a usable retry button. After 90 seconds the card says it is still saving and will update when finished; long skill imports continue until success or error.
 - A failed attempt to republish a report no longer disconnects the existing report.
