@@ -55,13 +55,28 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 # Match each content/embed component independently. Anchored
                 # answers must not be joined to another message or its footer.
                 pattern = assertion.pattern or ""
-                components = [component for m in turn.messages for component in text_components(m)]
-                match = any(re.search(pattern, component, re.MULTILINE) for component in components)
+                components: list[str] = []
+                for message in turn.messages:
+                    parts = text_components(message)
+                    for header in turn.agent_subtext_headers:
+                        if header.get("message_id") == str(message.get("id")):
+                            first, separator, rest = parts[0].partition("\n")
+                            if separator and first.rstrip("\r") == header.get("line"):
+                                parts[0] = rest
+                    components.extend(parts)
+                matcher = (
+                    re.fullmatch
+                    if kind == "text_present" and pattern.startswith("^") and pattern.endswith("$")
+                    else re.search
+                )
+                match = any(matcher(pattern, component, re.MULTILINE) for component in components)
                 passed = match if kind == "text_present" else not match
                 reason = f"regex {assertion.pattern!r}; matched={match}"
             elif kind in {"channel_text_present", "channel_text_absent"}:
                 rows = backend.channel_messages(turn)
                 turn.channel_history = rows
+                if kind == "channel_text_absent" and not rows:
+                    raise Pending("no bot message arrived in the channel observation window")
                 matched = any(
                     re.search(assertion.pattern or "", component, re.MULTILINE)
                     for row in rows

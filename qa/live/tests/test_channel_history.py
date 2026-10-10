@@ -9,7 +9,7 @@ from qa.live.schema import Assertion
 from qa.live.tests.conftest import FakeBackend, FakeJudge
 from qa.live.tests.test_burst_timing import snowflake
 from qa.live.tests.test_discord import FakeDriver
-from qa.live.types import Pending, Turn, utcnow
+from qa.live.types import Message, Pending, Turn, utcnow
 
 
 def test_channel_text_since_turn(backend: FakeBackend, judge: FakeJudge) -> None:
@@ -82,3 +82,38 @@ def test_agent_header_evidence_is_per_turn_and_deduplicated(pricing: Pricing) ->
     backend.collect(turn, 1)
     assert turn.agent_subtext_headers == [{"message_id": "123", "line": "-# qa-agent"}]
     assert Turn(1, "other", "parent", utcnow()).agent_subtext_headers == []
+
+
+def test_empty_channel_absence_is_pending(backend: FakeBackend, judge: FakeJudge) -> None:
+    turn = Turn(1, "trigger", "parent", utcnow(), settled=True, ended_at=utcnow())
+    check = evaluate(
+        Assertion(kind="channel_text_absent", since_turn=1, pattern="bad"), [turn], backend, judge
+    )
+    assert check.status == "PENDING"
+
+
+def test_channel_history_includes_thread_posts_before_reference_settles(pricing: Pricing) -> None:
+    class Driver(FakeDriver):
+        def messages(self, channel_id: str, *, after: str | None, limit: int = 50) -> list[Message]:
+            return self.baseline if channel_id == "thread" else []
+
+    driver = Driver()
+    backend = DiscordBackend(
+        Config(pricing=pricing, staging=Target(enabled=True)), "staging", driver=driver
+    )
+    backend.owned.add("parent")
+    backend.threads.add("thread")
+    now = utcnow()
+    turn = Turn(
+        1, snowflake(now), "parent", now, ended_at=now + timedelta(seconds=20), settled=True
+    )
+    driver.baseline = [
+        {
+            "id": snowflake(now + timedelta(seconds=5)),
+            "content": "bad routine",
+            "author": {"id": backend.target.daimon_id},
+        }
+    ]
+    assert [row["content"] for row in backend.channel_messages(turn)] == ["bad routine"]
+    turn.messages = list(driver.baseline)
+    assert backend.channel_messages(turn) == []

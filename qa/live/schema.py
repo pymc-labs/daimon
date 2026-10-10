@@ -123,6 +123,11 @@ class Assertion(Contract):
 
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
+        if self.kind in {"channel_text_present", "channel_text_absent"}:
+            if self.since_turn is None or self.turn is not None:
+                raise ValueError("channel_text assertions require since_turn, without turn")
+        elif self.since_turn is not None:
+            raise ValueError("since_turn requires channel_text assertion")
         if (
             self.kind not in {"db_check", "interrupt_within_s", "http_check"}
             and self.turn is None
@@ -262,7 +267,7 @@ PROPOSED_STEP_PARAMS = frozenset(
         "allow_fail",
     }
 )
-PROPOSED_ASSERT_PARAMS = frozenset({"target", "phase"})
+PROPOSED_ASSERT_PARAMS = frozenset({"target", "phase", "channel"})
 PLACEHOLDER = re.compile(r"\{[a-z][a-z0-9_]*(?:\.[a-z0-9_]+|:[A-Za-z0-9_]+)*\}")
 
 
@@ -304,7 +309,12 @@ class ProposedScenario(ScenarioMetadata):
             if kind == "admin" and isinstance(step.get("args"), str):
                 features.add("string admin arguments")
                 normalized["args"] = {}
-            Step.model_validate(normalized)
+            try:
+                Step.model_validate(normalized)
+            except ValidationError:
+                if self.tier == "canary":
+                    raise
+                features.add(f"invalid step contract: {kind}")
         for assertion in self.assertions:
             kind = assertion.get("kind")
             if isinstance(kind, str) and kind in PROPOSED_ASSERTIONS:
@@ -324,13 +334,21 @@ class ProposedScenario(ScenarioMetadata):
             if assertion.get("turn") == 0:
                 features.add("whole-run turn 0")
                 normalized["turn"] = 1
-            supported = Assertion.model_validate(normalized)
+            try:
+                supported = Assertion.model_validate(normalized)
+            except ValidationError:
+                if self.tier == "canary":
+                    raise
+                features.add(f"invalid assertion contract: {kind}")
+                continue
             if supported.pending_extension:
                 features.add(supported.pending_extension)
         if PLACEHOLDER.search(str([self.setup, self.steps, self.assertions, self.teardown])):
             features.add("catalog fixture/context placeholders")
         if not features:
-            raise ValueError("invalid scenario has no declared unimplemented proposal")
+            if self.tier == "canary":
+                raise ValueError("invalid scenario has no declared unimplemented proposal")
+            features.add("invalid scenario contract")
         self.unsupported = sorted(features)
         return self
 

@@ -441,7 +441,7 @@ class DiscordBackend:
                             "elapsed_s": visible_s,
                         }
             header_pattern = r"^-#\s+" + re.escape(self.target.qa_agent_name or "") + r"\s*$"
-            for message in messages:
+            for message in messages if self.target.qa_agent_name else []:
                 for match in re.finditer(
                     header_pattern, str(message.get("content") or ""), re.MULTILINE
                 ):
@@ -496,20 +496,28 @@ class DiscordBackend:
         self._owned(turn.channel_id)
         if not turn.settled or turn.ended_at is None:
             raise Pending("channel history requires a settled reference turn")
-        rows = self.driver.messages(turn.channel_id, after=None, limit=100)
-        if len(rows) >= 100:
-            raise Pending("channel history exceeds bounded observation")
-        return [
-            row
-            for row in rows
-            if row.get("type", 0) in {0, 19}
-            and (
-                obj(row.get("author")).get("id") == self.target.daimon_id
-                or str(row.get("application_id")) == self.target.daimon_id
-            )
-            and (created := message_created_at(row)) is not None
-            and created > turn.ended_at
-        ]
+        trigger_at = message_created_at({"id": turn.trigger_id}) or turn.started_at
+        reference_ids = {str(row.get("id")) for row in turn.messages}
+        observed: dict[str, Message] = {}
+        for channel in self.owned | self.threads:
+            self._owned(channel)
+            rows = self.driver.messages(channel, after=None, limit=100)
+            if len(rows) >= 100:
+                raise Pending("channel history exceeds bounded observation")
+            for row in rows:
+                created = message_created_at(row)
+                if (
+                    row.get("type", 0) in {0, 19}
+                    and (
+                        obj(row.get("author")).get("id") == self.target.daimon_id
+                        or str(row.get("application_id")) == self.target.daimon_id
+                    )
+                    and created is not None
+                    and created > trigger_at
+                    and str(row.get("id")) not in reference_ids
+                ):
+                    observed[str(row.get("id"))] = row
+        return list(observed.values())
 
     def react(self, channel: str, message: str, emoji: str) -> None:
         self._owned(channel)
