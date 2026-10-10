@@ -17,15 +17,89 @@ import pytest
 from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
     build_delete_modal,
+    build_export_result_view,
+    build_post_delete_view,
     build_privacy_main_container,
 )
+from daimon.core.ma import SessionDeletionReport
 from daimon.core.privacy import PurgePreview, PurgePreviewRow, summary_line
+from daimon.core.purge import AccountPurgeResult, PurgeReport
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _POLICY_URL = "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"
+
+
+@pytest.mark.parametrize(
+    ("failed", "upstream_error", "expected"),
+    [
+        (
+            0,
+            False,
+            "Your research-bot account has been deleted.\nYou can start again by using research-bot.",
+        ),
+        (
+            1,
+            False,
+            "We could not delete 1 chat transcript from Anthropic.\n• You do not need to retry while research-bot keeps trying.",
+        ),
+        (
+            3,
+            False,
+            "We could not delete 3 chat transcripts from Anthropic.\n• You do not need to retry while research-bot keeps trying.",
+        ),
+        (
+            0,
+            True,
+            "We could not confirm deletion of all chat transcripts from Anthropic.\n• Ask the person who runs research-bot to check and help remove them.",
+        ),
+        (
+            3,
+            True,
+            "We could not confirm deletion of all chat transcripts from Anthropic.\n• Ask the person who runs research-bot to check and help remove them.",
+        ),
+    ],
+)
+def test_post_delete_copy(failed: int, upstream_error: bool, expected: str) -> None:
+    view = build_post_delete_view(
+        AccountPurgeResult(
+            db=PurgeReport(accounts=1),
+            sessions=SessionDeletionReport(failed=failed, upstream_error=upstream_error),
+        ),
+        display_name="research-bot",
+    )
+    heading = view["blocks"][0]["text"]["text"]
+    rows = view["blocks"][2]["text"]["text"]
+    joined = heading + "\n" + rows
+    assert view["title"]["text"] == (
+        "⚠ Deletion incomplete" if failed or upstream_error else "✅ Account deleted"
+    )
+    assert (
+        "*⚠ Deletion incomplete*" if failed or upstream_error else "*✅ Account deleted*"
+    ) in heading
+    assert expected in joined
+    if failed or upstream_error:
+        assert (
+            "Your research-bot account was deleted, but chat transcript deletion is incomplete."
+            in heading
+        )
+    assert "Usage records are retained" in rows
+    assert "re-run /privacy" not in joined
+    if upstream_error:
+        assert "We could not delete 3 chat transcripts" not in joined
+
+
+def test_export_without_account_copy() -> None:
+    view = build_export_result_view(summary=None, display_name="research-bot")
+    assert "You have no research-bot account." in view["blocks"][0]["text"]["text"]
+
+
+def test_panel_without_account_copy() -> None:
+    from daimon.adapters.slack.privacy_panel.actions import _no_data_blocks
+
+    assert "You have no research-bot account." in _no_data_blocks("research-bot")[0]["text"]["text"]
 
 
 @pytest.mark.asyncio

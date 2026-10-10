@@ -56,7 +56,7 @@ def back() -> ExecuteAction:
 
 
 def no_data_card(bot: str) -> AdaptiveCard:
-    return text_card("🔒 Privacy", f"You have no data on file with {bot}.")
+    return text_card("🔒 Privacy", f"You have no {bot} account.")
 
 
 def panel_card(preview: PurgePreview, *, bot: str, policy_url: str) -> AdaptiveCard:
@@ -140,18 +140,27 @@ def post_delete_card(result: AccountPurgeResult, *, bot: str) -> AdaptiveCard:
         (sessions.deleted, "session transcript(s) deleted from Anthropic"),
     )
     lines = [f"✓ {count} {label}" for count, label in rows if count > 0]
-    if sessions.failed > 0:
-        lines.append(
-            f"⚠ {sessions.failed} transcript(s) could not be deleted; send privacy to retry"
-        )
     if sessions.upstream_error:
-        lines.append(
-            "⚠ Session transcripts could not be deleted from Anthropic; contact the operator "
-            "if you need them removed"
-        )
+        lines.append("We could not confirm deletion of all chat transcripts from Anthropic.")
+        lines.append(f"Ask the person who runs {bot} to check and help remove them.")
+    elif sessions.failed > 0:
+        noun = "chat transcript" if sessions.failed == 1 else "chat transcripts"
+        lines.append(f"We could not delete {sessions.failed} {noun} from Anthropic.")
+        lines.append(f"You do not need to retry while {bot} keeps trying.")
     return text_card(
-        "✅ Deleted",
-        f"Your {bot} data has been deleted. Re-onboarding starts from scratch.",
+        "⚠ Deletion incomplete"
+        if sessions.failed > 0 or sessions.upstream_error
+        else "✅ Account deleted",
+        (
+            f"Your {bot} account was deleted, but chat transcript deletion is incomplete."
+            if sessions.failed > 0 or sessions.upstream_error
+            else f"Your {bot} account has been deleted."
+        ),
+        *(
+            []
+            if sessions.failed > 0 or sessions.upstream_error
+            else [f"You can start again by using {bot}."]
+        ),
         *lines,
         _KEPT[1],
     )

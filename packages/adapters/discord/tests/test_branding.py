@@ -263,11 +263,13 @@ class TestPostDeleteContainer:
     def test_unset_matches_todays_text(self) -> None:
         result = AccountPurgeResult(db=PurgeReport(accounts=1))
         texts = _collect_text(build_post_delete_container(result))
-        assert "Your daimon data has been deleted." in texts
+        assert "Your daimon account has been deleted." in texts
+        assert "You can start again by using daimon." in texts
 
     def test_set_name_changes_text(self) -> None:
         result = AccountPurgeResult(db=PurgeReport(accounts=1))
         texts = _collect_text(
             build_post_delete_container(result, bot_display_name="daimon-staging")
         )
-        assert "Your daimon-staging data has been deleted." in texts
+        assert "Your daimon-staging account has been deleted." in texts
+        assert "You can start again by using daimon-staging." in texts

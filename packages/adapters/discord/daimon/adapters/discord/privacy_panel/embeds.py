@@ -42,19 +42,14 @@ def build_post_delete_container(
         rows.append("-# ✓ Account row removed")
     if result.sessions.deleted > 0:
         rows.append(f"-# ✓ {result.sessions.deleted} session transcript(s) deleted from Anthropic")
-    if result.sessions.failed > 0:
-        rows.append(
-            f"-# ⚠ {result.sessions.failed} transcript(s) could not be deleted"
-            " — re-run /privacy to retry"
-        )
     if result.sessions.upstream_error:
-        # Post-commit upstream failure: the DB purge completed, but session
-        # enumeration/deletion aborted. No /privacy retry hint — the account
-        # row is gone, so /privacy now renders the deleted state.
-        rows.append(
-            "-# ⚠ Session transcripts could not be deleted from Anthropic"
-            " — contact the operator if you need them removed"
-        )
+        rows.append("-# We could not confirm deletion of all chat transcripts from Anthropic.")
+        rows.append(f"-# Ask the person who runs {bot_display_name} to check and help remove them.")
+    elif result.sessions.failed > 0:
+        count = result.sessions.failed
+        noun = "chat transcript" if count == 1 else "chat transcripts"
+        rows.append(f"-# We could not delete {count} {noun} from Anthropic.")
+        rows.append(f"-# You do not need to retry while {bot_display_name} keeps trying.")
     # Carve-out disclosures — always shown (same three as cascade-preview).
     rows += [
         "",
@@ -65,12 +60,23 @@ def build_post_delete_container(
     ]
     # rows is never empty — the carve-out rows above are unconditional.
     checklist = "\n".join(rows)
+    incomplete = result.sessions.failed > 0 or result.sessions.upstream_error
+    if incomplete:
+        title = "⚠ Deletion incomplete"
+        subtext = (
+            f"Your {bot_display_name} account was deleted, "
+            "but chat transcript deletion is incomplete."
+        )
+    else:
+        title = "✅ Account deleted"
+        subtext = (
+            f"Your {bot_display_name} account has been deleted.\n"
+            f"-# You can start again by using {bot_display_name}."
+        )
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         layout.header(
-            "✅ Deleted",
-            subtext=(
-                f"Your {bot_display_name} data has been deleted. Re-onboarding starts from scratch."
-            ),
+            title,
+            subtext=subtext,
         ),
         layout.hairline(),
         discord.ui.TextDisplay(checklist),
@@ -86,12 +92,10 @@ def build_deleted_state_container(
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         layout.header(
             "🔒 Privacy",
-            subtext=f"for **{user_name}** — no data on file",
+            subtext=f"for **{user_name}**",
         ),
         layout.hairline(),
-        discord.ui.TextDisplay(
-            "You have no data on file with daimon.\n-# Run any other slash command to start fresh."
-        ),
+        discord.ui.TextDisplay("You have no Daimon account."),
         accent_colour=theme.COLOR_GREYPLE,
     )
     return container

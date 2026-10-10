@@ -60,7 +60,7 @@ def _no_data_blocks(display_name: str) -> list[dict[str, Any]]:
                 "type": "mrkdwn",
                 "text": (
                     "*🔒 Privacy*\n"
-                    f"You have no data on file with {escape_mrkdwn(display_name)}.\n"
+                    f"You have no {escape_mrkdwn(display_name)} account.\n"
                     "Run any other slash command to start fresh."
                 ),
             },
