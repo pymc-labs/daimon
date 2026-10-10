@@ -86,10 +86,37 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
         # An authenticated override may copy only resolver-bound MCP tools.
         # Anonymous-only agents retain their credential-free native requests.
         raise context.unsupported("unbound_mcp_destination")
+    if len(authenticated) != 1:
+        raise context.unsupported("single_bound_mcp_server")
     value = json.dumps([c.model_dump(mode="json") for c in authenticated], separators=(",", ":"))
     if len(value) > 512:
         raise context.unsupported("mcp_credential_metadata_size")
     return {KEY: value}
+
+
+def _non_mcp_tool(native: Object) -> Object:
+    """Rebuild only the exact native shapes admitted by this driver."""
+    kind = native.get("type")
+    if kind in ("web_search", "tool_search", "programmatic_tool_calling"):
+        if set(native) != {"type"}:
+            raise ValueError("undeclared builtin tool fields")
+        return {"type": kind}
+    if kind != "function" or set(native) - {"type", "name", "description", "parameters", "strict"}:
+        raise ValueError("unsupported native tool shape")
+    name = text(native["name"])
+    if not name:
+        raise ValueError("empty function name")
+    result: Object = {"type": "function", "name": name}
+    if "description" in native:
+        if not isinstance(native["description"], str):
+            raise ValueError("invalid function description")
+        result["description"] = native["description"]
+    result["parameters"] = object_json(native["parameters"])
+    if "strict" in native:
+        if not isinstance(native["strict"], bool):
+            raise ValueError("invalid function strict flag")
+        result["strict"] = native["strict"]
+    return result
 
 
 def _validate_native_auth(tools: Sequence[Object]) -> None:
@@ -101,6 +128,7 @@ def _validate_native_auth(tools: Sequence[Object]) -> None:
     """
     for native in tools:
         if native.get("type") != "mcp":
+            _non_mcp_tool(native)
             continue
         transport = object_json(native["transport"])
         if (
@@ -132,7 +160,7 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
     if len(value) > 512:
         raise ValueError("oversized MCP credential intent")
     connections = _CONNECTIONS.validate_json(value)
-    if not connections or len({c.name for c in connections}) != len(connections):
+    if len(connections) != 1:
         raise ValueError("invalid MCP credential references")
     if len([t for t in tools if t.get("type") == "mcp"]) != len(connections):
         raise ValueError("native MCP destination is not host-resolver bound")
@@ -179,14 +207,11 @@ async def session_tools(
         raise context.unsupported("host_mcp_secret_resolver")
     if vaults_attached:
         raise context.unsupported("mixed_mcp_authentication")
-    by_name = {c.name: c for c in connections}
+    connection = connections[0]
     tools: list[JsonValue] = []
     for native in objects(agent["tools"]):
-        connection = (
-            by_name.get(str(native.get("server_label"))) if native.get("type") == "mcp" else None
-        )
-        if connection is None:
-            tools.append(native)
+        if native.get("type") != "mcp":
+            tools.append(_non_mcp_tool(native))
             continue
         credential_ref = connection.credential_ref
         if credential_ref is None:
@@ -197,9 +222,10 @@ async def session_tools(
             raise ProviderError(
                 "permission", retryable=False, native_code="mcp_secret_unavailable"
             ) from None
+        expected = tool(connection, context)
         transport: Object = {
-            **object_json(native["transport"]),
+            **object_json(expected["transport"]),
             "authorization": authorization,
         }
-        tools.append({**native, "transport": transport, "connection_origin": "service"})
+        tools.append({**expected, "transport": transport, "connection_origin": "service"})
     return tools

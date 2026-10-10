@@ -558,6 +558,24 @@ async def test_cancelled_resolver_cancels_before_session_post() -> None:
         "transport_auth",
         "transport_token",
         "root_token",
+        "MCP",
+        "Mcp",
+        "mcp ",
+        " mcp",
+        "mcp\n",
+        "remote_mcp",
+        "unknown",
+        "FUNCTION",
+        "function_headers",
+        "function_authorization",
+        "function_server_url",
+        "function_credential_ref",
+        "function_api_key",
+        "function_auth",
+        "function_transport",
+        "web_search_authorization",
+        "tool_search_headers",
+        "programmatic_tool_calling_auth",
     ],
 )
 async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_post(
@@ -612,6 +630,40 @@ async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_pos
         else:
             secondary[authentication] = sentinel
         secondary["transport"] = transport
+        if authentication in (
+            "MCP",
+            "Mcp",
+            "mcp ",
+            " mcp",
+            "mcp\n",
+            "remote_mcp",
+            "unknown",
+            "FUNCTION",
+        ):
+            secondary["type"] = authentication
+            transport["authorization"] = "Bearer " + sentinel
+            if authentication == "Mcp":
+                transport["server_url"] = "https://user:" + sentinel + "@secondary.example.com/mcp"
+            if authentication == "remote_mcp":
+                secondary["server_url"] = URL
+                secondary["authorization"] = sentinel
+            secondary["transport"] = transport
+        elif authentication.startswith("function_"):
+            secondary = {
+                "type": "function",
+                "name": "unsafe",
+                "description": "Unsafe",
+                "parameters": {},
+            }
+            field = authentication.removeprefix("function_")
+            secondary[field] = {"Authorization": sentinel} if field == "headers" else sentinel
+        elif authentication in (
+            "web_search_authorization",
+            "tool_search_headers",
+            "programmatic_tool_calling_auth",
+        ):
+            kind, field = authentication.rsplit("_", 1)
+            secondary = {"type": kind, field: sentinel}
         native = list(objects(raw["tools"]))
         raw["tools"] = [secondary, *native] if position == "first" else [*native, secondary]
         return httpx.Response(200, json=raw)
@@ -679,16 +731,16 @@ async def test_clean_secondary_destination_requires_exact_scoped_binding() -> No
     assert all(request.url.path != "/v1/agents/sessions" for request in wire.requests)
 
 
-async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_debug(
+@pytest.mark.parametrize("strict", [None, False, True])
+async def test_single_bound_mcp_and_allowlisted_tools_preserve_bytes_and_redact_debug(
+    strict: bool | None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     wire = Wire()
     caplog.set_level(logging.DEBUG)
-    second_url = "https://secondary.example.com/mcp"
     resolved: list[tuple[Scope, str, str]] = []
     values = {
         ("host:owned-token", URL): "fictional-first-bound-bearer",
-        ("host:secondary", second_url): "fictional-second-bound-bearer",
     }
 
     async def resolve(scope: Scope, ref: str, destination: str) -> str:
@@ -696,20 +748,30 @@ async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_de
         resolved.append((scope, ref, destination))
         return values[(ref, destination)]
 
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = wire.handle(request)
+        if request.url.path != "/v1/agents/a" or strict is None:
+            return response
+        raw = object_json(response.json())
+        tools = objects(raw["tools"])
+        for tool in tools:
+            if tool["type"] == "function":
+                tool["strict"] = strict
+        wire.agent["tools"] = raw["tools"] = list(tools)
+        return httpx.Response(200, json=raw)
+
     requested = spec().model_copy(
         update={
             "tools": (
                 *(spec().tools or ()),
+                ToolSpec(name="tool_search", kind="builtin"),
+                ToolSpec(name="programmatic_tool_calling", kind="builtin"),
                 ToolSpec(
                     name="owned_helper",
                     kind="custom",
-                    description="Owned helper",
+                    description="",
                     input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
                 ),
-            ),
-            "mcp_servers": (
-                *(spec().mcp_servers or ()),
-                MCPConnection(name="secondary", url=second_url, credential_ref="host:secondary"),
             ),
         }
     )
@@ -717,7 +779,7 @@ async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_de
         api_key="offline-placeholder",
         base_url="https://openai.invalid/v1",
         max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
     ) as sdk:
         driver = OpenAIDriver(
             SDKTransport(sdk),
@@ -731,15 +793,15 @@ async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_de
         await driver.sessions.create(
             SCOPE,
             SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
-            key="two-bound-session",
+            key="single-bound-session",
         )
     assert resolved == [(SCOPE, ref, url) for ref, url in values]
     posts = [request for request in wire.requests if request.url.path == "/v1/agents/sessions"]
     assert len(posts) == 1
     tools = objects(object_json(object_json(json.loads(posts[0].content))["agent"])["tools"])
     saved = objects(wire.agent["tools"])
-    assert len(saved) == len(tools) == 4
-    for original, overridden in zip(saved[:2], tools[:2], strict=True):
+    assert len(saved) == len(tools) == 5
+    for original, overridden in zip(saved[:4], tools[:4], strict=True):
         assert json.dumps(original, separators=(",", ":")) == json.dumps(
             overridden, separators=(",", ":")
         )
@@ -756,3 +818,63 @@ async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_de
         record.name.startswith("openai") and record.levelno == logging.DEBUG
         for record in caplog.records
     )
+
+
+@pytest.mark.parametrize("saved", [False, True])
+async def test_multiple_bound_servers_refuse_before_resolver_or_write(saved: bool) -> None:
+    wire = Wire()
+    connections = (
+        *(spec().mcp_servers or ()),
+        MCPConnection(
+            name="second", url="https://second.example.com/mcp", credential_ref="host:second"
+        ),
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        response = wire.handle(request)
+        if request.url.path != "/v1/agents/a":
+            return response
+        raw = object_json(response.json())
+        raw["metadata"] = {
+            **object_json(raw["metadata"]),
+            KEY: json.dumps(
+                [c.model_dump(mode="json") for c in connections], separators=(",", ":")
+            ),
+        }
+        raw["tools"] = [
+            *objects(raw["tools"]),
+            {
+                "type": "mcp",
+                "server_label": "second",
+                "transport": {"type": "http", "server_url": "https://second.example.com/mcp"},
+            },
+        ]
+        return httpx.Response(200, json=raw)
+
+    async with AsyncOpenAI(
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    ) as sdk:
+        driver = wire.driver(sdk)
+        if saved:
+            agent = await driver.agents.create(SCOPE, spec(), key="agent")
+            with pytest.raises(ProviderError) as refused:
+                await driver.sessions.create(
+                    SCOPE,
+                    SessionSpec(
+                        agent=agent.ref, agent_revision=Revision(local=0), config_revision=1
+                    ),
+                    key="multiple-bound-session",
+                )
+            assert refused.value.native_code == "malformed_response"
+            assert all(r.method != "POST" for r in wire.requests[1:])
+        else:
+            with pytest.raises(UnsupportedCapability) as unsupported:
+                await driver.agents.create(
+                    SCOPE, spec().model_copy(update={"mcp_servers": connections}), key="agent"
+                )
+            assert unsupported.value.missing == ("single_bound_mcp_server",)
+            assert wire.requests == []
+    assert wire.resolve_calls == []

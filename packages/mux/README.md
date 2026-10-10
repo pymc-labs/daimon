@@ -536,4 +536,11 @@ fragments or malformed authority. A closed native tool/transport shape refuses
 headers, authentication and undeclared credential carriers before resolution.
 Every MCP tool copied into an authenticated session override must match its own
 scoped resolver binding exactly; mixed bound/anonymous MCP definitions refuse
-before agent creation. Multiple independently bound servers remain supported.
+before agent creation. Authenticated sessions accept exactly one resolver-bound MCP server. Non-MCP
+entries have exact type and key allowlists: `web_search`, `tool_search` and
+`programmatic_tool_calling` carry only `type`; `function` permits only `type`,
+`name`, `description`, `parameters` and boolean `strict`. Unknown types (including
+MCP spelling variants), extra fields and multiple bindings refuse before any
+resolver or session write. The override rebuilds these admitted tools and the
+bound MCP connection; it never copies a saved tool object verbatim. Multiple
+bound servers are deferred under RULES 24.
