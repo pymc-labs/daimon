@@ -48,7 +48,7 @@ _JSON_INPUTS = TypeAdapter(list[dict[str, JsonValue]])
 
 @dataclass(frozen=True)
 class TurnEvent:
-    native: BetaManagedAgentsStreamSessionEvents
+    native: BetaManagedAgentsStreamSessionEvents | None = None
     normalized: Event | None = None
     usage: UsageObservation | None = None
 
@@ -180,6 +180,8 @@ class _TrackedLegacyStream(_LegacyStream):
         except (StopAsyncIteration, httpx.HTTPError, anthropic.APIConnectionError):
             await self._persistence.gap(self._session)
             raise
+        if event.native is None:
+            raise TurnConnectionLost("native recovery stream has no SDK event")
         normalized = self._normalizer.normalize(
             object_json(event.native.model_dump(mode="json")), observed_at=datetime.now(UTC)
         )

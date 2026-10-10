@@ -731,3 +731,8 @@ signed corrections applied once in the usage and ledger transaction. Missing
 usage, unknown model attribution or unverified actual infrastructure leaves the
 observation pending for reconciliation. A known inapplicable cache-write bucket
 does not erase uncached input spend. Anthropic keeps its existing metering path.
+
+Prepared turns for an explicitly configured alternate provider use its authorized
+native session and bound observation recorder. Usage frames can arrive without
+a display event; nullable measurements and pending accounting stay intact.
+The default Anthropic session continues to use its SDK span recorder.

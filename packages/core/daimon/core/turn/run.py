@@ -16,7 +16,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 import anthropic as _anthropic
 import structlog
@@ -64,7 +64,7 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.posture import Billed
+from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
@@ -77,9 +77,11 @@ from daimon.core.turn.prepare import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.errors import ScopeViolation
+from mux.profiles import get_profile
 
 
 class _TurnPortKwargs(TypedDict, total=False):
@@ -89,6 +91,35 @@ class _TurnPortKwargs(TypedDict, total=False):
     session_ref: ResourceRef
     profile: str
     backend_request: TurnBackendRequest
+
+
+def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> BillingPosture:
+    """Choose the native recorder only for a proved foreign prepared session."""
+    revision = prepared.admission.backend_revision
+    profile = revision.profile if revision is not None else "anthropic.managed_agents"
+    ref = prepared.session_ref
+    if profile == "anthropic.managed_agents":
+        if ref is not None and ref.provider != "anthropic":
+            raise ScopeViolation(
+                prepared.ma_session_id, "recorder differs from the admitted profile"
+            )
+        return Billed(record=cast(UsageRecorder, prepared._record))  # pyright: ignore[reportPrivateUsage]
+    scope = admitted_session_scope(
+        prepared.admission, tenant_id=tenant_id, session_id=prepared.ma_session_id
+    )
+    if ref is None or (
+        ref.kind != "session"
+        or ref.provider != get_profile(profile).provider
+        or ref.id != prepared.ma_session_id
+        or ref.tenant_id != scope.tenant_id
+        or ref.account_id != scope.account_id
+        or revision is None
+        or revision.channel.tenant_id != scope.tenant_id
+    ):
+        raise ScopeViolation(prepared.ma_session_id, "native recorder has no authorized session")
+    return ObservationBilled(
+        record=cast(ObservationRecorder, prepared._record)  # pyright: ignore[reportPrivateUsage]
+    )
 
 
 def _turn_port_kwargs(
@@ -860,7 +891,7 @@ async def run_prepared_turn_impl(
                 lifecycle=first_attempt,
                 cancel=cancel,
                 render_interval_s=render_interval_s,
-                billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
+                billing=prepared_billing(prepared, tenant_id=tenant_id),
                 tool_confirmation=tool_confirmation,
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,

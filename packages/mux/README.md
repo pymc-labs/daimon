@@ -431,3 +431,9 @@ Host accounting requires fixed coverage sets across revisions of each alternate
 provider observation ID. It refuses overlapping sibling aggregates at ingest,
 including shared transitive descendants which have not arrived yet. Corrections
 may update amounts within that fixed coverage; dynamic coverage is unsupported.
+
+The host's provider usage edge allows `TurnEvent(usage=observation)` without a
+native SDK display record. Prepared recorder selection requires the admitted
+foreign profile and matching authorized native session. The original Anthropic
+recorder remains unchanged. Native accounting is supplied by its observation
+callback, independently of provider display events.
