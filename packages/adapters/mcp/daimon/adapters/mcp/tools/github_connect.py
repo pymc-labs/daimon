@@ -449,7 +449,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         required_ability: Literal["read", "write"] = "read",
         confirmed: bool = False,
     ) -> ConnectResult:
-        """Let an agent read a private GitHub repo: give it token access through GitHub.
+        """Give this agent token access to more repos, such as a private GitHub repo.
 
         Show a single-use connection button bound to the selected agent to a
         server admin, or to a channel admin who manages that agent; repos
