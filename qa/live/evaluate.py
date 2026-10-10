@@ -63,7 +63,9 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 )
                 reason = f"working state observed at {turn.progress_seen_s}s"
             elif kind == "no_blank_message":
-                passed = bool(turn.messages) and all(text_of(m).strip() for m in turn.messages)
+                passed = bool(turn.messages) and all(
+                    text_of(m, include_fields=False).strip() for m in turn.messages
+                )
                 reason = "nonblank message content or embed text"
             elif kind == "no_channel_post":
                 if not turn.ended_at:

@@ -20,17 +20,24 @@ The driver must obtain approval and make these changes before enabling it:
    Manage Messages and Attach Files; grant Daimon View Channel, Send Messages,
    Read Message History, Create Public Threads, Manage Threads and Embed Links.
    Verify inherited overwrites. Grant no access to customer guilds/channels.
-4. Confirm the effective agent in this category resolves to the approved
-   `claude-haiku-4-5-20251001` canary agent. Ensure its costs fit the driver's
-   per-turn estimate. Do not change the customer deployment's default model to
-   run QA; use an approved category/channel scope when available.
+4. Provision a dedicated QA agent using `claude-haiku-4-5-20251001`, and a
+   channel-specific binding for each QA-created canary channel. Set
+   `prod.qa_agent_name` and `prod.model_probe` to the reviewed read-only probe
+   command running with production's settings (the shipped `qa.live.model_probe`
+   helper reads the real config cascade and MA metadata). Its JSON output must
+   name the owned channel, expected QA agent, exact Haiku model, and
+   `channel_pinned=true`. The runner refuses inherited tenant/deployment defaults,
+   missing model IDs, and Sonnet/Opus. It does not provision bindings or change
+   real production agents. A fresh channel without its approved QA binding is
+   refused before any trigger; production remains disabled until provisioning
+   and the probe are ready.
 5. Fill `prod.guild_id`, `category_id`, `daimon_id`, `project`, `qa_user_ids`,
    `guild_allowlist` and `database_env` with verified production values. The
    configured guild must be in both the explicit allow-list and the hard-coded
    two-guild set. `project` selects production Cloud Logging; do not reuse
    staging logs to prove production assertions. If approved read-only DB access
-   is unavailable, accounting remains conservatively estimated and `db_check`
-   returns PENDING.
+   is unavailable, preflight returns PENDING before any trigger or charge. Both
+   environment timers require read-only DB access for actual model/accounting.
 6. Review the catalog's sole two-turn canary and the root Opus alert destination,
    then set `prod.enabled=true` and explicitly pass `--env prod --go`. Production
    permits only new-channel, mention, thread-reply and wait steps; no admin,
@@ -43,4 +50,9 @@ ownership/cleanup contract; it is not enabled by this implementation.
 
 Use the same shared daily ledger across staging and production. Review one
 manual run before copying the staging timer to a separate production service.
+Scenario B limits each environment to one two-turn Haiku canary per UTC hour and
+the entire fleet to one catalog invocation per UTC day, with a fixed $10 daily
+ledger cap. The planned canaries and configured daily catalog allocation must
+fit that cap before any run. Only the two internal guilds are eligible; a real
+Sonnet/Opus production agent is never an eligible canary target.
 Do not install or enable either service as part of a worker implementation task.

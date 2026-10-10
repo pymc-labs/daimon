@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, evaluates assertions, records guarded daily costs and canary evidence, and deduplicates failure/recovery alerts. Offline tests and an uninstalled hourly timer template are included; production canary remains disabled pending approval.
+- An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.
 
 ### Changed
 

@@ -18,7 +18,7 @@ from qa.live.cost import Ledger, estimate
 from qa.live.evaluate import evaluate
 from qa.live.report import Result
 from qa.live.schema import MODEL, Assertion, CatalogScenario, ProposedScenario, Step
-from qa.live.types import Backend, Check, Judge, Pending, Turn, utcnow
+from qa.live.types import Backend, Check, Judge, Pending, Turn, WatchTimeout, utcnow
 
 GLOBAL_PATTERNS = (
     r"\(empty response\)",
@@ -53,6 +53,7 @@ class Executor:
         self.channels: dict[str, str] = {}
         self.created: list[str] = []
         self.context: Context | None = None
+        self.trigger_attempted = False
 
     def run(self, scenario: CatalogScenario) -> Result:
         run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
@@ -90,6 +91,7 @@ class Executor:
         )
         self.channels = {}
         self.created = []
+        self.trigger_attempted = False
         try:
             self.backend.preflight(
                 {s.role for s in [*scenario.setup, *scenario.steps, *scenario.teardown]}
@@ -100,11 +102,16 @@ class Executor:
                 self.created.append(channel)
                 self.channels["default"] = channel
                 self.context.values["channel_id"] = channel
-            for step in [*scenario.setup, *scenario.steps]:
-                self.step(step, result, channel)
-            for turn in result.turns:
-                if turn.ended_at is None:
-                    self.backend.collect(turn, 900)
+            try:
+                for step in [*scenario.setup, *scenario.steps]:
+                    self.step(step, result, channel)
+                for turn in result.turns:
+                    if turn.ended_at is None:
+                        self.backend.collect(turn, self.backend.fallback_watch_s)
+            except WatchTimeout:
+                # A silent/stuck bot is a failed observation, not missing coverage.
+                # Preserve the messages and evaluate latency/card assertions below.
+                result.checks.append(Check("watch", "FAIL", "watch ended without terminal proof"))
             assertions = list(scenario.assertions)
             for turn in result.turns:
                 assertions.extend(
@@ -149,20 +156,23 @@ class Executor:
             for turn in result.turns:
                 try:
                     turn.usage = self.backend.usage(turn)
-                    if any(model != MODEL for model in turn.usage.models):
+                    if not turn.usage.models or any(model != MODEL for model in turn.usage.models):
                         result.checks.append(
                             Check(
                                 "model",
                                 "FAIL",
-                                "Daimon used a model outside the approved Haiku pin",
+                                "Daimon model is missing or outside the approved Haiku pin",
                                 turn.number,
                             )
                         )
                 except Exception:
                     result.notes.append(f"turn {turn.number}: usage unavailable")
+                    result.checks.append(
+                        Check("model", "FAIL", "Daimon model evidence unavailable", turn.number)
+                    )
             usages = [t.usage for t in result.turns] + self.judge.usage
             fixture_dir.cleanup()
-            self.ledger.receipt(run_id, usages, estimated)
+            self.ledger.receipt(run_id, usages, estimated, spend_possible=self.trigger_attempted)
         result.finalize()
         return result
 
@@ -204,7 +214,9 @@ class Executor:
                 destination = next((t.thread_id for t in reversed(result.turns) if t.thread_id), "")
                 if not destination:
                     raise Pending("thread_reply requires an observed thread")
+            self.backend.verify_model(destination)
             started_at = utcnow()
+            self.trigger_attempted = True
             message = self.backend.send(
                 destination,
                 step,
@@ -228,7 +240,9 @@ class Executor:
             for i, text in enumerate(step.texts):
                 if i:
                     time.sleep(step.interval_s)
+                self.backend.verify_model(destination)
                 started_at = utcnow()
+                self.trigger_attempted = True
                 trigger = self.backend.send(
                     destination, Step(do="mention", text=text), mention=True
                 )

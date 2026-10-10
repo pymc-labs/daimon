@@ -25,12 +25,12 @@ def objects(value: JsonValue) -> list[Message]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
-def text_of(message: Message) -> str:
+def text_of(message: Message, *, include_fields: bool = True) -> str:
     parts = [str(message.get("content") or "")]
     for embed in objects(message.get("embeds")):
         parts.extend(str(embed.get(k) or "") for k in ("title", "description"))
         parts.append(str(obj(embed.get("footer")).get("text") or ""))
-        for field_ in objects(embed.get("fields")):
+        for field_ in objects(embed.get("fields")) if include_fields else []:
             parts.extend(str(field_.get(k) or "") for k in ("name", "value"))
     return "\n".join(parts)
 
@@ -82,10 +82,17 @@ class Pending(RuntimeError):
     """Unavailable capability; must never become a passing assertion."""
 
 
+class WatchTimeout(Pending):
+    """Observation completed without terminal proof; evaluate the collected evidence."""
+
+
 class Backend(Protocol):
+    fallback_watch_s: float
+
     def context(self) -> dict[str, str]: ...
     def preflight(self, roles: set[str]) -> None: ...
     def create_channel(self, name: str) -> str: ...
+    def verify_model(self, channel: str) -> None: ...
     def delete_channel(self, channel: str) -> None: ...
     def send(
         self,

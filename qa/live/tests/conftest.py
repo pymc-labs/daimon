@@ -9,7 +9,7 @@ from pydantic import JsonValue
 
 from qa.live.config import Pricing
 from qa.live.cost import Ledger
-from qa.live.schema import Assertion, Scenario, Step
+from qa.live.schema import MODEL, Assertion, Scenario, Step
 from qa.live.types import Message, Pending, Turn, Usage, utcnow
 
 
@@ -22,6 +22,8 @@ class FakeJudge:
 
 
 class FakeBackend:
+    fallback_watch_s = 180.0
+
     def __init__(self) -> None:
         self.events: list[str] = []
         self.sent = 0
@@ -43,6 +45,9 @@ class FakeBackend:
 
     def delete_channel(self, channel: str) -> None:
         self.events.append("delete")
+
+    def verify_model(self, channel: str) -> None:
+        pass
 
     def send(
         self, channel: str, step: Step, *, mention: bool, reply_message_id: str | None = None
@@ -94,6 +99,7 @@ class FakeBackend:
             cache_creation_input_tokens=0,
             usd=0.02,
             source="turn_outcomes",
+            models=[MODEL],
         )
 
     def classify(self, message: Message) -> str:

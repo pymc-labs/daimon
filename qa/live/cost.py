@@ -92,7 +92,28 @@ class Ledger:
             pending[run_id] = {"ts": utcnow().isoformat(), "usd": usd}
             self._save_pending(pending)
 
-    def receipt(self, run_id: str, usages: list[Usage], estimated: float) -> None:
+    def claim_schedule(self, mode: str, env: str) -> None:
+        path = self.path.with_suffix(".schedule.json")
+        with self.locked():
+            state = cast(dict[str, str], json.loads(path.read_text())) if path.exists() else {}
+            key = f"canary:{env}" if mode == "canary" else "catalog"
+            now = utcnow()
+            if key in state:
+                previous = datetime.fromisoformat(state[key])
+                if (
+                    mode == "canary"
+                    and previous.replace(minute=0, second=0, microsecond=0)
+                    == now.replace(minute=0, second=0, microsecond=0)
+                ) or (mode != "canary" and previous.astimezone(UTC).date() == now.date()):
+                    raise ValueError("Scenario B cadence already claimed for this interval")
+            state[key] = now.isoformat()
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(state))
+            temporary.replace(path)
+
+    def receipt(
+        self, run_id: str, usages: list[Usage], estimated: float, *, spend_possible: bool = True
+    ) -> None:
         if any(u.usd is not None and (not math.isfinite(u.usd) or u.usd < 0) for u in usages):
             raise ValueError("measured cost must be finite and nonnegative")
         measured = sum(u.usd or 0.0 for u in usages)
@@ -100,15 +121,18 @@ class Ledger:
             u.usd is not None and u.source in {"turn_outcomes", "anthropic_messages"}
             for u in usages
         )
-        charged = measured if complete else max(estimated, measured)
+        no_spend = not spend_possible and not usages
+        charged = 0.0 if no_spend else (measured if complete else max(estimated, measured))
         row = {
             "ts": utcnow().isoformat(),
             "who": "qa-runner",
             "model": MODEL,
             "run_id": run_id,
             "usd": charged,
-            "actual_usd": measured if complete else None,
-            "accounting": "actual" if complete else "conservative_estimate",
+            "actual_usd": measured if complete or no_spend else None,
+            "accounting": "no_trigger"
+            if no_spend
+            else ("actual" if complete else "conservative_estimate"),
             "input_tokens": sum(u.input_tokens or 0 for u in usages),
             "output_tokens": sum(u.output_tokens or 0 for u in usages),
             "cache_read_input_tokens": sum(u.cache_read_input_tokens or 0 for u in usages),

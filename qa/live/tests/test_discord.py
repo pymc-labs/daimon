@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 
-from qa.live.config import Config, Pricing
+from qa.live.config import Config, Pricing, Target
 from qa.live.discord import DiscordBackend, fingerprint, load_driver
 from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, utcnow
@@ -84,9 +84,16 @@ def driver() -> FakeDriver:
 
 
 @pytest.fixture
-def backend(pricing: Pricing, driver: FakeDriver) -> DiscordBackend:
-    config = Config(pricing=pricing, poll_interval_s=0.001, settle_s=0.001)
-    return DiscordBackend(config, "staging", driver=driver)
+def backend(
+    pricing: Pricing, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> DiscordBackend:
+    config = Config(
+        pricing=pricing, staging=Target(enabled=True), poll_interval_s=0.001, settle_s=0.001
+    )
+    monkeypatch.setenv(config.staging.database_env, "postgresql+asyncpg://offline-only")
+    backend = DiscordBackend(config, "staging", driver=driver)
+    monkeypatch.setattr(backend, "_wait_for_logs", lambda turn: None)
+    return backend
 
 
 def test_driver_bridge_reuses_functions_without_calls(tmp_path: Path) -> None:
@@ -254,8 +261,20 @@ def test_log_query_is_scoped_and_fields_filtered(
             0,
             json.dumps(
                 [
-                    {"jsonPayload": {"event": "turn.message_missing", "delivered": False}},
-                    {"jsonPayload": {"event": "turn.message_missing", "delivered": True}},
+                    {
+                        "jsonPayload": {
+                            "event": "turn.message_missing",
+                            "delivered": False,
+                            "thread_id": "thread",
+                        }
+                    },
+                    {
+                        "jsonPayload": {
+                            "event": "turn.message_missing",
+                            "delivered": True,
+                            "thread_id": "thread",
+                        }
+                    },
                 ]
             ),
             "",
@@ -314,7 +333,7 @@ def test_request_correlated_log_absence_is_required(
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         records = (
-            [{"jsonPayload": {"event": "turn.completed", "rid": "qa-rid"}}]
+            [{"jsonPayload": {"event": "turn.completed", "rid": "qa-rid", "thread_id": "thread"}}]
             if len(calls) % 2
             else []
         )

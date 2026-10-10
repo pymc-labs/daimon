@@ -8,12 +8,12 @@ from pathlib import Path
 from types import FrameType
 
 from qa.live.config import load_config, write_example
-from qa.live.cost import Ledger
+from qa.live.cost import Ledger, estimate
 from qa.live.discord import DiscordBackend
 from qa.live.judge import HaikuJudge
 from qa.live.report import Alerter, report
 from qa.live.runner import Executor
-from qa.live.schema import ProposedScenario, load_catalog
+from qa.live.schema import ProposedScenario, Scenario, load_catalog
 
 
 def interrupted(signum: int, frame: FrameType | None) -> None:
@@ -62,11 +62,23 @@ def main() -> int:
         if not scenarios:
             parser.error("no full scenarios; use --scenario or canary")
     signal.signal(signal.SIGTERM, interrupted)
+    config.validate_plan(
+        sum(estimate(s, config.pricing) for s in scenarios if isinstance(s, Scenario))
+        if args.command == "run"
+        else 0,
+        canary_estimate=sum(
+            estimate(s, config.pricing) for s in scenarios if isinstance(s, Scenario)
+        )
+        if args.command == "canary"
+        else None,
+    )
+    ledger = Ledger(args.ledger)
+    ledger.claim_schedule(args.command, args.env)
     failed = False
     for scenario in scenarios:
         backend = DiscordBackend(config, args.env)
         judge = HaikuJudge(config.pricing, go=args.go, model=config.model)
-        executor = Executor(backend, judge, Ledger(args.ledger), config.pricing, args.env)
+        executor = Executor(backend, judge, ledger, config.pricing, args.env)
         result = executor.run(scenario)
         path = report(result, args.results)
         try:

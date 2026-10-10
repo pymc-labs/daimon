@@ -39,9 +39,18 @@ judge input/output token prices, and a bounded judge input allowance. Judge call
 always use `claude-haiku-4-5-20251001`, `max_tokens=300`, `temperature=0` and the
 Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
-No model override is allowed. The driver must confirm that the resolved Daimon
-agent is pinned to this same Haiku model before giving GO; this local tool cannot
-change a deployed agent's model. Configure all required QA identities, including
+No model override is allowed. Every trigger first runs the target's read-only
+`model_probe` argv command, passing the owned channel/guild/category as JSON on
+stdin. Set `qa_agent_name` to the dedicated QA agent. The shipped
+`python -m qa.live.model_probe` helper must execute with the chosen deployment's
+settings, directly there or through an operator-reviewed IAP wrapper forwarding
+stdin/stdout. It reads the same core config cascade and actual MA agent metadata;
+it neither creates a turn nor changes configuration. The returned model must be
+Haiku and its agent must match the QA agent. Production additionally requires a
+channel-specific agent binding, refusing tenant/deployment Sonnet/Opus defaults.
+An absent probe is PENDING; missing/wrong model evidence fails. The post-turn
+receipt also fails the run when a model ID is missing or differs from Haiku.
+Configure all required QA identities, including
 the admin bot when scenarios use `as: admin`.
 
 Staging is hard-bound to guild `1435062989119295640`, category
@@ -49,6 +58,9 @@ Staging is hard-bound to guild `1435062989119295640`, category
 bot identity, category ownership and effective permissions before channel creation,
 and warms staging's MCP service. The deployment must already allow the configured
 QA bot IDs through `DAIMON_DISCORD__QA_BOT_USER_IDS`; the runner does not change it.
+Both targets default to `enabled=false`; set staging enabled only after approval.
+The target's read-only database environment variable is required before preflight,
+so the hourly timer cannot quietly rely on rounded footers for model/accounting.
 
 ## Execute after the driver's GO
 
@@ -68,7 +80,10 @@ including on exceptions, Ctrl-C and SIGTERM. `new_channel` without a ref denotes
 binds that channel; later refs create additional owned channels in the same QA
 category. `mention` and `channel_message` can select a ref through `channel`.
 Every created channel is deleted in reverse order. Production allows one channel. Failed cleanup records the channel ID in
-a failing check for manual recovery. SIGKILL or host loss cannot run teardown.
+a failing check for manual recovery. DELETE retries three times. Preflight sweeps
+at most 20 `qa-*` channels carrying this runner's topic marker in the configured
+QA category when their snowflake age exceeds one hour; this recovers channels
+left by SIGKILL or host loss while protecting other QA workers' allocations.
 
 `mention`, `thread_reply`, `channel_message`, `burst`, `react`, `wait` and
 `wait_done` execute through the Discord backend. `thread_reply` accepts `mention: true` and `reply_to: turnN.chunkM`; a false or
@@ -80,6 +95,9 @@ queued triggers can share a composite answer. Fingerprints exclude previous turn
 unchanged messages from follow-up evidence. The collector settles after terminal
 messages stop changing and includes visible queue reactions. Time measurements
 are observation bounds at the configured polling interval.
+Watch timeouts preserve evidence and evaluate assertions: a silent or stuck bot
+fails the canary and alerts. The fallback watch is bounded to 180 seconds, and
+the service allows 1200 seconds for watches, probes, log ingestion and cleanup.
 
 `admin` and weekly-only `restart_workers` invoke only named `admin_hooks` from
 the operator config. A hook is an argv list executed without a shell; it receives
@@ -118,7 +136,11 @@ Triggers are indexed in order, including each `channel_message` and burst text.
 Cloud Logging queries use the configured environment project, the turn's UTC
 window and thread ID. The reader discovers request IDs (`rid`) only through
 thread-scoped logs, then includes those IDs when querying core events that omit
-thread IDs. No correlated request evidence means absence is PENDING. Query failure or truncation returns PENDING, including
+thread IDs. Structured numeric/string IDs and GCE's JSON-string `message` wrapper
+are supported. Broad wrapped-log matches are checked against exact parsed IDs
+and event names before use. The reader waits 45 seconds after the observation
+window before log assertions (configurable only within 30–60 seconds).
+No correlated request evidence means absence is PENDING. Query failure or truncation returns PENDING, including
 for absence assertions. A `db_check` executes inside a PostgreSQL read-only
 transaction with a 15-second statement timeout. Configure the URL through
 `DAIMON_QA_STAGING_DATABASE_URL` (or the production equivalent); it is never stored
@@ -144,6 +166,17 @@ Reservations and receipt updates use `flock` on a sidecar lock, so cooperating
 runner processes cannot race the cap. Other QA workers must still coordinate
 through the driver's shared ledger/cap; they do not participate in this lock.
 
+Scenario B is encoded in `schedule`: one staging Haiku canary per UTC hour, one
+production Haiku canary per UTC hour in a hard-allowed internal guild, and one
+catalog invocation per UTC day across environments. Claims share a locked
+`<ledger>.schedule.json`; restarting the runner cannot bypass cadence. Production
+still requires its separate enablement and an actual channel-specific Haiku pin.
+The planned 48 daily two-turn canaries plus `catalog_budget_usd` must fit $10,
+and a catalog's turn/judge estimate must fit that allocation before any call.
+The example uses a sample $0.05 per-turn allowance plus $2 for the daily catalog;
+the driver must replace this with verified conservative pricing. Real Sonnet/Opus
+production agents are refused; they are never used to estimate a cheaper run.
+
 Receipts read measured tokens, cache tokens and cost from read-only
 `turn_outcomes`, scoped to the thread and turn window. Old footers can supply
 rounded token/cost evidence; modern ones supply only rounded costs. If full
@@ -154,12 +187,15 @@ leaves a reservation in `<ledger>.reservations.json`; it never expires on its ow
 The driver should reconcile actual usage before removing a stale reservation.
 The estimate is a preflight guard, not a runtime token limiter: actual agent spend
 can exceed an estimate, and is recorded rather than concealed.
+If no trigger was attempted and no judge ran, the receipt records zero actual
+spend and releases the reservation. An uncertain send retains the estimate.
 
 FAIL writes a handoff inbox file and invokes the configured argv alert command
 with one summary argument. Defaults point to the root Opus inbox and `tsend.sh`
 with target `%618`. Persistent failure alerts once per six hours, keyed by
-scenario and environment; the first subsequent PASS sends a recovery. PENDING
-never sends a recovery. Failed delivery does not advance dedupe state. Change
+scenario and environment. Three consecutive PENDING runs also alert using the
+same six-hour dedupe; a subsequent PASS sends recovery from either alert state.
+PENDING never sends a recovery. Failed delivery does not advance dedupe state. Change
 `alerts.inbox` and `alerts.command` to choose a reviewed destination.
 
 ## Hourly user timer (install only after review)

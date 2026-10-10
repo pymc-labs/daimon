@@ -73,23 +73,37 @@ class Alerter:
         key = f"{result.env}:{result.scenario}"
         prior = state.get(key, {})
         now = utcnow()
+        pending_count = (
+            int(prior.get("pending_count", "0")) + 1 if result.status == "PENDING" else 0
+        )
         if result.status == "PENDING":
-            return  # Missing coverage is neither a failure nor a recovery.
-        recovery = result.status == "PASS" and prior.get("status") == "FAIL"
+            prior["pending_count"] = str(pending_count)
+            state[key] = prior
+            if pending_count < self.config.pending_threshold:
+                self._save_state(state)
+                return
+        recovery = result.status == "PASS" and prior.get("status") in {"FAIL", "PENDING"}
         if result.status == "PASS" and not recovery:
+            prior["pending_count"] = "0"
+            state[key] = prior
+            self._save_state(state)
             return
-        if result.status == "FAIL" and prior.get("status") == "FAIL":
+        if result.status in {"FAIL", "PENDING"} and prior.get("status") in {"FAIL", "PENDING"}:
             previous = datetime.fromisoformat(prior["ts"])
             if (now - previous).total_seconds() < self.config.cooldown_s:
+                prior["pending_count"] = str(pending_count)
+                self._save_state(state)
                 return
-        label = "RECOVERY" if recovery else "FAIL"
+        label = "RECOVERY" if recovery else result.status
         line = f"QA canary {label}: {result.scenario} ({result.env}), {evidence_path}"
+        if result.status == "PENDING":
+            line += f"; {pending_count} consecutive PENDING runs"
         inbox = Path(self.config.inbox)
         inbox.mkdir(parents=True, exist_ok=True)
         failures = "\n".join(
             f"- {c.kind}, turn {c.turn}: {c.reason}\n  Evidence: {', '.join(c.evidence)}"
             for c in result.checks
-            if c.status == "FAIL"
+            if c.status == result.status
         )
         (inbox / f"qa-canary-{label}-{now.strftime('%Y%m%dT%H%M%S%fZ')}.md").write_text(
             f"{line}\n\n{failures}\n\nRun evidence: {evidence_path.resolve()}\n",
@@ -99,7 +113,14 @@ class Alerter:
         )
         if delivery.returncode:
             raise RuntimeError("handoff alert delivery failed; dedupe state was not advanced")
-        state[key] = {"status": result.status, "ts": now.isoformat()}
+        state[key] = {
+            "status": result.status,
+            "ts": now.isoformat(),
+            "pending_count": str(pending_count),
+        }
+        self._save_state(state)
+
+    def _save_state(self, state: dict[str, dict[str, str]]) -> None:
         temporary = self.state_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(state))
         temporary.replace(self.state_path)
