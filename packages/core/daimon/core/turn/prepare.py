@@ -55,7 +55,8 @@ from daimon.core.sessions import create_session
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
-from daimon.core.stores.github_access import get_agent_mode, list_live_grant_repositories
+from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -300,10 +301,6 @@ async def create_ma_session(
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     async with deps.sessionmaker() as session:
         github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        # App tokens sit in the vault even when no working repo is mounted.
-        has_app_tokens = github_mode == "app" and bool(
-            await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        )
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     ma_session = await create_session(
         deps.anthropic,
@@ -338,6 +335,15 @@ async def create_ma_session(
         isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
         for resource in ma_session.resources
     )
+    # App tokens sit in the vault even when no working repo is mounted; record an
+    # issue time only when this session was actually delivered some.
+    has_app_tokens = False
+    if github_mode == "app":
+        async with deps.sessionmaker() as session:
+            has_app_tokens = any(
+                row.status == "delivered"
+                for row in await list_session_tokens(session, session_id=ma_session.id)
+            )
     snapshot = snapshot_from_created_session(
         ma_session,
         env_sha256=env_sha256,
