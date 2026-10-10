@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord form, credential and app install buttons now check private thread membership before posting for someone.
 - Stop subscribes to the session's events before sending the interrupt, so a fast stop no longer waits two minutes and reports "Stop not confirmed".
+- Worker deploys allow 95 seconds for container shutdown, exceeding the worker compose asset's 90-second grace for turn draining and cleanup.
+
 - A rejected notebook re-publish keeps the previous source, so its link still opens the original notebook after an idle stop or host restart.
 - When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
 - Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
