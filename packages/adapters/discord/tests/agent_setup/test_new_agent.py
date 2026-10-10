@@ -524,21 +524,20 @@ async def test_unexpected_failure_captures_sentry_with_tenant_context(
     )
 
 
-async def test_a_daimon_error_is_rendered_without_a_sentry_capture(
+async def test_real_discord_name_collision_is_rendered_without_a_sentry_capture(
     monkeypatch: pytest.MonkeyPatch, account_id: uuid.UUID
 ) -> None:
     """A name collision is an expected outcome, not a defect to page someone about."""
-    from daimon.core.errors import DaimonError
-
     captured: list[BaseException] = []
-
-    async def _collide(*_args: Any, **_kwargs: Any) -> ResourceOutcome:
-        raise DaimonError("This server already has an agent named **churn-explorer**.")
 
     monkeypatch.setattr(
         new_agent_mod, "capture_exception_with_scope", lambda err: captured.append(err)
     )
-    monkeypatch.setattr(new_agent_mod, "create_blank_agent", _collide)
+    monkeypatch.setattr(
+        write_mod,
+        "find_agents_by_daimon_tag",
+        AsyncMock(return_value=[ma_agent(id="ag_existing", name="churn-explorer")]),
+    )
     monkeypatch.setattr(
         new_agent_mod, "resolve_tenant_for_panel", AsyncMock(return_value=_TENANT_ID)
     )
@@ -552,4 +551,26 @@ async def test_a_daimon_error_is_rendered_without_a_sentry_capture(
     assert captured == [], "an expected refusal must not be captured as an exception"
     interaction.followup.send.assert_called_once()
     message = interaction.followup.send.call_args.args[0]
-    assert "already has an agent named" in message, "the caller sees the real reason"
+    assert message == (
+        "This workspace already has an agent with that name. Pick a different name."
+    ), "the caller sees the reason without an exception body"
+
+
+async def test_unregistered_server_keeps_setup_guidance_from_real_tenant_resolution(
+    account_id: uuid.UUID, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    modal = _modal(
+        _state(account_id),
+        runtime=_runtime(build_stub_anthropic(), sessionmaker=db_session_factory),
+    )
+    _fill(modal)
+    interaction = _interaction()
+    interaction.guild_id = 987765543
+
+    await modal.on_submit(interaction)
+
+    interaction.followup.send.assert_called_once()
+    assert interaction.followup.send.call_args.args[0] == (
+        "This server is not registered. Ask a server admin to finish setup."
+    )
+    assert interaction.followup.send.call_args.kwargs["ephemeral"] is True

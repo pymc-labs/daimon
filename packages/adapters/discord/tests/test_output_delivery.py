@@ -228,6 +228,31 @@ async def test_oversize_uses_guild_limit_and_posts_skip_notice() -> None:
     assert deleted == ["file_chart"], "the entry is removed after the skip notice"
 
 
+@pytest.mark.parametrize(
+    "author, size, expected_notices", [(42, 20 * _MIB, 0), (7, 20 * _MIB, 1), (42, 21 * _MIB, 1)]
+)
+async def test_oversize_notice_does_not_contradict_an_already_delivered_file(
+    author: int,
+    size: int,
+    expected_notices: int,
+) -> None:
+    client, deleted = _client_with_file(filename="report.zip", size_bytes=20 * _MIB)
+    thread = _thread()
+    thread.guild.me.id = 42
+    thread.history = _history(_posted(author_id=author, filename="report.zip", size=size))
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_WINDOW,
+        sleep=_no_sleep,
+    )
+    assert thread.send.await_count == expected_notices
+    assert deleted == ["file_chart"]
+
+
 async def test_missing_attach_permission_keeps_file_and_posts_one_notice() -> None:
     client, deleted = _client_with_file(filename="chart.png", size_bytes=9, content=b"png-bytes")
     thread = _thread()

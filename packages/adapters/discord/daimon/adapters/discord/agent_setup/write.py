@@ -14,7 +14,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import ResourceOutcome
-from daimon.core.errors import DaimonError
+from daimon.core.errors import AgentNameCollision, SpecError
 from daimon.core.github_credentials import (
     build_multifernet,
     get_pat,
@@ -94,13 +94,13 @@ async def create_blank_agent(
     """
     collisions = await find_agents_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
     if collisions:
-        raise DaimonError(
+        raise AgentNameCollision(
             f"This server already has an agent named **{name}**. Pick a different name."
         )
     try:
         spec = AgentSpec.model_validate({"name": name, "model": model, "system": system})
     except ValidationError as err:
-        raise DaimonError(f"Spec validation failed: {err}") from err
+        raise SpecError(f"Spec validation failed: {err}") from err
     public_url = (
         str(runtime.settings.mcp.public_url)
         if runtime.settings.mcp.public_url is not None

@@ -25,7 +25,7 @@ from daimon.adapters.discord.routines_panel.write import (
     resume_routine_via_panel,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.stores.domain import RoutineRow
@@ -296,7 +296,9 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
     async with runtime.sessionmaker() as session:
         row = await get_tenant(session, tenant_id)
         if row is None:
-            raise DaimonError("This server is not registered.")
+            raise UserFacingError(
+                "This server is not registered. Ask a server admin to finish setup."
+            )
         entries, over_cap_count, agent_name_map = await load_guild_routines(
             session,
             runtime.anthropic,

@@ -11,7 +11,7 @@ from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import ADMIN_NOUN
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.roster import RosterAgent
 from daimon.core.setup_conversations import (
     build_setup_opener,
@@ -77,7 +77,7 @@ async def open_setup_conversation(
         tenant_id = await resolve_tenant_for_panel(runtime, interaction)
         selected = target if target is not None else _legacy_target(state)
         if selected is not None and not selected.ma_agent_id:
-            raise DaimonError("That agent is not ready. Reopen `/agent-setup` and try again.")
+            raise UserFacingError("That agent is not ready. Reopen `/agent-setup` and try again.")
         responder, ma_target = await resolve_setup_agents(
             runtime.anthropic,
             tenant_id=tenant_id,

@@ -34,7 +34,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     tenant_scoped_display_title,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import RuleRefused, runs_only_in, thread_rule_key
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
@@ -489,7 +489,7 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             default_agent_name=None,
         )
 
-    with pytest.raises(DaimonError, match="Only a workspace or server admin"):
+    with pytest.raises(UserFacingError, match="Only a workspace or server admin"):
         await fork_agent(
             client,
             db_session_factory,
@@ -504,7 +504,7 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
     agents = await list_agents_by_tenant(client, tenant_id=tenant.id)
     names = sorted(agent.metadata[MA_METADATA_KEY_NAME] for agent in agents)
     assert names == ["shared", "team-alpha"], "the copy is tagged with its new name"
-    with pytest.raises(DaimonError, match="already exists"):
+    with pytest.raises(AgentNameCollision, match="already exists"):
         await fork("team-alpha")
     await set_access_policy(
         db_session,

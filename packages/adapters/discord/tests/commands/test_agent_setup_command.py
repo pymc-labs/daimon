@@ -270,4 +270,4 @@ async def test_database_error_answers_the_deferred_reply(
         await cog.agent_setup.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
 
     interaction.followup.send.assert_awaited_once()
-    assert "Database error" in interaction.followup.send.await_args.args[0]
+    assert "couldn't load or save" in interaction.followup.send.await_args.args[0]

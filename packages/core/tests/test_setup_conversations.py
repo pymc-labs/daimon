@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.setup_conversations import (
     build_setup_opener,
     get_setup_responder,
@@ -58,7 +58,7 @@ async def test_setup_resolves_builtin_without_parent_default_or_namesake_fallbac
     )
     client = build_fake_anthropic(router.dispatch)
     if missing_target:
-        with pytest.raises(DaimonError, match="no longer exists"):
+        with pytest.raises(UserFacingError, match="no longer exists"):
             await resolve_setup_agents(client, tenant_id=tenant_id, target_ma_agent_id="ag_deleted")
     else:
         responder, target = await resolve_setup_agents(
@@ -76,7 +76,7 @@ async def test_missing_bound_responder_is_explicit_and_does_not_reconcile() -> N
             404, json={"type": "error", "error": {"type": "not_found_error", "message": "missing"}}
         )
     )
-    with pytest.raises(DaimonError, match="Daimon responder is missing"):
+    with pytest.raises(UserFacingError, match="Daimon responder is missing"):
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_deleted")
 
 

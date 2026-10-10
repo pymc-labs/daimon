@@ -199,6 +199,12 @@ app header. A missing face is queued for generation after the turn proceeds;
 the current picture remains in use until it is stored. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
+Discord renders known failures as plain sentences with a next step. Provider
+JSON, exception bodies, request IDs and tool details stay out of failure copy;
+request IDs remain in turn logs. A failed reply can still be followed by files
+created during the turn. The output sweep suppresses an oversize notice when
+the same filename and size were already attached by Daimon in that turn.
+
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
 application-owned webhook post in the same tenant and channel. With agent
 identity off, the reply must be to a turn post the bot itself sent (the card or
@@ -1837,3 +1843,13 @@ The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+
+Discord passes through only explicitly audited `UserFacingError` guidance. Raise
+that marker with deliberate copy, never exception text, provider bodies, secrets
+or internal identifiers. Known domain errors map to fixed next steps; unmarked
+exceptions keep a generic public fallback and diagnostics in logs. Both Discord
+and shared New Agent creators use the typed name-collision refusal, as does
+agent copying. Shared setup-responder, agent-visibility and DM routing refusals
+mark their fixed guidance explicitly. Terminal
+failure cards retain audited guidance as their next step, including an expired
+setup context encountered during reconnection.

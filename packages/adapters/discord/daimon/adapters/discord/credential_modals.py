@@ -147,7 +147,7 @@ from daimon.core.env_file import (
     env_name_problem,
     parse_env_file,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.ma import update_agent_with_version_retry
@@ -1294,7 +1294,11 @@ class SkillRepoModal(discord.ui.Modal):
                 self._runtime.anthropic, tenant_id=tenant_id, skills=merged
             )
             if collision is not None:
-                raise DaimonError(f"cannot attach: {collision}")
+                _log.info("credential_modal.skill_mount_collision", collision=str(collision))
+                raise UserFacingError(
+                    "That skill overlaps an attached skill. "
+                    "Ask an admin to check the skill setup before attaching it."
+                )
             return await self._runtime.anthropic.beta.agents.update(
                 fresh.id, version=fresh.version, skills=merged
             )
