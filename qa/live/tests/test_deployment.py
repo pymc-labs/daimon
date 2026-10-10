@@ -109,7 +109,7 @@ def test_end_probe_pending_retries_after_settle_without_pending_streak(
             self.probes += 1
             if self.probes in (2, 3):
                 raise Pending("mixed/not-ready workers")
-            return "a" * 40
+            return ("a" if self.probes == 1 else "b") * 40
 
     instances: list[RollingBackend] = []
 
@@ -283,3 +283,64 @@ def test_restart_logs_are_scoped_to_turn_and_active_window(monkeypatch: pytest.M
     monkeypatch.setattr(backend, "_read_logs", logs)
     evidence = backend.deployment_events(start, end, [turn])
     assert [row["affects_turn"] for row in evidence] == [True, False, True]
+
+
+@pytest.mark.parametrize("budget", [True, False])
+def test_same_image_probe_recovery_restores_alertable_failure_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    budget: bool,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+) -> None:
+    from qa.live.report import report
+
+    clock = [0.0]
+    monkeypatch.setattr("qa.live.deployment.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "qa.live.deployment.time.sleep", lambda s: clock.__setitem__(0, clock[0] + s)
+    )
+
+    class CrashingBackend(RollingBackend):
+        def deployment_image(self) -> str:
+            self.probes += 1
+            if self.probes == 2:
+                raise Pending("worker not ready")
+            return "a" * 40
+
+    backend = CrashingBackend()
+    backend.verdict = "error"
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({f"staging:{scenario.id}": {"pending_count": "2"}}))
+    alerter = Alerter(Alerts(inbox=str(tmp_path / "alerts"), command=[]), state)
+    snapshots: list[str] = []
+
+    def persist(result: Result) -> None:
+        snapshots.append(result.status)
+        alerter.notify(result, report(result, tmp_path))
+
+    instances = []
+
+    def factory() -> Executor:
+        instances.append(backend)
+        return Executor(backend, FakeJudge(), ledger, pricing, "staging")
+
+    results = run_with_deploy_retry(scenario, factory, persist, retry_allowed=lambda: budget)
+    assert len(results) == len(instances) == 1
+    result = results[0]
+    assert snapshots == ["PENDING", "FAIL"]
+    assert result.status == "FAIL"
+    assert result.deployment and not result.deployment.interrupted
+    assert result.deployment.end_probe_pending
+    assert (
+        result.deployment.start_image
+        == result.deployment.end_image
+        == result.deployment.settled_image
+        == "a" * 40
+    )
+    assert len(list((tmp_path / "alerts").glob("qa-canary-FAIL-*.md"))) == 1
+    assert json.loads(state.read_text())[f"staging:{scenario.id}"]["pending_count"] == "0"
+    assert "end_probe_pending" in capsys.readouterr().out
+    assert ledger.charged({result.run_id}) == 0.04

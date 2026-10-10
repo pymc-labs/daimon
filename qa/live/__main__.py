@@ -107,7 +107,8 @@ def main() -> int:
                 path = report(result, args.results)
                 if result.run_id in notified_ids:
                     return
-                notified_ids.add(result.run_id)
+                if not (result.deployment and result.deployment.interrupted):
+                    notified_ids.add(result.run_id)
                 try:
                     Alerter(config.alerts, args.results / "alert-state.json").notify(result, path)
                 except Exception as exc:

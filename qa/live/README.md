@@ -312,3 +312,9 @@ the same bounded policy. This checks image stability, not boot or orphan-sweep
 readiness. Missing observation evidence remains PENDING and never proves a product
 PASS; an event-log outage with matching verified images preserves a product FAIL.
 Production execution is unchanged.
+
+An end probe that was PENDING records `end_probe_pending` in JSON and the five-line
+summary. If the settle check recovers the starting SHA, restore the original
+verdict and alert policy without spending on a retry. This read-only recovery
+check runs even when the retry budget is exhausted. A recovered matching image
+does not excuse a product failure as a deployment.
