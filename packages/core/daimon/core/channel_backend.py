@@ -9,8 +9,8 @@ newest one applies.
 A configured channel is checked at admission, after the config cascade and
 before any provider call: its profile must meet what the configuration
 requires (`mux.contracts.admission.admit`), and this release must be able to
-run it. Today that is Anthropic Managed Agents with the agent's own model
-and per-caller threads; anything else is refused visibly as
+run it. Today that is Anthropic Managed Agents with the agent's own model,
+per caller or shared (`daimon.core.shared_threads`); anything else is refused visibly as
 `backend_unsupported` rather than quietly run on Anthropic.
 """
 
@@ -91,7 +91,7 @@ def check_backend(revision: ConfigRevision) -> BackendAdmission:
     runnable = (
         revision.profile in RUNNABLE_PROFILES
         and revision.model is None
-        and revision.thread_mode == "per_caller"
+        and revision.thread_mode in ("per_caller", "shared")
     )
     if not runnable:
         log.info(

@@ -110,6 +110,24 @@ the agent's own model and per-caller threads. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
 never run on Anthropic in its place.
 
+A channel whose configuration says `thread_mode="shared"` shares one session
+per thread between everyone who writes in it
+(`daimon.core.shared_threads`); setup conversations and DMs stay per
+caller. The session row belongs to an owner derived from the thread
+(tenant, platform, channel, thread), never a person's account and never the
+key the old shared mode used, so nobody's private session or that mode's
+history is ever selected. The thread's binding lives in the state store's
+shared slot and is pinned to the configuration revision it was bound under:
+a later change to the channel applies to new threads, and a thread whose
+revision can no longer run is refused. A shared session carries no caller's
+credentials (no personal vault, MCP identity, personal servers or GitHub
+user grant), so the agent must run in app mode; otherwise the turn is
+refused as `backend_unsupported`. Each turn's usage is still recorded
+against the person who wrote it. Unconfigured and per-caller channels read
+nothing more than before; a per-caller channel whose configuration changed
+reads the thread's binding, so a thread shared under the earlier revision
+stays shared.
+
 ## Ports
 
 `ManagedAgents` groups the eight ports (`agents`, `environments`, `sessions`,

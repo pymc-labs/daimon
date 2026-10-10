@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare offline live-scenario recipes for the 33 immutable oracle cases, with typed blockers and structural outcome assertions for the disposable Haiku QA harness.
 - Route turn seal reads and metadata updates through scoped backend ports, preserving nullable native metadata, DB publication order and SDK request bytes; prepared legacy replay and interruption retain their admitted tenant/account scope.
 
+- A channel configured with `thread_mode="shared"` (with
+  `DAIMON_TURN__CHANNEL_BACKENDS` on) shares one agent workspace per thread
+  between everyone who writes in it. The shared workspace holds the agent's
+  own credentials only, so the agent must use the GitHub App mode; each
+  person's usage is still charged to them. Unconfigured and per-caller
+  channels are unchanged.
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
 
 - Prepare an explicit Gemini SDK smoke and recorded offline conformance harness, with a private MockTransport dry-run, the $30/$24 live admission guard and an exact Flash-Lite model pin before credential access.

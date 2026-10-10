@@ -63,6 +63,10 @@ def test_an_unconfigured_channel_resolves_to_anthropic_managed_agents_unchanged(
     check_backend(ConfigRevision.create(_CHANNEL, 1, resolved))
 
 
+def test_shared_threads_on_anthropic_are_runnable() -> None:
+    check_backend(_revision(BackendConfig(thread_mode="shared")))
+
+
 def test_turn_settings_leave_channel_backends_off() -> None:
     assert TurnSettings().channel_backends is False
 
@@ -84,7 +88,6 @@ def _revision(config: BackendConfig) -> ConfigRevision:
         # Admitted by its profile, but not runnable in this release.
         BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-5"),
         BackendConfig(model="claude-opus-5-5"),
-        BackendConfig(thread_mode="shared"),
     ],
 )
 def test_a_configuration_this_release_cannot_honour_is_refused(config: BackendConfig) -> None:

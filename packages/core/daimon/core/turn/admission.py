@@ -209,6 +209,10 @@ class Admission:
     # has one and `DAIMON_TURN__CHANNEL_BACKENDS` is on; None otherwise.
     backend_revision: ConfigRevision | None = field(default=None, compare=False, repr=False)
     backend: BackendAdmission | None = field(default=None, compare=False, repr=False)
+    # Set by `bind_session` for a shared thread (`daimon.core.shared_threads`):
+    # the synthetic owner of its session row. The session is then created and
+    # refreshed with no caller credentials. None for every per-caller turn.
+    shared_owner: uuid.UUID | None = field(default=None, compare=False, repr=False)
 
 
 async def admit(

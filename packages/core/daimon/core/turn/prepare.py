@@ -37,6 +37,7 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
+from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
@@ -53,6 +54,12 @@ from daimon.core.session_snapshot import (
     snapshot_from_created_session,
 )
 from daimon.core.sessions import create_session
+from daimon.core.shared_threads import (
+    SharedThread,
+    may_have_shared_binding,
+    record_shared_binding,
+    resolve_shared_thread,
+)
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
@@ -67,7 +74,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn_origin import SessionState
@@ -289,7 +296,8 @@ async def create_ma_session(
         agent=admission.agent,
         environment=admission.environment,
         mcp_settings=deps.mcp,
-        account_id=admission.account_id,
+        # A shared thread's session carries no caller's credentials.
+        account_id=None if admission.shared_owner is not None else admission.account_id,
         tenant_id=tenant_id,
         agent_uuid=agent_uuid,
         session_factory=deps.sessionmaker,
@@ -521,6 +529,12 @@ async def bind_session(
     observation.agent_id = admission.agent.id
     try:
         with observation.activate():
+            shared = await _shared_thread(
+                deps, admission, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+            )
+            if shared is not None:
+                admission = replace(admission, shared_owner=shared.owner)
+                session_account_id = shared.owner
             result = await bind_session_impl(
                 deps,
                 admission,
@@ -535,11 +549,55 @@ async def bind_session(
                 deadline=deadline,
                 now=now,
             )
+            if shared is not None:
+                async with deps.sessionmaker() as session:
+                    await record_shared_binding(session, shared, ma_session_id=result.ma_session_id)
+                    await session.commit()
     except BaseException as exc:
         observation.finish(error=exc)
         raise
     observation.session_id = result.ma_session_id
     return result
+
+
+async def _shared_thread(
+    deps: TurnDeps, admission: Admission, *, tenant_id: uuid.UUID, platform: str, thread_id: str
+) -> SharedThread | None:
+    """The thread's shared binding, or None to run per caller as before.
+
+    Reads nothing unless admission carried a channel backend revision that
+    can share (`may_have_shared_binding`); a setup conversation and a DM are
+    always per caller. A shared thread needs an app-mode agent, whose
+    credentials are its own, and a revision that can still run here;
+    otherwise the turn is refused visibly.
+    """
+    revision = admission.backend_revision
+    channel_id = admission.origin_channel_id
+    if (
+        not may_have_shared_binding(revision)
+        or channel_id is None
+        or admission.private_dm_id is not None
+        or admission.config.thread_binding_kind == "setup"
+    ):
+        return None
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    async with deps.sessionmaker() as session:
+        try:
+            shared = await resolve_shared_thread(
+                session,
+                revision,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+            )
+        except BackendUnsupported as err:
+            raise AdmissionDenied(reason="backend_unsupported") from err
+        if shared is None:
+            return None
+        if await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid) != "app":
+            raise AdmissionDenied(reason="backend_unsupported")
+    return shared
 
 
 async def _decide_reuse_again(
