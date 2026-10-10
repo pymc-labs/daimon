@@ -702,9 +702,9 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         )
     )
     await db_session.flush()
-    with pytest.raises(
-        ValueError, match="This agent uses a saved GitHub key. Ask your Daimon operator"
-    ):
+    # A link for one agent may switch its saved key; confirming checks the
+    # working and skill repos are covered before the key is retired.
+    assert (
         await connect_link(
             db_session,
             settings=settings,
@@ -715,3 +715,4 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
             agent_id=agent_id,
             agent_name="ResearchBot",
         )
+    ).startswith("https://example.invalid/oauth/github/connect/")

@@ -800,8 +800,9 @@ async def test_mint_waits_for_concurrent_agent_key_write(
         await asyncio.wait_for(attempted.wait(), timeout=10)
         release.set()
         await writer
-        with pytest.raises(github_connect.ClientAgentConnectionError):
-            await minter
+        # A link for one agent may switch a saved key, so the mint goes ahead,
+        # but only after the concurrent key write committed.
+        await minter
     finally:
         release.set()
         if not writer.done():
@@ -1178,12 +1179,10 @@ async def test_repo_credential_agents_wait_for_explicit_update(
         repository_selection="selected",
         suspended_at=None,
     )
-    assert (
-        await github_connect.activate_confirmed_agent(
-            db_session, invitation=invitation, repos=[confirmation]
-        )
-        == "update_pending"
+    pending = await github_connect.activate_confirmed_agent(
+        db_session, invitation=invitation, repos=[confirmation]
     )
+    assert pending is not None and pending.status == "update_pending"
     assert (
         await github_access.get_agent_mode(db_session, tenant_id=tenant_id, agent_id=agent_id)
         == "legacy"
@@ -1304,7 +1303,9 @@ async def test_reconfirmation_respects_inactive_repo_choice(
             )
         ],
     )
-    repo = await db_session.get(TenantGitHubRepo, (tenant_id, 101))
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
     assert repo is not None
     assert repo.status == "active" and repo.max_access == expected_access
     assert repo.version == 2
@@ -1352,9 +1353,22 @@ async def test_workspace_a_can_connect_org_repo_after_workspace_b(
                 )
             ],
         )
-        assert await db_session.get(TenantGitHubRepo, (tenant_id, index)) is not None
+        assert (
+            await github_access.repo_for_agent(
+                db_session, tenant_id=tenant_id, repo_id=index, agent_id=None
+            )
+            is not None
+        )
         connected.append((tenant_id, index))
-    assert all([await db_session.get(TenantGitHubRepo, key) is not None for key in connected])
+    assert all(
+        [
+            await github_access.repo_for_agent(
+                db_session, tenant_id=tenant, repo_id=repo, agent_id=None
+            )
+            is not None
+            for tenant, repo in connected
+        ]
+    )
 
 
 @pytest.mark.asyncio
