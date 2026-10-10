@@ -3397,6 +3397,8 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
     _register(transport.state, moved)
     changed = replace(first.admission, agent=moved)
     entered, release, attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    rollback_entered, allow_rollback = asyncio.Event(), asyncio.Event()
+    retry_backoff, resume_retry = asyncio.Event(), asyncio.Event()
     count = 0
 
     async def checkpoint(**kwargs):
@@ -3411,15 +3413,45 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         )
 
     from daimon.core import session_preparation_stages
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from sqlalchemy.ext.asyncio import AsyncSessionTransaction
 
     original_lock = session_preparation_stages.try_fence
+    original_exit = AsyncSessionTransaction.__aexit__
+    original_sleep = asyncio.sleep
+    rollback_finished = asyncio.Event()
 
     async def observed_lock(*args, **kwargs):
         if asyncio.current_task() is waiter:
             attempted.set()
         return await original_lock(*args, **kwargs)
 
+    async def delayed_rollback(self, exc_type, exc, tb):
+        if (
+            queue == "same_session"
+            and asyncio.current_task() is waiter
+            and exc_type is FenceUnavailable
+        ):
+            rollback_entered.set()
+            await allow_rollback.wait()
+            result = await original_exit(self, exc_type, exc, tb)
+            rollback_finished.set()
+            return result
+        return await original_exit(self, exc_type, exc, tb)
+
+    async def observed_sleep(delay, *args, **kwargs):
+        if (
+            queue == "same_session"
+            and asyncio.current_task() is waiter
+            and rollback_finished.is_set()
+        ):
+            retry_backoff.set()
+            await resume_retry.wait()
+        return await original_sleep(delay, *args, **kwargs)
+
     monkeypatch.setattr(session_preparation_stages, "try_fence", observed_lock)
+    monkeypatch.setattr(AsyncSessionTransaction, "__aexit__", delayed_rollback)
+    monkeypatch.setattr(asyncio, "sleep", observed_sleep)
     advance = _advance_fence_clock(monkeypatch)
     tasks = [
         asyncio.create_task(
@@ -3466,8 +3498,13 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         waiter = asyncio.create_task(queued_turn())
         if queue == "same_session":
             await asyncio.wait_for(attempted.wait(), 2)
-            # Allow the failed try-lock to roll back before advancing time.
-            await asyncio.sleep(0.1)
+            # A try-lock attempt is not a rollback. Delay the transaction exit to
+            # reproduce that gap, then wait for the retry sleep, which is entered
+            # only after transaction and permit teardown.
+            await asyncio.wait_for(rollback_entered.wait(), 2)
+            assert engine.pool.checkedout() == 3
+            allow_rollback.set()
+            await asyncio.wait_for(retry_backoff.wait(), 2)
         else:
             while preparation_counts()["waiting"] == 0:
                 await asyncio.sleep(0)
@@ -3478,6 +3515,7 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         for _ in range(10):
             await asyncio.sleep(0)
         release.set()
+        resume_retry.set()
         successors = await asyncio.wait_for(asyncio.gather(*tasks), 3)
         prepared = await asyncio.wait_for(waiter, 3)
         assert prepared.ma_session_id == successors[0].ma_session_id
@@ -3491,6 +3529,8 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         )
     finally:
         release.set()
+        allow_rollback.set()
+        resume_retry.set()
         for task in [*tasks, *([waiter] if waiter is not None else [])]:
             task.cancel()
         await asyncio.gather(
