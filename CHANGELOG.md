@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
 - Capture QA headless invocation returns with monotonic receipts, retaining exact host truncation and distinguishing empty completion from visible output.
 - Allow opt-in OpenAI Agents MCP bearer authentication through a scoped host resolver; persist references only and attach fresh credentials to session requests while preserving model and delegation controls.
+- Resolve explicitly configured provider turn runtimes per admitted channel and carry their scoped dependencies into execution, without constructing a runtime for default Anthropic channels.
 
 - Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
 

@@ -1190,3 +1190,10 @@ reuse and before input. Missing or changed configured limits refuse; omission
 preserves existing behavior. If an acknowledged creation fails verification,
 its native session reference remains in the durable creation claim for exact
 owned cleanup, and preparation does not resend it automatically.
+
+Explicit channel backend configuration resolves runtime dependencies separately
+for each admitted turn. Native preparation and execution use the same resolved
+runtime and authorized scope; runtime lookup does not cache one channel's native
+plan for another channel or configuration revision. Default Anthropic channels
+do not construct provider runtimes. An explicitly selected provider whose
+deployment constructor is absent is refused before provider transport access.
