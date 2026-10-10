@@ -491,3 +491,16 @@ Usage revisions persist under the same slot lease across process restart.
 Verified dated prices plus measured container cost can settle; missing evidence
 stays pending without a zero-cost fallback or an Anthropic meter. Authenticated
 remote MCP and paid host certification ship separately.
+
+The Gemini host turn codec accepts an explicitly selected `gemini.inline_reuse`
+channel and an injected, revision-pinned `GeminiDeployment`, driver `Storage`,
+neutral `StateStore`, transport factory and accounting runtime. Its stream opens
+lazily after interaction acceptance, preserves provider root identities across
+replay/cancel and emits cumulative interaction usage through the neutral host
+recorder. The host configures `gemini-3.8-flash` as primary; only create HTTP503
+permits the reviewed Flash fallback chain. Preparation rejects missing stores,
+foreign bindings, seals and unsupported deployment policies before dispatch.
+Unsupported runtime/model/policy selections return the host's typed
+`backend_unsupported` refusal. Native journal source identities are scoped to
+the interaction, so reused-session turns and function continuations remain
+distinct without changing neutral event IDs or ordering domains.

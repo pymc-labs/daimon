@@ -187,6 +187,15 @@ def _admitted_profile(admission: Admission) -> str:
     )
 
 
+async def _gemini_preparation(request: ProviderPreparationRequest) -> PreparedTurn:
+    from daimon.core.turn.gemini_prepare import prepare_gemini_turn
+
+    return await prepare_gemini_turn(request)
+
+
+register_turn_preparation("gemini.inline_reuse", _gemini_preparation)
+
+
 @dataclass(frozen=True)
 class FreshSession:
     """A just-created MA session, its mapping row, and the config it froze.

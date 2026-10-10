@@ -42,7 +42,7 @@ class BackendUnsupported(DaimonError):
 
 
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
-    {"anthropic.managed_agents", "openai.persistent_workspace"}
+    {"anthropic.managed_agents", "openai.persistent_workspace", "gemini.inline_reuse"}
 )
 """Profiles this release's turn path can run. Widened as drivers are wired in."""
 
@@ -116,6 +116,10 @@ def check_backend(revision: ConfigRevision) -> BackendAdmission:
         and (
             revision.backend != "openai"
             or (revision.model == "gpt-6-luna" and revision.thread_mode == "per_caller")
+        )
+        and (
+            revision.backend != "gemini"
+            or (revision.model == "gemini-3.8-flash" and revision.thread_mode == "per_caller")
         )
     )
     if not runnable:

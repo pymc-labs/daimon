@@ -364,6 +364,7 @@ async def test_foreign_provider_preparation_is_refused(
 def test_explicit_provider_model_is_accepted_only_when_profile_enabled(
     backend: Literal["openai", "gemini"], profile: str, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(channel_backend, "RUNNABLE_PROFILES", frozenset())
     revision = ConfigRevision.create(
         REVISION.channel,
         1,

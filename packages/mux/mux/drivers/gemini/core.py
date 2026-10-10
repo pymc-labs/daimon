@@ -1,7 +1,7 @@
 """Inline configuration and logical sessions over documented Interactions calls."""
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 from uuid import uuid4
@@ -11,7 +11,7 @@ from pydantic import JsonValue
 from mux.contracts.actions import InputEvent, UserMessage, UserToolResult
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event, TextPart
-from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
+from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
 from mux.contracts.receipts import (
     CancelReceipt,
     DeletionReceipt,
@@ -196,7 +196,7 @@ class Base:
                 revision=1 if prior is None else prior.revision,
                 observed_at=now(),
                 root_turn=root,
-                model=record.model,
+                model=record.interaction_models.get(interaction, record.model),
             )
             if prior is not None and prior.native_meter != observation.native_meter:
                 observation = observation.model_copy(update={"revision": prior.revision + 1})
@@ -629,14 +629,25 @@ class GeminiEvents(Base):
         account_scope_id: str,
         *,
         state_store: StateStore,
+        model_for_interaction: Callable[[str], ModelRef | None] | None = None,
     ) -> None:
         super().__init__(transport, storage, account_scope_id)
         self._state_store = state_store
+        self._model_for_interaction = model_for_interaction
 
     def _accept(
         self, record: SessionRecord, raw: Object, root: str, events: Sequence[InputEvent]
     ) -> None:
         interaction = string(raw["id"])
+        if self._model_for_interaction is not None:
+            selected = record.interaction_models.get(interaction) or self._model_for_interaction(
+                interaction
+            )
+            if selected is None or selected.provider != "gemini":
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="unknown_selected_model"
+                )
+            record.interaction_models[interaction] = selected
         record.current, record.root = interaction, root
         record.interactions[interaction] = root
         for index, input_ in enumerate(events):

@@ -41,7 +41,7 @@ def event(
         native=NativeProvenance(
             provider="gemini",
             api_revision=API_REVISION,
-            event_id=identity,
+            event_id=f"{interaction_id}:{identity}",
             event_type=native_type,
             ordering_domain=interaction_id,
         ),
