@@ -303,6 +303,9 @@ altered readback, previews, cross-session/root records, gaps, errors and multipl
 turns. The first running record must name a nonempty root that matches its own
 turn ID before it establishes the stream's root. Loading the pinned instructions
 is the skill invocation; scripted output does not establish model quality.
+Non-null turn IDs seen before running must match the accepted root too; null
+pre-running IDs remain legal. Every subsequent record retains the root check,
+including usage observations.
 
 Use `run_default_capability(manifest, adapter, recorder=recorder)` for a scripted
 turn, then save a complete F1 tape. Replay uses

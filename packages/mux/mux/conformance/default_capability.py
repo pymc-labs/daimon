@@ -212,6 +212,7 @@ def check_turn(
     ended: list[TurnEndedPayload] = []
     messages: list[AgentMessagePayload] = []
     ids: set[str] = set()
+    pre_running_turn_ids: set[str] = set()
     previous_sequence = -1
     terminal = False
     inputs = 0
@@ -234,6 +235,8 @@ def check_turn(
         require(not terminal, "F1: records after root completion")
         if running:
             require(event.turn_id == running[0].root_turn_id, "F1: event belongs to another root")
+        elif event.turn_id is not None:
+            pre_running_turn_ids.add(event.turn_id)
         payload = event.typed_payload()
         if event.type == "user.message":
             inputs += 1
@@ -252,6 +255,10 @@ def check_turn(
                 require(
                     bool(payload.root_turn_id) and event.turn_id == payload.root_turn_id,
                     "F1: running record root identity missing or mismatched",
+                )
+                require(
+                    all(turn_id == payload.root_turn_id for turn_id in pre_running_turn_ids),
+                    "F1: event belongs to another root",
                 )
                 running.append(payload)
         elif event.type == "agent.tool_use":

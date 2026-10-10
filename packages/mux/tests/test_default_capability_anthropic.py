@@ -525,6 +525,7 @@ CORRUPTIONS = (
     "orphan_result",
     "null_running_start",
     "mismatched_running_start",
+    "foreign_user_start",
     "foreign_root",
     "foreign_session",
     "preview",
@@ -578,6 +579,8 @@ def corrupt(data, fault: str) -> None:
     elif fault in ("null_running_start", "mismatched_running_start"):
         running = next(e for e in events if e["type"] == "session.status_running")
         running["turn_id"] = None if fault == "null_running_start" else "foreign-root"
+    elif fault == "foreign_user_start":
+        next(e for e in events if e["type"] == "user.message")["turn_id"] = "foreign-root"
     elif fault in ("foreign_root", "foreign_session", "preview"):
         key, value = {
             "foreign_root": ("turn_id", "another-root"),
@@ -631,10 +634,49 @@ async def test_corrupted_f1_tape_never_certifies(tmp_path: Path, fault: str) -> 
     assert result.status == "fail", (fault, result.evidence)
     if fault in ("null_running_start", "mismatched_running_start"):
         assert result.evidence == ("F1: running record root identity missing or mismatched",)
+    elif fault == "foreign_user_start":
+        assert result.evidence == ("F1: event belongs to another root",)
     assert all(not r.path.endswith(("/events", "/stream")) for r in script.requests)
 
 
-@pytest.mark.parametrize("fault", ("failed_edit", "null_running_start", "mismatched_running_start"))
+@pytest.mark.parametrize(
+    "event_index", range(len(json.loads(TAPE.read_text())["batches"][1]["events"]))
+)
+async def test_each_f1_record_refuses_a_foreign_turn_id(tmp_path: Path, event_index: int) -> None:
+    data = json.loads(TAPE.read_text())
+    event = data["batches"][1]["events"][event_index]
+    event["turn_id"] = "foreign-root"
+    path = tmp_path / "foreign-record.json"
+    path.write_text(json.dumps(data))
+    expected = manifest()
+    script = Script(expected, replay=True)
+    async with script.client() as client:
+        result = await replay_default_capability(path, expected, partial(adapter, client, script))
+    assert result.status == "fail", (event_index, event["type"], result.evidence)
+    diagnostic = (
+        "F1: running record root identity missing or mismatched"
+        if event["type"] == "session.status_running"
+        else "F1: event belongs to another root"
+    )
+    assert result.evidence == (diagnostic,)
+
+
+async def test_null_pre_running_user_turn_id_remains_legal(tmp_path: Path) -> None:
+    data = json.loads(TAPE.read_text())
+    next(e for e in data["batches"][1]["events"] if e["type"] == "user.message")["turn_id"] = None
+    path = tmp_path / "null-user.json"
+    path.write_text(json.dumps(data))
+    expected = manifest()
+    script = Script(expected, replay=True)
+    async with script.client() as client:
+        result = await replay_default_capability(path, expected, partial(adapter, client, script))
+    assert result.status == "pass", result.evidence
+    script.assert_consumed()
+
+
+@pytest.mark.parametrize(
+    "fault", ("failed_edit", "null_running_start", "mismatched_running_start", "foreign_user_start")
+)
 def test_corrupt_f1_checks_survive_python_optimization(tmp_path: Path, fault: str) -> None:
     path = tmp_path / "optimized.json"
     data = json.loads(TAPE.read_text())
@@ -655,6 +697,9 @@ async def check():
     if sys.argv[3] in ('null_running_start', 'mismatched_running_start'):
         if result.evidence != ('F1: running record root identity missing or mismatched',):
             raise SystemExit('optimized F1 start rejected without the identity diagnostic')
+    elif sys.argv[3] == 'foreign_user_start':
+        if result.evidence != ('F1: event belongs to another root',):
+            raise SystemExit('optimized F1 user start rejected without the root diagnostic')
 asyncio.run(check())
 """
     subprocess.run(
