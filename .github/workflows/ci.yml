@@ -374,7 +374,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
         with:
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: daimon
         uses: docker/build-push-action@v6
         with:
@@ -433,7 +433,7 @@ jobs:
           echo "report=$BASE/report-host:$TAG" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
         with:
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Build + push candidate daimon
         id: daimon
         uses: docker/build-push-action@v6
