@@ -402,6 +402,26 @@ and the features that read it are inactive while it is.
 
 Discord bot token. Required to run the Discord adapter.
 
+### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
+
+`int` · optional · default `15`
+
+Recent Discord activity window in minutes scanned on startup for missed mentions and
+replies. Set 0 to disable catch-up.
+
+### `DAIMON_DISCORD__STARTUP_REPLAY_CHANNELS_PER_GUILD`
+
+`int` · optional · default `25`
+
+Maximum recently active Discord channels and threads scanned per guild on startup.
+
+### `DAIMON_DISCORD__STARTUP_REPLAY_MESSAGES_PER_CHANNEL`
+
+`int` · optional · default `100`
+
+Maximum recent Discord messages scanned per channel or thread on startup. Current
+message gates and durable admissions prevent duplicate turns.
+
 ### `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S`
 
 `float` · optional · default `3.0`

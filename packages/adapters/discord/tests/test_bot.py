@@ -2092,6 +2092,7 @@ class TestDrainLoopDeCoalescing:
             content_override: str | None = None,
             created_thread_ids: list[int] | None = None,
             attachments_override: list[discord.Attachment] | None = None,
+            admitted_message_ids: tuple[str, ...] = (),
         ) -> None:
             # Record the call then return immediately (no DB work needed).
             handle_calls.append((message, content_override))
@@ -2342,3 +2343,119 @@ async def test_orchestrate_boundary_persists_one_terminal_outcome(
     assert len(rows) == 1
     assert rows[0].reason == TerminationReason.COMPLETED
     assert rows[0].platform == "discord" and rows[0].channel_id == "123"
+
+
+async def test_live_message_then_startup_replay_admit_one_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+
+    guild_id = "801000101"
+    await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
+    )
+    runtime = _make_runtime(db_session_factory)
+    bot = make_bot(runtime)
+    bot._handle_mention = AsyncMock()
+    message = _make_channel_message(guild_id=int(guild_id))
+    message.id = 55555
+    message.webhook_id = None
+    message.reference = None
+    await bot.on_message(message)
+    await bot.on_message(message)
+    bot._handle_mention.assert_awaited_once()
+    restarted = make_bot(_make_runtime(db_session_factory))
+    restarted._handle_mention = AsyncMock()
+    await restarted.on_message(message)
+    restarted._handle_mention.assert_not_awaited()
+
+
+async def test_cancelled_input_before_first_card_remains_replayable(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import asyncio
+
+    from daimon.core.defaults.provisioning import provision_tenant
+
+    guild_id = "801000103"
+    await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
+    )
+    bot = make_bot(_make_runtime(db_session_factory))
+    entered = asyncio.Event()
+
+    async def paused(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    bot._handle_mention = AsyncMock(side_effect=paused)
+    message = _make_channel_message(guild_id=int(guild_id))
+    message.id = 55556
+    message.webhook_id = None
+    message.reference = None
+    task = asyncio.create_task(bot.on_message(message))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    restarted = make_bot(_make_runtime(db_session_factory))
+    restarted._handle_mention = AsyncMock()
+    await restarted.on_message(message, startup_replay=True)
+    restarted._handle_mention.assert_awaited_once()
+
+
+async def test_startup_scan_replays_unseen_addressed_messages_through_live_gates(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import asyncio
+    from datetime import UTC, datetime
+
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.discord_message_admissions import claim_message, finish_messages
+
+    guild_id = "801000102"
+    tenant = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
+    )
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.discord.startup_replay_minutes = 15
+    runtime.settings.discord.startup_replay_channels_per_guild = 25
+    runtime.settings.discord.startup_replay_messages_per_channel = 100
+    bot = make_bot(runtime)
+    bot._handle_mention = AsyncMock()
+    bot._maybe_participate = AsyncMock()
+    base = discord.utils.time_snowflake(datetime.now(UTC))
+    old = _make_channel_message(guild_id=int(guild_id))
+    old.id = base
+    missed = _make_channel_message(guild_id=int(guild_id))
+    missed.id = base + 1
+    ignored = _make_channel_message(guild_id=int(guild_id))
+    ignored.id = base + 2
+    ignored.mentions = []
+    for message in (old, missed, ignored):
+        message.webhook_id = None
+        message.reference = None
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 789
+    channel.guild = missed.guild
+    channel.history = MagicMock(return_value=_AsyncIter([old, missed, ignored]))
+    bot.get_channel = MagicMock(return_value=channel)
+    bot._connection._guilds = {int(guild_id): missed.guild}
+    async with db_session_factory() as session:
+        assert await claim_message(
+            session,
+            tenant_id=tenant.tenant_id,
+            channel_id="789",
+            message_id=str(base),
+            owner_key=runtime.owner_key,
+        )
+        await finish_messages(session, tenant_id=tenant.tenant_id, message_ids=(str(base),))
+        await session.commit()
+    await bot._replay_missed_messages()
+    await asyncio.gather(*tuple(bot._bg_tasks))
+    bot._handle_mention.assert_awaited_once_with(
+        missed, guild_id, tenant.tenant_id, created_thread_ids=[]
+    )
+    bot._maybe_participate.assert_not_awaited()
+    assert channel.history.call_args.kwargs["limit"] == 100
+    assert channel.history.call_args.kwargs["oldest_first"]

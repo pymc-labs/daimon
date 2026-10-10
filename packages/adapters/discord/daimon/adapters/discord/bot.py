@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import io
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from functools import partial
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
 import aiohttp
@@ -42,6 +42,7 @@ from daimon.adapters.discord.post_transport import (
 )
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.startup_replay import completed_orphan_text
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.adapters.discord.thread_send import safe_thread_send
@@ -94,7 +95,20 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
-from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
+from daimon.core.stores.discord_message_admissions import (
+    claim_message,
+    finish_messages,
+    has_released_messages,
+    replay_channels,
+    unposted_thread_for_message,
+)
+from daimon.core.stores.domain import (
+    Role,
+    TaskContinuationRow,
+    TenantRow,
+    ThreadSessionRow,
+    TurnCardIntentRow,
+)
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
@@ -110,6 +124,7 @@ from daimon.core.stores.thread_sessions import (
     clear_active_turn_if_message_id,
     get_live_thread_session,
     list_orphaned_turns,
+    lock_orphaned_turn,
     mark_turn_active,
     update_watermark,
 )
@@ -122,7 +137,6 @@ from daimon.core.stores.turn_origins import get_active_origin, thread_archive_re
 from daimon.core.thread_naming import naming_text, strip_mentions
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
-from daimon.core.turn.bookkeeping import recover_orphan_marker
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -567,6 +581,7 @@ class DaimonBot(commands.Bot):
         # One-shot guard for the orphaned-turn sweep. on_ready re-fires on every
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
+        self._startup_replay_started = False
         self._orphans_retired: bool = False
         self._orphan_sweep_lock = asyncio.Lock()
         self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
@@ -1149,7 +1164,7 @@ class DaimonBot(commands.Bot):
         async with self.runtime.sessionmaker() as session:
             if self._boot_turn_card_intents is None:
                 self._boot_turn_card_intents = await list_recoverable_turn_card_intents(
-                    session, platform="discord"
+                    session, platform="discord", exclude_live_owners=True
                 )
             orphans = await list_orphaned_turns(session, platform="discord")
         if not orphans:
@@ -1158,61 +1173,101 @@ class DaimonBot(commands.Bot):
             return
         log.info("turn.orphans_found", count=len(orphans))
 
+        async def retire(row: ThreadSessionRow) -> None:
+            async with self.runtime.sessionmaker() as session:
+                locked = await lock_orphaned_turn(session, row=row)
+                if locked is None or locked.active_turn_message_id is None:
+                    return
+                delivered = False
+                try:
+                    async with asyncio.timeout(30):
+                        channel = self.get_channel(
+                            int(locked.thread_id)
+                        ) or await self.fetch_channel(int(locked.thread_id))
+                        if isinstance(channel, discord.abc.Messageable):
+                            message = await channel.fetch_message(
+                                int(locked.active_turn_message_id)
+                            )
+                            result = await completed_orphan_text(self.runtime.anthropic, locked)
+                            transport = DiscordPostTransport(
+                                self, channel, name="Daimon", avatar_url=None, builtin=False
+                            )
+                            embed = discord.Embed(
+                                color=theme.COLOR_RED,
+                                title="Daimon restarted before this request finished.",
+                                description=(
+                                    "This request was interrupted by a restart; reply to retry "
+                                    "or @mention Daimon to try again."
+                                ),
+                            )
+                            # A single idempotent edit also covers a crash after
+                            # Discord accepted it but before the DB commit.
+                            kwargs: dict[str, Any] = {"embed": embed, "view": None}
+                            if result:
+                                kwargs = {
+                                    "content": result
+                                    if len(result) <= 2000
+                                    else "Recovered reply attached.",
+                                    "embed": None,
+                                    "view": None,
+                                }
+                                if len(result) > 2000:
+                                    kwargs["attachments"] = [
+                                        attachment
+                                        for attachment in message.attachments
+                                        if attachment.filename != "recovered-reply.txt"
+                                    ] + [
+                                        discord.File(
+                                            io.BytesIO(result.encode()),
+                                            filename="recovered-reply.txt",
+                                        )
+                                    ]
+                            if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
+                                await transport.edit(message, **kwargs, _allow_replacement=False)
+                            elif not isinstance(message.webhook_id, int):
+                                await message.edit(**kwargs)
+                            else:
+                                raise discord.ClientException("webhook channel unavailable")
+                            delivered = bool(result)
+                            log.info(
+                                "turn.orphan_resumed" if delivered else "turn.orphan_retired",
+                                thread_id=locked.thread_id,
+                                message_id=locked.active_turn_message_id,
+                                frozen_for_s=(
+                                    datetime.now(UTC) - locked.active_turn_started_at
+                                ).total_seconds()
+                                if locked.active_turn_started_at
+                                else None,
+                            )
+                except (
+                    discord.HTTPException,
+                    discord.ClientException,
+                    TimeoutError,
+                    ValueError,
+                ) as err:
+                    log.warning(
+                        "turn.orphan_retire_failed", thread_id=locked.thread_id, error=str(err)
+                    )
+                cleared = await clear_active_turn_if_message_id(
+                    session, id=locked.id, expected_message_id=locked.active_turn_message_id
+                )
+                await session.commit()
+            if cleared and not delivered:
+                await interrupt_orphaned_session(
+                    self.runtime.anthropic, session_id=locked.ma_session_id
+                )
+
+        # Four rows progress independently; a slow provider or unreachable
+        # thread cannot hold every restart notice behind it.
+        queue: asyncio.Queue[ThreadSessionRow] = asyncio.Queue()
         for row in orphans:
-            if row.active_turn_message_id is None:  # pragma: no cover - filtered by the query
-                continue
-            try:
-                channel = self.get_channel(int(row.thread_id)) or await self.fetch_channel(
-                    int(row.thread_id)
-                )
-                if isinstance(channel, discord.abc.Messageable):
-                    message = await channel.fetch_message(int(row.active_turn_message_id))
-                    transport = DiscordPostTransport(
-                        self, channel, name="Daimon", avatar_url=None, builtin=False
-                    )
-                    embed = discord.Embed(
-                        color=theme.COLOR_RED,
-                        title="Daimon restarted before this request finished.",
-                        description="@mention Daimon with your request to try again.",
-                    )
-                    if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
-                        await transport.edit(
-                            message, embed=embed, view=None, _allow_replacement=False
-                        )
-                    elif not isinstance(message.webhook_id, int):
-                        await message.edit(embed=embed, view=None)
-                    log.info(
-                        "turn.orphan_retired",
-                        thread_id=row.thread_id,
-                        message_id=row.active_turn_message_id,
-                        # How long the user stared at a spinner. The only place
-                        # this is visible -- the turn's own logs died with its
-                        # container.
-                        frozen_for_s=(
-                            (datetime.now(UTC) - row.active_turn_started_at).total_seconds()
-                            if row.active_turn_started_at is not None
-                            else None
-                        ),
-                    )
-            except (discord.HTTPException, discord.ClientException, ValueError) as err:
-                log.warning(
-                    "turn.orphan_retire_failed",
-                    thread_id=row.thread_id,
-                    message_id=row.active_turn_message_id,
-                    error=str(err),
-                )
-            cleared = await recover_orphan_marker(
-                self.runtime.sessionmaker,
-                row,
-                clear=clear_active_turn_if_message_id,
-                interrupt=partial(interrupt_orphaned_session, self.runtime.anthropic),
-            )
-            if not cleared:
-                log.info(
-                    "turn.orphan_marker_moved",
-                    thread_id=row.thread_id,
-                    message_id=row.active_turn_message_id,
-                )
+            queue.put_nowait(row)
+
+        async def worker() -> None:
+            while not queue.empty():
+                await retire(queue.get_nowait())
+
+        await asyncio.gather(*(worker() for _ in range(min(4, len(orphans)))))
         self._orphans_retired = True
         self._start_turn_card_recovery()
 
@@ -1251,7 +1306,9 @@ class DaimonBot(commands.Bot):
         assert discord_settings is not None
         cutoff = datetime.now(UTC).timestamp() - discord_settings.turn_card_unrecoverable_after_s
         async with self.runtime.sessionmaker() as session:
-            intents = await list_recoverable_turn_card_intents(session, platform="discord")
+            intents = await list_recoverable_turn_card_intents(
+                session, platform="discord", exclude_live_owners=True
+            )
             live_card_ids = {
                 row.active_turn_message_id
                 for row in await list_orphaned_turns(session, platform="discord")
@@ -1289,6 +1346,12 @@ class DaimonBot(commands.Bot):
             await asyncio.gather(
                 *(worker() for _ in range(min(_TURN_CARD_RECOVERY_CONCURRENCY, len(intents))))
             )
+            async with self.runtime.sessionmaker() as session:
+                released = await has_released_messages(
+                    session, intent_ids=(intent.id for intent in intents)
+                )
+            if released:
+                self._spawn(self._replay_missed_messages())
 
     async def _reconcile_turn_card_intent(
         self,
@@ -1411,6 +1474,9 @@ class DaimonBot(commands.Bot):
         sync the command tree. NO archive-on-absence."""
         log.info("bot_ready", user=str(self.user))
         await self._retire_orphaned_turns()
+        if not self._startup_replay_started:
+            self._startup_replay_started = True
+            self._spawn(self._replay_missed_messages())
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
         known_tenants = {tr.external_id: tr for tr in tenants}
         recovered_tenant_ids: set[uuid.UUID] = set()
@@ -1487,6 +1553,70 @@ class DaimonBot(commands.Bot):
             log.info("tree_synced_global")
         except discord.HTTPException as exc:
             log.warning("tree_sync_global_failed", error=str(exc))
+
+    async def _replay_missed_messages(self) -> None:
+        """Bound history reads, then send missed inputs through normal message gates."""
+        settings = self.runtime.settings.discord
+        if settings is None or settings.startup_replay_minutes == 0:
+            return
+        cutoff = datetime.now(UTC) - timedelta(minutes=settings.startup_replay_minutes)
+        for guild in self.guilds:
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+            async with self.runtime.sessionmaker() as session:
+                candidates = await replay_channels(
+                    session,
+                    tenant_id=tenant_id,
+                    cutoff=cutoff,
+                    limit=settings.startup_replay_channels_per_guild,
+                )
+            for channel_id, watermark in candidates:
+                try:
+                    async with asyncio.timeout(30):
+                        channel = self.get_channel(int(channel_id)) or await self.fetch_channel(
+                            int(channel_id)
+                        )
+                        if (
+                            not isinstance(channel, (discord.TextChannel, discord.Thread))
+                            or channel.guild.id != guild.id
+                        ):
+                            continue
+                        after = max(
+                            discord.utils.time_snowflake(cutoff), int(watermark) if watermark else 0
+                        )
+                        messages = [
+                            message
+                            async for message in channel.history(
+                                after=discord.Object(id=after),
+                                oldest_first=True,
+                                limit=settings.startup_replay_messages_per_channel,
+                            )
+                        ]
+
+                    async def dispatch(messages: list[discord.Message]) -> None:
+                        for message in messages:
+                            # Preserve each channel's order; other channels do
+                            # not wait for a long turn to finish here.
+                            await self.on_message(message, startup_replay=True)
+
+                    self._spawn(dispatch(messages))
+                    log.info(
+                        "startup_replay.channel_scanned",
+                        guild_id=str(guild.id),
+                        channel_id=channel_id,
+                        messages=len(messages),
+                    )
+                except (
+                    discord.HTTPException,
+                    discord.ClientException,
+                    TimeoutError,
+                    ValueError,
+                    SQLAlchemyError,
+                ) as err:
+                    log.warning(
+                        "startup_replay.channel_failed",
+                        channel_id=channel_id,
+                        error_type=type(err).__name__,
+                    )
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Async two-phase provisioning: provision (pending) → immediate welcome →
@@ -1750,7 +1880,7 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
         )
 
-    async def on_message(self, message: discord.Message) -> None:
+    async def on_message(self, message: discord.Message, *, startup_replay: bool = False) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
         discord_settings = self.runtime.settings.discord
@@ -1836,7 +1966,7 @@ class DaimonBot(commands.Bot):
         ):
             # Not a mention. The only other way a message starts a turn is
             # organic thread participation, which has its own gates.
-            if is_participation_candidate(
+            if not startup_replay and is_participation_candidate(
                 # No Discord settings block means no bot to follow anything.
                 deployment_mode=(
                     self.runtime.settings.thread_participation.mode
@@ -1881,6 +2011,8 @@ class DaimonBot(commands.Bot):
                 state=post_state.value,
             )
             return
+        claimed_message = False
+        queued_message = False
         try:
             tr: TenantRow | None = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
             if tr is None or tr.archived_at is not None:
@@ -1899,6 +2031,19 @@ class DaimonBot(commands.Bot):
                 await message.channel.send(_setting_up_message(bot_display_name))
                 return
             # Only 'ready' proceeds.
+
+            async with self.runtime.sessionmaker() as session:
+                claimed = await claim_message(
+                    session,
+                    tenant_id=tenant_id,
+                    channel_id=str(message.channel.id),
+                    message_id=str(message.id),
+                    owner_key=self.runtime.owner_key,
+                )
+                await session.commit()
+            if not claimed:
+                return
+            claimed_message = True
 
             log.info(
                 "mention_received",
@@ -1922,6 +2067,7 @@ class DaimonBot(commands.Bot):
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
             if thread_id in self._processing:
+                queued_message = True
                 await self._queue_behind_inflight_turn(thread_id, message)
                 return
 
@@ -2032,6 +2178,21 @@ class DaimonBot(commands.Bot):
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
         except Exception as exc:  # on_message event-handler boundary
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
+        finally:
+            if claimed_message and not queued_message:
+                await self._finish_admitted_messages(tenant_id, (str(message.id),))
+
+    async def _finish_admitted_messages(
+        self, tenant_id: uuid.UUID, message_ids: tuple[str, ...]
+    ) -> None:
+        # Cancellation before the durable card intent must leave the input
+        # pending for the next process. Posted intents already mark it handled.
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            return
+        async with self.runtime.sessionmaker() as session:
+            await finish_messages(session, tenant_id=tenant_id, message_ids=message_ids)
+            await session.commit()
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
         """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
@@ -2099,6 +2260,7 @@ class DaimonBot(commands.Bot):
                 tenant_id,
                 content_override=_compose_queued_content(messages),
                 attachments_override=[a for m in messages for a in m.attachments],
+                admitted_message_ids=tuple(str(m.id) for m in messages),
             )
 
         await self._thread_queue.drain(
@@ -2116,6 +2278,7 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
         unprompted: bool = False,
     ) -> None:
         """Orchestrate thread creation/lookup, session lifecycle, and turn execution.
@@ -2149,6 +2312,7 @@ class DaimonBot(commands.Bot):
                 content_override=content_override,
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
+                admitted_message_ids=admitted_message_ids,
                 unprompted=unprompted,
             )
         except _ThreadOpenFailed as exc:
@@ -2174,6 +2338,9 @@ class DaimonBot(commands.Bot):
             )
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
         finally:
+            await self._finish_admitted_messages(
+                tenant_id, admitted_message_ids or (str(message.id),)
+            )
             # One slot per turn: a follow-up drained after this re-enters
             # admission instead of keeping the slot (wait_for_slot).
             release_turn_slot()
@@ -2588,6 +2755,7 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             thread_id=row.thread_id,
             make_lifecycle=_make_lifecycle,
+            owner_key=self.runtime.owner_key,
         )
         self._track_live_turn_card(turn_card_intent.id)
 
@@ -2611,6 +2779,7 @@ class DaimonBot(commands.Bot):
                     id=prepared.mapping_id,
                     active_turn_message_id=lifecycle.final_message_id,
                     now=datetime.now(UTC),
+                    owner_key=self.runtime.owner_key,
                 )
                 await session.commit()
 
@@ -2856,6 +3025,7 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
         unprompted: bool = False,
     ) -> None:
         with observe_turn(
@@ -2871,6 +3041,7 @@ class DaimonBot(commands.Bot):
                 content_override=content_override,
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
+                admitted_message_ids=admitted_message_ids,
                 unprompted=unprompted,
             )
 
@@ -2883,6 +3054,7 @@ class DaimonBot(commands.Bot):
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
         unprompted: bool = False,
     ) -> None:
         """Core orchestration logic extracted for clean error boundary.
@@ -3062,6 +3234,22 @@ class DaimonBot(commands.Bot):
         if thread is None:
 
             async def _open_thread() -> discord.Thread:
+                async with self.runtime.sessionmaker() as session:
+                    unposted_thread_id = await unposted_thread_for_message(
+                        session, tenant_id=tenant_id, message_id=str(message.id)
+                    )
+                if unposted_thread_id is not None:
+                    existing = self.get_channel(
+                        int(unposted_thread_id)
+                    ) or await self.fetch_channel(int(unposted_thread_id))
+                    if (
+                        isinstance(existing, discord.Thread)
+                        and existing.parent_id == message.channel.id
+                    ):
+                        self._processing.add(existing.id)
+                        if created_thread_ids is not None:
+                            created_thread_ids.append(existing.id)
+                        return existing
                 # Name before creation to avoid a Discord rename system message.
                 thread_name = f"Chat with {agent.name}"
                 naming = self.runtime.settings.thread_naming
@@ -3184,7 +3372,9 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker,
             tenant_id=tenant_id,
             thread_id=str(thread.id),
+            message_ids=admitted_message_ids or (str(message.id),),
             make_lifecycle=_make_lifecycle,
+            owner_key=self.runtime.owner_key,
         )
         self._track_live_turn_card(turn_card_intent.id)
         turn_send = recorder.sender(
@@ -3397,6 +3587,7 @@ class DaimonBot(commands.Bot):
                     id=prepared.mapping_id,
                     active_turn_message_id=lifecycle.final_message_id,
                     now=datetime.now(UTC),
+                    owner_key=self.runtime.owner_key,
                 )
                 await _at_session.commit()
 

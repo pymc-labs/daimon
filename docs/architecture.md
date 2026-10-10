@@ -208,6 +208,32 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+On gateway readiness, Discord scans recently active channels and threads for
+missed addressed messages. The window and per-guild/channel limits are
+configurable (`discord.startup_replay_*`). Replayed messages use the same
+protection, mention/reply, provisioning and admission gates as live events.
+The `discord_message_admissions` ledger deduplicates each tenant/message ID;
+queued follow-ups remain pending until a card intent is committed or the
+request reaches a visible terminal outcome. A PostgreSQL session advisory
+lock identifies each process for its lifetime, using one dedicated database
+connection outside the turn connection pool. A guard stops the adapter if this connection is lost. Another worker can reclaim a pending message only after that
+owner's lock disappears. Inputs whose card intent was committed before a crash
+but never posted are requeued only after two complete no-card history reads
+separated by a minute; the ledger reset and intent retirement commit together. Turn markers and card intents also carry the owner,
+so startup never retires another live worker's cards.
+
+Orphan recovery runs at most four rows concurrently. Successful completed
+provider text is delivered by editing the existing card, with a text attachment
+for replies over Discord's message length limit. It verifies the provider's
+latest user message belongs to the interrupted turn before recovering its
+answer. Other orphaned turns edit that card to explain the restart and invite
+a retry, then interrupt the old session. Provider result reads are bounded to
+five seconds and card fetch/edit work to thirty seconds per row. Recovery
+serializes edits across workers and conditionally clears the original marker;
+a newer turn keeps its marker and its running session. Recovery never sends
+a new model request. Generated-file recovery and resuming a still-running
+provider session are not part of this text-recovery path.
+
 Restart recovery keeps a card intent active when a pending card cannot be
 edited. It does not post a replacement status card, because the original
 button could remain. A definite missing-webhook, missing-token, permission or

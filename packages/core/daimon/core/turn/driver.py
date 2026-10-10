@@ -71,7 +71,12 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.errors import TurnError
-from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
+from daimon.core.ma import (
+    SessionEvent,
+    replay_events,
+    send_interrupt_and_wait,
+    terminal_stop_reason,
+)
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
     build_confirmation_events,
@@ -1206,6 +1211,11 @@ def _events_since_last_turn_boundary(
         if _ends_turn(ev):
             return current_events[: i + 1]
     return current_events
+
+
+def current_turn_events(events: list[SessionEvent]) -> list[SessionEvent]:
+    """Select the latest turn for startup recovery without replaying old answers."""
+    return _events_since_last_turn_boundary(events, tool_confirmation=_DEFAULT_TOOL_CONFIRMATION)
 
 
 def _note_accepted(events: Sequence[object], accepted: set[str]) -> None:

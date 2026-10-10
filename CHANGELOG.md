@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord replays missed mentions and replies from recently active channels after a restart, with durable message deduplication across workers. Interrupted turns edit their existing card once; completed provider replies are recovered without starting another turn.
+
 - A rejected notebook re-publish keeps the previous source, so its link still opens the original notebook after an idle stop or host restart.
 - When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
 - Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.

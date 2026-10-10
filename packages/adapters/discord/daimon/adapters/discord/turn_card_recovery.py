@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import structlog
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.core.stores.discord_message_admissions import finish_messages, release_unposted_messages
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.turn_card_intents import (
     create_turn_card_intent,
@@ -60,6 +61,8 @@ async def post_initial_turn_card(
     *,
     tenant_id: UUID,
     thread_id: str,
+    message_ids: tuple[str, ...] = (),
+    owner_key: int | None = None,
     make_lifecycle: Callable[
         [UUID, Callable[[discord.Message], Awaitable[None]]], DiscordTurnLifecycle
     ],
@@ -81,6 +84,10 @@ async def post_initial_turn_card(
             platform="discord",
             thread_id=thread_id,
             turn_token=uuid4(),
+            owner_key=owner_key,
+        )
+        await finish_messages(
+            session, tenant_id=tenant_id, message_ids=message_ids, intent_id=intent.id
         )
         await session.commit()
     log.info(
@@ -114,6 +121,7 @@ async def retire_terminal_turn_card(
     expected_message_id: str | None,
     no_post_confirmed: bool = False,
     allow_prepared_without_message: bool = False,
+    requeue_unposted_messages: bool = False,
 ) -> bool:
     """Retire by response ID, or explicitly permit retirement of a prepared NULL-ID row.
 
@@ -128,6 +136,8 @@ async def retire_terminal_turn_card(
             retired = await retire_turn_card_intent(
                 session, id=intent_id, expected_message_id=expected_message_id
             )
+            if retired and requeue_unposted_messages and expected_message_id is None:
+                await release_unposted_messages(session, intent_id=intent_id)
             await session.commit()
         return retired
     except SQLAlchemyError:
@@ -455,6 +465,7 @@ async def reconcile_turn_card_intent(
                 intent_id=intent.id,
                 expected_message_id=None,
                 allow_prepared_without_message=True,
+                requeue_unposted_messages=True,
             )
             return
 

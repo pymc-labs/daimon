@@ -535,6 +535,7 @@ class ThreadSession(Base):
     # 'live' on every healthy thread forever. Slack needs the channel because a
     # Slack message is addressed by (channel, ts); Discord leaves it NULL since
     # a Discord message id is globally addressable on its own.
+    active_turn_owner_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     active_turn_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     active_turn_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -585,6 +586,7 @@ class TurnCardIntent(Base):
     # NULL while prepared: the platform accepted no response yet, or the
     # process died before it could persist the response's message identifier.
     message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'prepared'"))
     recovery_failures: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
@@ -3148,5 +3150,25 @@ class PlatformChannelName(Base):
     channel_id: Mapped[str] = mapped_column(Text)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DiscordMessageAdmission(Base):
+    """Durable addressed-message admission, shared by gateway and startup replay."""
+
+    __tablename__ = "discord_message_admissions"
+    __table_args__ = (Index("ix_discord_admissions_activity", "tenant_id", "created_at"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    message_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("turn_card_intents.id", ondelete="SET NULL"), nullable=True
+    )
+    handled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

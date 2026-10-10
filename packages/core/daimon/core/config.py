@@ -378,6 +378,32 @@ class DiscordSettings(BaseModel):
     bot_token: SecretStr = Field(
         description="Discord bot token. Required to run the Discord adapter.",
     )
+    startup_replay_minutes: int = Field(
+        default=15,
+        ge=0,
+        le=60,
+        description=(
+            "Recent Discord activity window in minutes scanned on startup for "
+            "missed mentions and replies. Set 0 to disable catch-up."
+        ),
+    )
+    startup_replay_channels_per_guild: int = Field(
+        default=25,
+        ge=1,
+        le=100,
+        description=(
+            "Maximum recently active Discord channels and threads scanned per guild on startup."
+        ),
+    )
+    startup_replay_messages_per_channel: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum recent Discord messages scanned per channel or thread on startup. "
+            "Current message gates and durable admissions prevent duplicate turns."
+        ),
+    )
     thread_open_notice_after_s: float = Field(
         default=3.0,
         ge=0,

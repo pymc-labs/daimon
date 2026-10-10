@@ -799,7 +799,12 @@ async def test_boot_recovery_needs_two_complete_misses_before_retiring_null_id(
         "the second complete absence read must occur after 60 monotonic seconds"
     )
     assert retired == [
-        {"intent_id": _TURN_ID, "expected_message_id": None, "allow_prepared_without_message": True}
+        {
+            "intent_id": _TURN_ID,
+            "expected_message_id": None,
+            "allow_prepared_without_message": True,
+            "requeue_unposted_messages": True,
+        }
     ], "the recovery policy may retire only the still-NULL prepared intent"
 
 
@@ -1033,3 +1038,89 @@ async def test_unprompted_terminal_without_post_retires_prepared_intent(
         expected_message_id=None,
         allow_prepared_without_message=True,
     ), "a known no-post terminal can retire its prepared row"
+
+
+async def test_no_card_crash_returns_the_linked_message_to_replay_atomically(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.discord_message_admissions import (
+        claim_message,
+        finish_messages,
+        has_released_messages,
+        unposted_thread_for_message,
+    )
+
+    tenant = await make_tenant(db_session)
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
+    )
+    intent = await create_turn_card_intent(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="200",
+        turn_token=uuid4(),
+        owner_key=11,
+    )
+    await finish_messages(
+        db_session, tenant_id=tenant.id, message_ids=("200",), intent_id=intent.id
+    )
+    await db_session.commit()
+    assert not await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
+    )
+    await db_session.commit()
+    # This permission is granted by reconcile_turn_card_intent only after two
+    # complete no-match history reads at least sixty monotonic seconds apart.
+    assert await retire_terminal_turn_card(
+        db_session_factory,
+        intent_id=intent.id,
+        expected_message_id=None,
+        allow_prepared_without_message=True,
+        requeue_unposted_messages=True,
+    )
+    assert await has_released_messages(db_session, intent_ids=(intent.id,))
+    assert (
+        await unposted_thread_for_message(db_session, tenant_id=tenant.id, message_id="200")
+        == "200"
+    )
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
+    )
+    await db_session.commit()
+
+
+async def test_a_recorded_card_never_releases_its_input_for_another_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.discord_message_admissions import (
+        claim_message,
+        finish_messages,
+        has_released_messages,
+    )
+
+    tenant = await make_tenant(db_session)
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
+    )
+    intent = await create_turn_card_intent(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="200", turn_token=uuid4()
+    )
+    await finish_messages(
+        db_session, tenant_id=tenant.id, message_ids=("200",), intent_id=intent.id
+    )
+    await record_turn_card_message(db_session, id=intent.id, message_id="300")
+    await db_session.commit()
+    assert not await retire_terminal_turn_card(
+        db_session_factory,
+        intent_id=intent.id,
+        expected_message_id=None,
+        allow_prepared_without_message=True,
+        requeue_unposted_messages=True,
+    )
+    assert not await has_released_messages(db_session, intent_ids=(intent.id,))
+    assert not await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=22
+    )
