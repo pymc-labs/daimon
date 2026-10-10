@@ -103,6 +103,11 @@ the zero ledger debits and null turn outcomes already written are not repaired.
 
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
 $0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.10.
+Haiku 5.5 is priced by prompt length: $0.10, $0.50, $0.125 and $0.01 for a
+request whose prompt is up to 100,000 tokens, and $0.50, $2.50, $0.625 and
+$0.05 above that. The prompt counts input, cache reads and cache writes, and
+each request is priced on its own (`ModelRates.long_context`,
+`LONG_CONTEXT_PROMPT_TOKENS`).
 `AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
 `AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
 until the test table and the date move with it, and

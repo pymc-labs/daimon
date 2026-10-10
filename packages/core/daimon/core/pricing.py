@@ -25,6 +25,15 @@ class ModelRates:
     output: float
     cache_write: float
     cache_read: float
+    # Rates for a request whose prompt is over LONG_CONTEXT_PROMPT_TOKENS, for
+    # models priced by prompt length (Haiku 5.5). None: one rate at any length.
+    long_context: ModelRates | None = None
+
+
+# Haiku 5.5's long-context threshold. The pricing page counts a request's
+# prompt as all its input tokens, cache reads and cache writes included, and
+# prices each request on its own.
+LONG_CONTEXT_PROMPT_TOKENS = 100_000
 
 
 # Agent models — what an agent's `model` may be set to. List price in USD per
@@ -34,7 +43,7 @@ class ModelRates:
 # provider cost. `test_pricing.py` pins every row and has an opt-in live check
 # (`pytest -m contract packages/core/tests/test_pricing.py`) against the page.
 AGENT_PRICING_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
-AGENT_PRICING_CHECKED_ON = "2026-10-08"
+AGENT_PRICING_CHECKED_ON = "2026-10-10"
 AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -43,6 +52,13 @@ AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-sonnet-5-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.10),
     "claude-sonnet-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.20),
     "claude-sonnet-4-6": ModelRates(input=3.0, output=15.0, cache_write=3.75, cache_read=0.30),
+    "claude-haiku-5-5": ModelRates(
+        input=0.10,
+        output=0.50,
+        cache_write=0.125,
+        cache_read=0.01,
+        long_context=ModelRates(input=0.50, output=2.50, cache_write=0.625, cache_read=0.05),
+    ),
     "claude-haiku-4-5": ModelRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.10),
 }
 
@@ -104,6 +120,11 @@ def cost_of(
     """
     if rates is None:
         return None
+    prompt_tokens = (
+        usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+    )
+    if rates.long_context is not None and prompt_tokens > LONG_CONTEXT_PROMPT_TOKENS:
+        rates = rates.long_context
     return (
         usage.input_tokens * rates.input / 1_000_000
         + usage.output_tokens * rates.output / 1_000_000
