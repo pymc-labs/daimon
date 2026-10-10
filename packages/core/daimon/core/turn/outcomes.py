@@ -113,6 +113,21 @@ class TurnObservation:
         default_factory=lambda: dict[tuple[str, str], UsageSample]()
     )
 
+    def check_root_usage(self, root_turn_id: str, values: tuple[UsageObservation, ...]) -> None:
+        """Validate a delegated batch before its transaction, without capture."""
+        existing = tuple(sample.usage for sample in self._samples.values())
+        for value in (*existing, *values):
+            if (
+                value.session.provider == "anthropic"
+                or value.session.tenant_id != str(self.tenant_id)
+                or (self.session_id is not None and value.session.id != self.session_id)
+                or value.turn_id != root_turn_id
+            ):
+                raise ValueError("root usage differs from the active outcome attribution")
+        for value in values:
+            existing = replace_observation(existing, value)
+        disjoint_observations(existing)
+
     def note_usage(
         self,
         event: BetaManagedAgentsSpanModelRequestEndEvent | UsageObservation,
@@ -120,6 +135,7 @@ class TurnObservation:
         metered: bool = False,
         provider_price: ProviderPrice | None = None,
         infrastructure_usd: Decimal | None = None,
+        reuse_provider_price: bool = True,
     ) -> None:
         if isinstance(event, UsageObservation) and event.session.provider != "anthropic":
             if event.session.kind != "session" or event.session.tenant_id != (
@@ -140,7 +156,9 @@ class TurnObservation:
                 return
             key = (event.session.id, event.id)
             prior = self._samples.get(key)
-            price = provider_price or (prior.provider_price if prior is not None else None)
+            price = provider_price or (
+                prior.provider_price if prior is not None and reuse_provider_price else None
+            )
             cost = (
                 provider_cost_of(event, price, infrastructure_usd=infrastructure_usd)
                 if price is not None

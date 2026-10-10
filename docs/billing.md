@@ -783,3 +783,33 @@ it cannot certify exact spend or zero usage. Actual model usage, dated prices
 and container/session charges must still be measured separately. Missing or
 changed configured caps refuse before host input, while omitted caps preserve
 existing behavior.
+
+OpenAI delegated usage has an offline accounting API in
+`daimon.core.usage_delegation`. The admitted host supplies a frozen, bounded
+inventory of native turn IDs, subagent IDs and proven ancestry to one root.
+Native child observation IDs and meters stay intact; the accounting `turn_id`
+is fixed to that root and accounting binding. A child cannot move to another root on replay, restart or
+correction. Nested children remain separate work, including later turns from a
+reused subagent. Missing batch members, invalid ancestry, overlapping aggregates
+and omission of previously recorded work are refused before settlement.
+
+Inventory completeness and disjoint model-work coverage default to unverified.
+The host must establish both from authoritative native records before setting
+the corresponding scope decisions. A populated tree, exhausted cursor or
+subagent creation event alone is not proof. The current OpenAI collector does
+not establish that inventory or verified child model context, so this API does
+not lift G1's delegation-disabled restriction. Native collection and enablement
+remain a separate owner follow-up; no provider parent-turn field is assumed.
+
+Every root and child observation enters one transaction, including null usage.
+Unknown disjointness, inventory completeness, child model/tariff, token counts
+or actual infrastructure leaves unsatisfied observations durably pending and
+the root outcome cost unverified. Children never inherit a parent's tariff.
+The explicitly measured shared session/environment and auxiliary-charge total
+is charged once on the root; children contribute their independently priced
+model work. No missing infrastructure is filled with zero. Same-revision retries
+can settle newly verified context; changed settled amounts or newly attributed
+models require a higher observation revision. Capture follows successful
+commit, so a batch failure rolls back every debit and emits no usage sample.
+Gemini Flash currently retains interaction usage; this API refuses to invent
+independent child meters or add delegated costs to potentially inclusive totals.
