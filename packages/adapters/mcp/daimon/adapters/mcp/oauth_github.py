@@ -967,16 +967,17 @@ def build_oauth_github_routes(
             )
             # A staged or inactive repo, or one the agent still needs more of,
             # can be ticked again; only a repo it fully has is settled.
-            missing_access = {
-                missing.full_name.casefold(): missing.needs_write
-                for missing in (
-                    await github_connect.missing_required_repos(
-                        session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
-                    )
-                    if invitation.agent_id is not None
-                    else []
+            missing_access: dict[str, bool] = {}
+            for missing in (
+                await github_connect.missing_required_repos(
+                    session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
                 )
-            }
+                if invitation.agent_id is not None
+                else []
+            ):
+                # Needing write for any use of the repo means it needs write.
+                key = missing.full_name.casefold()
+                missing_access[key] = missing_access.get(key, False) or missing.needs_write
             already_added = frozenset(
                 repo.repo_id
                 for repo in agent_repos

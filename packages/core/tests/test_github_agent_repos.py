@@ -12,6 +12,7 @@ from daimon.core._models import (
     AgentGithubBinding,
     AgentGitHubGrant,
     AgentRepoBinding,
+    AgentSkillRepoCredential,
     GitHubConnectInvitation,
     PlatformPrincipal,
     TenantGitHubRepo,
@@ -882,3 +883,41 @@ async def test_panel_sends_a_pinned_agent_with_a_server_wide_grant_to_the_operat
         db_session, tenant_id=world.tenant_id, agent_id=team_a, agent_name="TeamA"
     )
     assert panel.saved_state
+
+
+@pytest.mark.asyncio
+async def test_a_repo_that_is_working_and_skill_repo_is_missing_once_with_write(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    team_a = world.agent("ma_team_a")
+    await _saved_key_and_working_repo(db_session, world, team_a)
+    db_session.add(
+        AgentSkillRepoCredential(
+            tenant_id=world.tenant_id,
+            agent_id=team_a,
+            repo_url="team-a/app",
+            default_branch="main",
+            ma_secret_ref="saved-key",
+            proof_kind="private",
+        )
+    )
+    await db_session.flush()
+    assert await github_connect.missing_required_repos(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a
+    ) == [github_connect.MissingRepo(full_name="team-a/app", needs_write=True)]
+    # Read only on it still leaves the agent waiting, and says it needs write.
+    pending = await _connect(
+        db_session,
+        world,
+        requester_id=world.channel_admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101,),
+        manages=True,
+        access="read",
+    )
+    assert pending == github_connect.ConfirmedActivation(
+        status="update_pending",
+        missing_repos=(github_connect.MissingRepo(full_name="team-a/app", needs_write=True),),
+    )

@@ -954,8 +954,12 @@ async def test_channel_admin_completes_connect_for_their_agent(
     async def missing(
         _session: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
     ) -> list[github_connect.MissingRepo]:
-        # Its working repo, which it has read only and needs to change.
-        return [github_connect.MissingRepo(full_name="ana/thesis", needs_write=True)]
+        # Its working repo, which it needs to change, listed again as a skill repo:
+        # needing write for either use means it needs write.
+        return [
+            github_connect.MissingRepo(full_name="ana/thesis", needs_write=True),
+            github_connect.MissingRepo(full_name="ana/thesis", needs_write=False),
+        ]
 
     monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
     monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")

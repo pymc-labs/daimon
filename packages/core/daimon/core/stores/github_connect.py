@@ -797,7 +797,18 @@ async def _missing_required_repos(
     for skill in skill_repos:
         if skill.proof_kind != "public" and skill.repo_url.casefold() not in connected:
             missing.append(MissingRepo(full_name=skill.repo_url, needs_write=False))
-    return missing
+    # One repo can be both the working repo and a skill repo: list it once,
+    # needing write if either use does.
+    merged: dict[str, MissingRepo] = {}
+    for repo in missing:
+        key = repo.full_name.casefold()
+        seen = merged.get(key)
+        merged[key] = (
+            repo
+            if seen is None
+            else seen.model_copy(update={"needs_write": seen.needs_write or repo.needs_write})
+        )
+    return list(merged.values())
 
 
 async def missing_required_repos(
