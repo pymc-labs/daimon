@@ -126,7 +126,12 @@ def apply(state: TurnState, event: SessionEvent) -> TurnState:
                 cache_read_input_tokens=t.cache_read_input_tokens + u.cache_read_input_tokens,
                 output_tokens=t.output_tokens + u.output_tokens,
             )
-            return dataclasses.replace(state, usage_totals=new_totals, seen_event_ids=seen)
+            return dataclasses.replace(
+                state,
+                usage_totals=new_totals,
+                usage_requests=(*state.usage_requests, u),
+                seen_event_ids=seen,
+            )
         case _:
             return dataclasses.replace(state, seen_event_ids=seen)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 import pytest_asyncio
 from daimon.core._models import UsageEvent
 from daimon.core.stores import usage_events
@@ -679,3 +680,46 @@ async def test_usage_events_tenant_isolation(db_session: AsyncSession) -> None:
         db_session, tenant_id=tenant_a.id, since=past
     )
     assert cost_a_after == cost_a, "tenant_b write must not affect tenant_a reads"
+
+
+@pytest.mark.parametrize(
+    "counts,expected",
+    [
+        ([(60_000, 0, 0, 0), (60_000, 0, 0, 0)], 0.012),
+        ([(60_000, 0, 0, 0), (100_001, 0, 0, 0)], 0.0560005),
+        ([(0, 100_000, 0, 0), (0, 100_001, 0, 0)], 0.075000625),
+        ([(50_000, 0, 50_000, 1000), (60_000, 0, 40_001, 1000)], 0.04050005),
+    ],
+)
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-haiku-5-5-20261001"])
+async def test_user_report_prices_requests_before_aggregating(
+    db_session: AsyncSession, counts: list[tuple[int, int, int, int]], expected: float, model: str
+) -> None:
+    tenant = await make_tenant(db_session)
+    for input_tokens, cache_write, cache_read, output_tokens in counts:
+        await make_usage_event(
+            db_session,
+            tenant=tenant,
+            platform_user_id="u",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
+        )
+    since = datetime.now(UTC) - timedelta(days=1)
+    report = await usage_events.costs_by_user_in_tenant_since(
+        db_session, tenant_id=tenant.id, since=since
+    )
+    user_cost = await usage_events.cost_for_user_in_tenant_since(
+        db_session,
+        tenant_id=tenant.id,
+        platform_user_id="u",
+        since=since,
+    )
+    tenant_cost = await usage_events.cost_for_tenant_since(
+        db_session, tenant_id=tenant.id, since=since
+    )
+    assert report == {"u": pytest.approx(expected)}
+    assert user_cost == pytest.approx(expected)
+    assert tenant_cost == pytest.approx(expected)

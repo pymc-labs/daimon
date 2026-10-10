@@ -592,3 +592,41 @@ async def test_turn_debit_is_dated_by_the_model_call_not_the_write(
     )
     [debit] = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
     assert debit.occurred_at == processed_at, "the debit should carry event.processed_at"
+
+
+@pytest.mark.parametrize(
+    "counts,expected_debits",
+    [
+        ([60_000, 60_000], [Decimal("-0.006"), Decimal("-0.006")]),
+        ([60_000, 100_001], [Decimal("-0.006"), Decimal("-0.050000")]),
+    ],
+)
+async def test_haiku_tiered_ledger_debits_remain_per_request_and_replay_safe(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    counts: list[int],
+    expected_debits: list[Decimal],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    for index, count in enumerate(counts):
+        event = BetaManagedAgentsSpanModelRequestEndEvent(
+            id=f"haiku-{index}",
+            type="span.model_request_end",
+            model_request_start_id=f"start-{index}",
+            model_usage=ma_model_usage(input_tokens=count, output_tokens=0),
+            processed_at=datetime.now(UTC),
+        )
+        for _ in range(2):
+            await usage_recording.record_turn_usage(
+                sessionmaker=db_session_factory,
+                tenant_id=tenant.id,
+                platform_user_id="u",
+                managed_session_id="tier-test",
+                model_id="claude-haiku-5-5",
+                event=event,
+                pricing=MODEL_PRICING["claude-haiku-5-5"],
+            )
+    entries = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert sorted(entry.delta_usd for entry in entries) == sorted(expected_debits)
+    assert len(await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)) == len(counts)

@@ -202,42 +202,23 @@ async def costs_by_user_in_tenant_since(
 ) -> dict[str, float]:
     """Per-user spend for a tenant since `since`. EXCLUDES NULL platform_user_id.
 
-    GROUP BY (platform_user_id, model) so cost_of can reprice each model bucket
-    in Python; results are folded back to a per-user total. Pair with
-    `turns_by_user_in_tenant_since` to assemble per-user (cost, turns) rows —
-    turn counts cannot be derived from this aggregate without double-counting
-    sessions that span multiple models.
+    Price each request before summing: combining token counts first can move
+    separate short requests into a model's expensive prompt-size tier. Pair
+    with `turns_by_user_in_tenant_since` for per-user (cost, turns) rows.
     """
-    stmt = (
-        select(
-            UsageEvent.platform_user_id,
-            UsageEvent.model,
-            func.sum(UsageEvent.input_tokens).label("in_tok"),
-            func.sum(UsageEvent.output_tokens).label("out_tok"),
-            func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
-            func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
-        )
-        .where(
-            UsageEvent.tenant_id == tenant_id,
-            UsageEvent.platform_user_id.is_not(None),
-            UsageEvent.occurred_at >= since,
-        )
-        .group_by(UsageEvent.platform_user_id, UsageEvent.model)
+    stmt = select(UsageEvent).where(
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id.is_not(None),
+        UsageEvent.occurred_at >= since,
     )
     result = await session.execute(stmt)
     per_user: dict[str, float] = {}
-    for row in result.all():
+    for row in result.scalars():
         user_id = row.platform_user_id
         if user_id is None:
             continue
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=int(row.in_tok or 0),
-            output_tokens=int(row.out_tok or 0),
-            cache_creation_input_tokens=int(row.cw_tok or 0),
-            cache_read_input_tokens=int(row.cr_tok or 0),
-        )
-        c = cost_of(usage, MODEL_PRICING.get(row.model))
-        per_user[user_id] = per_user.get(user_id, 0.0) + (c if c is not None else 0.0)
+        cost = _sum_cost([UsageEventRow.model_validate(row, from_attributes=True)])
+        per_user[user_id] = per_user.get(user_id, 0.0) + cost
     return per_user
 
 

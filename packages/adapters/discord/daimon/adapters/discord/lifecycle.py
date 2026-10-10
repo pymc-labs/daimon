@@ -24,9 +24,6 @@ from typing import Any
 
 import structlog
 from anthropic.types import RawMessageStreamEvent
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.adapters.discord.embed import (
     EmbedData,
     EmbedEvent,
@@ -46,7 +43,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.ops_alerts import alert_ops
-from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.pricing import MODEL_PRICING, cost_of_requests, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
@@ -385,24 +382,12 @@ class DiscordTurnLifecycle:
         # else: within debounce window — skip
 
     def _apply_usage(self, state: TurnState) -> None:
-        """Price the turn's accumulated token totals onto the embed state before a
-        terminal flush.
+        """Price each deduplicated request, then sum for the terminal summary.
 
-        Reconstructs a per-turn ``BetaManagedAgentsSpanModelUsage`` from the four
-        cache-split totals and prices it through the same ``cost_of`` the billing
-        ledger uses, so the footer cost matches the ledger to the cent. An unpriced
-        model yields ``cost_of`` -> None -> ``cost_str`` None -> the footer omits
-        the cost.
+        Separate short prompts retain their tier even when the turn's token
+        totals exceed the threshold. An unpriced model omits the cost.
         """
-        t = state.usage_totals
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=t.input_tokens,
-            cache_creation_input_tokens=t.cache_creation_input_tokens,
-            cache_read_input_tokens=t.cache_read_input_tokens,
-            output_tokens=t.output_tokens,
-            speed="standard",
-        )
-        cost = cost_of(usage, MODEL_PRICING.get(self._model_id))
+        cost = cost_of_requests(state.usage_requests, MODEL_PRICING.get(self._model_id))
         if cost is not None:
             # What the tenant is debited, markup included, so `used` matches `left`.
             cost = float(debit_amount(cost, markup=self._markup))

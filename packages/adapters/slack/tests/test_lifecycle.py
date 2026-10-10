@@ -12,7 +12,7 @@ Task 1 (debounce / registry / usage):
     (debounce elapsed).
   - The first flush's registration rides post_initial(); a later
     render-tick update does not re-register.
-  - _apply_usage prices usage_totals into cost_str.
+  - _apply_usage prices individual requests into cost_str.
 
 on_render error propagation:
   - A failing chat.update surfaces out of on_render unswallowed -- the
@@ -63,6 +63,9 @@ import pytest
 import structlog
 import yarl
 from anthropic import BadRequestError, RateLimitError
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+    BetaManagedAgentsSpanModelRequestEndEvent,
+)
 from daimon.adapters.slack import lifecycle as lifecycle_mod
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.agent_identity import AgentIdentity
@@ -73,12 +76,12 @@ from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import (
     McpServerFailure,
     TextBlock,
     ToolUseBlock,
     TurnState,
-    UsageTotals,
 )
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
@@ -716,16 +719,18 @@ async def test_status_ts_is_none_before_anything_is_posted(fake_slack_web_client
 # ---------------------------------------------------------------------------
 
 
-async def test_apply_usage_folds_usage_totals(fake_slack_web_client: Any) -> None:
-    """_apply_usage prices usage_totals onto the lifecycle state's cost_str."""
+async def test_apply_usage_prices_request_usage(fake_slack_web_client: Any) -> None:
+    """_apply_usage prices individual requests onto the lifecycle state's cost_str."""
     lc, *_ = _make_lifecycle(fake_slack_web_client, model_id="claude-sonnet-4-6")
     state = dataclasses.replace(
         TurnState(),
-        usage_totals=UsageTotals(
-            input_tokens=1000,
-            cache_creation_input_tokens=500,
-            cache_read_input_tokens=2000,
-            output_tokens=300,
+        usage_requests=(
+            ma_model_usage(
+                input_tokens=1000,
+                cache_creation_input_tokens=500,
+                cache_read_input_tokens=2000,
+                output_tokens=300,
+            ),
         ),
     )
 
@@ -754,11 +759,13 @@ async def test_apply_usage_shows_the_debit_with_markup(fake_slack_web_client: An
     lc._markup = Decimal("1.1")  # pyright: ignore[reportPrivateUsage]
     state = dataclasses.replace(
         TurnState(),
-        usage_totals=UsageTotals(
-            input_tokens=10000,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-            output_tokens=3000,
+        usage_requests=(
+            ma_model_usage(
+                input_tokens=10000,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                output_tokens=3000,
+            ),
         ),
     )
 
@@ -1936,3 +1943,42 @@ async def test_eye_cleanup_failure_does_not_break_terminal_delivery(fake_slack_w
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
     assert lifecycle.final_ts is not None
     assert deregistered
+
+
+@pytest.mark.parametrize(
+    "counts,expected",
+    [
+        ([(60_000, 0, 0, 0), (60_000, 0, 0, 0)], 0.012),
+        ([(60_000, 0, 0, 0), (100_001, 0, 0, 0)], 0.0560005),
+        ([(0, 100_000, 0, 0), (0, 100_001, 0, 0)], 0.075000625),
+        ([(50_000, 0, 50_000, 1000), (60_000, 0, 40_001, 1000)], 0.04050005),
+    ],
+)
+@pytest.mark.parametrize("markup", [Decimal("1"), Decimal("1.1")])
+async def test_terminal_cost_preserves_each_request_tier_and_deduplication(
+    counts: list[tuple[int, int, int, int]],
+    expected: float,
+    markup: Decimal,
+    fake_slack_web_client: Any,
+) -> None:
+    state = TurnState()
+    for index, (input_tokens, cache_write, cache_read, output_tokens) in enumerate(counts):
+        event = BetaManagedAgentsSpanModelRequestEndEvent(
+            id=f"tier-{index}",
+            type="span.model_request_end",
+            model_request_start_id=f"start-{index}",
+            model_usage=ma_model_usage(
+                input_tokens=input_tokens,
+                cache_creation_input_tokens=cache_write,
+                cache_read_input_tokens=cache_read,
+                output_tokens=output_tokens,
+            ),
+            processed_at=datetime.now(UTC),
+        )
+        state = apply(apply(state, event), event)
+    assert len(state.usage_requests) == len(counts), "replay must retain each request once"
+    debited = format_cost(float(debit_amount(expected, markup=markup)))
+    lifecycle, *_ = _make_lifecycle(fake_slack_web_client, model_id="claude-haiku-5-5")
+    lifecycle._markup = markup
+    lifecycle._apply_usage(state)
+    assert lifecycle._state.cost_str == debited

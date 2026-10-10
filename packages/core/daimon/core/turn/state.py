@@ -23,6 +23,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_result_event i
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import (
     StopReason,
 )
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
+    BetaManagedAgentsSpanModelUsage,
+)
 from daimon.core.errors import TurnError
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.termination import TerminationReason
@@ -89,10 +92,9 @@ def daimon_tool_arguments(block: ToolUseBlock, tool: str) -> Mapping[str, object
 class UsageTotals:
     """Per-turn token totals, folded from `span.model_request_end` events.
 
-    Field names match `BetaManagedAgentsSpanModelUsage` verbatim so a usage
-    payload can be reconstructed 1:1 and priced through `daimon.core.pricing`
-    in the adapter shell. The reducer never prices — it has no model id and
-    no rates; it only accumulates the four cache-split stage totals.
+    These totals are for token reporting only. Pricing uses the individual
+    `TurnState.usage_requests`: a request-size tier cannot be chosen from
+    cumulative turn tokens. The reducer has no model id or rates.
     """
 
     input_tokens: int = 0
@@ -137,6 +139,8 @@ class TurnState:
     error: TurnError | None = None
     seen_event_ids: frozenset[str] = field(default_factory=frozenset[str])
     usage_totals: UsageTotals = field(default_factory=UsageTotals)
+    usage_requests: tuple[BetaManagedAgentsSpanModelUsage, ...] = ()
+    """Deduplicated request payloads, retained for per-request tier selection."""
     mcp_failures: tuple[McpServerFailure, ...] = ()
     """Servers that failed this turn, newest status per server name."""
     retrying_error: TurnError | None = None

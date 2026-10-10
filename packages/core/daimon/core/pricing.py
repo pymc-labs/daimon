@@ -10,6 +10,7 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
@@ -79,8 +80,9 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
         input=2.00, output=120.00, cache_write=0.0, cache_read=0.0
     ),
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
-    # Through 2026-12-31; Google doubles every rate on 2027-01-01. The hourly
-    # cache storage charge is not modeled.
+    # Checked 2026-10-10; valid through 2026-12-31. Cache storage is not modeled.
+    # TODO before 2027-01-01: input=1.50, cache_read=0.15, output=7.50;
+    # recheck Google pricing and update docs/billing.md + test_pricing.py.
     "gemini-3.8-flash": ModelRates(input=0.75, output=3.75, cache_write=0.0, cache_read=0.075),
 }
 
@@ -136,6 +138,20 @@ def cost_of(
         + usage.cache_creation_input_tokens * rates.cache_write / 1_000_000
         + usage.cache_read_input_tokens * rates.cache_read / 1_000_000
     )
+
+
+def cost_of_requests(
+    requests: Iterable[BetaManagedAgentsSpanModelUsage], rates: ModelRates | None
+) -> float | None:
+    """Price each request before summing; prompt-size tiers never span requests."""
+    if rates is None:
+        return None
+    total = 0.0
+    for usage in requests:
+        cost = cost_of(usage, rates)
+        assert cost is not None
+        total += cost
+    return total
 
 
 def format_cost(amount: float | None) -> str | None:

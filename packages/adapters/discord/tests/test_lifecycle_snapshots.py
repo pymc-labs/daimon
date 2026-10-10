@@ -17,7 +17,8 @@ import types
 from typing import Any
 
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.testing.ma_models import ma_model_usage
 from syrupy.assertion import SnapshotAssertion
 
 _SENTINEL_REF = object()
@@ -111,11 +112,13 @@ class TestSuccessSequenceSnapshot:
 
         state = TurnState(
             content=[TextBlock(kind="text", text="Here is the answer.")],
-            usage_totals=UsageTotals(
-                input_tokens=1200,
-                cache_creation_input_tokens=0,
-                cache_read_input_tokens=300,
-                output_tokens=320,
+            usage_requests=(
+                ma_model_usage(
+                    input_tokens=1200,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=300,
+                    output_tokens=320,
+                ),
             ),
         )
         await lc.on_terminal_success(state)
@@ -133,11 +136,13 @@ class TestFailureSnapshot:
         await lc.on_render(TurnState())
 
         state = TurnState(
-            usage_totals=UsageTotals(
-                input_tokens=500,
-                cache_creation_input_tokens=0,
-                cache_read_input_tokens=0,
-                output_tokens=80,
+            usage_requests=(
+                ma_model_usage(
+                    input_tokens=500,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    output_tokens=80,
+                ),
             ),
         )
         await lc.on_terminal_failure(state, Exception("upstream timeout"))

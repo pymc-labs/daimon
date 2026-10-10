@@ -81,9 +81,10 @@ escapes the ledger.
 ## Pricing
 
 `packages/core/daimon/core/pricing.py` holds `MODEL_PRICING`, a table of
-`ModelRates` in **USD per million tokens** with exactly four dimensions:
+`ModelRates` in **USD per million tokens** with four token dimensions:
 input, output, cache write and cache read. `cost_of` multiplies the event's
-four token counts by those rates and returns USD. The table is split in two:
+four token counts by the rates for that request and returns USD. The table
+is split in two:
 `AGENT_MODEL_PRICING` doubles as the allowlist of models an agent may be
 configured with (`ALLOWED_MODEL_IDS` in
 `packages/core/daimon/core/constants.py` is literally its keys), while
@@ -111,6 +112,30 @@ rows with the live pricing page.
 The four-field ledger cannot distinguish one-hour cache writes, which
 Anthropic prices at $8 (Opus 5.5) and $4 (Sonnet 5.5) per million tokens; it
 currently treats all cache writes as five-minute writes.
+
+Claude Haiku 5.5 (`claude-haiku-5-5`) is selectable. Its prices depend on
+**each request's prompt length**, including uncached input, cache writes and
+cache reads; output does not count toward the threshold. Exactly 100,000
+prompt tokens uses the standard tier; above it, the entire request uses the
+higher rates, including output:
+
+| Prompt tokens | Input | Five-minute cache write | Cache read | Output |
+| --- | --- | --- | --- | --- |
+| Up to 100,000 | $0.10 | $0.125 | $0.01 | $0.50 |
+| Over 100,000 | $0.50 | $0.625 | $0.05 | $2.50 |
+
+All entries are USD per million tokens, from
+[Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+Reports, caps and finished-turn summaries price requests separately before
+adding their costs. Two 60,000-input-token requests cost $0.012 together;
+their combined 120,000 tokens do not move either into the higher tier.
+
+The tool-only `gemini-3.8-flash` row uses Google's standard text/image/video
+rates through December 31, 2026: $0.75 input, $0.075 cache read and $3.75 output
+per million tokens. On January 1, 2027 those rates double to $1.50, $0.15 and
+$7.50. The table requires a manual update for that date. Cache write is zero
+in this token model; Google's hourly cache-storage charge is omitted. See
+[Google pricing](https://ai.google.dev/gemini-api/docs/pricing).
 
 Two consequences worth knowing before you add a model:
 

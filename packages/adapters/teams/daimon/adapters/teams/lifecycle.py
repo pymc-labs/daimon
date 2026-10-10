@@ -26,16 +26,13 @@ from typing import Protocol
 import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.adapters.teams import card
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.message_split import split_fenced
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
-from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.pricing import MODEL_PRICING, cost_of_requests, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
@@ -277,15 +274,11 @@ class TeamsTurnLifecycle:
 
         `named_above`: agent identity's bold name leads the answer just above it.
         """
-        t = state.usage_totals
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=t.input_tokens,
-            cache_creation_input_tokens=t.cache_creation_input_tokens,
-            cache_read_input_tokens=t.cache_read_input_tokens,
-            output_tokens=t.output_tokens,
-            speed="standard",
+        cost = (
+            cost_of_requests(state.usage_requests, MODEL_PRICING.get(self._model_id))
+            if self._model_id
+            else None
         )
-        cost = cost_of(usage, MODEL_PRICING.get(self._model_id)) if self._model_id else None
         if cost is not None:
             # What the tenant is debited, markup included, so `used` matches `left`.
             cost = float(debit_amount(cost, markup=self._markup))

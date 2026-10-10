@@ -27,6 +27,7 @@ MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
     "claude-sonnet-5": "Sonnet 5",
     "claude-sonnet-4-6": "Sonnet 4.6",
     "claude-haiku-4-5": "Haiku 4.5",
+    "claude-haiku-5-5": "Haiku 5.5",
 }
 
 # What a new agent gets when the creator does not name a model: every panel

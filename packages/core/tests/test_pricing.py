@@ -20,6 +20,7 @@ from daimon.core.pricing import (
     TOOL_MODEL_PRICING,
     ModelRates,
     cost_of,
+    cost_of_requests,
     format_cost,
 )
 
@@ -201,28 +202,57 @@ def _money(cell: str) -> float:
     return float(match.group(1))
 
 
-@pytest.mark.contract
-def test_agent_rows_match_the_live_pricing_page() -> None:
-    """Opt-in: fails when Anthropic changes a price Daimon bills at."""
-    page = httpx.get(f"{AGENT_PRICING_SOURCE}.md", follow_redirects=True, timeout=30).text
+def _published_agent_prices(page: str) -> dict[str, ModelRates]:
     published: dict[str, ModelRates] = {}
+    long_context: dict[str, tuple[int, ModelRates]] = {}
     for line in page.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        # The model table comes first: name, input, 5m write, 1h write, cache read, output.
-        # A tiered model's first row is its standard tier: "Claude Haiku 5.5 (for prompts up to ...)".
-        name = re.sub(r"\s*\(.*\)$", "", cells[0]) if cells else ""
-        if len(cells) != 6 or not cells[1].startswith("$") or name in published:
+        # Name, input, 5m write, 1h write, cache read, output.
+        if len(cells) != 6 or not cells[1].startswith("$"):
             continue
-        published[name] = ModelRates(
+        tier = re.fullmatch(r"(.+) \(for prompts (up to|over) ([\d,]+) tokens\)", cells[0])
+        name = tier[1] if tier else cells[0]
+        rates = ModelRates(
             input=_money(cells[1]),
             output=_money(cells[5]),
             cache_write=_money(cells[2]),
             cache_read=_money(cells[4]),
         )
+        if tier:
+            threshold = int(tier[3].replace(",", ""))
+            if tier[2] == "over":
+                long_context.setdefault(name, (threshold, rates))
+                continue
+            rates = dataclasses.replace(rates, long_context_over=threshold)
+        published.setdefault(name, rates)
+    for name, (threshold, rates) in long_context.items():
+        assert published[name].long_context_over == threshold, "tier boundaries must agree"
+        published[name] = dataclasses.replace(published[name], long_context=rates)
+    return published
+
+
+def test_live_price_parser_retains_both_tiers_and_the_boundary() -> None:
+    page = """
+| Claude Haiku 5.5 (for prompts up to 100,000 tokens) | $0.10 / MTok | $0.125 / MTok | $0.20 / MTok | $0.01 / MTok | $0.50 / MTok |
+| Claude Haiku 5.5 (for prompts over 100,000 tokens) | $0.50 / MTok | $0.625 / MTok | $1 / MTok | $0.05 / MTok | $2.50 / MTok |
+"""
+    expected = AGENT_MODEL_PRICING["claude-haiku-5-5"]
+    assert _published_agent_prices(page)["Claude Haiku 5.5"] == expected
+    changed_boundary = page.replace("100,000", "200,000")
+    assert _published_agent_prices(changed_boundary)["Claude Haiku 5.5"] != expected
+    changed_long_price = page.replace("$0.625", "$0.75")
+    assert _published_agent_prices(changed_long_price)["Claude Haiku 5.5"] != expected
+
+
+@pytest.mark.contract
+def test_agent_rows_match_the_live_pricing_page() -> None:
+    """Public HTTP only: compare all rates, both tiers and the prompt boundary."""
+    response = httpx.get(f"{AGENT_PRICING_SOURCE}.md", follow_redirects=True, timeout=30)
+    response.raise_for_status()
+    published = _published_agent_prices(response.text)
     for model_id, rates in AGENT_MODEL_PRICING.items():
         name = _display_name(model_id)
-        base = dataclasses.replace(rates, long_context_over=None, long_context=None)
-        assert published.get(name) == base, (
+        assert published.get(name) == rates, (
             f"{model_id} is billed at {rates}, the pricing page lists {published.get(name)}"
         )
 
@@ -244,7 +274,9 @@ def test_an_unknown_model_still_prices_at_none() -> None:
     )
 
 
-def _usage(input_tokens: int, output_tokens: int, cache_write: int = 0, cache_read: int = 0):
+def _usage(
+    input_tokens: int, output_tokens: int, cache_write: int = 0, cache_read: int = 0
+) -> BetaManagedAgentsSpanModelUsage:
     from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
         BetaManagedAgentsSpanModelUsage,
     )
@@ -281,4 +313,29 @@ def test_haiku_5_5_is_selectable_and_gemini_3_8_flash_is_priced() -> None:
     assert "claude-haiku-5-5" in ALLOWED_MODEL_IDS, (
         "the latest cheap Claude model must be selectable"
     )
-    assert MODEL_PRICING["gemini-3.8-flash"].input == 0.75
+    assert MODEL_PRICING["gemini-3.8-flash"] == ModelRates(
+        input=0.75, output=3.75, cache_write=0.0, cache_read=0.075
+    )
+
+
+@pytest.mark.parametrize("prompt,expected", [(100_000, 0.0125), (100_001, 0.062500625)])
+def test_cache_write_counts_toward_the_haiku_prompt_boundary(prompt: int, expected: float) -> None:
+    assert cost_of(
+        _usage(0, 0, cache_write=prompt), MODEL_PRICING["claude-haiku-5-5"]
+    ) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("second,expected", [(60_000, 0.012), (100_001, 0.0560005)])
+def test_request_costs_keep_short_and_mixed_tiers(second: int, expected: float) -> None:
+    requests = [_usage(60_000, 0), _usage(second, 0)]
+    assert cost_of_requests(requests, MODEL_PRICING["claude-haiku-5-5"]) == pytest.approx(expected)
+
+
+def test_request_costs_omit_unknown_models() -> None:
+    assert cost_of_requests([_usage(60_000, 0)], None) is None
+
+
+def test_output_does_not_count_toward_the_prompt_boundary() -> None:
+    assert cost_of(_usage(100_000, 100_001), MODEL_PRICING["claude-haiku-5-5"]) == pytest.approx(
+        0.0600005
+    )

@@ -442,6 +442,8 @@ def test_apply_folds_span_model_request_end_into_usage_totals() -> None:
         processed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     next_state = apply(state, event)
+    assert state.usage_requests == (), "fold must not mutate the original state"
+    assert next_state.usage_requests == (event.model_usage,)
     assert next_state.usage_totals == UsageTotals(
         input_tokens=10,
         cache_creation_input_tokens=3,
@@ -480,6 +482,7 @@ def test_apply_accumulates_usage_totals_across_two_span_events() -> None:
     )
     state = apply(state, first)
     state = apply(state, second)
+    assert state.usage_requests == (first.model_usage, second.model_usage)
     assert state.usage_totals == UsageTotals(
         input_tokens=110,
         cache_creation_input_tokens=10,
@@ -506,6 +509,7 @@ def test_apply_dedupes_span_model_request_end_leaving_usage_totals_unchanged() -
     once = apply(state, event)
     twice = apply(once, event)
     assert twice == once, "re-applying the same span event id must be a no-op"
+    assert twice.usage_requests == (event.model_usage,)
     assert twice.usage_totals == UsageTotals(
         input_tokens=10,
         cache_creation_input_tokens=3,

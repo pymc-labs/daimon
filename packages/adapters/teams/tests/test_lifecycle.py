@@ -20,6 +20,9 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsTextBlock,
 )
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+    BetaManagedAgentsSpanModelRequestEndEvent,
+)
 from daimon.adapters.teams import card
 from daimon.adapters.teams import lifecycle as lifecycle_module
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
@@ -28,9 +31,11 @@ from daimon.core.message_split import split_fenced
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
+from daimon.core.turn.reducers import apply
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.ma_models import ma_model_usage
 from microsoft_teams.api import Account, MentionEntity, MessageActivityInput, SentActivity
 from sqlalchemy.exc import OperationalError
 
@@ -152,7 +157,7 @@ class _Sessions:
         return session()
 
 
-_USAGE = UsageTotals(
+_USAGE = ma_model_usage(
     input_tokens=1000,
     cache_creation_input_tokens=500,
     cache_read_input_tokens=2000,
@@ -161,15 +166,7 @@ _USAGE = UsageTotals(
 
 
 def _debited(model_id: str, markup: Decimal) -> str | None:
-    t = _USAGE
-    usage = lifecycle_module.BetaManagedAgentsSpanModelUsage(
-        input_tokens=t.input_tokens,
-        cache_creation_input_tokens=t.cache_creation_input_tokens,
-        cache_read_input_tokens=t.cache_read_input_tokens,
-        output_tokens=t.output_tokens,
-        speed="standard",
-    )
-    cost = cost_of(usage, MODEL_PRICING[model_id])
+    cost = cost_of(_USAGE, MODEL_PRICING[model_id])
     assert cost is not None
     return format_cost(float(debit_amount(cost, markup=markup)))
 
@@ -197,7 +194,7 @@ async def test_the_summary_line_names_the_agent_time_debit_and_money_left(
         budget_channel_id="19:budget",
     )
     clock.now += 12
-    state = dataclasses.replace(_answer("Done."), usage_totals=_USAGE)
+    state = dataclasses.replace(_answer("Done."), usage_requests=(_USAGE,))
     await lifecycle.on_terminal_success(state)
 
     expected = format_summary(
@@ -688,3 +685,46 @@ async def test_an_unprompted_turn_without_an_answer_or_with_a_failure_stays_sile
     await _unprompted(sender).on_terminal_failure(TurnState(error=error), error)
     await _unprompted(sender).close_with_notice("Sorry, something went wrong.")
     assert sender.sent == [], "no tool trail, failure card or notice in a thread nobody asked in"
+
+
+@pytest.mark.parametrize(
+    "counts,expected",
+    [
+        ([(60_000, 0, 0, 0), (60_000, 0, 0, 0)], 0.012),
+        ([(60_000, 0, 0, 0), (100_001, 0, 0, 0)], 0.0560005),
+        ([(0, 100_000, 0, 0), (0, 100_001, 0, 0)], 0.075000625),
+        ([(50_000, 0, 50_000, 1000), (60_000, 0, 40_001, 1000)], 0.04050005),
+    ],
+)
+@pytest.mark.parametrize("markup", [Decimal("1"), Decimal("1.1")])
+async def test_terminal_cost_preserves_each_request_tier_and_deduplication(
+    counts: list[tuple[int, int, int, int]], expected: float, markup: Decimal
+) -> None:
+    state = TurnState()
+    for index, (input_tokens, cache_write, cache_read, output_tokens) in enumerate(counts):
+        event = BetaManagedAgentsSpanModelRequestEndEvent(
+            id=f"tier-{index}",
+            type="span.model_request_end",
+            model_request_start_id=f"start-{index}",
+            model_usage=ma_model_usage(
+                input_tokens=input_tokens,
+                cache_creation_input_tokens=cache_write,
+                cache_read_input_tokens=cache_read,
+                output_tokens=output_tokens,
+            ),
+            processed_at=datetime.now(UTC),
+        )
+        state = apply(apply(state, event), event)
+    assert len(state.usage_requests) == len(counts), "replay must retain each request once"
+    debited = format_cost(float(debit_amount(expected, markup=markup)))
+    lifecycle = TeamsTurnLifecycle(
+        sender=FakeSender(),
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="tier-test",
+        agent_name="Haiku",
+        model_id="claude-haiku-5-5",
+        markup=markup,
+    )
+    summary = await lifecycle._summary(state)
+    assert f"{debited} used" in summary

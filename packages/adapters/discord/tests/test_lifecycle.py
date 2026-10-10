@@ -40,6 +40,7 @@ from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, Tu
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -2122,3 +2123,39 @@ async def test_ended_after_a_terminal_render() -> None:
     await lc.on_render(TurnState())
     await lc.on_terminal_failure(TurnState(), Exception("boom"))
     assert lc.ended
+
+
+@pytest.mark.parametrize(
+    "counts,expected",
+    [
+        ([(60_000, 0, 0, 0), (60_000, 0, 0, 0)], 0.012),
+        ([(60_000, 0, 0, 0), (100_001, 0, 0, 0)], 0.0560005),
+        ([(0, 100_000, 0, 0), (0, 100_001, 0, 0)], 0.075000625),
+        ([(50_000, 0, 50_000, 1000), (60_000, 0, 40_001, 1000)], 0.04050005),
+    ],
+)
+@pytest.mark.parametrize("markup", [Decimal("1"), Decimal("1.1")])
+async def test_terminal_cost_preserves_each_request_tier_and_deduplication(
+    counts: list[tuple[int, int, int, int]], expected: float, markup: Decimal
+) -> None:
+    state = TurnState()
+    for index, (input_tokens, cache_write, cache_read, output_tokens) in enumerate(counts):
+        event = BetaManagedAgentsSpanModelRequestEndEvent(
+            id=f"tier-{index}",
+            type="span.model_request_end",
+            model_request_start_id=f"start-{index}",
+            model_usage=ma_model_usage(
+                input_tokens=input_tokens,
+                cache_creation_input_tokens=cache_write,
+                cache_read_input_tokens=cache_read,
+                output_tokens=output_tokens,
+            ),
+            processed_at=datetime.now(UTC),
+        )
+        state = apply(apply(state, event), event)
+    assert len(state.usage_requests) == len(counts), "replay must retain each request once"
+    debited = format_cost(float(debit_amount(expected, markup=markup)))
+    lifecycle, *_ = _make_lifecycle(model_id="claude-haiku-5-5")
+    lifecycle._markup = markup
+    lifecycle._apply_usage(state)
+    assert lifecycle._state.cost_str == debited
