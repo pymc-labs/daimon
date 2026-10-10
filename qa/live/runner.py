@@ -157,10 +157,11 @@ class Executor:
                     requested = self.context.resolve(step.guild)
                     if requested != self.context.values.get("guild_id"):
                         raise Pending("new_channel guild requires a separately approved QA target")
-                if step.do == "admin" and step.tool == "cli" and isinstance(step.args, str):
+                if step.do == "admin" and step.tool == "cli":
+                    if not isinstance(step.args, str):
+                        raise Pending("admin CLI arguments must be a validated command string")
                     args = shlex.split(step.args)
-                    prefix = [self.context.resolve(arg) for arg in args[:3]]
-                    if prefix == ["daimon", "tenants", "credit"]:
+                    if any(args[i : i + 2] == ["tenants", "credit"] for i in range(len(args))):
                         raise Pending(
                             "tenant credit mutations require a separately approved isolated target"
                         )

@@ -579,13 +579,13 @@ def test_model_skip_requires_positive_scoped_pre_admission_log(
     "exit_code,output,allow,process_code,expected",
     [
         (1, "ConnectionError: database transport unavailable", True, 0, RuntimeError),
-        (1, "refused: skill still attached", True, 0, None),
-        (2, "refused: skill still attached", True, 0, RuntimeError),
-        (1, "refused: skill still attached", False, 0, RuntimeError),
+        (1, "skill is still attached to qa-test", True, 0, None),
+        (2, "skill is still attached to qa-test", True, 0, RuntimeError),
+        (1, "skill is still attached to qa-test", False, 0, RuntimeError),
         (0, "ok", False, 1, RuntimeError),
-        (1, "refused: skill still attached", True, 1, RuntimeError),
-        (True, "refused: skill still attached", True, 0, ValueError),
-        (-1, "refused: skill still attached", True, 0, ValueError),
+        (1, "skill is still attached to qa-test", True, 1, RuntimeError),
+        (True, "skill is still attached to qa-test", True, 0, ValueError),
+        (-1, "skill is still attached to qa-test", True, 0, ValueError),
     ],
 )
 def test_admin_expected_refusal_never_hides_transport_or_unexpected_exit(
@@ -611,7 +611,7 @@ def test_admin_expected_refusal_never_hides_transport_or_unexpected_exit(
         tool="cli",
         args="daimon skills delete qa-test",
         allow_fail=allow,
-        allow_fail_pattern="(?i)still attached|refus" if allow else None,
+        allow_fail_pattern="(?i)skill is still attached|still attached to" if allow else None,
     )
     if expected:
         with pytest.raises(expected):
@@ -700,3 +700,46 @@ def test_collect_records_distinct_running_edits_and_baseline_ids(
         second["edited_timestamp"],
     }
     assert all(e["phase"] == "running" for e in turn.card_history)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "psycopg.OperationalError: connection failed: Connection refused",
+        "httpx.ConnectError: [Errno 111] Connection refused",
+        "ssh: connect to host 10.0.0.2 port 22: Connection refused",
+        "connection reset",
+        "ECONNRESET",
+        "timed out",
+        "TimeoutError",
+        "DNS lookup failed",
+        "temporary failure in name resolution",
+        "TLS handshake failed",
+        "SSL error",
+        "HTTP 503",
+        "5xx error",
+        "Traceback (most recent call last)",
+        "unhandled exception",
+    ],
+)
+def test_transport_denylist_precedes_even_matching_refusal_pattern(
+    backend: DiscordBackend, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    backend.owned.add("parent")
+    backend.config.admin_hooks["cli"] = ["fixture"]
+
+    def command(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args, 0, json.dumps({"exit_code": 1, "stderr": failure + "\nrefused"}), ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", command)
+    step = Step(
+        do="admin",
+        tool="cli",
+        args="daimon skills delete qa-test",
+        allow_fail=True,
+        allow_fail_pattern="(?i)still attached|refus",
+    )
+    with pytest.raises(RuntimeError, match="transport failure"):
+        backend.admin(step, "parent")

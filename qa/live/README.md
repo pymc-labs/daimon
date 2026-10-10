@@ -349,3 +349,8 @@ Thread counts probe every trigger even if its thread has no bot answer. Permissi
 errors do not prove absence. Chunk delivery uses creation timestamps except for
 recorded baseline messages or messages predating the trigger. Tenant-credit CLI
 mutations are refused before setup, including the shared QA guild.
+
+Transport/crash signatures (connection refusal/reset, timeouts, DNS, TLS/SSL, 5xx,
+tracebacks and unhandled exceptions) are rejected before the declared refusal regex.
+Expected patterns must not match empty output. CLI args must be command strings;
+tenant-credit tokens are refused even behind wrappers or global options.

@@ -25,6 +25,13 @@ from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
 
 CHANNEL_MARKER = "daimon-live-qa"
+TRANSPORT_FAILURE = re.compile(
+    r"connection\s+(?:refused|reset)|econn\w*|errno\s+1\d\d|"
+    r"timed?\s*out|timeout|operationalerror|connecterror|could not connect|"
+    r"dns|name or service not known|name resolution|tls|ssl|"
+    r"\b5\d\d\b|\b5xx\b|traceback|unhandled exception",
+    re.IGNORECASE,
+)
 
 
 def log_scope(field: str, value: str) -> str:
@@ -616,11 +623,18 @@ class DiscordBackend:
                 output = obj(data).get("stdout", "")
                 stderr = obj(data).get("stderr", "")
                 if (
+                    isinstance(output, str)
+                    and isinstance(stderr, str)
+                    and TRANSPORT_FAILURE.search(output + "\n" + stderr)
+                ):
+                    raise RuntimeError("staging CLI command reported a transport failure")
+                if (
                     not step.allow_fail
                     or exit_code not in step.allow_fail_exit_codes
                     or not step.allow_fail_pattern
                     or not isinstance(output, str)
                     or not isinstance(stderr, str)
+                    or not (output + stderr).strip()
                     or not re.search(step.allow_fail_pattern, output + "\n" + stderr, re.MULTILINE)
                 ):
                     raise RuntimeError(

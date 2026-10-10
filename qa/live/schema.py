@@ -75,9 +75,11 @@ class Step(Contract):
             if not self.allow_fail_pattern:
                 raise ValueError("allow_fail requires an explicit expected refusal pattern")
             try:
-                re.compile(self.allow_fail_pattern)
+                compiled = re.compile(self.allow_fail_pattern)
             except re.error as exc:
                 raise ValueError("expected refusal pattern is invalid") from exc
+            if compiled.search(""):
+                raise ValueError("expected refusal pattern must not match empty output")
             if not self.allow_fail_exit_codes or any(
                 code <= 0 for code in self.allow_fail_exit_codes
             ):

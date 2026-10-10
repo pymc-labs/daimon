@@ -169,14 +169,22 @@ def test_late_answer_edits_cannot_hide_or_invent_chunk_gaps() -> None:
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        "daimon tenants credit discord 1435062989119295640 -999 --note qa",
+        "uv run daimon tenants credit discord 1435062989119295640 -999 --note qa",
+        "daimon --env staging tenants credit discord 1435062989119295640 -999 --note qa",
+    ],
+)
 def test_shared_guild_credit_is_refused_before_any_mutation(
-    scenario: Scenario, ledger: Ledger, pricing: Pricing
+    args: str, scenario: Scenario, ledger: Ledger, pricing: Pricing
 ) -> None:
     scenario.setup = [
         Step(
             do="admin",
             tool="cli",
-            args="daimon tenants credit discord 1435062989119295640 -999 --note qa",
+            args=args,
         )
     ]
     scenario.steps[0].guild = "1435062989119295640"
@@ -191,6 +199,8 @@ def test_shared_guild_credit_is_refused_before_any_mutation(
     "payload",
     [
         {"allow_fail": True},
+        {"allow_fail": True, "allow_fail_pattern": ".*"},
+        {"allow_fail": True, "allow_fail_pattern": "^"},
         {"allow_fail": True, "allow_fail_pattern": "["},
         {"allow_fail": True, "allow_fail_pattern": "refus", "allow_fail_exit_codes": [0]},
     ],
@@ -200,3 +210,15 @@ def test_expected_refusal_is_explicit_and_validated(payload: dict[str, object]) 
         Step.model_validate(
             {"do": "admin", "tool": "cli", "args": "daimon skills delete qa-test", **payload}
         )
+
+
+@pytest.mark.parametrize("section", ["setup", "teardown"])
+def test_dict_cli_arguments_are_refused_before_mutation(
+    scenario: Scenario, ledger: Ledger, pricing: Pricing, section: str
+) -> None:
+    setattr(scenario, section, [Step(do="admin", tool="cli", args={"argv": "tenants credit"})])
+    backend = FakeBackend()
+    result = Executor(backend, FakeJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING" and not backend.events
+    assert any("validated command string" in c.reason for c in result.checks)
+    assert ledger.charged({result.run_id}) == 0
