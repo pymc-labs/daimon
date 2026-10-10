@@ -1,15 +1,13 @@
 """Run a disposable, authenticated Daimon MCP host for a live QA run.
 
     uv run python scripts/qa_mcp_host.py up --database-url postgresql+asyncpg://…/daimon_qa
-    uv run python scripts/qa_mcp_host.py up … --tunnel --lead-go inbox/<ts>-LEAD-GO.md
     uv run python scripts/qa_mcp_host.py down --database-url … \
         --manifest /tmp/daimon-qa-mcp/<run>/manifest.json
 
 `up` builds the host (`daimon.testing.qa_mcp_host`), serves its gate on a
 loopback port, writes the run bearer to `<root>/<run>/bearer` (mode 0600,
 never printed) and serves until interrupted or the bearer expires; then it
-cleans up whatever the manifest owns. A tunnel opens only with `--tunnel`
-and a recorded `--lead-go`.
+cleans up whatever the manifest owns. It serves loopback only.
 """
 
 from __future__ import annotations
@@ -27,7 +25,6 @@ from daimon.testing.qa_mcp_host import (
     DEFAULT_ROOT,
     build_host,
     cleanup,
-    open_tunnel,
     serve,
 )
 
@@ -48,8 +45,6 @@ async def _up(args: argparse.Namespace) -> int:
             print(f"manifest: {manifest_path}")
             print(f"bearer file: {bearer_path}")
             print(f"local MCP URL: {url}")
-            if args.tunnel:
-                print(f"tunnel MCP URL: {await open_tunnel(qa, lead_go=args.lead_go or '')}")
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
             for signum in (signal.SIGINT, signal.SIGTERM):
@@ -83,8 +78,6 @@ def main() -> int:
     up.add_argument("--port", type=int, default=8765)
     up.add_argument("--ttl-minutes", type=int, default=30)
     up.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    up.add_argument("--tunnel", action="store_true")
-    up.add_argument("--lead-go", default=None)
     down = commands.add_parser("down")
     down.add_argument("--manifest", type=Path, required=True)
     down.add_argument("--database-url", default=os.environ.get("DAIMON_QA_DATABASE_URL"))

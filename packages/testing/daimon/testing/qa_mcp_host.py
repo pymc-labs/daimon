@@ -12,15 +12,16 @@ configuration, a production database or a real provider:
 - Only the F1 contract's MCP tools (`describe_agent`, `list_my_sessions`) exist
   on the server.
 
-In front of the Daimon app sits `McpGate`, the only thing a tunnel may expose.
-It serves `POST /mcp` alone, requires the run's bearer (constant-time
-compare, minutes-long expiry, file-backed revocation), refuses batches and
-any `tools/call` outside the allowlist before dispatch, and swaps the bearer
-for the run's revocable Daimon agent token, so a provider never holds a
-Daimon credential.
+In front of the Daimon app sits `McpGate`, served on loopback only. It
+serves `POST /mcp` alone, requires the run's bearer (constant-time compare,
+minutes-long expiry, file-backed revocation), refuses batches and any
+`tools/call` outside the allowlist before dispatch, and swaps the bearer for
+the run's revocable Daimon agent token, so a client never holds a Daimon
+credential.
 
 Everything a run creates is listed in its manifest; `cleanup` revokes first
 (the bearer, then the Daimon token), then drops only the manifest's schema.
+Exposing the gate beyond loopback (a temporary tunnel) is a separate follow-up.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ import os
 import re
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -115,9 +116,6 @@ class Manifest:
     schema: str
     tenant_id: str
     token_jti: str | None = None
-    tunnel_pid: int | None = None
-    tunnel_url: str | None = None
-    tunnel_lead_go: str | None = None
     # The host the built app believes it serves: proof no ambient setting leaked in.
     public_url_host: str | None = None
     status: str = "created"
@@ -134,7 +132,11 @@ class Manifest:
 
     @classmethod
     def load(cls, path: Path) -> Manifest:
-        return cls(**json.loads(path.read_text()))
+        """Load a manifest; one with fields this host never writes is refused."""
+        try:
+            return cls(**json.loads(path.read_text()))
+        except TypeError as err:
+            raise QaHostError(f"manifest {path} has fields this host does not own: {err}") from None
 
 
 @dataclass(frozen=True)
@@ -253,7 +255,7 @@ def synthetic_anthropic(
 
 
 class McpGate:
-    """The only surface a tunnel may expose: `POST /mcp`, the run bearer, two tools."""
+    """The host's only surface: `POST /mcp`, the run bearer, the two F1 tools."""
 
     def __init__(
         self,
@@ -511,9 +513,6 @@ async def cleanup(manifest_path: Path, *, database_url: str) -> Manifest:
         expires_at=dt.datetime.now(dt.UTC),
         revoked_marker=root / manifest.run_id / "revoked",
     ).revoke()
-    if manifest.tunnel_pid is not None:
-        _stop_process(manifest.tunnel_pid)
-        manifest.tunnel_pid = None
     engine = build_test_engine(database_url, manifest.schema)
     try:
         if await schema_exists(engine, manifest.schema):
@@ -537,15 +536,6 @@ async def schema_exists(engine: AsyncEngine, schema: str) -> bool:
             text("SELECT 1 FROM information_schema.schemata WHERE schema_name = :s"), {"s": schema}
         )
     return found is not None
-
-
-def _stop_process(pid: int) -> None:
-    import signal
-
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
 
 
 @asynccontextmanager
@@ -572,109 +562,3 @@ async def serve(qa: QaHost) -> AsyncIterator[str]:
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, timeout=10)
-
-
-TUNNEL_URL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
-
-
-def tunnel_command(port: int) -> list[str]:
-    """A cloudflared quick tunnel to the gate's loopback port, and nothing else."""
-    return [
-        "cloudflared",
-        "tunnel",
-        "--no-autoupdate",
-        "--url",
-        f"http://127.0.0.1:{port}",
-    ]
-
-
-async def open_tunnel(
-    qa: QaHost,
-    *,
-    lead_go: str,
-    spawn: Callable[..., Awaitable[str]] | None = None,
-    timeout: float = 30,
-) -> str:
-    """Expose the gate through a temporary HTTPS tunnel. Only with a lead GO.
-
-    `lead_go` names the lead's GO (an inbox note or timestamp) and is kept in
-    the manifest. The tunnel forwards to the gate alone, which serves only
-    `POST /mcp` with the run bearer. The process id is in the manifest from the
-    moment it starts, so `cleanup` stops it whatever happens next; a tunnel that
-    does not report its URL in time is stopped here. Returns the public URL.
-    """
-    if not lead_go.strip():
-        raise QaHostError("a tunnel needs the lead's GO, recorded with --lead-go")
-    if qa.manifest.status != "serving":
-        raise QaHostError("serve the gate before opening a tunnel to it")
-    qa.manifest.tunnel_lead_go = lead_go
-
-    def started(pid: int) -> None:
-        qa.manifest.tunnel_pid = pid
-        qa.manifest.save(qa.root)
-
-    base = await (spawn or spawn_tunnel)(
-        tunnel_command(qa.manifest.port),
-        started=started,
-        log=qa.root / qa.manifest.run_id / "tunnel.log",
-        timeout=timeout,
-    )
-    qa.manifest.tunnel_url = f"{base}/mcp"
-    qa.manifest.save(qa.root)
-    return qa.manifest.tunnel_url
-
-
-async def spawn_tunnel(
-    command: list[str],
-    *,
-    started: Callable[[int], None],
-    log: Path,
-    timeout: float,
-    url_pattern: re.Pattern[str] = TUNNEL_URL,
-) -> str:
-    """Start `command`, return the first URL it prints, and keep draining its output.
-
-    On a timeout or any failure the process is terminated and reaped before
-    the error propagates.
-    """
-    process = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-    )
-    started(process.pid)
-    assert process.stderr is not None
-    stderr = process.stderr
-    found: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-
-    async def drain() -> None:
-        with log.open("ab") as out:
-            while line := await stderr.readline():
-                out.write(line)
-                out.flush()
-                match = url_pattern.search(line.decode(errors="replace"))
-                if match and not found.done():
-                    found.set_result(match.group(0))
-        if not found.done():
-            found.set_exception(QaHostError("the tunnel exited before reporting a URL"))
-
-    drainer = asyncio.create_task(drain())
-    _TUNNEL_DRAINERS.add(drainer)
-    drainer.add_done_callback(_TUNNEL_DRAINERS.discard)
-    try:
-        return await asyncio.wait_for(asyncio.shield(found), timeout=timeout)
-    except BaseException:
-        await _terminate(process)
-        drainer.cancel()
-        raise
-
-
-_TUNNEL_DRAINERS: set[asyncio.Task[None]] = set()
-
-
-async def _terminate(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except TimeoutError:
-            process.kill()
-            await process.wait()

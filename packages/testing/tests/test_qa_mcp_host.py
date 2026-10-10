@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +23,9 @@ from daimon.testing.qa_mcp_host import (
     check_database,
     check_loopback,
     cleanup,
-    open_tunnel,
     schema_exists,
     scrubbed_environment,
     serve,
-    spawn_tunnel,
-    tunnel_command,
 )
 from starlette.types import Message, Receive, Scope, Send
 
@@ -281,42 +277,6 @@ async def test_a_run_serves_two_read_tools_on_loopback_then_cleans_up(
     assert again.status == "cleaned"
 
 
-# The tunnel: refused without a lead GO; otherwise it targets the gate's loopback port only
-
-
-async def test_a_tunnel_needs_the_lead_go_and_points_only_at_the_gate(tmp_path: Path) -> None:
-    database_url = _database_url()
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
-    manifest_path = qa.manifest.path(tmp_path)
-    spawned: list[list[str]] = []
-
-    async def fake_spawn(
-        command: list[str], *, started: Callable[[int], None], log: Path, timeout: float
-    ) -> str:
-        spawned.append(command)
-        started(999_999_999)
-        assert log.parent == tmp_path / qa.manifest.run_id
-        return "https://qa-run.trycloudflare.com"
-
-    try:
-        with pytest.raises(QaHostError):
-            await open_tunnel(qa, lead_go="go", spawn=fake_spawn)  # not serving yet
-        async with serve(qa):
-            with pytest.raises(QaHostError):
-                await open_tunnel(qa, lead_go="  ", spawn=fake_spawn)
-            assert spawned == []
-            url = await open_tunnel(qa, lead_go="inbox/LEAD-GO.md", spawn=fake_spawn)
-        assert url == "https://qa-run.trycloudflare.com/mcp"
-        assert spawned == [tunnel_command(qa.manifest.port)]
-        assert spawned[0][-1].startswith("http://127.0.0.1:")
-        saved = Manifest.load(manifest_path)
-        assert (saved.tunnel_lead_go, saved.tunnel_url) == ("inbox/LEAD-GO.md", url)
-    finally:
-        await qa.engine.dispose()
-        cleaned = await cleanup(manifest_path, database_url=database_url)
-    assert cleaned.tunnel_pid is None and cleaned.status == "cleaned"
-
-
 async def test_a_build_that_fails_after_creating_its_schema_leaves_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -336,44 +296,6 @@ async def test_a_build_that_fails_after_creating_its_schema_leaves_nothing(
         assert not await schema_exists(probe, "qa_mcp_failedbuild")
     finally:
         await probe.dispose()
-
-
-async def test_a_tunnel_that_never_reports_a_url_is_stopped(tmp_path: Path) -> None:
-    started: list[int] = []
-    with pytest.raises(TimeoutError):
-        await spawn_tunnel(
-            ["sleep", "30"],
-            started=started.append,
-            log=tmp_path / "tunnel.log",
-            timeout=0.5,
-        )
-    (pid,) = started
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-
-
-async def test_a_tunnel_that_fails_after_starting_is_left_in_the_manifest(
-    tmp_path: Path,
-) -> None:
-    database_url = _database_url()
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
-    manifest_path = qa.manifest.path(tmp_path)
-
-    async def failing_spawn(
-        command: list[str], *, started: Callable[[int], None], log: Path, timeout: float
-    ) -> str:
-        started(999_999_998)
-        raise TimeoutError
-
-    try:
-        async with serve(qa):
-            with pytest.raises(TimeoutError):
-                await open_tunnel(qa, lead_go="inbox/LEAD-GO.md", spawn=failing_spawn)
-        assert Manifest.load(manifest_path).tunnel_pid == 999_999_998
-    finally:
-        await qa.engine.dispose()
-        cleaned = await cleanup(manifest_path, database_url=database_url)
-    assert cleaned.tunnel_pid is None
 
 
 async def test_a_schema_create_that_fails_halfway_leaves_nothing(
@@ -422,3 +344,29 @@ async def test_cleanup_refuses_a_manifest_naming_any_other_schema(
         assert await schema_exists(probe, "public")
     finally:
         await probe.dispose()
+
+
+def test_this_host_has_no_tunnel_and_refuses_a_manifest_that_names_one(tmp_path: Path) -> None:
+    from daimon.testing import qa_mcp_host
+
+    for name in ("open_tunnel", "spawn_tunnel", "tunnel_command"):
+        assert not hasattr(qa_mcp_host, name)
+    path = tmp_path / "old" / "manifest.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "run_id": "old",
+                "created_at": NOW.isoformat(),
+                "expires_at": NOW.isoformat(),
+                "host": "127.0.0.1",
+                "port": 1,
+                "database": "postgresql+asyncpg://localhost/daimon_test",
+                "schema": "qa_mcp_old",
+                "tenant_id": "t",
+                "tunnel_pid": 4242,
+            }
+        )
+    )
+    with pytest.raises(QaHostError, match="does not own"):
+        Manifest.load(path)
