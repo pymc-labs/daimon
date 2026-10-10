@@ -2481,4 +2481,5 @@ async def test_create_session_registers_owned_usage_before_return(
     assert owned.tenant_id == tenant.id
     assert owned.unsettled is True
     assert owned.resumable is not headless
+    assert owned.priority is headless, "billed headless sessions precede inline repairs"
     assert owned.finished_at is None

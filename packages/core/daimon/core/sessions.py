@@ -82,6 +82,7 @@ from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -619,13 +620,22 @@ async def create_session(
                 resources=resources if resources else omit,
             )
             if session_factory is not None and tenant_id is not None:
-                async with session_factory.begin() as db:
-                    await usage_sweep_sessions.register(
-                        db,
+                try:
+                    async with session_factory.begin() as db:
+                        await usage_sweep_sessions.register(
+                            db,
+                            session_id=created.id,
+                            tenant_id=tenant_id,
+                            resumable=not requester_is_headless,
+                            priority=requester_is_headless and billing_exempt is None,
+                        )
+                except SQLAlchemyError as error:
+                    _log.warning(
+                        "sessions.usage_registration.failed",
                         session_id=created.id,
-                        tenant_id=tenant_id,
-                        resumable=not requester_is_headless,
+                        error=type(error).__name__,
                     )
+                    raise
             if app_access is not None:
                 assert (
                     session_factory is not None and tenant_id is not None and vault_id is not None

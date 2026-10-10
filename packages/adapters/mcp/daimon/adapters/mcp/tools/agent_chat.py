@@ -586,7 +586,12 @@ async def _start_turn_impl(
     if recheck is not None:
         await recheck()
     async with runtime.session_factory.begin() as db:
-        await usage_sweep_sessions.register(db, session_id=session.id, tenant_id=auth.tenant_id)
+        await usage_sweep_sessions.register(
+            db,
+            session_id=session.id,
+            tenant_id=auth.tenant_id,
+            priority=auth.platform_user_id is not None,
+        )
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         session.id,
@@ -671,7 +676,15 @@ async def _continue_turn_impl(
         if session.archived_at is not None:
             raise ToolError("This session is archived.")
         async with runtime.session_factory.begin() as db:
-            await usage_sweep_sessions.register(db, session_id=handle, tenant_id=auth.tenant_id)
+            # The sweep can archive while the pre-fence retrieve is in flight.
+            if await usage_sweep_sessions.is_archived(db, session_id=handle):
+                raise ToolError("This session is archived.")
+            await usage_sweep_sessions.register(
+                db,
+                session_id=handle,
+                tenant_id=auth.tenant_id,
+                priority=auth.platform_user_id is not None,
+            )
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This session is closed.")

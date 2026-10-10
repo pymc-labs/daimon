@@ -139,7 +139,10 @@ The [usage sweep](billing.md#the-tables), when switched on
 (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`, off by default; `--once` honours the
 same switch), runs on its own loop with the same
 pause between passes, so a long pass no longer blocks claims. Shutdown cancels a
-pass in flight; the next process starts a full pass.
+pass in flight; the next process resumes durable per-session event progress.
+The sweep checks recent or unsettled usage, and archives finished routine
+sessions after two hours without activity once their usage reconciles. See
+[usage backfill and archive rules](billing.md#the-tables).
 
 The per-routine catch-up policy controls downtime recovery:
 

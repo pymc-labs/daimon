@@ -1138,7 +1138,7 @@ async def test_running_session_keeps_polling_and_idle_continuation_wakes_it(
     router.add("GET", r"/v1/sessions/[^/]+/events", events)
     client = build_fake_anthropic(router.dispatch)
     watermark = UsageSweepWatermark()
-    for minute in (0, 1, 20):
+    for minute in (0, 31, 62):
         await sweep_headless_usage(
             client,
             db_session_factory,
@@ -1153,23 +1153,23 @@ async def test_running_session_keeps_polling_and_idle_continuation_wakes_it(
         db_session_factory,
         markup=Decimal("1"),
         watermark=watermark,
-        now=NOW + timedelta(minutes=21),
+        now=NOW + timedelta(minutes=93),
     )
     # Advance the durable activity as a follow-up does, including a send racing a pass.
     await usage_sweep_sessions.register(
         db_session, session_id="sesn_running", tenant_id=principal.tenant_id
     )
     await db_session.execute(
-        update(UsageSweepSession).values(updated_at=NOW + timedelta(minutes=22))
+        update(UsageSweepSession).values(updated_at=NOW + timedelta(minutes=94))
     )
-    shape["updated_at"] = (NOW + timedelta(minutes=22)).isoformat()
+    shape["updated_at"] = (NOW + timedelta(minutes=94)).isoformat()
     before = len(reads)
     await sweep_headless_usage(
         client,
         db_session_factory,
         markup=Decimal("1"),
         watermark=watermark,
-        now=NOW + timedelta(minutes=22),
+        now=NOW + timedelta(minutes=94),
     )
     assert len(reads) == before + 1
 
@@ -1538,3 +1538,321 @@ async def test_sweep_does_not_import_synthetic_tool_charge_session_ids(
         )
     assert await db_session.scalar(select(func.count()).select_from(UsageSweepSession)) == 0
     assert [e["ma_calls"] for e in logs if e["event"] == "usage_sweep.completed"] == [0]
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("failure", ["retrieve", "events", "page", "database"])
+async def test_bad_session_does_not_prevent_later_sessions_from_being_billed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    failure: str,
+) -> None:
+    principal = await make_platform_principal(db_session, platform="discord", external_id="poison")
+    router = MARouter()
+    sessions = [
+        _session_dict(
+            session_id=sid, tenant_id=principal.tenant_id, account_id=principal.account_id
+        )
+        for sid in ("sesn_a_bad", "sesn_z_good", "sesn_zz_good")
+    ]
+    # Override the bad retrieve before the generic route is installed.
+    if failure == "retrieve":
+        router.add("GET", r"/v1/sessions/sesn_a_bad", lambda req, m: httpx.Response(500))
+    await _add_owned_sessions(router, db_session, sessions)
+    if failure == "database":
+        from sqlalchemy import text
+
+        await db_session.execute(
+            text(
+                "ALTER TABLE usage_events ADD CONSTRAINT reject_bad_usage "
+                "CHECK (managed_session_id <> 'sesn_a_bad')"
+            )
+        )
+    await db_session.commit()
+    requests: list[str] = []
+
+    def events(req: httpx.Request, match: Any) -> httpx.Response:
+        sid = req.url.path.split("/")[-2]
+        requests.append(sid)
+        if sid == "sesn_a_bad":
+            if failure == "events" or (failure == "page" and req.url.params.get("page")):
+                return httpx.Response(500)
+            if failure == "page":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            _model_request_end_dict(
+                                event_id="evt_partial", input_tokens=10, output_tokens=5
+                            )
+                        ],
+                        "next_page": "bad_page",
+                    },
+                )
+        return list_response(
+            [_model_request_end_dict(event_id=f"evt_{sid}", input_tokens=100, output_tokens=50)]
+        )
+
+    router.add("GET", r"/v1/sessions/[^/]+/events", events)
+    client = build_fake_anthropic(router.dispatch)
+    for attempt in range(6):
+        await sweep_headless_usage(
+            client,
+            db_session_factory,
+            markup=Decimal("1"),
+            now=NOW + timedelta(minutes=31 * attempt),
+        )
+    rows = (await db_session.scalars(select(UsageEvent.managed_session_id))).all()
+    assert {"sesn_z_good", "sesn_zz_good"} <= set(rows), "a poison candidate cannot block billing"
+    bad = await db_session.get(UsageSweepSession, "sesn_a_bad", populate_existing=True)
+    assert bad is not None and bad.unsettled, "failed billing remains queued"
+    assert bad.last_swept_at == NOW + timedelta(minutes=155), "failed candidates advance progress"
+    assert bad.last_error in {"InternalServerError", "IntegrityError"}, (
+        "record a sanitized error class"
+    )
+    assert bad.retry_at == NOW + timedelta(minutes=185), "retry after bounded backoff"
+    assert bad.terminal_reason is None, "transient errors must not be terminally settled"
+
+
+@pytest.mark.parametrize("metadata", ["missing", "invalid", "mismatch"])
+async def test_invalid_ownership_is_quarantined_until_new_activity(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    metadata: str,
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="quarantine"
+    )
+    shape = _session_dict(
+        session_id="sesn_skip", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    router = MARouter()
+    await _add_owned_sessions(router, db_session, [shape])
+    if metadata == "missing":
+        del shape["metadata"][MA_METADATA_KEY_TENANT]
+    else:
+        shape["metadata"][MA_METADATA_KEY_TENANT] = (
+            "broken" if metadata == "invalid" else str(uuid.uuid4())
+        )
+    router.add("GET", r"/v1/sessions/sesn_skip/events", lambda req, m: list_response([]))
+    client = build_fake_anthropic(router.dispatch)
+    with structlog.testing.capture_logs() as logs:
+        for hour in (0, 3, 30):
+            await sweep_headless_usage(
+                client, db_session_factory, markup=Decimal("1"), now=NOW + timedelta(hours=hour)
+            )
+    assert [e["ma_calls"] for e in logs if e["event"] == "usage_sweep.ma_calls"] == [1, 0, 0], (
+        "unsafe ownership must not consume permanent polling slots"
+    )
+    row = await db_session.get(UsageSweepSession, "sesn_skip", populate_existing=True)
+    assert row is not None and not row.unsettled and row.terminal_reason, (
+        "record a terminal skip reason"
+    )
+    shape["metadata"][MA_METADATA_KEY_TENANT] = str(principal.tenant_id)
+    await usage_sweep_sessions.register(
+        db_session, session_id="sesn_skip", tenant_id=principal.tenant_id
+    )
+    await sweep_headless_usage(
+        client, db_session_factory, markup=Decimal("1"), now=NOW + timedelta(hours=31)
+    )
+    await db_session.refresh(row)
+    assert row.terminal_reason is None and row.last_swept_at == NOW + timedelta(hours=31), (
+        "a continuation requeues ownership"
+    )
+
+
+@pytest.mark.parametrize("totals", [None, 101])
+async def test_idle_coverage_gap_has_bounded_repair_and_cannot_archive(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    totals: int | None,
+) -> None:
+    principal = await make_platform_principal(db_session, platform="discord", external_id="gap")
+    shape = _session_dict(
+        session_id="sesn_gap", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    shape["usage"] = {"input_tokens": totals, "output_tokens": 50}
+    router = MARouter()
+    await _add_owned_sessions(router, db_session, [shape])
+    await db_session.execute(
+        update(UsageSweepSession).values(
+            resumable=False,
+            updated_at=NOW - timedelta(days=1),
+            finished_at=NOW - timedelta(days=1),
+        )
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/sesn_gap/events",
+        lambda req, m: list_response(
+            [_model_request_end_dict(event_id="evt_gap", input_tokens=100, output_tokens=50)]
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    with structlog.testing.capture_logs() as logs:
+        for attempt in range(6):
+            await sweep_headless_usage(
+                client,
+                db_session_factory,
+                markup=Decimal("1"),
+                now=NOW + timedelta(minutes=31 * attempt),
+            )
+    row = await db_session.get(UsageSweepSession, "sesn_gap", populate_existing=True)
+    assert row is not None and not row.unsettled and row.terminal_reason == "coverage_gap", (
+        "stop endless gap reads after three repairs without progress"
+    )
+    assert row.archived_at is None, "quarantined usage is never eligible for archive"
+    assert not await usage_sweep_sessions.can_archive(db_session, session_id="sesn_gap", now=NOW), (
+        "archive guard checks quarantine independently"
+    )
+    assert [e["ma_calls"] for e in logs if e["event"] == "usage_sweep.ma_calls"] == [
+        2,
+        2,
+        2,
+        2,
+        0,
+        0,
+    ], "coverage gaps have a finite request budget"
+    assert len([e for e in logs if e["event"] == "usage_sweep.coverage_gap"]) == 1, (
+        "emit an actionable warning"
+    )
+    assert await db_session.scalar(select(func.count()).select_from(UsageEvent)) == 1, (
+        "repair reads never double debit"
+    )
+
+
+async def test_unmetered_recent_activity_precedes_inline_legacy_backlog(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="priority"
+    )
+    router = MARouter()
+    shapes = [
+        _session_dict(
+            session_id=sid, tenant_id=principal.tenant_id, account_id=principal.account_id
+        )
+        for sid in ("sesn_a_legacy", "sesn_b_inline", "sesn_y_headless", "sesn_z_mcp")
+    ]
+    await _add_owned_sessions(router, db_session, shapes)
+    await db_session.execute(
+        update(UsageSweepSession)
+        .where(UsageSweepSession.session_id.in_(["sesn_y_headless", "sesn_z_mcp"]))
+        .values(priority=True)
+    )
+    await db_session.execute(
+        update(UsageSweepSession)
+        .where(UsageSweepSession.session_id == "sesn_z_mcp")
+        .values(last_swept_at=NOW - timedelta(hours=1), updated_at=NOW + timedelta(seconds=1))
+    )
+    reads: list[str] = []
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events",
+        lambda req, m: reads.append(req.url.path) or list_response([]),
+    )
+    await sweep_headless_usage(
+        build_fake_anthropic(router.dispatch), db_session_factory, markup=Decimal("1"), now=NOW
+    )
+    assert reads == ["/v1/sessions/sesn_z_mcp/events", "/v1/sessions/sesn_y_headless/events"], (
+        "continued MCP and billed headless usage precede old inline repairs"
+    )
+
+
+async def test_checkpoint_resumes_after_restart_and_preserves_equal_timestamp_events(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(db_session, platform="discord", external_id="cursor")
+    shape = _session_dict(
+        session_id="sesn_cursor", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    shape["usage"] = {"input_tokens": 200, "output_tokens": 100}
+    old = _model_request_end_dict(event_id="evt_old", input_tokens=100, output_tokens=50)
+    boundary = _model_request_end_dict(event_id="evt_boundary", input_tokens=100, output_tokens=50)
+    boundary["processed_at"] = (NOW + timedelta(seconds=1)).isoformat()
+    new = dict(boundary, id="evt_equal")
+    router = MARouter()
+    await _add_owned_sessions(router, db_session, [shape])
+    queries: list[dict[str, str]] = []
+
+    def events(req: httpx.Request, match: Any) -> httpx.Response:
+        queries.append(dict(req.url.params))
+        if req.url.params.get("created_at[gte]"):
+            return list_response([boundary, new])
+        return list_response([old, boundary])
+
+    router.add("GET", r"/v1/sessions/sesn_cursor/events", events)
+    client = build_fake_anthropic(router.dispatch)
+    await sweep_headless_usage(client, db_session_factory, markup=Decimal("1"), now=NOW)
+    shape["usage"] = {"input_tokens": 300, "output_tokens": 150}
+    await usage_sweep_sessions.register(
+        db_session, session_id="sesn_cursor", tenant_id=principal.tenant_id
+    )
+    assert (
+        await sweep_headless_usage(
+            client, db_session_factory, markup=Decimal("1"), now=NOW + timedelta(minutes=1)
+        )
+        == 1
+    ), "restart bills only a new boundary event"
+    assert queries[0]["limit"] == "1000" and "created_at[gte]" not in queries[0], (
+        "first read uses the large page size"
+    )
+    assert datetime.fromisoformat(queries[1]["created_at[gte]"]) == NOW + timedelta(seconds=1), (
+        "later reads use the durable inclusive cursor"
+    )
+    row = await db_session.get(UsageSweepSession, "sesn_cursor", populate_existing=True)
+    assert row is not None and row.checkpoint["input_tokens"] == 300 and not row.unsettled, (
+        "coverage combines old pages and new events without duplicate tokens"
+    )
+    assert await db_session.scalar(select(func.count()).select_from(UsageEvent)) == 3, (
+        "equal timestamps cannot lose or double debit a model call"
+    )
+
+
+async def test_coverage_repair_finds_late_event_before_saved_cursor(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="late-cursor"
+    )
+    shape = _session_dict(
+        session_id="sesn_repair", tenant_id=principal.tenant_id, account_id=principal.account_id
+    )
+    shape["usage"] = {"input_tokens": 201, "output_tokens": 100}
+    first = _model_request_end_dict(event_id="evt_first", input_tokens=100, output_tokens=50)
+    first["processed_at"] = (NOW + timedelta(seconds=10)).isoformat()
+    late = _model_request_end_dict(event_id="evt_earlier", input_tokens=101, output_tokens=50)
+    late["processed_at"] = (NOW + timedelta(seconds=5)).isoformat()
+    router = MARouter()
+    await _add_owned_sessions(router, db_session, [shape])
+    requests: list[httpx.Request] = []
+
+    def events(req: httpx.Request, match: Any) -> httpx.Response:
+        requests.append(req)
+        return list_response([first] if len(requests) == 1 else [late, first])
+
+    router.add("GET", r"/v1/sessions/sesn_repair/events", events)
+    client = build_fake_anthropic(router.dispatch)
+    await sweep_headless_usage(client, db_session_factory, markup=Decimal("1"), now=NOW)
+    assert await db_session.scalar(select(UsageSweepSession.unsettled)) is True, (
+        "insufficient coverage stays queued"
+    )
+    assert (
+        await sweep_headless_usage(
+            client, db_session_factory, markup=Decimal("1"), now=NOW + timedelta(minutes=31)
+        )
+        == 1
+    ), "repair bills the late event once"
+    assert "created_at[gte]" not in requests[1].url.params, (
+        "repair must look behind the saved cursor"
+    )
+    row = await db_session.get(UsageSweepSession, "sesn_repair", populate_existing=True)
+    assert row is not None and not row.unsettled and row.checkpoint["input_tokens"] == 201, (
+        "repair rebuilds totals without adding the old page twice"
+    )
+    assert await db_session.scalar(select(func.count()).select_from(UsageEvent)) == 2, (
+        "historical replay remains idempotent"
+    )

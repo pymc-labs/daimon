@@ -38,9 +38,8 @@ The stamp is written once, at session creation, so the creator's posture
 covers every turn on the session: a billed caller continuing an exempt session
 is absorbed too, and an exempt caller acting on a billed session is debited.
 
-Per `guideline:architecture` Error Propagation: this does not swallow
-exceptions — the scheduler's sweep loop is the boundary that decides a sweep
-failure must not kill the process.
+Candidate API/database errors are recorded and retried without preventing
+other sessions from being billed. Rate limits still end the entire pass.
 """
 
 from __future__ import annotations
@@ -57,7 +56,7 @@ from time import monotonic
 from typing import cast
 
 import structlog
-from anthropic import AsyncAnthropic, NotFoundError, RateLimitError
+from anthropic import APIError, AsyncAnthropic, NotFoundError, RateLimitError, omit
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from daimon.core.defaults.metadata import (
@@ -72,6 +71,7 @@ from daimon.core.stores import usage_events, usage_sweep_sessions
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -94,12 +94,7 @@ class UsageSweepWatermark:
     next_request_at: float = 0.0
 
 
-@dataclass
-class _ObservedUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    cache_creation_input_tokens: int = 0
+class _ObservedUsage(usage_sweep_sessions.SweepCheckpoint):
     read: bool = False
 
     def covers(self, session: BetaManagedAgentsSession) -> bool:
@@ -128,6 +123,10 @@ class _ObservedUsage:
 class _SweepReads:
     client: AsyncAnthropic
     watermark: UsageSweepWatermark
+    sessionmaker: async_sessionmaker[AsyncSession]
+    terminal_reason: str | None = None
+    model_id: str = ""
+    markup: Decimal = Decimal("1")
     calls: int = 0
     observed: _ObservedUsage = field(default_factory=_ObservedUsage)
 
@@ -142,7 +141,7 @@ class _SweepReads:
         self.calls += 1
 
     async def retrieve(self, session_id: str) -> BetaManagedAgentsSession:
-        self.observed = _ObservedUsage()
+        self.terminal_reason = None
         await self._reserve()
         return await self.client.beta.sessions.retrieve(session_id)
 
@@ -151,28 +150,48 @@ class _SweepReads:
         await self.client.beta.sessions.archive(session_id)
 
     async def events(self, session_id: str) -> AsyncIterator[BetaManagedAgentsSessionEvent]:
-        # Count every HTTP page, including one that raises. SDK retries are
-        # disabled for this client so a sweep yields on the first 429.
+        # The inclusive cursor plus boundary IDs prevents losing events with
+        # the same timestamp. A page is checkpointed only after every yielded
+        # event was billed successfully; failures replay through idempotency.
         await self._reserve()
         page = await self.client.beta.sessions.events.list(
-            session_id, order="asc", types=_SWEPT_EVENT_TYPES
+            session_id,
+            order="asc",
+            types=_SWEPT_EVENT_TYPES,
+            limit=1000,
+            created_at_gte=self.observed.cursor or omit,
         )
-        seen: set[str] = set()
+        seen = set(self.observed.boundary_ids)
+        pricing = MODEL_PRICING.get(self.model_id)
         while True:
             for event in page.data:
                 if event.id in seen:
                     continue
                 seen.add(event.id)
-                if event.type == "span.model_request_end":
-                    self.observed.input_tokens += event.model_usage.input_tokens
-                    self.observed.output_tokens += event.model_usage.output_tokens
-                    self.observed.cache_read_input_tokens += (
-                        event.model_usage.cache_read_input_tokens
-                    )
-                    self.observed.cache_creation_input_tokens += (
-                        event.model_usage.cache_creation_input_tokens
-                    )
+                if event.type != "span.model_request_end":
+                    continue
+                self.observed.input_tokens += event.model_usage.input_tokens
+                self.observed.output_tokens += event.model_usage.output_tokens
+                self.observed.cache_read_input_tokens += event.model_usage.cache_read_input_tokens
+                self.observed.cache_creation_input_tokens += (
+                    event.model_usage.cache_creation_input_tokens
+                )
+                self.observed.model_calls += 1
+                event_cost = cost_of(event.model_usage, pricing)
+                self.observed.cost += debit_amount(event_cost, markup=Decimal("1"))
+                self.observed.debit += debit_amount(event_cost, markup=self.markup)
+                if self.observed.cursor is None or event.processed_at > self.observed.cursor:
+                    self.observed.cursor = event.processed_at
+                    self.observed.boundary_ids = [event.id]
+                elif event.processed_at == self.observed.cursor:
+                    self.observed.boundary_ids.append(event.id)
                 yield event
+            async with self.sessionmaker.begin() as s:
+                await usage_sweep_sessions.save_checkpoint(
+                    s,
+                    session_id=session_id,
+                    checkpoint=self.observed,
+                )
             if not page.has_next_page():
                 self.observed.read = True
                 break
@@ -189,7 +208,28 @@ async def _session_progress(
     candidate: usage_sweep_sessions.SweepCandidate,
 ) -> AsyncIterator[None]:
     yield
+    complete = reads.observed.covers(session)
+    no_progress_reads = 0
+    if not complete and reads.observed.read and session.status in ("idle", "terminated"):
+        if reads.observed.model_calls <= candidate.checkpoint.model_calls:
+            no_progress_reads = candidate.no_progress_reads + 1
+        # A bounded full repair also catches late events behind the cursor.
+        # It never adds an estimated debit for unobservable tokens.
+        reads.observed.rescan = True
+        if no_progress_reads >= 3:
+            reads.terminal_reason = "coverage_gap"
+            log.warning(
+                "usage_sweep.coverage_gap",
+                session_id=session.id,
+                no_progress_reads=no_progress_reads,
+            )
     async with sessionmaker.begin() as s:
+        if reads.observed.read:
+            await usage_sweep_sessions.save_checkpoint(
+                s,
+                session_id=session.id,
+                checkpoint=reads.observed,
+            )
         await usage_sweep_sessions.mark_swept(
             s,
             session_id=session.id,
@@ -197,7 +237,9 @@ async def _session_progress(
             activity_at=candidate.activity_at,
             status=session.status,
             archived_at=session.archived_at,
-            usage_complete=reads.observed.covers(session),
+            usage_complete=complete,
+            terminal_reason=reads.terminal_reason,
+            no_progress_reads=no_progress_reads,
         )
     if (
         candidate.needs_archive
@@ -266,7 +308,12 @@ async def sweep_headless_usage(
     if watermark is not None and watermark.retry_at is not None and started_at < watermark.retry_at:
         log.info("usage_sweep.deferred", ma_calls=0, retry_at=watermark.retry_at.isoformat())
         return 0
-    reads = _SweepReads(client.with_options(max_retries=0), watermark or UsageSweepWatermark())
+    reads = _SweepReads(
+        client.with_options(max_retries=0),
+        watermark or UsageSweepWatermark(),
+        sessionmaker,
+        markup=markup,
+    )
     try:
         return await _sweep_owned_usage(
             reads, sessionmaker, markup=markup, watermark=watermark, now=started_at
@@ -301,80 +348,43 @@ async def _sweep_owned_usage(
         candidates = await usage_sweep_sessions.list_candidates(s, now=started_at)
     for candidate in candidates:
         try:
-            session = await reads.retrieve(candidate.session_id)
-        except NotFoundError:
-            # A retired/deleted session cannot be reconciled. Advance this
-            # candidate so it cannot starve other pending usage.
-            async with sessionmaker.begin() as s:
-                await usage_sweep_sessions.mark_swept(
-                    s,
+            candidate_recorded, absorbed = await _sweep_candidate(
+                reads,
+                sessionmaker,
+                candidate,
+                markup=markup,
+                started_at=started_at,
+            )
+        except RateLimitError:
+            raise
+        except (APIError, SQLAlchemyError) as error:
+            # Store only the class: response bodies / SQL parameters can contain
+            # credentials or customer data. Use a fresh transaction after rollback.
+            error_name = type(error).__name__
+            log.warning(
+                "usage_sweep.session_failed", session_id=candidate.session_id, error=error_name
+            )
+            try:
+                async with sessionmaker.begin() as s:
+                    await usage_sweep_sessions.mark_failed(
+                        s,
+                        session_id=candidate.session_id,
+                        started_at=started_at,
+                        error=error_name,
+                    )
+            except SQLAlchemyError as progress_error:
+                log.warning(
+                    "usage_sweep.failure_progress_failed",
                     session_id=candidate.session_id,
-                    started_at=started_at,
-                    activity_at=candidate.activity_at,
-                    status="deleted",
+                    error=type(progress_error).__name__,
                 )
             continue
-        async with _session_progress(sessionmaker, session, started_at, reads, candidate):
-            tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
-            if tenant_raw is None:
-                continue
-            try:
-                tenant_id = uuid.UUID(tenant_raw)
-            except ValueError:
-                # An invalid tenant tag cannot be attributed safely; skip only this
-                # session so it cannot prevent later sessions from being swept.
-                log.warning(
-                    "usage_sweep.session_skipped",
-                    session_id=session.id,
-                    reason="invalid_tenant_metadata",
-                )
-                continue
-            if tenant_id != candidate.tenant_id:
-                log.warning(
-                    "usage_sweep.session_skipped",
-                    session_id=session.id,
-                    reason="tenant_metadata_mismatch",
-                )
-                continue
-            exempt_reason = session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT)
-            if exempt_reason is not None:
-                absorbed = await _log_absorbed_usage(
-                    reads, session, tenant_id=tenant_id, reason=exempt_reason, markup=markup
-                )
-                exempt_sessions += 1
-                exempt_model_calls += absorbed.model_calls
-                exempt_cost += absorbed.cost
-                exempt_debit += absorbed.debit
-                continue
-            platform_user_id = await _resolve_platform_user_id(
-                sessionmaker,
-                session.metadata,
-                session_id=session.id,
-                expected_tenant_id=tenant_id,
-            )
-            model_id = session.agent.model.id
-            pricing = MODEL_PRICING.get(model_id)
-            channel_id = session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
-            async with sessionmaker() as s:
-                recorded_ids = await usage_events.list_event_ids_for_session(
-                    s, managed_session_id=session.id
-                )
-
-            async for event in reads.events(session.id):
-                if event.type != "span.model_request_end" or event.id in recorded_ids:
-                    continue
-                await record_turn_usage(
-                    sessionmaker=sessionmaker,
-                    tenant_id=tenant_id,
-                    platform_user_id=platform_user_id,
-                    managed_session_id=session.id,
-                    model_id=model_id,
-                    event=event,
-                    markup=markup,
-                    pricing=pricing,
-                    channel_id=channel_id,
-                )
-                recorded += 1
+        recorded += candidate_recorded
+        if absorbed is not None:
+            exempt_sessions += 1
+            exempt_model_calls += absorbed.model_calls
+            exempt_cost += absorbed.cost
+            exempt_debit += absorbed.debit
     if watermark is not None:
         watermark.last_successful_start = started_at
         watermark.retry_at = None
@@ -388,6 +398,102 @@ async def _sweep_owned_usage(
         exempt_would_be_debit_usd=str(exempt_debit),
     )
     return recorded
+
+
+async def _sweep_candidate(
+    reads: _SweepReads,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    candidate: usage_sweep_sessions.SweepCandidate,
+    *,
+    markup: Decimal,
+    started_at: datetime,
+) -> tuple[int, _AbsorbedUsage | None]:
+    recorded = 0
+    reads.observed = (
+        _ObservedUsage()
+        if candidate.checkpoint.rescan
+        else _ObservedUsage.model_validate(candidate.checkpoint.model_dump())
+    )
+    try:
+        session = await reads.retrieve(candidate.session_id)
+    except NotFoundError:
+        # A retired/deleted session cannot be reconciled. Advance this
+        # candidate so it cannot starve other pending usage.
+        async with sessionmaker.begin() as s:
+            await usage_sweep_sessions.mark_swept(
+                s,
+                session_id=candidate.session_id,
+                started_at=started_at,
+                activity_at=candidate.activity_at,
+                status="deleted",
+                terminal_reason="deleted",
+            )
+        return 0, None
+    reads.model_id = session.agent.model.id
+    async with _session_progress(sessionmaker, session, started_at, reads, candidate):
+        tenant_raw = session.metadata.get(MA_METADATA_KEY_TENANT)
+        if tenant_raw is None:
+            reads.terminal_reason = "missing_tenant_metadata"
+            log.warning(
+                "usage_sweep.session_skipped", session_id=session.id, reason=reads.terminal_reason
+            )
+            return 0, None
+        try:
+            tenant_id = uuid.UUID(tenant_raw)
+        except ValueError:
+            # An invalid tenant tag cannot be attributed safely; skip only this
+            # session so it cannot prevent later sessions from being swept.
+            log.warning(
+                "usage_sweep.session_skipped",
+                session_id=session.id,
+                reason="invalid_tenant_metadata",
+            )
+            reads.terminal_reason = "invalid_tenant_metadata"
+            return 0, None
+        if tenant_id != candidate.tenant_id:
+            log.warning(
+                "usage_sweep.session_skipped",
+                session_id=session.id,
+                reason="tenant_metadata_mismatch",
+            )
+            reads.terminal_reason = "tenant_metadata_mismatch"
+            return 0, None
+        exempt_reason = session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT)
+        if exempt_reason is not None:
+            absorbed = await _log_absorbed_usage(
+                reads, session, tenant_id=tenant_id, reason=exempt_reason, markup=markup
+            )
+            return 0, absorbed
+        platform_user_id = await _resolve_platform_user_id(
+            sessionmaker,
+            session.metadata,
+            session_id=session.id,
+            expected_tenant_id=tenant_id,
+        )
+        model_id = session.agent.model.id
+        pricing = MODEL_PRICING.get(model_id)
+        channel_id = session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
+        async with sessionmaker() as s:
+            recorded_ids = await usage_events.list_event_ids_for_session(
+                s, managed_session_id=session.id
+            )
+
+        async for event in reads.events(session.id):
+            if event.type != "span.model_request_end" or event.id in recorded_ids:
+                continue
+            await record_turn_usage(
+                sessionmaker=sessionmaker,
+                tenant_id=tenant_id,
+                platform_user_id=platform_user_id,
+                managed_session_id=session.id,
+                model_id=model_id,
+                event=event,
+                markup=markup,
+                pricing=pricing,
+                channel_id=channel_id,
+            )
+            recorded += 1
+    return recorded, None
 
 
 async def _log_absorbed_usage(
@@ -409,25 +515,9 @@ async def _log_absorbed_usage(
     """
     model_id = session.agent.model.id
     pricing = MODEL_PRICING.get(model_id)
-    model_calls = 0
-    input_tokens = 0
-    output_tokens = 0
-    cache_creation_input_tokens = 0
-    cache_read_input_tokens = 0
-    cost = Decimal("0")
-    debit = Decimal("0")
-    async for event in reads.events(session.id):
-        if event.type != "span.model_request_end":
-            continue
-        usage = event.model_usage
-        model_calls += 1
-        input_tokens += usage.input_tokens
-        output_tokens += usage.output_tokens
-        cache_creation_input_tokens += usage.cache_creation_input_tokens
-        cache_read_input_tokens += usage.cache_read_input_tokens
-        event_cost = cost_of(usage, pricing)
-        cost += debit_amount(event_cost, markup=Decimal("1"))
-        debit += debit_amount(event_cost, markup=markup)
+    async for _event in reads.events(session.id):
+        pass
+    observed = reads.observed
     log.info(
         "usage_sweep.exempt_skipped",
         tenant_id=str(tenant_id),
@@ -435,15 +525,17 @@ async def _log_absorbed_usage(
         reason=reason,
         model_id=model_id,
         priced=pricing is not None,
-        model_calls=model_calls,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation_input_tokens,
-        cache_read_input_tokens=cache_read_input_tokens,
-        cost_usd=str(cost),
-        would_be_debit_usd=str(debit),
+        model_calls=observed.model_calls,
+        input_tokens=observed.input_tokens,
+        output_tokens=observed.output_tokens,
+        cache_creation_input_tokens=observed.cache_creation_input_tokens,
+        cache_read_input_tokens=observed.cache_read_input_tokens,
+        cost_usd=str(observed.cost),
+        would_be_debit_usd=str(observed.debit),
     )
-    return _AbsorbedUsage(model_calls=model_calls, cost=cost, debit=debit)
+    return _AbsorbedUsage(
+        model_calls=observed.model_calls, cost=observed.cost, debit=observed.debit
+    )
 
 
 async def _resolve_platform_user_id(

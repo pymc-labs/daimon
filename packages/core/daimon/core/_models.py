@@ -12,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from pydantic import JsonValue
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -464,6 +465,16 @@ class UsageSweepSession(Base):
     resumable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    priority: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
+    no_progress_reads: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    checkpoint: Mapped[dict[str, JsonValue]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
 
 
 class ThreadSession(Base):

@@ -191,14 +191,15 @@ Two boundaries of the design worth stating plainly:
   so queued turns do not widen the bound. An MCP `start_turn` session is
   worse. Its spend
   reaches the ledger only when the scheduler's usage sweep next reads the
-  session: up to two sweep passes plus one tick interval later, and not at
-  all while the sweep is switched off (its default, see "The sweep" below).
+  session. Reconciliation can lag behind the queue, event publication,
+  retries and the background request cap; it has no fixed two-pass deadline.
+  No backfill runs while the sweep is switched off (its default, see "The sweep" below).
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
   `formal/metering/BalanceGate.tla` checks the concurrent-turn bound for chat
   turns, where it holds, and has a counterexample in which headless turns
-  exceed it. The between-sweeps bound is stated here, not model-checked.
+  exceed it. The between-reconciliations exposure has no fixed time bound and is not model-checked.
   Neither bound covers a refund or dispute of credit already spent: that
   clawback is a further debit, and can take the balance lower still.
 - **`BillingExempt` usage is absorbed by the operator, not debited to the
@@ -482,17 +483,34 @@ The sweep checks sessions active within two hours or still marked unsettled.
 Recent settled sessions are rechecked after thirty minutes; old settled
 histories are skipped. A successful complete event read settles an idle
 session only when it covers the session's reported cumulative token counts.
-Missing events or cumulative totals, running sessions and failed reads retain
-the durable flag across restarts. A continuation wakes it before sending.
-Each pass selects up to two sessions, oldest check first within unsettled work. It requests only
-`span.model_request_end` events and skips IDs already in `usage_events`.
+Running sessions and failed reads retain the durable flag across restarts.
+A continuation wakes it before sending. Each pass selects up to two sessions,
+prioritizing MCP and billed headless sessions without an inline recorder,
+then unsettled usage and recent activity. Checks are spaced thirty minutes
+apart per session, so a running or failed session cannot occupy every pass.
+Legacy Discord/Slack repairs come after this billing work.
+
+Event reads request up to 1,000 `span.model_request_end` events per page.
+Completed pages save token totals and an inclusive timestamp cursor with IDs
+at its boundary; subsequent checks resume there. A failed page replays safely
+through the usage recorder's idempotency. An idle coverage mismatch triggers
+a full repair read to catch late events. After three complete reads with no
+additional model calls and insufficient or missing cumulative totals, the row
+is quarantined with `coverage_gap` and a warning; it is never archived.
+Missing, invalid or mismatched tenant stamps are also quarantined, with the
+reason logged. New activity requeues a quarantined session. An operator can
+requeue it by clearing `terminal_reason`, `retry_at` and `no_progress_reads`,
+setting `unsettled=true`, and setting `checkpoint` to `{}` for a full repair.
+No debit is estimated for tokens without a model-request event.
 
 Every MA request, including event pagination and archive calls, is spaced
 at least two minutes apart: at most thirty requests per hour in a continuously
 running scheduler. Interactive calls use no sweep limiter. The first HTTP
 429 ends the pass without SDK retries and defers passes for at least sixty
 seconds or `Retry-After`, whichever is longer. Failed usage progress stays
-unsettled; committed usage rows remain idempotent on retry.
+unsettled; committed usage rows remain idempotent on retry. Other API or
+database failures record the error class and check time, retain unsettled
+usage, retry after thirty minutes, and let the next candidate run.
 `usage_sweep.ma_calls` counts every request attempted, including failures.
 
 Only explicitly finished, nonresumable headless sessions with settled usage
