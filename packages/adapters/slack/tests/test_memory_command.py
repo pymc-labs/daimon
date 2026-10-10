@@ -112,7 +112,7 @@ async def test_memory_empty_state(db_session, db_session_factory) -> None:
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
     kwargs = web.chat_postEphemeral.call_args.kwargs
-    assert "no memories" in kwargs["text"].lower()
+    assert "no memory to show here." in kwargs["text"].lower()
 
 
 async def test_memory_missing_agent_surfaces_ephemeral_error(
@@ -145,4 +145,4 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
     with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
         await handle_memory_command(runtime, _payload())
     text = web.chat_postEphemeral.call_args.kwargs["text"]
-    assert "no memories" in text.lower(), "the deployment default answers elsewhere too"
+    assert "no memory to show here." in text.lower(), "the deployment default answers elsewhere too"

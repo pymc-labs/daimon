@@ -29,7 +29,7 @@ from slack_sdk.errors import SlackApiError
 log = structlog.get_logger()
 
 _SLACK_LIMIT = 3800  # headroom under Slack's ~4000-char text limit
-_EMPTY = "This agent has no memories yet — it will start remembering as it works."
+_EMPTY = "No memory to show here."
 
 
 def _truncate(text: str) -> str:
@@ -103,7 +103,7 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             _agent_name, store_id = resolved
             content = await get_memory_content(runtime.anthropic, store_id, path_arg)
             if content is None:
-                text = f"No memory at `{path_arg}`. Run `/memory` to list paths."
+                text = f"No memory file called `{path_arg}`.\n\nRun `/memory` to see them all."
             else:
                 text = _fenced(f"*`{path_arg}`*", content, _SLACK_LIMIT)
 
@@ -117,7 +117,7 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         error_text = (
             str(exc)
             if isinstance(exc, DaimonError)
-            else "Something went wrong fetching memory — try again later."
+            else "Couldn't load the memory.\n\nTry again in a minute."
         )
         with contextlib.suppress(SlackApiError):
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]

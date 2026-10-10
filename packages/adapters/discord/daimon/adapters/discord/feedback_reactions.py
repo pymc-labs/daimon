@@ -82,10 +82,9 @@ def feedback_prompt_embed(link: str, *, shared: bool = False) -> discord.Embed:
     if shared:
         embed.add_field(
             name="Shared with support team",
-            value="Your feedback and answer link go to the support team.",
+            value="Support gets your feedback and a link to the answer, not the answer itself.",
             inline=False,
         )
-    embed.set_footer(text="Give feedback")
     return embed
 
 

@@ -53,9 +53,9 @@ def state_label(glyph: Glyph) -> str:
     """Human label for a state glyph (used in the embed Status field)."""
     return {
         "⏸": "Paused",
-        "⏳": "Never run",
-        "❌": "Errored",
-        "✅": "Success",
+        "⏳": "Not run yet",
+        "❌": "Error recorded",
+        "✅": "No errors",
     }[glyph]
 
 

@@ -53,9 +53,9 @@ _NOT_AVAILABLE = "This form is no longer available."
 _WRONG_REQUESTER = "This form was for someone else."
 _ALREADY_SUBMITTED = "This form was already submitted."
 _EXPIRED = "This form has expired."
-_STALE = "This form changed before your tap landed."
-_DRAINING = "daimon is restarting. Press Submit again in a minute."
-_EMPTY = "Type your answer first."
+_STALE = "This form just changed.\n\nCheck it and try again."
+_DRAINING = "Daimon is restarting.\n\nPress Submit again in a minute."
+_EMPTY = "Type an answer first."
 _TOO_LONG = f"Keep your answer under {MAX_TEXT_CHARS} characters."
 
 

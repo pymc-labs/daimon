@@ -46,7 +46,6 @@ from daimon.core.billing_panel import (
     channel_budget_line,
     channel_budget_phrase,
     credit_headline,
-    estimate_turns,
     expiry_rows,
     month_label,
     more_channel_budgets,
@@ -54,7 +53,6 @@ from daimon.core.billing_panel import (
     spend_over_cap,
     spender_line,
     timed_credit_note,
-    turns_phrase,
 )
 from daimon.core.promo_credit import ActiveTimedCredit
 
@@ -152,14 +150,10 @@ def spender_name(row: MemberRow) -> str:
 def _topup_select(state: BillingPanelState) -> dict[str, Any]:
     options: list[dict[str, Any]] = []
     for amount in TOPUP_AMOUNTS:
-        turns = estimate_turns(
-            float(amount), guild_spend=state.guild_spend, guild_turns=state.guild_turns
-        )
         options.append(
             {
                 "text": {"type": "plain_text", "text": f"${amount}"},
                 "value": str(amount),
-                "description": {"type": "plain_text", "text": turns_phrase(turns)[:75]},
             }
         )
     return {
@@ -231,7 +225,11 @@ def build_billing_container(
     blocks: list[dict[str, Any]] = [_context("\n".join(subtext)), _divider()]
     if not state.is_admin:
         own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
-        over = "  ⚠️ Over your cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
+        over = (
+            "  ⚠️ Over your monthly limit"
+            if spend_over_cap(state.caller_spend, state.caller_cap)
+            else ""
+        )
         blocks += [_section(f"*{YOU}*{over}\n{own}"), _divider()]
     blocks += _credit_blocks(state)
     if state.channel_budget is not None:

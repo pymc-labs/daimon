@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from daimon.adapters.teams.card_actions import button, clip, error_text, submitted_fields
+from daimon.core.cron_words import schedule_words
 from daimon.core.routines import can_manage_routine, derive_glyph, routine_label
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.cards import (
@@ -34,11 +35,11 @@ VERB = "routines"
 CREATE_DIALOG = "routine_create"
 FORM_FIELDS = {
     "agent": "Agent",
-    "cron": "Cron expression",
+    "cron": "Schedule",
     "timezone": "Timezone",
-    "message": "Trigger message",
+    "message": "What to ask the agent",
 }
-_EMPTY_HINT = "No routines yet. Ask your agent to schedule one, e.g. 'daily 9am stand-up summary'."
+_EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
 # Core caps the panel at 25 rows; 20 fit Teams' 28 KB with emoji labels.
 _ROWS_SHOWN = 20
 
@@ -48,8 +49,9 @@ Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete"]
 _CRON_MAX_CHARS = 100
 
 
-def created_notice(agent: str, cron: str) -> str:
-    return f"✅ Created routine on {agent} ({clip(cron, _CRON_MAX_CHARS)})."
+def created_notice(agent: str, cron: str, timezone: str) -> str:
+    schedule = schedule_words(clip(cron, _CRON_MAX_CHARS), timezone)
+    return f"✅ Routine created for {agent}, {schedule}."
 
 
 def _button(
@@ -60,12 +62,26 @@ def _button(
 
 
 def _routine(row: RoutineRow, *, can_manage: bool) -> Container:
+    schedule = schedule_words(clip(row.cron_expr, _CRON_MAX_CHARS), row.timezone)
     items: list[CardElement] = [
         TextBlock(text=f"{derive_glyph(row)} {routine_label(row)}", weight="Bolder", wrap=True),
         TextBlock(
-            text=f"{row.agent_name} · {clip(row.cron_expr, _CRON_MAX_CHARS)} ({row.timezone})",
+            text=f"{row.agent_name}, {schedule}",
             is_subtle=True,
             size="Small",
+            spacing="Medium",
+            wrap=True,
+        ),
+        TextBlock(
+            text={
+                "✅": "No errors",
+                "❌": "Error recorded",
+                "⏸": "Paused",
+                "⏳": "Not run yet",
+            }[derive_glyph(row)],
+            is_subtle=True,
+            size="Small",
+            spacing="Medium",
             wrap=True,
         ),
     ]
@@ -96,7 +112,7 @@ def panel_card(
     if not rows:
         body.append(TextBlock(text=_EMPTY_HINT, wrap=True))
     if hidden:
-        more = f"+{hidden} more routine(s) not shown (cap: {_ROWS_SHOWN})"
+        more = f"+{hidden} more not shown."
         body.append(TextBlock(text=more, is_subtle=True, size="Small", wrap=True))
     actions: list[Action] = [_button("Refresh", "refresh")]
     if is_admin:
@@ -142,6 +158,12 @@ def create_form(
             is_required=True,
             value=values.get("agent"),
             choices=[Choice(title=name, value=name) for name in agent_names],
+        ),
+        TextBlock(
+            text="Five fields: minute, hour, day of month, month, day of week. "
+            "0 9 * * * means every day at 09:00.",
+            is_subtle=True,
+            wrap=True,
         ),
         TextInput(
             id="cron",

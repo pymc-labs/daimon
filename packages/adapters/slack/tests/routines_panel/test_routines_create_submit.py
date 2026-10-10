@@ -263,9 +263,7 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
         "success should post a confirmation ephemeral"
     )
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
-    assert any(":white_check_mark:" in t for t in texts), (
-        "success confirmation must include :white_check_mark:"
-    )
+    assert any("✅ Routine created for" in t for t in texts)
 
 
 @pytest.mark.asyncio
@@ -310,7 +308,6 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
     ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
     assert ephemeral_key in fake_slack_web_client.mock.requests, "bad cron should post an ephemeral"
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
-    assert any("invalid cron `not a cron`" in t for t in texts), (
-        "bad cron ephemeral must name the rejected cron expression — only the "
-        "cron-validation branch can produce this text, unlike a bare :x:"
+    assert any(
+        "That schedule or time zone isn't valid.\n\nCheck both and try again." in t for t in texts
     )

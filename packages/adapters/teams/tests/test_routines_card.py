@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from daimon.adapters.teams.routines_card import form_values, output_card
+from daimon.adapters.teams.routines_card import create_form, form_values, output_card, panel_card
 from daimon.core.stores.domain import RoutineRow
 
 
@@ -52,3 +52,18 @@ def test_form_values_trims_fields_and_fills_missing_ones() -> None:
     values = form_values({"action": "routine_create", "agent": " daimon ", "cron": None})
     assert values == {"agent": "daimon", "cron": "", "timezone": "", "message": ""}
     assert form_values("not a form") == {"agent": "", "cron": "", "timezone": "", "message": ""}
+
+
+def test_routine_card_uses_schedule_words_and_status() -> None:
+    row = _row(last_error=None, last_result_tail="done")
+    card = json.dumps(panel_card([row], 0, user_id="user-a", is_admin=False).model_dump())
+    assert "daimon, every day at 09:00 UTC" in card
+    assert "No errors" in card
+    assert " · " not in card
+
+
+def test_create_form_has_the_approved_labels_and_schedule_hint() -> None:
+    card = json.dumps(create_form(["daimon"], {}).model_dump())
+    assert '"Schedule"' in card
+    assert '"What to ask the agent"' in card
+    assert "Five fields: minute, hour, day of month, month, day of week." in card

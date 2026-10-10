@@ -101,7 +101,7 @@ async def test_memory_lists_paths_then_shows_one_and_reports_a_missing_path(
         "the listing names every path, sorted"
     )
     assert "alpha facts" in shown, "a path argument shows that memory's content"
-    assert "No memory at /nope.md" in missing
+    assert "No memory file called /nope.md" in missing
 
 
 async def test_memory_without_a_store_says_so(
@@ -152,5 +152,5 @@ async def test_memory_typed_in_a_limited_readers_channel_stays_out_of_the_chat(
         await set_access_policy(session, tenant_id=TENANT, policy=policy)
     card = await _chat_card(db_session_factory, teams_api_fake, anthropic)
 
-    assert KEPT_INSIDE.split(",")[0] in card, "the 1:1 chat is told why nothing is shown"
+    assert json.dumps(KEPT_INSIDE)[1:-1] in card, "the 1:1 chat is told why nothing is shown"
     assert "/secret.md" not in card, "no path leaves the channel"

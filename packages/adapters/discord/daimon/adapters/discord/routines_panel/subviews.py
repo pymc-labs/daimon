@@ -17,13 +17,13 @@ def build_last_output_container(
     """V2 container for the last-output sub-view.
 
     Structure:
-    - ``## 📜 Last output`` header with ``-# {glyph} {state} · {label}`` subtext
+    - ``## 📜 Last output`` header with status and routine label
     - hairline separator
     - fenced code block TextDisplay (truncated to ``_MAX_OUTPUT_CHARS``)
     """
     glyph, _color = derive_state(routine)
     label = routine.trigger_message.strip()[:60] or routine.id.hex[:8]
-    subtext = f"{glyph} {state_label(glyph)} · {label}"
+    subtext = f"{glyph} {state_label(glyph)}\n\n{label}"
 
     if routine.last_error is not None:
         body = routine.last_error
@@ -34,7 +34,7 @@ def build_last_output_container(
         body = body[:_MAX_OUTPUT_CHARS] + "\n… (truncated)"
 
     return discord.ui.Container(
-        layout.header("📜 Last output", subtext=subtext),
+        discord.ui.TextDisplay(f"## 📜 Last output\n\n-# {subtext}"),
         layout.hairline(),
         discord.ui.TextDisplay(f"```\n{body}\n```"),
     )
@@ -66,7 +66,7 @@ class ViewLastOutputSubView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                "Only the person who opened this can use it.",
                 ephemeral=True,
             )
             return False

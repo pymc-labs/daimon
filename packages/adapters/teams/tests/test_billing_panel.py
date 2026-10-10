@@ -165,7 +165,9 @@ async def test_a_top_up_without_payments_says_so(
     async with _running(db_session_factory, teams_api_fake) as service:
         response = await post_activity(service, _click("topup", amount="10"))
 
-    assert NOT_CONFIGURED in json.dumps(response), "no billing routes mounted is not an error"
+    assert json.dumps(NOT_CONFIGURED)[1:-1] in json.dumps(response), (
+        "no billing routes mounted is not an error"
+    )
 
 
 async def _promo(db_factory: async_sessionmaker[AsyncSession], code: str) -> None:
@@ -195,7 +197,7 @@ async def test_an_admin_redeems_a_promo_code_from_the_card(
     assert forwarded["value"] == REDEEM_ADMIN_ONLY and empty["value"] == ENTER_CODE
     assert isinstance(wrong["value"], str) and wrong["value"], "a refusal is said, the card kept"
     card = json.dumps(redeemed, ensure_ascii=False)
-    assert "Redeemed **$10.00** of credit" in card and "Top spenders" in card
+    assert "Added **$10.00** of credit" in card and "Top spenders" in card
 
 
 def _budget_status(channel_id: str, spent: str) -> ChannelBudgetStatus:
@@ -627,9 +629,7 @@ def test_the_admin_card_is_sections_set_apart_with_the_total_biggest() -> None:
     assert amounts["type"] == "ColumnSet" and len(amounts["columns"]) == 4
     first = amounts["columns"][0]["items"]
     assert first[0]["actions"][0]["title"] == "$10", "the button is the amount alone"
-    assert first[1]["text"] == "about 100 turns" and first[1]["isSubtle"] is True, (
-        "what it buys sits under it in grey"
-    )
+    assert len(first) == 1, "top-up options show the amount alone"
     assert toggle["type"] == "Action.ToggleVisibility"
     assert toggle["targetElements"] == ["billing-expiry"]
 

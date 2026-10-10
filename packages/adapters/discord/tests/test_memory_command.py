@@ -143,7 +143,7 @@ async def test_memory_empty_state(db_session, db_session_factory) -> None:
 
     sent = interaction.followup.send.call_args
     text = sent.args[0] if sent.args else sent.kwargs.get("content", "")
-    assert "no memories" in text.lower()
+    assert "no memory to show here." in text.lower()
 
 
 async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_factory) -> None:
@@ -164,4 +164,4 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
     await cog.memory.callback(cog, interaction, path=None)
 
     text = interaction.followup.send.call_args.args[0]
-    assert "no memories" in text.lower(), "the deployment default answers elsewhere too"
+    assert "no memory to show here." in text.lower(), "the deployment default answers elsewhere too"

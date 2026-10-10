@@ -142,9 +142,9 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-_CALLBACK_FAILED = "Something went wrong submitting this form -- please try again."
-_CHECK_FAILED = "Something went wrong checking this form -- please try again."
-_DRAINING = "I'm restarting right now -- submit this form again in a moment."
+_CALLBACK_FAILED = "Something went wrong.\n\nTry again."
+_CHECK_FAILED = "Something went wrong.\n\nTry again."
+_DRAINING = "Daimon is restarting.\n\nPress Submit again in a minute."
 _OVER_CAP = (
     "Your answers were recorded, but this server has too many chats in flight "
     "right now -- ask again in the thread in a moment."

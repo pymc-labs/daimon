@@ -95,16 +95,12 @@ _THANKS_TEXT: Final = "Thanks for the feedback."
 _NO_LONGER_AVAILABLE: Final = "This request has expired."
 _NOT_ALLOWED: Final = "You can't leave feedback on this answer."
 _POLICY_UNREADABLE: Final = (
-    "This workspace's access policy could not be read, so your feedback wasn't recorded. "
-    "Ask an admin to check it."
+    "Your feedback wasn't saved.\n\nAsk an admin to check this workspace's access settings."
 )
 _FORM_DID_NOT_OPEN: Final = "That didn't work. Try again."
 _FORM_EXPIRED: Final = "This request has expired."
 _TELL_US_PROMPT: Final = "What went wrong with this answer?"
-_SHARED_HINT: Final = (
-    "What you send here also goes to the support team, with a link to this answer "
-    "(not its content)."
-)
+_SHARED_HINT: Final = "Support gets your feedback and a link to the answer, not the answer itself."
 
 FEEDBACK_VOTE_UP: Final = "feedback_vote:up"
 FEEDBACK_VOTE_DOWN: Final = "feedback_vote:down"
@@ -327,7 +323,7 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
             decision,
             response_payload={
                 "response_action": "errors",
-                "errors": {_TEXT_BLOCK_ID: "Write a few words first."},
+                "errors": {_TEXT_BLOCK_ID: "Pick a reason or write a few words."},
             },
         )
     if is_external_interactive(payload):

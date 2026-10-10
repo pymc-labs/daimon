@@ -30,6 +30,7 @@ from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
+from daimon.core.cron_words import schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -119,7 +120,7 @@ def evaluate_routines_create_submission(payload: dict[str, Any]) -> RoutinesCrea
         return RoutinesCreateDecision(
             response_payload={
                 "response_action": "errors",
-                "errors": {"routines_create__cron": "A cron expression is required."},
+                "errors": {"routines_create__cron": "A schedule is required."},
             },
             proceed=False,
             extra={},
@@ -137,7 +138,7 @@ def evaluate_routines_create_submission(payload: dict[str, Any]) -> RoutinesCrea
         return RoutinesCreateDecision(
             response_payload={
                 "response_action": "errors",
-                "errors": {"routines_create__message": "A trigger message is required."},
+                "errors": {"routines_create__message": "What to ask the agent is required."},
             },
             proceed=False,
             extra={},
@@ -224,10 +225,7 @@ async def run_routines_create_submission(
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
-                text=(
-                    f":x: Could not schedule routine — invalid cron `{cron_expr}` "
-                    f"or timezone `{timezone_}`."
-                ),
+                text=("That schedule or time zone isn't valid.\n\nCheck both and try again."),
             )
             return
 
@@ -267,7 +265,7 @@ async def run_routines_create_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=f":white_check_mark: Created routine on `{agent_name}` (`{cron_expr}`).",
+            text=f"✅ Routine created for {agent_name}, {schedule_words(cron_expr, timezone_)}.",
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
         log.error("slack.routines_create_failed", team_id=team_id, exc_info=exc)
@@ -275,7 +273,7 @@ async def run_routines_create_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=f":x: Failed to create routine: {type(exc).__name__}",
+            text="Couldn't create the routine.\n\nTry again.",
         )
 
 
@@ -355,5 +353,5 @@ async def run_routines_delete_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id or user_id,
             user=user_id,
-            text=f":x: Failed to delete routine: {type(exc).__name__}",
+            text="Couldn't delete the routine.\n\nTry again.",
         )

@@ -187,7 +187,10 @@ async def test_on_the_form_says_it_is_shared_and_posts_once_to_the_support_chann
     runtime = _runtime(key, db_session_factory, routed={tenant.id: True})
 
     await handle_feedback_vote(runtime, _vote_click())
-    assert "also goes to the support team" in json.dumps(_opened_views(permalink))
+    assert (
+        "Support gets your feedback and a link to the answer, not the answer itself."
+        in json.dumps(_opened_views(permalink))
+    )
 
     await _submit(runtime, "the <!channel> totals are *off*", ("inaccurate", "too_slow"))
 
