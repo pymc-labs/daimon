@@ -1910,3 +1910,142 @@ async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
     assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
     assert await lc.prepend_revealed_answer("Recovered files.")
     assert "embed" not in edits[-1][1], "a later answer edit must retain the footer too"
+
+
+@pytest.mark.parametrize("missing_at", ["render", "terminal", "answer"])
+@pytest.mark.parametrize("render_tables", [False, True])
+async def test_missing_card_is_replaced_before_answer_delivery(missing_at, render_tables):
+    from structlog.testing import capture_logs
+
+    sent = []
+    replacements = []
+    refs = iter([types.SimpleNamespace(id=1000), types.SimpleNamespace(id=1001)])
+    clock = [0.0]
+    missing = [False]
+
+    async def send(**kwargs):
+        ref = next(refs)
+        sent.append((ref, kwargs))
+        return ref
+
+    async def edit(ref, **kwargs):
+        is_target = (
+            (missing_at == "render" and not lifecycle._terminal)
+            or (missing_at == "terminal" and lifecycle._terminal and "content" not in kwargs)
+            or (missing_at == "answer" and "content" in kwargs)
+        )
+        if is_target and not missing[0]:
+            missing[0] = True
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="Not Found"),
+                {"code": 10008, "message": "Unknown Message"},
+            )
+        ref.kwargs = kwargs
+
+    async def record_replacement(ref):
+        replacements.append(ref.id)
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        agent_name="test",
+        model_id="claude-sonnet-4-6",
+        clock=lambda: clock[0],
+        on_replacement=record_replacement,
+        render_tables=render_tables,
+    )
+    text = (
+        "| Name | Value |\n| --- | ---: |\n| Example | 42 |"
+        if render_tables
+        else "Complete answer."
+    )
+    with capture_logs() as logs:
+        await lifecycle.post_initial()
+        clock[0] = 11.0
+        await lifecycle.on_render(_make_success_state(text))
+        await lifecycle.on_terminal_success(_make_success_state(text))
+    assert len(sent) == 2, "replace the missing card once, without posting an error"
+    assert replacements == [1001], "record the replacement for reply routing"
+    assert lifecycle.final_message_id == lifecycle.feedback_message_id == "1001"
+    assert lifecycle.card_message_id == "1000", "retire the original durable card intent"
+    assert lifecycle.was_answered
+    answer = sent[-1][1] if missing_at == "answer" else sent[-1][0].kwargs
+    assert ("table-1.png" if render_tables else text) in answer["content"]
+    if missing_at == "answer":
+        assert answer["embeds"], "a replacement answer must keep its summary"
+        assert "attachments" not in answer and "view" not in answer
+        if render_tables:
+            assert answer["files"][0].filename == "table-1.png"
+    assert any(
+        entry["event"] == "turn.message_missing" and not entry["delivered"] for entry in logs
+    )
+
+
+async def test_missing_message_after_answer_delivery_is_a_logged_noop():
+    from structlog.testing import capture_logs
+
+    sent = []
+    missing = [False]
+    ref = types.SimpleNamespace(id=1000)
+
+    async def send(**kwargs):
+        sent.append(kwargs)
+        return ref
+
+    async def edit(message, **kwargs):
+        if missing[0]:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="Not Found"),
+                {"code": 10008, "message": "Unknown Message"},
+            )
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="test", model_id="claude-sonnet-4-6"
+    )
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_make_success_state())
+    missing[0] = True
+    with capture_logs() as logs:
+        await lifecycle.prepend_revealed_answer("Recovered files.")
+    assert len(sent) == 1, "a stale edit must not duplicate an already delivered answer"
+    assert any(entry["event"] == "turn.message_missing" and entry["delivered"] for entry in logs)
+
+
+@pytest.mark.parametrize("code,status", [(10015, 404), (50013, 403), (0, 500)])
+async def test_other_discord_edit_errors_still_propagate(code, status):
+    lc, sends, _ = _make_lifecycle()
+    await lc.post_initial()
+
+    async def edit(ref, **kwargs):
+        raise discord.HTTPException(
+            types.SimpleNamespace(status=status, reason="Failure"),
+            {"code": code, "message": "Failure"},
+        )
+
+    lc._edit = edit
+    with pytest.raises(discord.HTTPException):
+        await lc.on_terminal_success(_make_success_state())
+    assert len(sends) == 1
+
+
+async def test_setup_notice_replaces_a_deleted_initial_card():
+    sent = []
+    refs = iter([types.SimpleNamespace(id=1000), types.SimpleNamespace(id=1001)])
+
+    async def send(**kwargs):
+        sent.append(kwargs)
+        return next(refs)
+
+    async def edit(message, **kwargs):
+        raise discord.NotFound(
+            types.SimpleNamespace(status=404, reason="Not Found"),
+            {"code": 10008, "message": "Unknown Message"},
+        )
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="test", model_id="claude-sonnet-4-6"
+    )
+    await lifecycle.post_initial()
+    await lifecycle.edit_card(content="Send your message again.", embed=None, view=None)
+    assert sent[-1] == {"content": "Send your message again."}
+    assert lifecycle.final_message_id == "1001"

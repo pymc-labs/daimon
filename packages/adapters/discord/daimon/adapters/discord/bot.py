@@ -3207,7 +3207,7 @@ class DaimonBot(commands.Bot):
                 "queue_full": TENANT_CAP_NOTICE,
             }[slot]
             if lifecycle.message_ref is not None:
-                await _edit_message(lifecycle.message_ref, content=ended, embed=None, view=None)
+                await lifecycle.edit_card(content=ended, embed=None, view=None)
             else:
                 await turn_send(ended)
             await retire_terminal_turn_card(
@@ -3281,9 +3281,7 @@ class DaimonBot(commands.Bot):
             if request_id_line:
                 handoff_embed.set_footer(text=f"rid: {request_id_line.rstrip('`')}")
             if lifecycle.message_ref is not None:
-                await _edit_message(
-                    lifecycle.message_ref, content=None, embed=handoff_embed, view=view
-                )
+                await lifecycle.edit_card(content=None, embed=handoff_embed, view=view)
             else:
                 await turn_send(embed=handoff_embed, view=view)
             await retire_terminal_turn_card(
@@ -3299,9 +3297,7 @@ class DaimonBot(commands.Bot):
             # here either; the copy says what was preserved and asks for a retry.
             failure_text = render_preparation_failed(agent.name)
             if lifecycle.message_ref is not None:
-                await _edit_message(
-                    lifecycle.message_ref, content=failure_text, embed=None, view=None
-                )
+                await lifecycle.edit_card(content=failure_text, embed=None, view=None)
             else:
                 await turn_send(failure_text)
             await retire_terminal_turn_card(
@@ -3326,7 +3322,7 @@ class DaimonBot(commands.Bot):
                 else render_current_work_must_finish(agent.name, handoff=True)
             )
             if lifecycle.message_ref is not None:
-                await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
+                await lifecycle.edit_card(content=busy_text, embed=None, view=None)
             else:
                 await turn_send(busy_text)
             await retire_terminal_turn_card(

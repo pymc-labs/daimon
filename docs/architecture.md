@@ -208,6 +208,11 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+A Discord Unknown Message (10008) while editing a turn card posts a fresh
+message if the answer has not arrived yet. Once an answer is delivered, a
+stale edit is logged and ignored. Stop still interrupts the turn when its
+card has been deleted; restart recovery treats a card deleted between its
+lookup and edit as already resolved. Other edit failures still propagate.
 Restart recovery keeps a card intent active when a pending card cannot be
 edited. It does not post a replacement status card, because the original
 button could remain. A definite missing-webhook, missing-token, permission or

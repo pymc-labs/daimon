@@ -292,13 +292,42 @@ class DiscordTurnLifecycle:
         self._note_discord_time(getattr(sent, "id", None))
         return sent
 
+    async def edit_card(self, **kwargs: Any) -> None:  # noqa: ANN401
+        """Update the turn's card, recovering a deleted card before delivery.
+
+        Also used by admission and session-setup notices before the driver starts.
+        """
+        await self._edit_message(self._message_ref, **kwargs)
+
     async def _edit_message(
         self,
         message: discord.Message | None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         assert message is not None
-        replacement = await self._edit(message, **kwargs)
+        try:
+            replacement = await self._edit(message, **kwargs)
+        except discord.HTTPException as err:
+            if err.code != 10008:
+                raise
+            delivered = self._revealed_first_chunk is not None or self._summary_ref is not None
+            log.info("turn.message_missing", message_id=str(message.id), delivered=delivered)
+            if delivered:
+                return  # a stale edit must not turn a delivered answer into an error
+            send_kwargs = dict(kwargs)
+            attachments = send_kwargs.pop("attachments", None)
+            if attachments:
+                send_kwargs["files"] = [a for a in attachments if isinstance(a, discord.File)]
+            for key in ("embed", "view"):
+                if send_kwargs.get(key) is None:
+                    send_kwargs.pop(key, None)
+            if self._terminal_embed is not None and not {"embed", "embeds"} & kwargs.keys():
+                send_kwargs["embeds"] = [self._terminal_embed]
+            replacement = await self._send_message(**send_kwargs)
+            self._message_ref = replacement
+            if self._on_replacement is not None:
+                await self._on_replacement(replacement)
+            return
         edited_at = getattr(replacement, "edited_at", None)
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))

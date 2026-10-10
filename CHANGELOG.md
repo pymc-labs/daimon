@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Worker deploys allow 95 seconds for container shutdown, exceeding the worker compose asset's 90-second grace for turn draining and cleanup.
 
 - When an agent with a rule, or one in a channel kept to its own agents, is refused a publish or upload after the approval step, the MCP server now logs why (`publish_gate.needs_approval`, with the missing proof: no turn origin, no live session, a session that does not hold the tool on a card, another agent's session or an unreadable session). The refusal used to log nothing, so a missed Approve could not be traced.
+- Discord replaces a missing status card before delivering an answer and ignores stale message edits after delivery, instead of posting a false Unknown Message error. Stopping a deleted card still interrupts the turn.
+
 - A rejected notebook re-publish keeps the previous source, so its link still opens the original notebook after an idle stop or host restart.
 - When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
 - Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
