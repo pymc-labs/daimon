@@ -954,6 +954,16 @@ async def revoke_discord_connect_intent(session: AsyncSession, *, intent_id: uui
     )
 
 
+async def connect_intent_agent(
+    session: AsyncSession, *, intent_id: uuid.UUID
+) -> tuple[str, str | None] | None:
+    """The (agent name, Managed Agents id) a live connect button is bound to."""
+    intent = await session.get(GitHubConnectClickIntent, intent_id)
+    if intent is None or intent.expires_at <= datetime.now(UTC):
+        return None
+    return intent.agent_name, intent.agent_ma_id
+
+
 async def bind_discord_connect_click(
     session: AsyncSession,
     *,

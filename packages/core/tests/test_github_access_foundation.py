@@ -609,7 +609,9 @@ async def test_inventory_sweeper_finds_changed_grant_version(db_session: AsyncSe
         item.token_id for item in await github_issued_tokens.select_stale_tokens(db_session)
     ] == [row.token_id]
     grant.version = 1
-    authorization = await db_session.get(TenantGitHubRepo, (tenant_id, 101))
+    authorization = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
     assert authorization is not None
     authorization.version = 2
     await db_session.flush()
