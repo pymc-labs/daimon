@@ -12,6 +12,7 @@ that alignment matters."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -978,14 +979,10 @@ async def test_mcp_modal_vault_write_failure_keeps_exception_details_private(
     )
 
 
-async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
+async def test_mcp_modal_restores_the_button_when_the_write_below_it_fails(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The consume is what kills the button, not the vault write after it.
-
-    A downstream failure still leaves the request spent, so a button that
-    still looks live would only ever earn an "already used" refusal.
-    """
+    """A downstream failure finalizes the card and restores its form."""
 
     def _failing_vault(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/v1/agents":
@@ -1019,7 +1016,7 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
         "a consumed request moves its card to received regardless of the write's outcome"
     )
     assert _card_buttons(edits[0]) == [], "the received card offers no button to click again"
-    assert "Nothing was saved for tester." in _card_text(edits[-1]), (
+    assert "Try again" in _card_text(edits[-1]) and _card_buttons(edits[-1]), (
         "a card left on 'Saving…' would describe a save that has already stopped"
     )
     message = interaction.followup.send.call_args.args[0]
@@ -1223,7 +1220,8 @@ async def test_repo_modal_pasted_token_that_github_refuses_writes_nothing(
         binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert binding is None, "a GitHub-refused token must never produce a binding"
     message = interaction.followup.send.call_args.args[0]
-    assert "can't access this repo" in message, "the panel's own refusal copy must be surfaced"
+    assert "Repository access could not be saved" in message
+    assert "Try again" in message
 
 
 async def test_repo_modal_double_submit_writes_exactly_one_binding(
@@ -1361,7 +1359,7 @@ async def test_repo_modal_never_leaks_the_pasted_token(
         assert binding is not None and binding.ma_secret_ref == f"inline-pat:{row.agent_id}"
     elif scenario == "refused_by_github":
         message = _sent_message(interaction)
-        assert "can't access this repo" in message
+        assert "Repository access could not be saved" in message
     elif scenario == "unexpected_exception":
         message = _sent_message(interaction)
         assert "ConnectError" not in message, "exception classes stay in operator logs"
@@ -1815,7 +1813,8 @@ async def test_skill_repo_failure_reports_only_confirmed_token_saves(
         assert "Token saved" not in message and "Token stored" not in message, (
             "a failure before storage must not claim that the token was saved"
         )
-    assert "retry" in message, "a consumed request needs a concrete retry instruction"
+    assert "Try again using the same form" in message
+    assert persisted is not None and persisted.used_at is None
     assert "private upstream detail" not in message and "ConnectError" not in message, (
         "unexpected exception details stay in operator logs"
     )
@@ -2481,16 +2480,22 @@ async def test_env_file_upload_queues_its_continuation_with_the_keys(
     assert "next message" not in card, "nothing was waiting on the file, so no turn is promised"
 
 
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     """A 401/403 from the server at the door: nothing stored, nothing attached,
     the card refused with the way out named (the case a Notion token hit)."""
     import dataclasses
 
+    from daimon.core import credential_submit
     from daimon.core.mcp_oauth import McpProbe
 
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     row = await _seed_mcp_request(
         db_session_factory, mcp_server_url="https://mcp.notion.com/mcp", with_origin=True
     )
@@ -2498,9 +2503,13 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     agent_updates: list[dict[str, Any]] = []
     probed: list[tuple[str, str]] = []
 
+    accepted = False
+
     async def probe(url: str, token: str) -> McpProbe:
         probed.append((url, token))
-        return McpProbe(status_code=403, resource_metadata_url=None)
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
+        return McpProbe(status_code=200 if accepted else 403, resource_metadata_url=None)
 
     runtime = dataclasses.replace(
         _runtime(
@@ -2531,10 +2540,27 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
     assert spent is not None and spent.outcome == "token_rejected"
-    text = interaction.followup.send.call_args.args[0]
-    assert "did not accept" in text and "connect it with your account" in text, (
-        "the person learns the token was refused and that OAuth is the way out"
-    )
+    if failure == "rejection":
+        text = interaction.followup.send.call_args.args[0]
+        assert "did not accept" in text and "connect it with your account" in text, (
+            "the person learns the token was refused and that OAuth is the way out"
+        )
+
+    assert spent.used_at is None, "a rejected token keeps the form usable"
+    card = _card_text(_card_edits(interaction)[-1])
+    assert "That token was rejected" in card
+    assert "Try again" in card
+    if failure == "slow_rejection":
+        assert any("Still saving" in _card_text(edit) for edit in _card_edits(interaction))
+    assert RECEIVED_FOOTER not in card
+    accepted = True
+    monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
+    await modal.on_submit(interaction)
+    async with db_session_factory() as session:
+        saved = await peek_credential_request(session, token=row.token)
+    assert saved is not None and saved.outcome == "applied" and saved.used_at is not None
+    assert creds_created and agent_updates, "the same form can save on retry"
+    assert "✅" in _card_text(_card_edits(interaction)[-1])
 
 
 # --- key-name policy at submit ----------------------------------------------
@@ -2646,12 +2672,13 @@ async def test_mcp_agent_gone_before_the_attach_saves_nothing(
     await modal.on_submit(interaction)
 
     card = _card_text(_card_edits(interaction)[-1])
-    assert "Nothing was saved for tester." in card
+    assert "not available" in card and "Try again" not in card
     assert _MCP_TOKEN not in card, "no token may reach the card"
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
         stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
     assert persisted is not None and persisted.outcome == "write_failed"
+    assert persisted.used_at is not None, "a deleted target cannot be fixed by retrying a token"
     assert stored == 0, "no agent-wide token is published without an attach"
     assert await _queued_continuation(db_session_factory, row) is None
 
@@ -2689,7 +2716,7 @@ async def test_mcp_attach_failure_publishes_no_token(
     await modal.on_submit(interaction)
 
     card = _card_text(_card_edits(interaction)[-1])
-    assert "Nothing was saved for tester." in card
+    assert "Try again" in card
     assert _MCP_TOKEN not in card, "no token may reach the card"
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)

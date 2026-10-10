@@ -13,12 +13,13 @@ Adaptive Card.
 State comes back from `classify_card_state`, which reads the headline's
 leading emoji and is deliberately lossy in two places (a `received` card
 repeats the `requested` headline; `superseded` shares ⚠️ with `partial`).
-Both are recoverable from the rest of the card, so this module refines them:
+These are recoverable from the rest of the card, so this module refines them:
 `RECEIVED_FOOTER` separates received from requested, and the one line only
 `_superseded_content` writes separates superseded from partial. The third
 collision, `replaced` against `expired` on ⌛, needs no refinement here:
 `replaced` writes one fixed headline, so core matches it exactly and this
-reader gets the right state back already.
+reader gets the right state back already. A retryable failure also uses ⚠️;
+its private-input button distinguishes it from a terminal partial receipt.
 """
 
 from __future__ import annotations
@@ -58,7 +59,9 @@ class CapturedCard:
     button_labels: tuple[str, ...]
 
 
-def _refine_state(headline: str, facts: tuple[str, ...], footer: str | None) -> CardState:
+def _refine_state(
+    headline: str, facts: tuple[str, ...], footer: str | None, button_labels: tuple[str, ...]
+) -> CardState:
     """The card's real state, undoing `classify_card_state`'s two collisions."""
     state = classify_card_state(headline)
     if state is None:
@@ -67,6 +70,8 @@ def _refine_state(headline: str, facts: tuple[str, ...], footer: str | None) -> 
         return "received"
     if state == "partial" and _SUPERSEDED_MARKER in facts:
         return "superseded"
+    if state == "partial" and button_labels:
+        return "requested"
     return state
 
 
@@ -74,7 +79,7 @@ def _build(
     *, headline: str, facts: tuple[str, ...], footer: str | None, button_labels: tuple[str, ...]
 ) -> CapturedCard:
     return CapturedCard(
-        state=_refine_state(headline, facts, footer),
+        state=_refine_state(headline, facts, footer, button_labels),
         headline=headline,
         facts=facts,
         button_labels=button_labels,

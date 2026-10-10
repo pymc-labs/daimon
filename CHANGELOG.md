@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Rejected or failed MCP and GitHub token forms on Discord, Slack and Teams now show an error with a usable retry button. After 90 seconds the card says it is still saving and will update when finished; long skill imports continue until success or error.
 - Discord form, credential and app install buttons now check private thread membership before posting for someone.
 - Stop subscribes to the session's events before sending the interrupt, so a fast stop no longer waits two minutes and reports "Stop not confirmed".
 - Worker deploys allow 95 seconds for container shutdown, exceeding the worker compose asset's 90-second grace for turn draining and cleanup.

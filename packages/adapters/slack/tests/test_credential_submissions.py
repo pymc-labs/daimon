@@ -19,6 +19,7 @@ Behavioral assertions — grouped by runner:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Callable
@@ -842,7 +843,7 @@ async def test_skill_repo_submission_never_attaches_to_a_managed_agent_even_for_
 
     async with db_session_factory() as s:
         row = await peek_credential_request(s, token=token)
-    assert row is not None and row.used_at is not None, "an admin's import goes ahead"
+    assert row is not None and row.used_at is None and row.outcome == "write_failed"
     # `_agents_handler` fails the test on any agent update, so reaching here
     # means the managed agent was left untouched.
     card = json.dumps(_chat_updates(fake_slack_web_client)[-1])
@@ -1058,7 +1059,7 @@ async def test_skill_repo_failure_receipt_reflects_confirmed_token_storage(
     assert ("Token stored" in receipt) == fails_after_storage, (
         "receipt must report only confirmed storage"
     )
-    assert "retry" in receipt, "failed setup must offer a reachable retry"
+    assert "Try again using the same form" in receipt, "a reachable retry"
     assert "sensitive-upstream-detail" not in receipt, (
         "upstream details must stay out of the receipt"
     )
@@ -1658,17 +1659,23 @@ async def test_success_paths_send_no_ephemeral_receipt(
     )
 
 
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_write(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     """Same door check as Discord: a 401/403 from the server stores nothing."""
     _override_users_info_admin(fake_slack_web_client.mock)
     import dataclasses
 
+    from daimon.core import credential_submit
     from daimon.core.mcp_oauth import McpProbe
 
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     tenant_id, fernet_key = await _seed_team(db_session)
     live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
@@ -1692,8 +1699,12 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
         ma_calls.append(f"{req.method} {req.url.path}")
         return counting(req)
 
+    accepted = False
+
     async def probe(url: str, value: str) -> McpProbe:
-        return McpProbe(status_code=401, resource_metadata_url=None)
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
+        return McpProbe(status_code=200 if accepted else 401, resource_metadata_url=None)
 
     runtime = dataclasses.replace(
         _build_runtime(
@@ -1718,10 +1729,36 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
         request_row = await peek_credential_request(session, token=token)
     assert request_row is not None and request_row.outcome == "token_rejected"
     card = _chat_updates(fake_slack_web_client)[-1]
-    assert "did not accept that token" in card["text"], "the card says the token was refused"
-    assert any(
-        "connect it with your account" in t for t in _ephemeral_texts(fake_slack_web_client)
-    ), "the person is pointed at the OAuth path"
+    assert "That token was rejected" in card["text"]
+    assert "Try again" in card["text"]
+    if failure == "slow_rejection":
+        assert any(
+            "Still saving" in json.dumps(edit) for edit in _chat_updates(fake_slack_web_client)
+        )
+    if failure == "rejection":
+        assert any(
+            "connect it with your account" in t for t in _ephemeral_texts(fake_slack_web_client)
+        ), "the person is pointed at the OAuth path"
+
+    assert request_row.used_at is None
+    assert RECEIVED_FOOTER not in json.dumps(card)
+    assert any(block["type"] == "actions" for block in card["blocks"])
+    accepted = True
+    monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
+    await run_mcp_credential_submission(
+        runtime,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        message_ts=_MESSAGE_TS,
+        token=token,
+        value="ntn_corrected",
+        dispatch_continuations=_noop_dispatch,
+    )
+    async with db_session_factory() as session:
+        saved = await peek_credential_request(session, token=token)
+    assert saved is not None and saved.outcome == "applied" and saved.used_at is not None
+    assert "✅" in _chat_updates(fake_slack_web_client)[-1]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -1894,7 +1931,8 @@ async def test_mcp_attach_failure_publishes_no_token(
     assert request_row is not None and request_row.outcome == "write_failed"
     assert stored == 0, "no agent-wide token is published without an attach"
     card = _chat_updates(fake_slack_web_client)[-1]
-    assert card["text"] == "🛡️ Nothing was saved for tester."
+    assert "Try again" in card["text"]
+    assert request_row.used_at is None
     assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == []
 
 
@@ -1916,7 +1954,7 @@ async def test_mcp_vault_write_failure_after_the_attach_renders_partial(
     assert "The connection did not finish" in json.dumps(card)
     assert RECEIVED_FOOTER not in json.dumps(card), "the card must leave the received state"
     pending = await _pending_continuations(db_session_factory, tenant_id=tenant_id)
-    assert [row.requested_work for row in pending] == [None]
+    assert pending == [], "failed attempts cannot occupy the retry continuation"
 
 
 async def test_mcp_agent_gone_before_the_attach_saves_nothing(
@@ -1939,7 +1977,9 @@ async def test_mcp_agent_gone_before_the_attach_saves_nothing(
     assert request_row is not None and request_row.outcome == "write_failed"
     assert stored == 0
     card = _chat_updates(fake_slack_web_client)[-1]
-    assert card["text"] == "🛡️ Nothing was saved for tester."
+    assert "Try again" not in card["text"]
+    assert not any(block["type"] == "actions" for block in card["blocks"])
+    assert request_row.used_at is not None, "a deleted target cannot be fixed by retrying a token"
     assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == []
 
 

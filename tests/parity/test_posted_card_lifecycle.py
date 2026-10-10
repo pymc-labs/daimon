@@ -368,12 +368,12 @@ def _mcp_routes(router: MARouter) -> None:
     router.add("POST", rf"/v1/agents/{_MA_AGENT_ID}", _attach_fails)
 
 
-async def test_mcp_attach_failure_publishes_no_token_and_refuses(
+async def test_mcp_attach_failure_publishes_no_token_and_allows_retry(
     driver: PlatformDriver, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """The attach comes before the agent-wide token is published, so a failed
-    attach stores nothing and the card says nothing was saved, on both
-    platforms."""
+    attach stores nothing and the card offers the same form for retry on all
+    three platforms."""
     install = await _install(driver, db_session_factory)
     router = _agent_router(install)
     _mcp_routes(router)
@@ -410,17 +410,22 @@ async def test_mcp_attach_failure_publishes_no_token_and_refuses(
         value=_SECRET,
     )
 
-    refused = _last(driver)
-    assert refused.state == "refused", (
-        f"an attach that failed must not read as applied, got {refused.state!r}"
+    retry = _last(driver)
+    assert retry.state == "requested", (
+        f"a failed attach must offer the same form again, got {retry.state!r}"
     )
-    assert _SECRET not in "\n".join((refused.headline, *refused.facts)), (
+    assert retry.button_labels
+    assert "Try again" in "\n".join((retry.headline, *retry.facts))
+    assert _SECRET not in "\n".join((retry.headline, *retry.facts)), (
         "no submitted token may ever reach the posted card"
     )
     async with db_session_factory() as session:
         credentials = await list_credentials(
             session, tenant_id=install.tenant_id, agent_id=_agent_uuid(install)
         )
+        request = await peek_credential_request(session, token=token)
+    assert request is not None and request.used_at is None
+    assert request.outcome == "write_failed"
     assert credentials == (), "no agent-wide token is published without an attach"
 
 
