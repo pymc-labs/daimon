@@ -481,7 +481,7 @@ async def _build_fire(
             )
         final_state: list[TurnState] = []
 
-        tail = await run_turn(
+        result = await run_turn(
             anthropic=client,
             agent_id=resolved_agent_id,
             environment_id=resolved_env_id,
@@ -511,7 +511,7 @@ async def _build_fire(
 
         if row.destination_kind is None:
             async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=tail, error=None)
+                await record_result(s, row.id, tail=result, error=None)
             return
 
         # Fallback post: only when the agent did not deliver to the
@@ -521,7 +521,7 @@ async def _build_fire(
             await record_result(
                 s,
                 row.id,
-                tail=tail,
+                tail=result,
                 error=None,
                 delivery="skipped" if posted else "pending",
                 delivery_note="agent_posted" if posted else None,

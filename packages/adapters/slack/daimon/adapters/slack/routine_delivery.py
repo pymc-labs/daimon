@@ -28,6 +28,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
@@ -78,9 +79,9 @@ async def _dm_fallback(
             return DeliveryOutcome(status="skipped", note=reason)
         opened = await client.conversations_open(users=creator)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, str]", opened["channel"])["id"]
-        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel, text=escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason))
-        )
+        text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason))
+        for chunk in split_fenced(text, 11800, word_boundary=True):
+            await client.chat_postMessage(channel=channel, text=chunk)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
     except SlackApiError as err:
         log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
         return DeliveryOutcome(status="skipped", note=reason)
@@ -216,12 +217,9 @@ def make_slack_routine_poster(
             # Slack drops `username` and `icon_url` without an error when the
             # install lacks chat:write.customize, so the line keeps naming the
             # agent here; only Discord, whose label always carries it, drops it.
-            await post_as_agent(
-                client,
-                identity,
-                text=escape_mrkdwn_preserving_mentions(render_fallback_post(row)),
-                **place,
-            )
+            text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
+            for chunk in split_fenced(text, 11800, word_boundary=True):
+                await post_as_agent(client, identity, text=chunk, **place)
         except SlackApiError as err:
             error = str(cast("dict[str, object]", err.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
             if error in _UNUSABLE_DESTINATION:

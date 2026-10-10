@@ -34,6 +34,7 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     clear_creator,
@@ -167,10 +168,10 @@ def make_discord_routine_poster(
             return DeliveryOutcome(status="skipped", note=reason)
         try:
             dm = await open_dm(int(guild_id), int(creator))
-            await dm.send(
-                content=render_fallback_dm(row, reason)[:_DISCORD_MAX_CHARS],
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            for chunk in split_fenced(
+                render_fallback_dm(row, reason), _DISCORD_MAX_CHARS, word_boundary=True
+            ):
+                await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
         except (discord.HTTPException, LookupError) as err:
             log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
             return DeliveryOutcome(status="skipped", note=reason)
@@ -243,10 +244,10 @@ def make_discord_routine_poster(
             else None
         )
         if client is None or identity is None or identity.builtin:
-            await channel.send(
-                content=render_fallback_post(row)[:_DISCORD_MAX_CHARS],
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            for chunk in split_fenced(
+                render_fallback_post(row), _DISCORD_MAX_CHARS, word_boundary=True
+            ):
+                await channel.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
             return DeliveryOutcome(status="delivered")
         # A bot fallback puts the name label on top, so leave room for it.
         limit = _DISCORD_MAX_CHARS - len(fallback_name_prefix(identity.name, ""))
@@ -258,11 +259,14 @@ def make_discord_routine_poster(
             builtin=False,
             identity_enabled=True,
         )
-        await transport.send(
-            content=render_fallback_post(row, as_agent=True)[:limit],
-            allowed_mentions=discord.AllowedMentions.none(),
-            _prefix_if_fallback=True,
-        )
+        for index, chunk in enumerate(
+            split_fenced(render_fallback_post(row, as_agent=True), limit, word_boundary=True)
+        ):
+            await transport.send(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+                _prefix_if_fallback=index == 0,
+            )
         return DeliveryOutcome(status="delivered")
 
     return _post

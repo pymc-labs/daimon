@@ -433,10 +433,11 @@ async def record_result(
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
     `error=None` clears `last_error` (sets NULL); `error="..."` sets it.
-    `tail` is written as-is (None or str).
+    `tail` accepts the complete final reply. The preview keeps its last 1000
+    characters, with an explicit truncation marker when shortened.
 
     `delivery` is only passed for a routine with a destination (FEAT-085):
-    `pending` queues this fire's tail for the adapter to post (copied into
+    `pending` queues this fire's complete reply for the adapter to post (copied into
     `delivery_payload`), `skipped` records why it will not be
     (`delivery_note`). Either replaces whatever an earlier fire left in the
     outbox, so only the newest result is ever posted. Omitted, the outbox
@@ -444,7 +445,18 @@ async def record_result(
     and an older scheduler all write exactly what they wrote before, and a
     result still pending from an earlier successful fire stays pending.
     """
-    values: dict[str, object] = {"last_result_tail": tail, "last_error": error}
+    preview = tail
+    if tail is not None and len(tail) > 1000:
+        marker = "… (truncated)\n"
+        preview = tail[-(1000 - len(marker)) :]
+        # Start at a whole word when the retained suffix begins inside one.
+        cut = len(tail) - len(preview)
+        if not tail[cut - 1].isspace() and not preview[0].isspace():
+            first_space = next((i for i, char in enumerate(preview) if char.isspace()), None)
+            if first_space is not None:
+                preview = preview[first_space + 1 :]
+        preview = marker + preview
+    values: dict[str, object] = {"last_result_tail": preview, "last_error": error}
     if delivery is not None:
         values.update(
             delivery_status=delivery,

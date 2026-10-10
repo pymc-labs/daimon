@@ -192,19 +192,19 @@ def render_routine_controls(
     if direct_post == "allowed":
         delivery = (
             "If you do not post it to the destination yourself with send_message, daimon "
-            "posts the end of your final reply there for you."
+            "posts your full final reply there for you."
         )
     elif direct_post == "protected":
         # Writers none since the routine was made: never invite a write there.
         delivery = (
             "The destination's rule now lets nobody write there: do not post there. daimon "
-            "sends the end of your final reply to the routine's creator instead."
+            "sends your full final reply to the routine's creator instead."
         )
     else:
         # Its parent channel or category could not be checked here: never
         # invite a direct write; the poster checks placement and delivers.
         delivery = (
-            "Do not post to the destination yourself. daimon delivers the end of your "
+            "Do not post to the destination yourself. daimon delivers your full "
             "final reply for you, to the destination if the workspace policy allows it "
             "and otherwise to the routine's creator."
         )

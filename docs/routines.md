@@ -9,7 +9,7 @@ the agent's baseline repository grants.
 
 A routine may name a **destination**: a channel or a thread. With one, the run
 is told where its result goes, and if the agent does not post there itself,
-Daimon posts the tail of its final reply there after the run (see
+Daimon posts its full final reply there after the run (see
 [Delivery](#delivery)). Without one — every routine created before this
 existed, and any created without it — nothing is delivered anywhere: the
 result is only recorded on the row, and if it should land in a channel the
@@ -200,7 +200,7 @@ A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in
 `packages/core/daimon/core/routine_delivery.py`): the routine's id, agent,
 schedule, timezone and destination, and one line saying that nobody is
-watching and that Daimon posts the end of the final reply to the destination
+watching and that Daimon posts the full final reply to the destination
 unless the agent posts there itself. If the destination's rule has since
 become `writers: none`, the controls say so and tell
 the agent not to post there (the result goes to the creator instead). The
@@ -214,8 +214,9 @@ SYS-048's), so the controls err on the side of not inviting a post. The
 controls grant nothing else. A routine without a destination sends its
 trigger message byte-for-byte as before.
 
-On success the runner returns the tail of the final message, truncated to
-1000 characters, and that is what lands in `last_result_tail`.
+On success the runner returns the complete final message. `last_result_tail`
+keeps a preview of its last 1000 characters, with a truncation marker when
+shortened. The outbox keeps the full reply for delivery.
 
 ## Delivery
 
@@ -226,7 +227,10 @@ the MCP search interface's `call_tool(name="send_message", arguments=…)` —
 whose `channel_id` is exactly the destination (a Slack thread counts only as
 `<channel>:<ts>`; a top-level post in its channel is not the thread). If the
 agent posted there, the outbox is `skipped` with note `agent_posted`.
-Otherwise it is `pending`, with the result copied into `delivery_payload`. A
+Otherwise it is `pending`, with the complete reply copied into `delivery_payload`.
+Discord, Slack and Teams split long results across messages at word or line
+boundaries and preserve code fences. Creator fallback messages also keep the
+complete result. A
 failed fire leaves the outbox alone and records `last_error` as always, so a
 result still pending from an earlier successful fire stays pending.
 
