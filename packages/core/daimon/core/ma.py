@@ -141,7 +141,8 @@ async def send_interrupt_and_wait(
     terminal idle or `timeout_s` elapses.
 
     Per refinements §5 (interrupt UX):
-    - POST `user.interrupt`.
+    - Open the SSE stream before posting `user.interrupt`, so an immediate
+      idle acknowledgement cannot arrive before the subscription.
     - Wait up to `timeout_s` (default 120s) for a `session.status_idle` whose
       `stop_reason.type` is in `_INTERRUPT_TERMINAL` (`end_turn`,
       `retries_exhausted`, or `requires_action`). `requires_action` IS treated
@@ -153,18 +154,21 @@ async def send_interrupt_and_wait(
     The caller owns rendering (`lifecycle.on_render("… interrupting")`). This
     helper is pure I/O-and-wait.
     """
-    await anthropic.beta.sessions.events.send(
-        session_id,
-        events=[{"type": "user.interrupt"}],
-    )
 
     async def _wait_for_terminal_idle() -> None:
         stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
-        async for event in stream:
-            if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
-                continue
-            if event.stop_reason.type in _INTERRUPT_TERMINAL:
-                return
+        try:
+            await anthropic.beta.sessions.events.send(
+                session_id,
+                events=[{"type": "user.interrupt"}],
+            )
+            async for event in stream:
+                if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
+                    continue
+                if event.stop_reason.type in _INTERRUPT_TERMINAL:
+                    return
+        finally:
+            await stream.close()
         raise TurnError(
             kind="interrupt_timeout",
             message=f"MA SSE stream closed without terminal idle (timeout {timeout_s}s)",

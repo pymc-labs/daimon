@@ -844,6 +844,11 @@ per-hook cost contract:
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
 
+Stop also opens its SSE subscription before sending `user.interrupt`, so an
+immediate idle acknowledgement is observed. The interrupt and acknowledgement
+wait are bounded by the same 120-second timeout; the subscription closes when
+the wait finishes or fails.
+
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It delivers each file before deleting its MA
