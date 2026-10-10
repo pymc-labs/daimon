@@ -11,6 +11,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest_asyncio
+from daimon.core._models import Tenant
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.stores.routines import (
@@ -29,6 +30,7 @@ from daimon.core.stores.routines import (
     update_routine,
 )
 from daimon.testing.factories import make_tenant
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -77,6 +79,42 @@ async def test_create_round_trip(db_session: AsyncSession, tenant_id: uuid.UUID)
     fetched = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert fetched is not None, "newly created routine must be fetchable by id"
     assert fetched.id == row.id, "fetched row id must match created row id"
+
+
+async def test_archived_tenant_routine_is_not_claimed(db_session: AsyncSession) -> None:
+    now = datetime(2026, 10, 9, 12, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    archived = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="u1",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="run",
+        next_fire_at=now - timedelta(minutes=1),
+    )
+    await db_session.execute(update(Tenant).where(Tenant.id == tenant.id).values(archived_at=now))
+    live_tenant = await make_tenant(db_session, workspace_id="live-routine-claim")
+    live = await create_routine(
+        db_session,
+        tenant_id=live_tenant.id,
+        created_by_user_id="u2",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="run",
+        next_fire_at=now,
+    )
+    claimed = await claim_due_fireable(db_session, now=now, limit=1)
+    assert [row.id for row in claimed] == [live.id], (
+        "archived rows must not consume the claim limit"
+    )
+    saved = await get_routine(db_session, archived.id, tenant_id=tenant.id)
+    assert saved is not None and saved.next_fire_at == now - timedelta(minutes=1)
+    assert saved.last_fired_at is None, "archived rows stay due for a possible restore"
 
 
 async def test_list_for_tenant_filters(db_session: AsyncSession) -> None:
