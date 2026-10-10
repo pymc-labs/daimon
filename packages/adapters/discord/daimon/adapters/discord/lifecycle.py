@@ -39,7 +39,7 @@ from daimon.adapters.discord.embed import (
 )
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.output_delivery import AnswerMessage
-from daimon.adapters.discord.split import split_for_discord_safe
+from daimon.adapters.discord.split import split_discord_answer, split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
@@ -70,9 +70,9 @@ DeleteFn = Callable[[discord.Message], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
 
-# A text block sealed by a later tool use posts permanently once it reaches
-# this size; shorter sealed blocks are pre-tool narration and stay in the
-# ephemeral draft on the status card. Calibrated on real sessions: the
+# A text block sealed by a later tool use is retained in the final answer
+# once it reaches this size; shorter sealed blocks are pre-tool narration.
+# Calibrated on real sessions: the
 # largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
 
@@ -119,7 +119,7 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
 def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
     """Keep the fallback sender label attached to the first answer chunk."""
     prefix = fallback_name_prefix(agent_name, "")
-    chunks = split_for_discord_safe(text, limit=1900 - len(prefix))
+    chunks = split_discord_answer(text, limit=1900 - len(prefix))
     chunks[0] = prefix + chunks[0]
     return chunks
 
@@ -219,7 +219,6 @@ class DiscordTurnLifecycle:
         self._on_first_post = on_first_post
         self._on_replacement = on_replacement
         self._first_post_attempted: bool = False
-        self._persisted_sealed_indices: set[int] = set()
         self._was_answered: bool = False
         # A continuity notice that belongs ABOVE the answer it explains. The
         # answer is an in-place edit of the embed posted at mention time, so a
@@ -308,8 +307,9 @@ class DiscordTurnLifecycle:
                 await self._on_replacement(replacement)
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the one status embed: headline, tool lines and the latest draft."""
-        return [build_discord_embed(to_embed_data(self._state, now=now))]
+        """Keep the working card visible until the complete answer is ready."""
+        state = dataclasses.replace(self._state, text_preview="")
+        return [build_discord_embed(to_embed_data(state, now=now))]
 
     async def _maybe_flush(self) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""
@@ -395,35 +395,6 @@ class DiscordTurnLifecycle:
         else:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
 
-    async def _persist_sealed_responses(self, state: TurnState) -> None:
-        """Post sealed answers (text blocks a later tool call made immutable)
-        as permanent messages, once each. Without this, an answer composed
-        before a trailing tool call (e.g. a memory-repo write) is discarded by
-        the final-response extraction and only the post-tool recap survives."""
-        for index, text in extract_sealed_responses(
-            state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
-        ):
-            if index in self._persisted_sealed_indices:
-                continue
-            self._persisted_sealed_indices.add(index)
-            use_name_prefix = (
-                self._fallback_active is not None
-                and self._fallback_active()
-                and not self._name_prefix_sent
-            )
-            if use_name_prefix:
-                self._name_prefix_sent = True
-            chunks = (
-                _split_with_name_prefix(text, self._agent_name)
-                if use_name_prefix
-                else split_for_discord_safe(text)
-            )
-            for chunk in chunks:
-                await self._send_message(
-                    content=chunk, allowed_mentions=discord.AllowedMentions.none()
-                )
-            log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
-
     def _note_discord_time(self, snowflake: object) -> None:
         if isinstance(snowflake, int) and (
             self._discord_mark is None or snowflake > self._discord_mark
@@ -449,12 +420,23 @@ class DiscordTurnLifecycle:
             self._mark_ended()
 
     async def _deliver_success(self, state: TurnState) -> None:
-        await self._persist_sealed_responses(state)
-        if self._unprompted and not extract_final_response(state.content):
+        # A tool call can seal an answer before the final recap. Hold both
+        # until the turn ends, then deliver one ordered, numbered sequence.
+        answers = [
+            text
+            for _, text in extract_sealed_responses(
+                state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
+            )
+        ]
+        final_response = extract_final_response(state.content)
+        if final_response:
+            answers.append(final_response)
+        response_text = "\n\n".join(answers)
+        if self._unprompted and not response_text:
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
             # "done" state worth keeping (unlike a mention, where the caller
-            # watched the tools run); sealed text already posted stays.
+            # watched the tools run).
             self._terminal = True
             await self._discard_embed()
             log.info("turn.terminal_success", has_text=False, unprompted=True)
@@ -463,7 +445,6 @@ class DiscordTurnLifecycle:
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
         await self._flush_terminal()
 
-        response_text = extract_final_response(state.content)
         cancelled = state.termination == TerminationReason.INTERRUPTED
         if cancelled:
             if not response_text:
@@ -547,7 +528,7 @@ class DiscordTurnLifecycle:
         chunks = (
             _split_with_name_prefix(response_text, self._agent_name)
             if use_name_prefix
-            else split_for_discord_safe(response_text)
+            else split_discord_answer(response_text)
         )
 
         summary = self._terminal_embed
@@ -580,7 +561,7 @@ class DiscordTurnLifecycle:
             chunks = (
                 _split_with_name_prefix(original_response_text, self._agent_name)
                 if use_name_prefix
-                else split_for_discord_safe(original_response_text)
+                else split_discord_answer(original_response_text)
             )
             await deliver_first(chunks[0], [])
         self._revealed_first_chunk = chunks[0]
@@ -717,13 +698,11 @@ class DiscordTurnLifecycle:
         )
 
     async def on_render(self, state: TurnState) -> None:
-        # Sole delivery path (D-11). Sealed answers first, then the embed
-        # flush -- matches on_terminal_success's existing order, so a sealed
-        # answer never trails behind an embed that already moved past it.
+        # Only progress is shown while the turn runs; answer text is buffered
+        # until terminal success so a later tool cannot leave a visible pause.
         if self._terminal:
             return
         self._state = update_activity(self._state, state)
-        await self._persist_sealed_responses(state)
         if self._unprompted and self._message_ref is None and not _has_visible_output(state):
             return  # nothing to show yet, and nobody asked: stay invisible
         await self._maybe_flush()

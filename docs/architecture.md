@@ -197,6 +197,11 @@ app header. A missing face is queued for generation after the turn proceeds;
 the current picture remains in use until it is stored. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
+Discord buffers draft and sealed answer text until the turn finishes. The status
+card shows progress while tools run. At terminal success, sealed answers and
+the final response are delivered together in order; answers spanning several
+messages carry `(1/3)` continuation labels and are sent back to back.
+
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
 application-owned webhook post in the same tenant and channel. With agent
 identity off, the reply must be to a turn post the bot itself sent (the card or

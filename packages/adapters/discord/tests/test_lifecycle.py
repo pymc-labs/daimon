@@ -345,7 +345,7 @@ class TestCleanReplace:
         await lc.on_terminal_success(state)
 
         first = edits[-1][1]
-        assert first.get("content", "").startswith("x"), "the first chunk replaces the card"
+        assert first.get("content", "").startswith("(1/3)\nx"), "the first chunk replaces the card"
         assert first.get("embeds") == [], "the first chunk drops the summary"
         overflow = sends[initial_sends:]
         assert len(overflow) >= 2, "4,000 characters overflow into at least two more messages"
@@ -691,112 +691,63 @@ def _sealed_state(answer: str, *, trailing: str = "") -> TurnState:
     return TurnState(content=content)
 
 
-class TestSealedResponsePersistence:
-    async def test_early_answer_labels_only_first_chunk_on_bot_fallback(self) -> None:
-        lc, sends, _ = _make_lifecycle()
-        lc._fallback_active = lambda: True  # pyright: ignore[reportPrivateUsage]
-        await lc.on_render(_sealed_state("x" * 2100))
-        chunks = [sent["content"] for sent in sends if "content" in sent]
-        assert len(chunks) > 1
-        assert chunks[0].startswith("-# test-agent\nx")
-        assert all(not chunk.startswith("-# test-agent\n") for chunk in chunks[1:])
-        assert all(len(chunk) <= 2000 for chunk in chunks)
-        assert "".join(chunks).removeprefix("-# test-agent\n") == "x" * 2100
-
-    async def test_on_render_posts_sealed_answer_once(self) -> None:
-        """A >=500-char text block sealed by a tool use posts as a permanent
-        message on the next render tick — and only once across ticks."""
+class TestBufferedAnswers:
+    async def test_answer_waits_for_terminal_even_after_trailing_tools(self) -> None:
         lc, sends, edits = _make_lifecycle()
-        await lc.on_sse_event(_thinking_event())
-        initial_sends = len(sends)
-
-        answer = "The full diagnosis is: " + "x" * 600
-        state = _sealed_state(answer)
-        await lc.on_render(state)
-        await lc.on_render(state)
-
-        content_sends = [s for s in sends[initial_sends:] if "content" in s]
-        assert len(content_sends) == 1, "sealed answer should post exactly once across ticks"
-        assert content_sends[0]["content"] == answer, "the sealed text posts verbatim"
-
-    async def test_sealed_answer_disables_all_mention_channels(self) -> None:
-        """T-22-01: the sealed pre-tool answer send (reachable via prompt
-        injection through tool output) must disable everyone/role/user mentions."""
-        lc, sends, edits = _make_lifecycle()
-        await lc.on_sse_event(_thinking_event())
-        initial_sends = len(sends)
-
-        answer = "@everyone the full diagnosis is: " + "x" * 600
-        state = _sealed_state(answer)
-        await lc.on_render(state)
-
-        content_sends = [s for s in sends[initial_sends:] if "content" in s]
-        assert len(content_sends) == 1
-        mentions = content_sends[0].get("allowed_mentions")
-        assert mentions is not None, "sealed answer send must carry allowed_mentions"
-        assert not mentions.everyone, "everyone mentions must be disabled"
-        assert not mentions.roles, "role mentions must be disabled"
-        assert not mentions.users, "user mentions must be disabled"
-
-    async def test_on_render_keeps_short_narration_suppressed(self) -> None:
-        """Sealed text under the threshold is narration and never posts as a
-        standalone message (on_render's own embed flush is unrelated)."""
-        lc, sends, edits = _make_lifecycle()
-        await lc.on_sse_event(_thinking_event())
-
-        await lc.on_render(_sealed_state("Let me check the ArviZ summary."))
-
-        content_sends = [s for s in sends if "content" in s]
-        assert content_sends == [], "short pre-tool narration must not post"
-
-    async def test_terminal_success_posts_unflushed_sealed_answer_before_final(self) -> None:
-        """A sealed answer the render loop never flushed still posts at terminal,
-        and the final recap posts as today."""
-        lc, sends, edits = _make_lifecycle()
-        await lc.on_sse_event(_thinking_event())
-        initial_sends = len(sends)
-
-        answer = "Here is the verified diagnosis. " + "y" * 600
-        state = _sealed_state(answer, trailing="I've delivered the full diagnosis above.")
-        await lc.on_terminal_success(state)
-
-        content_sends = [s["content"] for s in sends[initial_sends:] if "content" in s]
-        assert content_sends == [answer], "unflushed sealed answer posts at terminal"
-        replace_edit = edits[-1]
-        assert replace_edit[1].get("content") == "I've delivered the full diagnosis above.", (
-            "final recap still replaces the embed"
-        )
-
-    async def test_terminal_success_does_not_repost_already_flushed_answer(self) -> None:
-        """A sealed answer posted by on_render is not re-posted at terminal."""
-        lc, sends, edits = _make_lifecycle()
-        await lc.on_sse_event(_thinking_event())
-        initial_sends = len(sends)
-
-        answer = "z" * 800
+        answer = "The full diagnosis is: " + "x" * 2100
         state = _sealed_state(answer, trailing="Recap.")
+        await lc.on_sse_event(_message_event(answer))
+        await lc.on_render(state)
+        await lc.on_render(state)
+        assert all("content" not in sent for sent in sends)
+        assert all(not embed.description for sent in sends for embed in sent.get("embeds", []))
+        assert sends[0]["embeds"][0].title == "Working on it…"
+
+        await lc.on_terminal_success(state)
+        parts = [edit[1]["content"] for edit in edits if "content" in edit[1]]
+        parts += [sent["content"] for sent in sends if "content" in sent]
+        assert len(parts) == 2
+        assert parts[0].startswith("(1/2)\n")
+        assert parts[1].startswith("(2/2)\n")
+        assert "".join(part.split("\n", 1)[1] for part in parts) == answer + "\n\nRecap."
+        assert all(len(part) <= 1900 for part in parts)
+        assert all("(1/2)" not in str(edit[1]) for edit in edits[:-1])
+
+    async def test_fallback_name_is_only_on_first_part(self) -> None:
+        lc, sends, edits = _make_lifecycle()
+        lc._fallback_active = lambda: True  # pyright: ignore[reportPrivateUsage]
+        await lc.on_terminal_success(_sealed_state("x" * 2100))
+        parts = [edit[1]["content"] for edit in edits if "content" in edit[1]]
+        parts += [sent["content"] for sent in sends if "content" in sent]
+        assert parts[0].startswith("-# test-agent\n(1/2)\n")
+        assert parts[1].startswith("(2/2)\n")
+        assert all(len(part) <= 1900 for part in parts)
+
+    async def test_buffered_answer_disables_all_mentions(self) -> None:
+        lc, sends, edits = _make_lifecycle()
+        state = _sealed_state("@everyone " + "x" * 2100)
         await lc.on_render(state)
         await lc.on_terminal_success(state)
+        parts = [edit[1] for edit in edits if "content" in edit[1]]
+        parts += [sent for sent in sends if "content" in sent]
+        assert len(parts) == 2
+        assert all(part["allowed_mentions"].to_dict()["parse"] == [] for part in parts)
 
-        content_sends = [s["content"] for s in sends[initial_sends:] if "content" in s]
-        assert content_sends == [answer], "sealed answer posts exactly once end-to-end"
-
-    async def test_terminal_success_with_sealed_answer_and_no_final_text_keeps_done_embed(
-        self,
-    ) -> None:
-        """Tool-only ending after a flushed sealed answer keeps the done embed
-        (no 'Turn cancelled' replace)."""
+    async def test_short_pre_tool_narration_is_not_in_final_answer(self) -> None:
         lc, sends, edits = _make_lifecycle()
-        await lc.on_sse_event(_thinking_event())
-        await lc.on_render(TurnState())
-
-        state = _sealed_state("w" * 700)
+        state = _sealed_state("Let me check the ArviZ summary.", trailing="The result is ready.")
+        await lc.on_render(state)
         await lc.on_terminal_success(state)
+        assert edits[-1][1]["content"] == "The result is ready."
+        assert all("content" not in sent for sent in sends)
 
-        assert edits, "the done embed flush must still land"
-        assert all(e[1].get("content") != "Turn cancelled." for e in edits), (
-            "a turn that posted a sealed answer is not a cancellation"
-        )
+    async def test_sealed_answer_without_recap_is_preserved(self) -> None:
+        lc, sends, edits = _make_lifecycle()
+        answer = "w" * 700
+        await lc.on_render(_sealed_state(answer))
+        await lc.on_terminal_success(_sealed_state(answer))
+        assert edits[-1][1]["content"] == answer
+        assert lc.was_answered
 
 
 # ---------------------------------------------------------------------------
@@ -917,9 +868,7 @@ class TestStatusEmbedFromTurnState:
 
         embeds = edits[-1][1]["embeds"]
         assert len(embeds) == 1, "the draft rides the status embed"
-        assert (embeds[0].description or "").endswith("> Let me check the workspace config"), (
-            "agent.message text must be quoted at the bottom of the status embed"
-        )
+        assert not embeds[0].description, "the working card must not reveal a partial answer"
 
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +969,7 @@ class TestMessageEventMapping:
 
         embeds = sends[0].get("embeds")
         assert embeds is not None and len(embeds) == 1, "one status embed"
-        assert "> I'll look that up" in embeds[0].description, "message text is the draft"
+        assert not embeds[0].description, "draft text stays buffered until terminal success"
 
     async def test_thinking_event_adds_nothing_to_the_card(self) -> None:
         """agent.thinking carries no text; the headline already says Thinking."""
@@ -1043,9 +992,9 @@ class TestMessageEventMapping:
 
         embeds = sends[0].get("embeds")
         assert embeds is not None and len(embeds) == 1, "the draft rides the one status embed"
-        description = embeds[0].description
+        description = embeds[0].description or ""
         assert len(description) < 400, "draft must be truncated, not the full text"
-        assert "…" in description, "truncated text should end with ellipsis"
+        assert not description, "a long draft must not appear as a stopped partial answer"
 
 
 # ---------------------------------------------------------------------------
@@ -1800,7 +1749,7 @@ async def test_final_table_is_attached_to_answer(notify):
 @pytest.mark.parametrize("status", [403, 413, 500])
 @pytest.mark.parametrize("notify", [False, True])
 async def test_rejected_table_upload_retries_original_answer_as_text(status, notify):
-    from daimon.adapters.discord.split import split_for_discord_safe
+    from daimon.adapters.discord.split import split_discord_answer
     from structlog.testing import capture_logs
 
     delivered = []
@@ -1839,7 +1788,7 @@ async def test_rejected_table_upload_retries_original_answer_as_text(status, not
     await lifecycle.post_initial()
     with capture_logs() as logs:
         await lifecycle.on_terminal_success(_make_success_state(text))
-    assert [part["content"] for part in delivered] == split_for_discord_safe(
+    assert [part["content"] for part in delivered] == split_discord_answer(
         ("<@123>\n" if notify else "") + "Recovered files.\n\n" + text
     )
     assert all("attachments" not in part and "files" not in part for part in delivered)
