@@ -366,3 +366,8 @@ time, and observation coverage. Creation/edit timestamps do not backdate text
 seen on a late poll. Missing early coverage is PENDING; a completed observation
 without a matching early progress message FAILs. Tenant-cap mutation still needs
 an explicitly configured isolated QA operator hook.
+
+Progress text includes nested Discord V2 type-10 text displays. A component-only
+card whose running/terminal state the driver cannot identify is retained as
+`component_state_unknown`; it can only produce PENDING, never a false progress
+PASS or FAIL. The generic card/text assertions need separate V2 rendering support.

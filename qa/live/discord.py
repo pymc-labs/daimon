@@ -22,7 +22,18 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from qa.live.config import Config, Target
 from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
-from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
+from qa.live.types import (
+    Message,
+    Pending,
+    Turn,
+    Usage,
+    WatchTimeout,
+    component_text,
+    obj,
+    objects,
+    text_of,
+    utcnow,
+)
 
 CHANNEL_MARKER = "daimon-live-qa"
 TRANSPORT_FAILURE = re.compile(
@@ -502,14 +513,19 @@ class DiscordBackend:
             turn.progress_observed_until_s = observed_s
             for message, verdict in zip(messages, turn.verdicts, strict=True):
                 snapshot = fingerprint(message)
-                if verdict in {"working", "other_embed"} and snapshot not in progress_snapshots:
+                unknown_components = bool(component_text(message)) and not message.get("embeds")
+                if (
+                    verdict in {"working", "other_embed"} or unknown_components
+                ) and snapshot not in progress_snapshots:
                     # Content may disappear on a final card edit. Freeze it at
                     # the actual poll time; a snowflake cannot date edited text.
                     frozen = obj(json.loads(json.dumps(message)))
                     turn.progress_text_history.append(
                         {
                             "message": frozen,
-                            "classification": verdict,
+                            "classification": "component_state_unknown"
+                            if unknown_components
+                            else verdict,
                             "observed_at": observed_at.isoformat(),
                             "elapsed_s": observed_s,
                         }

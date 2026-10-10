@@ -197,3 +197,62 @@ def test_progress_text_requires_a_real_early_nonterminal_snapshot(
         judge,
     )
     assert check.status == expected
+
+
+@pytest.mark.parametrize(
+    "classification,expected",
+    [("working", "PASS"), ("component_state_unknown", "PENDING"), ("other_embed", "PENDING")],
+)
+def test_progress_nested_component_copy_requires_known_running_state(
+    classification: str,
+    expected: str,
+    turn: Turn,
+    backend: FakeBackend,
+    judge: FakeJudge,
+) -> None:
+    turn.progress_first_poll_s = 1.0
+    turn.progress_observed_until_s = 20.0
+    turn.progress_text_history = [
+        {
+            "elapsed_s": 2.0,
+            "classification": classification,
+            "message": {
+                "components": [
+                    {
+                        "type": 17,
+                        "components": [
+                            {
+                                "type": 9,
+                                "components": [{"type": 10, "content": "Queued for a free slot"}],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    ]
+    check = evaluate(
+        Assertion(kind="progress_text_seen", turn=1, pattern="Queued", within_s=15),
+        [turn],
+        backend,
+        judge,
+    )
+    assert check.status == expected
+
+
+def test_component_text_display_ignores_button_labels() -> None:
+    from qa.live.types import component_text
+
+    assert component_text(
+        {
+            "components": [
+                {
+                    "type": 17,
+                    "components": [
+                        {"type": 10, "content": "Visible copy"},
+                        {"type": 1, "components": [{"type": 2, "label": "Queued button"}]},
+                    ],
+                }
+            ]
+        }
+    ) == ["Visible copy"]

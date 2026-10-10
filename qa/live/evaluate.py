@@ -19,6 +19,7 @@ from qa.live.types import (
     Message,
     Pending,
     Turn,
+    component_text,
     obj,
     objects,
     text_components,
@@ -192,6 +193,7 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
             elif kind == "progress_text_seen":
                 maximum = assertion.within_s or 0
                 matched = False
+                unknown_state = False
                 for snapshot in turn.progress_text_history:
                     elapsed = snapshot.get("elapsed_s")
                     if (
@@ -202,15 +204,24 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                         or not isinstance(snapshot.get("message"), dict)
                     ):
                         raise Pending("progress snapshot evidence is malformed")
-                    if snapshot.get("classification") not in {"working", "other_embed"}:
+                    if (
+                        snapshot.get("classification") in {"component_state_unknown", "other_embed"}
+                        and elapsed <= maximum
+                    ):
+                        unknown_state = True
+                    if snapshot.get("classification") != "working":
                         continue
                     if elapsed <= maximum and any(
                         re.search(assertion.pattern or "", part, re.MULTILINE)
-                        for part in text_components(obj(snapshot.get("message")))
+                        for part in (
+                            text_components(obj(snapshot.get("message")))
+                            + component_text(obj(snapshot.get("message")))
+                        )
                     ):
                         matched = True
                 if not matched and (
-                    turn.progress_first_poll_s is None
+                    unknown_state
+                    or turn.progress_first_poll_s is None
                     or turn.progress_first_poll_s > maximum
                     or turn.progress_observed_until_s is None
                     or (turn.progress_observed_until_s < maximum and not turn.settled)

@@ -780,3 +780,25 @@ def test_progress_text_snapshot_survives_final_card_edit(
     frozen = snapshot["message"]
     assert isinstance(frozen, dict) and frozen["content"] == "Queued"
     assert turn.progress_first_poll_s is not None
+
+
+def test_component_only_progress_retains_unknown_state_instead_of_inventing_working(
+    backend: DiscordBackend,
+    driver: FakeDriver,
+) -> None:
+    from contextlib import suppress
+
+    from qa.live.types import WatchTimeout
+
+    backend.owned.add("parent")
+    driver.current = [
+        {
+            "id": "x",
+            "channel_id": "thread",
+            "components": [{"type": 17, "components": [{"type": 10, "content": "Queued"}]}],
+        }
+    ]
+    turn = Turn(1, "trigger", "parent", utcnow())
+    with suppress(WatchTimeout):
+        backend.collect(turn, 0.1)
+    assert turn.progress_text_history[0]["classification"] == "component_state_unknown"

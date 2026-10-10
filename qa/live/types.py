@@ -25,6 +25,17 @@ def objects(value: JsonValue) -> list[Message]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def component_text(message: Message) -> list[str]:
+    """Discord V2 text displays only; button labels are controls, not copy."""
+    parts: list[str] = []
+    for component in objects(message.get("components")):
+        content = component.get("content")
+        if component.get("type") == 10 and isinstance(content, str):
+            parts.append(content)
+        parts.extend(component_text(component))
+    return parts
+
+
 def text_components(message: Message, *, include_fields: bool = True) -> list[str]:
     parts = [str(message.get("content") or "")]
     for embed in objects(message.get("embeds")):
