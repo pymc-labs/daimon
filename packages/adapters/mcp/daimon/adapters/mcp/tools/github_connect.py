@@ -13,7 +13,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.reachability import channel_admin_caller
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
@@ -28,7 +27,7 @@ from daimon.core.github_connect_cards import (
     resolve_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
-from daimon.core.github_panel import can_manage_agent_github
+from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
@@ -179,20 +178,25 @@ async def _github_connect_impl(
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
-        # A channel admin may connect their own repos for an agent they manage.
-        manages = is_admin or await can_manage_agent_github(
+        # A channel admin may connect their own repos for an agent they manage,
+        # by their groups as the platform reports them now, not as cached.
+        lookups = runtime.group_lookups
+        manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
             platform=auth.platform,
-            caller=channel_admin_caller(auth).model_copy(update={"is_server_admin": False}),
-            agent_names=(
-                target_name,
-                agent.name,
-                str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
-            ),
+            platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
+            agent_name=agent.name,
+            other_names=(target_name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
             ma_agent_id=str(agent.id),
-            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
             default=runtime.deployment_default,
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            members=(
+                lookups.live_members(auth.platform, auth.external_id)
+                if lookups is not None and auth.external_id is not None
+                else None
+            ),
         )
         if not manages:
             await record_connect_request(

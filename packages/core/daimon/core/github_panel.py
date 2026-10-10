@@ -106,8 +106,14 @@ async def requester_manages_agent(
     default: DeploymentDefault,
     is_daimon_managed: bool | None,
     members: GroupMembers | None,
+    other_names: tuple[str | None, ...] = (),
 ) -> bool:
-    """The confirm-time check for a link someone made for one agent, outside a chat turn.
+    """Whether the requester manages one agent, by their role and groups as they are now.
+
+    For confirming a link outside a chat turn, and for any check that must not
+    trust a cached group: pass a `members` lookup that asks the platform each
+    time (the MCP server's `GroupLookups.live_members`). `other_names` are the
+    agent's other names (`agent_pin_names`).
 
     Reads the requester's stored role and channel admin grants, and counts a
     group or Discord role only as `members` confirms it now. The caller reads
@@ -148,7 +154,7 @@ async def requester_manages_agent(
         tenant_id=tenant_id,
         platform=platform,
         caller=ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids),
-        agent_names=(agent_name,),
+        agent_names=(agent_name, *other_names),
         ma_agent_id=ma_agent_id,
         is_daimon_managed=is_daimon_managed,
         default=default,
