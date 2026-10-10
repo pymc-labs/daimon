@@ -50,7 +50,9 @@ A temporary staging-only override admits `claude-haiku-4-5` and its dated
 `claude-haiku-4-5-20251001` snapshot until the driver confirms Haiku 5.5
 deployment. Staging also accepts the primary throughout that transition.
 Exact Haiku 5.5 snapshots with a valid `YYYYMMDD` suffix are admitted in model
-evidence and judge responses; requests still use the primary alias. Judges
+evidence and judge responses; requests still use the primary alias. Older
+configs that omit `dated_snapshots` inherit its approved value for each backend
+at load time. Explicit values must match the approved policy. Judges
 and production canaries never use the staging override. Every trigger first runs the target's read-only
 `model_probe` argv command, passing the owned channel/guild/category as JSON on
 stdin. Set `qa_agent_name` to the dedicated QA agent. The shipped
