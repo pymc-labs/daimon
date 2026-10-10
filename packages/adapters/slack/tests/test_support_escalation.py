@@ -444,16 +444,26 @@ async def test_sealed_origin_posts_a_link_and_the_note_only(
 
     await handle_ask_human_click(runtime, _click())
     view = _shown(permalink)[-1]
-    assert SEALED_NOTE_HINT in json.dumps(view), "the person is told the note leaves the seal"
+    hints = [
+        element["text"]
+        for block in view["blocks"]
+        if block["type"] == "context"
+        for element in block["elements"]
+    ]
+    assert SEALED_NOTE_HINT in hints, "the person is told the note leaves the seal"
+    assert SEALED_NOTE_HINT == (
+        "Support gets your note and a link, not the conversation.\n\n"
+        "Leave out anything that must stay in this channel."
+    )
 
     await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help me")))
 
     (body,) = _posts(permalink)
-    lines = body["text"].split("\n")
+    lines = body["text"].split("\n\n")
     assert lines[0].startswith("*Human support requested* by ")
     assert lines[1] == _PERMALINK
-    assert "read only from inside" in lines[2]
-    assert lines[3:] == ["", "help me"], "nothing but the requester, link and note"
+    assert lines[2] == "_Reply in the original channel._"
+    assert lines[3:] == ["help me"], "nothing but the requester, link and note"
     assert body["unfurl_links"] is False
 
 

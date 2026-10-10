@@ -53,13 +53,13 @@ import discord
 log = structlog.get_logger()
 
 
-def coding_tools_refusal(agent_name: str) -> str:
-    """What a member sees instead of a token, naming the permission and the way round it."""
-    return (
-        f"Minting an access token for {agent_name} needs Manage Server, or channel admin "
-        "of every channel its rule runs it in, pressed inside one of them. "
-        "Ask an admin to open Details and use this button."
-    )
+#: What a member sees instead of a token. Minting needs Manage Server, or channel
+#: admin of every channel the agent's rule runs it in, pressed inside one of them;
+#: the refusal names only the way out.
+CODING_TOOLS_REFUSAL = (
+    "You can't create this token.\n\n"
+    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+)
 
 
 async def send_coding_tools_access(
@@ -162,7 +162,7 @@ async def send_coding_tools_access(
         log.info(
             "agent_setup.coding_tools.refused", agent_name=selected.name, reason=decision.reason
         )
-        await interaction.response.send_message(coding_tools_refusal(selected.name), ephemeral=True)
+        await interaction.response.send_message(CODING_TOOLS_REFUSAL, ephemeral=True)
         await _audit(
             runtime,
             tenant_id=tenant_id,
@@ -289,19 +289,17 @@ def render_mcp_config(
         f'"{public_url}" '
         f'--header "Authorization: Bearer {jwt}"'
     )
-    bound = (
-        f"It runs in <#{channel_id}>, under that channel's rules and budget.\n"
-        if channel_id is not None
-        else ""
-    )
-    return (
-        f"**Use `{agent_name}` from your coding tools** — token shown once, copy it now.\n"
-        f"{bound}"
-        "**Run this:**\n"
-        f"```\n{cli_oneliner}\n```\n"
-        "**Or paste into `.mcp.json`:**\n"
-        f"```json\n{mcp_json_block}\n```"
-    )
+    lines = [
+        f"**Use {agent_name} from your coding tools**",
+        "Copy the setup below now. The token is shown only once.",
+    ]
+    if channel_id is not None:
+        lines.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
+    lines += [
+        f"**Run this:**\n```\n{cli_oneliner}\n```",
+        f"**Or paste into `.mcp.json`:**\n```json\n{mcp_json_block}\n```",
+    ]
+    return "\n\n".join(lines)
 
 
 class _McpAccessView(ExpiringView, discord.ui.View):

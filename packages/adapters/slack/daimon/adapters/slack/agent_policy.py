@@ -75,8 +75,8 @@ log = structlog.get_logger()
 #: admins included: a panel edit never stamps the reconciler's spec hash, so
 #: the drift would survive every later reconcile with no way back.
 MANAGED_AGENT_MESSAGE: Final[str] = (
-    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
-    "or ask me to make you a new agent."
+    "You can't change a starting agent.\n\n"
+    "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 
 #: A spec edit by a member against an agent the workspace currently depends on.
@@ -97,16 +97,15 @@ NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
 #: purpose: which limb fired says nothing the caller can act on, and the fix
 #: is the same either way.
 SHARED_AGENT_MESSAGE: Final[str] = (
-    "This agent answers for other people here, so changing its repo or its keys "
-    f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
-    "to make you a new agent of your own."
+    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
 #: A skill-repo import by a member onto a shared agent: the imported skills
 #: would reach everyone it answers.
 SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
-    f"This agent answers for other people here, so adding skills to it needs {ADMIN_NOUN}. "
-    "Ask me and I'll write the request for them, or ask me to fork it and add them to the fork."
+    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
 AGENT_GONE_MESSAGE: Final[str] = (

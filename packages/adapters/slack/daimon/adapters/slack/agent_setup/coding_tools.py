@@ -54,6 +54,7 @@ from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = [
+    "NEEDS_ADMIN_MESSAGE",
     "handle_coding_tools_click",
     "handle_revoke_token_click",
     "render_coding_tools_message",
@@ -68,15 +69,17 @@ NOT_CONFIGURED_MESSAGE: Final[str] = (
 
 REVOKE_BUTTON_LABEL: Final[str] = "🗑 Revoke this token"
 
+COPY_NOW_LINE: Final[str] = "Copy the setup below now. The token is shown only once."
+
 TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
 
 
-def _needs_admin_message(agent_name: str) -> str:
-    return (
-        f"Minting an access token for {agent_name} needs a workspace admin, or channel "
-        "admin of every channel its rule runs it in, pressed inside one of them. "
-        "Ask an admin to open Details and use this button."
-    )
+#: Who may mint is a workspace admin, or an admin of every channel the agent's
+#: rule runs it in, pressing inside one of them; the refusal names only the way out.
+NEEDS_ADMIN_MESSAGE: Final[str] = (
+    "You can't create this token.\n\n"
+    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+)
 
 
 def render_coding_tools_message(
@@ -101,22 +104,18 @@ def render_coding_tools_message(
     cli_oneliner, mcp_json_block = coding_tool_config(
         agent_name=agent_name, public_url=public_url, jwt=jwt
     )
-    bound = (
-        f"\nIt runs in <#{channel_id}>, under that channel's rules and budget."
-        if channel_id is not None
-        else ""
-    )
+    body = [COPY_NOW_LINE]
+    if channel_id is not None:
+        body.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
     blocks: list[dict[str, Any]] = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": (
-                    f"*Use `{escape_mrkdwn(agent_name)}` from your coding tools* — "
-                    f"token shown once, copy it now.{bound}"
-                ),
+                "text": f"*Use {escape_mrkdwn(agent_name)} from your coding tools*",
             },
         },
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n\n".join(body)}},
         {
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"*Run this:*\n```\n{cli_oneliner}\n```"},
@@ -141,7 +140,7 @@ def render_coding_tools_message(
             ],
         },
     ]
-    text = f"Use {agent_name} from your coding tools — token shown once, copy it now."
+    text = f"Use {agent_name} from your coding tools. {COPY_NOW_LINE}"
     return text, blocks
 
 
@@ -226,7 +225,7 @@ async def handle_coding_tools_click(
             client,
             channel_id=channel_id or user_id,
             user_id=user_id,
-            text=_needs_admin_message(agent_name),
+            text=NEEDS_ADMIN_MESSAGE,
         )
         await _audit(
             runtime,

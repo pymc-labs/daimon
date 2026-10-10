@@ -79,9 +79,8 @@ class PrivacyPanel:
         account_id = await self._account(tenant_id, user_id)
         if account_id is None:
             return no_data_card(bot)
-        preview = await collect_purge_preview(sm=self._runtime.sessionmaker, account_id=account_id)
         policy_url = str(self._runtime.settings.privacy_policy_url)
-        return panel_card(preview, bot=bot, policy_url=policy_url)
+        return panel_card(bot=bot, policy_url=policy_url)
 
     async def _act(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -102,10 +101,12 @@ class PrivacyPanel:
             return replace_card(export_card(preview, bot=bot))
         name = activity.from_.name or ""
         if op == "delete":
-            return replace_card(confirm_card(preview, account_id=account_id, name=name))
+            return replace_card(confirm_card(preview, account_id=account_id, name=name, bot=bot))
         typed = str(data.get(CONFIRM_INPUT) or "").strip()
         if not name or typed != name:
-            card = confirm_card(preview, account_id=account_id, name=name, error=NAME_MISMATCH)
+            card = confirm_card(
+                preview, account_id=account_id, name=name, bot=bot, error=NAME_MISMATCH
+            )
             return replace_card(card)
         if str(data.get("account")) != str(account_id):
             log.warning("teams.privacy.account_mismatch", account_id=str(account_id))

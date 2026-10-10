@@ -466,8 +466,9 @@ async def test_a_sealed_channel_warns_in_the_form_and_marks_the_post(
         await _send(service, _token(card), "help")
         chat = await _form(service, teams_api_fake, make_message_activity(text="support"))
 
-    assert support.SEALED_HINT in card, "told the note leaves the channel before sending it"
-    assert support.SEALED_HINT not in chat, "the 1:1 chat is nobody's sealed channel"
+    hint = json.dumps(support.SEALED_HINT)[1:-1]  # as it sits in the card's JSON
+    assert hint in card, "told the note leaves the channel before sending it"
+    assert hint not in chat, "the 1:1 chat is nobody's sealed channel"
     [posted] = _posts_to(teams_api_fake, OPS)
     assert support.SEALED_LINE in posted, "whoever picks it up knows to answer there"
 

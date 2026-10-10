@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Coroutine, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import anthropic
 import structlog
@@ -31,13 +31,16 @@ import discord
 log = structlog.get_logger()
 
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
+HEADER_LABEL: Final = "Extra skills"
 ADD_LABEL: Final = "Add skill"
 BACK_LABEL: Final = "◀ Back"
 MAX_LISTED: Final = 20
 EXPLAINER: Final = (
-    "-# Added to whatever agent answers in this channel, here only, from the next message. "
-    "A workspace library skill, or one uploaded to this channel's agent. Server admins only."
+    "-# These skills apply only here, from the next message.\n\n"
+    "-# Only server admins can change them."
 )
+#: Beside the skill field: which skills can be named.
+SKILL_HINT: Final = "A library skill, or one uploaded to this channel's agent."
 UNREADABLE: Final = "This server's skills could not all be read. Nothing changed."
 
 
@@ -45,11 +48,11 @@ def build_channel_skills_container(
     rows: Sequence[ChannelSkillRow], *, channel_name: str | None
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """The panel card for one channel's skills. Pure — no I/O."""
-    lines = [f"`{row.name}` · {row.version}" for row in rows[:MAX_LISTED]]
+    lines = [f"`{row.name}` ({row.version})" for row in rows[:MAX_LISTED]]
     if len(rows) > MAX_LISTED:
         lines.append(f"-# and {len(rows) - MAX_LISTED} more")
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
-    container.add_item(header(f"{CHANNEL_SKILLS_LABEL} · #{channel_name or 'this channel'}"))
+    container.add_item(header(f"{HEADER_LABEL} in #{channel_name or 'this channel'}"))
     container.add_item(discord.ui.TextDisplay("\n".join(lines) or "-# no extra skills"))
     container.add_item(hairline())
     container.add_item(discord.ui.TextDisplay(EXPLAINER))
@@ -175,10 +178,16 @@ class AddChannelSkillModal(discord.ui.Modal):
         name = view.state.channel_name or "this channel"
         super().__init__(title=f"Add a skill to #{name}"[:45])
         self._view = view
-        self.skill: discord.ui.TextInput[discord.ui.View] = discord.ui.TextInput(
-            label="Skill", placeholder="name, agent/name or skill id", max_length=200
+        skill_label: discord.ui.Label[AddChannelSkillModal] = discord.ui.Label(
+            text="Skill",
+            description=SKILL_HINT,
+            component=discord.ui.TextInput(
+                placeholder="name, agent/name or skill id", max_length=200
+            ),
         )
-        self.add_item(self.skill)
+        # The label wraps any input; this one was built inline just above.
+        self.skill = cast("discord.ui.TextInput[AddChannelSkillModal]", skill_label.component)
+        self.add_item(skill_label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         view, state = self._view, self._view.state

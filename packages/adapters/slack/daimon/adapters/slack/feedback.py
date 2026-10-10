@@ -69,6 +69,7 @@ from daimon.core.stores.message_feedback import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support_escalation import SEALED_POST_MARKER
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = [
@@ -685,9 +686,7 @@ def render_feedback_post(
     labels = [FEEDBACK_REASONS[code] for code in d.reasons if code in FEEDBACK_REASONS]
     lines.append(f"*Reasons:* {', '.join(labels) if labels else 'none picked'}")
     if recorded.sealed:
-        lines.append(
-            "_From a channel read only from inside: answer there, the conversation stays in it._"
-        )
+        lines.append(f"_{SEALED_POST_MARKER}_")
     text = "\n".join(lines)
     if d.text.strip():
         text += "\n\n" + escape_mrkdwn(d.text)

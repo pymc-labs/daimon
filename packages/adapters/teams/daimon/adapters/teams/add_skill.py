@@ -43,8 +43,8 @@ from daimon.core.skills.ingest import SkillBundle
 log = structlog.get_logger()
 
 BUILT_IN: Final = (
-    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
-    "or ask me to make you a new agent."
+    "You can't change a starting agent.\n\n"
+    "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 
 

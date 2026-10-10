@@ -31,7 +31,7 @@ from daimon.adapters.discord.agent_setup.details_view import (
     build_details_container,
     picture_details_embed,
 )
-from daimon.adapters.discord.agent_setup.mcp_access import coding_tools_refusal
+from daimon.adapters.discord.agent_setup.mcp_access import CODING_TOOLS_REFUSAL
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT, DetailListName
@@ -928,11 +928,11 @@ async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
 
     kwargs = interaction.response.send_message.call_args.kwargs
     message = interaction.response.send_message.call_args.args[0]
-    assert message == coding_tools_refusal("churn-explorer"), (
-        "a member gets the explanatory refusal naming the agent and the way round it"
-    )
-    assert "Manage Server" in message, "the refusal must name the permission the caller lacks"
-    assert "Ask an admin to open Details" in message, "the refusal must name the way forward"
+    assert message == CODING_TOOLS_REFUSAL, "a member gets the refusal naming the way round it"
+    assert message == (
+        "You can't create this token.\n\n"
+        'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    ), "two lines, a blank line apart"
     assert kwargs.get("ephemeral") is True, "the refusal is ephemeral"
     assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (
         "a refused caller must reach no token material"

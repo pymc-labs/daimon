@@ -116,9 +116,9 @@ async def test_with_identity_the_result_posts_as_the_agent_and_still_names_it(
 
     kwargs = client.chat_postMessage.await_args.kwargs
     assert (kwargs["username"], kwargs["icon_url"]) == ("research", "https://app/a.png")
-    assert kwargs["text"].startswith("Routine result from research (0 9 * * 1, UTC):\n\nDone"), (
-        "Slack can drop the header silently, so the text keeps the agent's name"
-    )
+    assert kwargs["text"].startswith(
+        "Result from research's Monday routine at 09:00 UTC:\n\nDone"
+    ), "Slack can drop the header silently, so the text keeps the agent's name"
     assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
 
 
@@ -142,7 +142,7 @@ async def test_without_customize_scope_the_plain_post_keeps_the_agents_name(
 
     retry = client.chat_postMessage.await_args_list[-1].kwargs
     assert "username" not in retry
-    assert retry["text"].startswith("Routine result from research (0 9 * * 1, UTC):")
+    assert retry["text"].startswith("Result from research's Monday routine at 09:00 UTC:")
 
 
 async def test_the_built_in_agent_keeps_todays_text(
@@ -158,7 +158,7 @@ async def test_the_built_in_agent_keeps_todays_text(
 
     kwargs = client.chat_postMessage.await_args.kwargs
     assert "username" not in kwargs
-    assert kwargs["text"].startswith("Routine result from daimon (0 9 * * 1, UTC):")
+    assert kwargs["text"].startswith("Result from daimon's Monday routine at 09:00 UTC:")
 
 
 async def test_a_protected_channel_is_refused(
@@ -180,7 +180,7 @@ async def test_a_protected_channel_is_refused(
     assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:protected_channel")
     (call,) = client.chat_postMessage.await_args_list
     assert call.kwargs["channel"] == "D_CREATOR", "the result went to the creator, not C_ANN"
-    assert "lets nobody write there" in call.kwargs["text"]
+    assert "posting is blocked there" in call.kwargs["text"]
 
 
 async def test_a_malformed_thread_destination_is_skipped(
@@ -410,7 +410,7 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(
     assert outcome.status == "delivered"
     calls = client.chat_postMessage.await_args_list
     assert len(calls) > 1 and all(len(call.kwargs["text"]) <= 11800 for call in calls)
-    assert "".join(call.kwargs["text"] for call in calls).split("\n\n", 1)[1] == result
+    assert "".join(call.kwargs["text"] for call in calls).split("\n\n")[-1] == result
     expected_channel = "D_CREATOR" if fallback else "C1"
     assert all(call.kwargs["channel"] == expected_channel for call in calls)
     if not fallback:

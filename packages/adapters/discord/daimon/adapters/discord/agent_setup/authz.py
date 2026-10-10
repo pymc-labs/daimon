@@ -63,17 +63,16 @@ import discord
 log = structlog.get_logger()
 
 _SYSTEM_AGENT_MESSAGE = (
-    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
-    "or ask me to make you a new agent."
+    "You can't change a starting agent.\n\n"
+    "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 _REACHABLE_AGENT_MESSAGE = (
     f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
     "Ask me and I'll write the request for them."
 )
 _SHARED_AGENT_MESSAGE = (
-    "This agent answers for other people here, so changing its repo or its keys "
-    f"needs {ADMIN_NOUN}. Ask me and I'll write the request for them, or ask me "
-    "to make you a new agent of your own."
+    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
 

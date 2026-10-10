@@ -148,3 +148,37 @@ async def test_an_unknown_skill_is_refused_with_its_reason(
     assert "No skill of this workspace" in message
     async with db_session_factory() as session:
         assert await list_channel_skills(session, tenant_id=tenant_id, platform="discord") == []
+
+
+def test_the_card_names_the_channel_lists_versions_and_says_who_can_change_them() -> None:
+    from daimon.adapters.discord.agent_setup.channel_skills_view import (
+        build_channel_skills_container,
+    )
+    from daimon.core.stores.domain import ChannelSkillRow
+
+    row = ChannelSkillRow(
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        channel_id="555",
+        skill_id="skill_1",
+        version="v1",
+        name="python-helper",
+        owner_agent_name=None,
+        added_by_account_id=None,
+        added_at=dt.datetime(2026, 10, 10, tzinfo=dt.UTC),
+    )
+    container = build_channel_skills_container([row], channel_name="team-020")
+    texts = [i.content for i in container.children if isinstance(i, discord.ui.TextDisplay)]
+    assert texts == [
+        "## Extra skills in #team-020",
+        "`python-helper` (v1)",
+        "-# These skills apply only here, from the next message.\n\n"
+        "-# Only server admins can change them.",
+    ], "no ' · ' separators; the explainer's two lines sit a blank line apart"
+
+
+def test_the_add_form_says_which_skills_can_be_named() -> None:
+    modal = AddChannelSkillModal(MagicMock(state=MagicMock(channel_name="team-020")))
+    (label,) = modal.children
+    assert isinstance(label, discord.ui.Label)
+    assert label.description == "A library skill, or one uploaded to this channel's agent."

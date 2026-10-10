@@ -46,6 +46,7 @@ from microsoft_teams.cards import (
     Container,
     ExecuteAction,
     OpenDialogData,
+    Spacing,
     SubmitAction,
     SubmitData,
     TextBlock,
@@ -84,7 +85,9 @@ def _button(
     return button(VERB, title, op, style=style, **fields)
 
 
-def _text(text: str, *, bold: bool = False, subtle: bool = False) -> TextBlock:
+def _text(
+    text: str, *, bold: bool = False, subtle: bool = False, spacing: Spacing | None = None
+) -> TextBlock:
     """A wrapped TextBlock. Teams renders a line break only as a blank line."""
     return TextBlock(
         text=re.sub(r"\n+", "\n\n", text),
@@ -92,6 +95,7 @@ def _text(text: str, *, bold: bool = False, subtle: bool = False) -> TextBlock:
         weight="Bolder" if bold else None,
         is_subtle=subtle or None,
         size="Small" if subtle else None,
+        spacing=spacing,
     )
 
 
@@ -429,17 +433,16 @@ def token_card(
 ) -> AdaptiveCard:
     """The minted token, shown once inside a dialog, with a Revoke button."""
     revoke = SubmitAction(title="🗑 Revoke this token", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
-    bound = (
-        f" It runs in channel `{channel_id}`, under that channel's rules and budget."
-        if channel_id is not None
-        else ""
-    )
+    lines = [
+        _text(f"Use {agent_name} from your coding tools", bold=True),
+        _text("Copy the setup below now. The token is shown only once.", spacing="Medium"),
+    ]
+    if channel_id is not None:
+        bound = f"It runs in {channel_id}, with that channel's rules and budget."
+        lines.append(_text(bound, spacing="Medium"))
     return AdaptiveCard(
         body=[
-            _text(
-                f"Use **{agent_name}** from your coding tools. Token shown once, copy it now."
-                + bound
-            ),
+            *lines,
             _text("**Run this:**"),
             CodeBlock(code_snippet=cli, language="Bash"),
             _text("**Or paste into `.mcp.json`:**"),

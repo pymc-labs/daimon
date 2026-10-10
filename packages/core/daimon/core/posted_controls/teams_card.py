@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Final
 
-from daimon.core.posted_controls.cards import PostedCard, card_for_request
+from daimon.core.posted_controls.cards import ENV_FILE_KEPT_LINE, PostedCard, card_for_request
 
 __all__ = [
     "ADAPTIVE_CARD_TYPE",
@@ -31,20 +31,25 @@ _REQUESTER: Final[str] = "the person who asked"
 # A dialog has no file input, so on Teams a `.env` file is pasted, not uploaded.
 _PASTED: Final[dict[str, str]] = {
     "🔐 Upload it privately": "🔐 Paste it privately",
-    "Daimon stores the keys, not a retained copy of your uploaded file.": (
-        "Daimon stores the keys, not a copy of what you pasted."
-    ),
 }
+_PASTED_KEPT_LINE: Final[str] = "We save the keys, not what you pasted."
 
 
 def teams_wording(card: PostedCard) -> PostedCard:
-    """The card as Teams words it: an `env_file` request takes a paste."""
+    """The card as Teams words it.
+
+    A TextBlock shows backticks literally, so a key's name loses them. An
+    `env_file` request takes a paste, so the file it keeps nothing of is
+    what you pasted.
+    """
+    if card.kind == "env":
+        return card.model_copy(update={"headline": card.headline.replace("`", "")})
     if card.kind != "env_file":
         return card
     buttons = tuple(
         b.model_copy(update={"label": _PASTED.get(b.label, b.label)}) for b in card.buttons
     )
-    facts = tuple(_PASTED.get(fact, fact) for fact in card.facts)
+    facts = tuple(fact.replace(ENV_FILE_KEPT_LINE, _PASTED_KEPT_LINE) for fact in card.facts)
     return card.model_copy(update={"buttons": buttons, "facts": facts})
 
 
@@ -72,7 +77,8 @@ def build_adaptive_card(card: PostedCard, *, token: str | None = None) -> dict[s
     """
     card = teams_wording(card)
     body: list[dict[str, object]] = [_text(card.headline, weight="Bolder")]
-    body += [_text(fact, isSubtle=True, spacing="None") for fact in card.facts]
+    # Title, body, buttons and footer each sit apart, a blank line's gap between.
+    body += [_text(fact, isSubtle=True, spacing="Medium") for fact in card.facts]
     actions: list[dict[str, object]] = []
     for button in card.buttons:
         if button.url is not None:
@@ -83,8 +89,8 @@ def build_adaptive_card(card: PostedCard, *, token: str | None = None) -> dict[s
         data = {"msteams": {"type": "task/fetch"}, "dialog_id": CREDENTIAL_DIALOG, "token": token}
         actions.append({"type": "Action.Submit", "title": button.label, "data": data})
     if actions:
-        body.append({"type": "ActionSet", "actions": actions})
+        body.append({"type": "ActionSet", "actions": actions, "spacing": "Medium"})
     footer = _footer(card)
     if footer is not None:
-        body.append(_text(footer, isSubtle=True, size="Small"))
+        body.append(_text(footer, isSubtle=True, size="Small", spacing="Medium"))
     return {"type": "AdaptiveCard", "version": "1.5", "fallbackText": card.headline, "body": body}

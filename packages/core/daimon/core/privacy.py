@@ -24,6 +24,7 @@ scope and erases those rows.
 from __future__ import annotations
 
 import uuid
+from typing import Final
 
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
@@ -120,6 +121,37 @@ def summary_line(preview: PurgePreview) -> str:
     )
     parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
     return ", ".join(parts) if parts else "nothing visible to you yet"
+
+
+PRIVACY_TITLE: Final[str] = "🔒 Your data"
+
+
+def privacy_lines(display_name: str) -> tuple[str, str]:
+    """The privacy panel's two lines: what the deployment keeps, what Anthropic keeps.
+
+    The categories behind them are the privacy policy's, one button away.
+    """
+    return (
+        f"{display_name} stores your linked accounts, routines and settings. "
+        "Saved GitHub keys are encrypted.",
+        "Anthropic stores your agents and their conversations.",
+    )
+
+
+def delete_scope_lines(display_name: str) -> tuple[str, str]:
+    """What Delete removes and what it leaves, true to `purge_account`.
+
+    The purge deletes the deployment's own rows about the account and, upstream,
+    tries to delete every Managed Agents session tagged with it (the
+    conversations it started); that upstream delete can fail, so the confirm
+    promises only the attempt. Shared agents and their memory stores stay; see
+    the carve-outs in `daimon.core.purge`.
+    """
+    return (
+        f"This deletes {display_name}'s records about you and tries to delete your "
+        "conversations stored at Anthropic.",
+        "Shared agents and their memory stay, and other people may keep using them.",
+    )
 
 
 def _format_platform_principal(p: PlatformPrincipalRow) -> str:

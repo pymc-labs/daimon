@@ -109,6 +109,14 @@ def test_container_lists_each_channels_roles_and_members() -> None:
     )
 
 
+def test_container_explains_channel_admins_in_two_lines() -> None:
+    text = _text(build_channel_admins_container([]))
+    assert (
+        "-# Channel admins pick this channel's agent and edit agents that only work in their "
+        "channels.\n\n-# Starting agents and the default agent stay with server admins."
+    ) in text, "two lines, a blank line apart"
+
+
 def test_container_stays_inside_discords_text_cap_with_full_grants() -> None:
     ids = tuple(str(10**20 + n) for n in range(MAX_CHANNEL_ADMIN_IDS))
     grants = [_row(str(10**20 + n), roles=ids, users=ids) for n in range(40)]

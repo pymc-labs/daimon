@@ -86,7 +86,7 @@ from daimon.core.mcp_attach import (
     decide_mcp_connect,
 )
 from daimon.core.mcp_oauth import INVITE_BUTTON_LABEL, invite_copy, start_url
-from daimon.core.mcp_token_check import is_token_rejected
+from daimon.core.mcp_token_check import check_token, rejected_token_message
 from daimon.core.mcp_token_connect import (
     McpAgentGoneError,
     McpAttachFailedError,
@@ -157,13 +157,12 @@ _REPO_KINDS = ("repo", "skill_repo")
 _MAX_GITHUB_TOKEN_CHARS = 255
 _COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
-    "This agent answers for other people here, so changing its repo or its keys needs an "
-    "admin. Ask me and I'll write the request for them, or ask me to make you a new agent "
-    "of your own."
+    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _SHARED_AGENT_SKILLS = (
-    "This agent answers for other people here, so adding skills to it needs an admin. Ask "
-    "me and I'll write the request for them, or ask me to fork it and add them to the fork."
+    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
 _AGENT_GONE = "That agent no longer exists — ask again and a fresh request will be posted."
@@ -248,7 +247,13 @@ def _title(row: CredentialRequestRow) -> str:
 def credential_form(row: CredentialRequestRow, error: str | None = None) -> TaskModuleResponse:
     """The private form for one request: the card's facts and one input. Never prefilled."""
     # One block per line: a TextBlock does not reliably break on a single newline.
-    body: list[CardElement] = [error_text(line) for line in (error or "").splitlines()]
+    # A paragraph break in the error is a blank line's gap between its blocks.
+    body: list[CardElement] = []
+    for paragraph in (error or "").split("\n\n"):
+        lines = [error_text(line) for line in paragraph.splitlines() if line]
+        if lines and body:
+            lines[0].spacing = "Medium"
+        body += lines
     body.append(_secret_input(row.kind))
     facts = teams_wording(card_for_request(row, state="requested")).facts
     if row.kind == "skill_repo":
@@ -450,7 +455,12 @@ class TeamsCredentialRequests:
         elif row.kind == "env_file":
             work = self._save_env_file(row, agent, entries, service_url=url)
         elif row.kind == "mcp":
-            work = self._save_mcp(row, agent, secret, is_admin=is_admin, service_url=url)
+            connect = await self._decide_mcp(row, agent, is_admin=is_admin)
+            if not connect.refused:
+                rejected = await self._mcp_token_refusal(row, secret, url)
+                if rejected is not None:
+                    return rejected
+            work = self._save_mcp(row, agent, secret, connect=connect, service_url=url)
         elif row.kind == "repo":
             work = self._save_repo(row, agent, secret.strip(), service_url=url)
         else:
@@ -954,44 +964,81 @@ class TeamsCredentialRequests:
             await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
         await self._edit(row, "refused", service_url, reason=reason)
 
+    async def _decide_mcp(
+        self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, *, is_admin: bool
+    ) -> McpConnectDecision:
+        """Repointing a server or setting the agent-wide token for a URL the agent
+        already uses is `mcp_replace`: decided against the live submitter before
+        the consume, as on Discord and Slack."""
+        if row.mcp_server_url is None:
+            return McpConnectDecision(replaces=False, replace_allowed=False)
+        return await decide_mcp_connect(
+            self._runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            agent=agent,
+            agent_id=row.agent_id,
+            server_name=row.target,
+            url=row.mcp_server_url,
+            platform="teams",
+            # Only the requester may submit, so they are the caller.
+            caller=await channel_admin_caller(
+                self._runtime,
+                tenant_id=row.tenant_id,
+                user_id=row.requester_platform_user_id,
+                is_admin=is_admin,
+            ),
+            default=self._runtime.deployment_default,
+            shares_token=True,
+        )
+
+    async def _mcp_token_refusal(
+        self, row: CredentialRequestRow, secret: str, service_url: str | None
+    ) -> TaskModuleResponse | None:
+        """The server's verdict on the token, while the dialog is open; None to save.
+
+        A dialog is the one private place Teams has to answer the submitter, so
+        the probe runs before it closes, as the repo token check does. A refused
+        token keeps the form open with the words Discord and Slack send privately
+        (the sign-in hint only for a server that offers sign-in), the card offers
+        the form again, and nothing is spent.
+        """
+        if row.mcp_server_url is None:
+            return None  # the save refuses it as target_unavailable
+        rejection = await check_token(
+            self._runtime.mcp_token_probe, mcp_server_url=row.mcp_server_url, token=secret
+        )
+        if rejection is None:
+            return None
+        async with self._runtime.sessionmaker.begin() as session:
+            await store.set_credential_request_outcome(
+                session, token=row.token, outcome="token_rejected"
+            )
+        await self._edit(
+            row,
+            "requested",
+            service_url,
+            retry_reason="That token was rejected: it cannot access the requested service. "
+            "Try again.",
+        )
+        return credential_form(row, rejected_token_message(rejection))
+
     async def _save_mcp(
         self,
         row: CredentialRequestRow,
         agent: BetaManagedAgentsAgent,
         secret: str,
         *,
-        is_admin: bool,
+        connect: McpConnectDecision,
         service_url: str | None,
     ) -> None:
-        """Decide, consume, probe, then attach-and-publish (see mcp_token_connect)."""
+        """Consume, then attach-and-publish (see mcp_token_connect).
+
+        `connect` was decided and the server accepted the token in `_submit`,
+        before the dialog closed.
+        """
         mcp = self._runtime.settings.mcp
         if mcp.public_url is None or mcp.jwt_secret is None:
             return
-        # Repointing a server or setting the agent-wide token for a URL the
-        # agent already uses is `mcp_replace`: decided against the live
-        # submitter before the consume, as on Discord and Slack.
-        connect = (
-            await decide_mcp_connect(
-                self._runtime.sessionmaker,
-                tenant_id=row.tenant_id,
-                agent=agent,
-                agent_id=row.agent_id,
-                server_name=row.target,
-                url=row.mcp_server_url,
-                platform="teams",
-                # Only the requester may submit, so they are the caller.
-                caller=await channel_admin_caller(
-                    self._runtime,
-                    tenant_id=row.tenant_id,
-                    user_id=row.requester_platform_user_id,
-                    is_admin=is_admin,
-                ),
-                default=self._runtime.deployment_default,
-                shares_token=True,
-            )
-            if row.mcp_server_url is not None
-            else McpConnectDecision(replaces=False, replace_allowed=False)
-        )
         now = datetime.now(UTC)
         try:
             async with self._runtime.sessionmaker.begin() as session:
@@ -1026,9 +1073,6 @@ class TeamsCredentialRequests:
                     service_url,
                 )
             log.info("teams.credential.mcp", mcp_server_url=url)
-            probe = self._runtime.mcp_token_probe
-            if await is_token_rejected(probe, mcp_server_url=url, token=secret):
-                return await self._refuse(consumed, "token_rejected", service_url)
             # Attach first, publish the agent-wide token only after that authorized
             # attach, then the submitter's own vault copy: no other session may ever
             # mirror a token this submission is refused for.

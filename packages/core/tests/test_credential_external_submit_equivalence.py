@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import json
+import re
 import subprocess
 import sys
 import types
@@ -29,6 +30,7 @@ from daimon.core.credential_submit import note_credential_save_failure
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.discovery import McpProbe
+from daimon.core.mcp_token_check import TokenRejection, rejected_token_message
 from daimon.core.posted_controls import RECEIVED_FOOTER, card_for_request, card_text
 from daimon.core.scope import DeploymentDefault
 from daimon.core.security_audit import capture_decision
@@ -54,6 +56,31 @@ ROOT = "https://daimon.example.com"
 REPO = "https://github.com/acme/skills"
 KINDS = ("mcp", "skill_repo", "repo", "mcp_oauth")
 POLICIES = ("open", "pinned_inside", "pinned_outside", "sealed", "pinned_sealed")
+#: Refusals reworded since BASE on purpose (plain words, batch 1 section 4):
+#: the historical adapter's copy maps to today's before the two are compared.
+RENAMED_COPY = (
+    (
+        "This agent answers for other people here, so changing its repo or its keys needs an "
+        "admin. Ask me and I'll write the request for them, or ask me to make you a new agent "
+        "of your own.",
+        "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent.",
+    ),
+    (
+        "This agent answers for other people here, so adding skills to it needs an admin. Ask "
+        "me and I'll write the request for them, or ask me to fork it and add them to the fork.",
+        "Other people use this agent. Adding skills needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent.",
+    ),
+)
+#: The replace-refused reply, reworded the same way; it names agent and admin.
+RENAMED_REPLACE_REFUSAL = (
+    re.compile(
+        r"(\S+) already has `[^`]*` \(or a token for that URL\) and is shared here, so "
+        r"replacing it needs a (server|workspace) admin\. Nothing was saved\."
+    ),
+    "\\1 already has this connection. Nothing was saved.\n\nOnly a \\2 admin can replace it.",
+)
 
 
 @cache
@@ -287,7 +314,9 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
         messages.append(("card", state, card_text(card), bool(card.buttons)))
 
     async def private(*args, **kwargs):
-        messages.append(("private", kwargs.get("text", args[0] if args else "")))
+        text = kwargs.get("text", args[0] if args else "")
+        pattern, replacement = RENAMED_REPLACE_REFUSAL
+        messages.append(("private", pattern.sub(replacement, text)))
 
     async def dispatch(*args, **kwargs):
         messages.append(("dispatch",))
@@ -299,6 +328,14 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
         return f"inline-pat:{row.agent_id}"
 
     with monkeypatch.context() as patch:
+        if module.__name__.endswith("_external_base") and hasattr(module, "rejected_token_message"):
+            # The historical adapter passes the URL; today's reply takes the
+            # rejection (and names no URL). The fixture's server offers no sign-in.
+            patch.setattr(
+                module,
+                "rejected_token_message",
+                lambda _url: rejected_token_message(TokenRejection(supports_sign_in=False)),
+            )
         # Replace only platform role lookups and external GitHub/skill work.
         for name in ("is_guild_admin", "resolve_is_admin"):
             if hasattr(module, name):
@@ -446,7 +483,10 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
                         )
                     )
                 )
-                messages.append(("dialog", str(response.model_dump())))
+                dialog = json.dumps(response.model_dump())
+                for old, new in RENAMED_COPY:
+                    dialog = dialog.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
+                messages.append(("dialog", dialog))
                 for task in spawned:
                     await task
 
@@ -562,6 +602,29 @@ def _assert_retry_lifecycle_change(base, current, *, outcome):
     assert "fixture-token" not in repr(current[7]), "no submitted token in receipts"
 
 
+def _assert_teams_rejection_answers_in_the_dialog(base, current):
+    """Intentional drift: Teams asks the server while the dialog is still open.
+
+    The dialog is Teams' one private reply, so a rejected token now answers
+    there with Discord's and Slack's words and spends nothing, where the
+    historical adapter consumed, refused and released the form behind a closed
+    dialog. Everything that is not the reply's timing still matches.
+    """
+    assert current[0] is False, "a rejected token spends nothing"
+    assert current[1] == "token_rejected", "the rejection is recorded"
+    assert current[2] is None, "no work is owed on a rejected token"
+    assert current[3:7] == base[3:7], "credential data and proofs are unchanged"
+    assert current[8] == base[8], "upstream side effects are unchanged"
+    assert current[10] == base[10], "live authorization decisions are unchanged"
+    dialog = next(message for message in current[7] if message[0] == "dialog")
+    assert "That token didn't work. Nothing was saved." in dialog[1]
+    assert "Check the token and try the form again." in dialog[1]
+    cards = [message for message in current[7] if message[0] == "card"]
+    assert cards and cards[-1][1] == "requested" and cards[-1][3], "same form offered again"
+    assert "Try again" in cards[-1][2] and RECEIVED_FOOTER not in cards[-1][2]
+    assert "fixture-token" not in repr(current[7]), "no submitted token in receipts"
+
+
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("admin", (False, True), ids=("member", "admin"))
@@ -634,6 +697,8 @@ async def test_external_failures_match_real_base(
         )
     if fault == "race":
         assert results[0] == results[1], "policy refusals stay terminal"
+    elif platform == "teams" and kind == "mcp" and fault == "rejected":
+        _assert_teams_rejection_answers_in_the_dialog(results[0], results[1])
     else:
         outcome = (
             "token_rejected"

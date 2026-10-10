@@ -156,7 +156,7 @@ from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
     decide_mcp_connect,
 )
-from daimon.core.mcp_token_check import is_token_rejected, rejected_token_message
+from daimon.core.mcp_token_check import check_token, rejected_token_message
 from daimon.core.mcp_token_connect import (
     McpAgentGoneError,
     McpAttachFailedError,
@@ -804,9 +804,8 @@ class McpCredentialModal(discord.ui.Modal):
         await interaction.followup.send(
             (mcp_permission_message(_agent_name(consumed_row)) + " Nothing was saved.")
             if policy_refused
-            else f"{_agent_name(consumed_row)} already has `{consumed_row.target}` (or a token "
-            "for that URL) and is shared here, so replacing it needs a server admin. "
-            "Nothing was saved.",
+            else f"{_agent_name(consumed_row)} already has this connection. Nothing was saved."
+            "\n\nOnly a server admin can replace it.",
             ephemeral=True,
         )
 
@@ -892,13 +891,12 @@ class McpCredentialModal(discord.ui.Modal):
             # mirrored into every caller's vault and attached, and every turn from
             # then on would carry a failed MCP init (#79). A server that cannot be
             # reached is not a verdict: the save proceeds and MA reports later.
-            if await is_token_rejected(
+            rejection = await check_token(
                 self._runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=token_value
-            ):
+            )
+            if rejection is not None:
                 await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
-                await interaction.followup.send(
-                    rejected_token_message(mcp_server_url), ephemeral=True
-                )
+                await interaction.followup.send(rejected_token_message(rejection), ephemeral=True)
                 return
             try:
                 await write_mcp_submit(

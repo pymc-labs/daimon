@@ -56,3 +56,24 @@ def test_only_admins_get_the_operator_tokens_dialog_and_it_offers_tenant_scopes_
     assert setup_card.OPERATOR_DIALOG not in card_json(False), "members never see the entry"
     form = json.dumps(setup_card.operator_tokens_card([]).model_dump(by_alias=True))
     assert "tenant:read" in form and "promo:create" not in form
+
+
+def test_token_card_is_a_title_then_lines_a_blank_line_apart() -> None:
+    def body(channel_id: str | None) -> list[dict[str, object]]:
+        card = setup_card.token_card(
+            agent_name="analyst", cli="npx …", mcp_json="{}", jti="j1", channel_id=channel_id
+        )
+        return card.model_dump(by_alias=True)["body"]
+
+    title, copy, run, *_ = body(None)
+    assert (title["text"], title.get("weight")) == ("Use analyst from your coding tools", "Bolder")
+    assert (copy["text"], copy.get("spacing")) == (
+        "Copy the setup below now. The token is shown only once.",
+        "Medium",
+    )
+    assert run["text"] == "**Run this:**", "no channel line for a token bound to no channel"
+    bound = body("19:abc@thread.tacv2")[2]
+    assert (bound["text"], bound.get("spacing")) == (
+        "It runs in 19:abc@thread.tacv2, with that channel's rules and budget.",
+        "Medium",
+    ), "the channel line only for a channel-bound token"

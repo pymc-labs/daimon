@@ -212,7 +212,7 @@ async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
     )
     assert made["builtin"] is False and made["identity_enabled"] is True
     (sent,) = _Transport.sent
-    assert sent["content"] == "Routine result (0 9 * * 1, UTC):\n\nAll green @everyone."
+    assert sent["content"] == "Result from the Monday routine at 09:00 UTC:\n\nAll green @everyone."
     assert sent["_prefix_if_fallback"] is True, "a bot fallback still names the agent"
     mentions = sent["allowed_mentions"]
     assert not mentions.everyone and not mentions.users and not mentions.roles
@@ -253,7 +253,7 @@ async def test_the_built_in_agent_posts_as_the_bot_with_todays_text(
 
     assert _Transport.made == []
     assert channel.send.await_args.kwargs["content"].startswith(
-        "Routine result from daimon (0 9 * * 1, UTC):"
+        "Result from daimon's Monday routine at 09:00 UTC:"
     )
 
 
@@ -276,7 +276,7 @@ async def test_a_channel_in_a_protected_category_falls_back_to_a_dm(
     channel.send.assert_not_awaited()
     (guild_id, user_id, content) = dms.sent[0]
     assert (guild_id, user_id) == (_GUILD, 1)
-    assert "lets nobody write there" in content and content.endswith("All green @everyone.")
+    assert "posting is blocked there" in content and content.endswith("All green @everyone.")
 
 
 async def test_an_uncached_thread_parent_is_resolved_before_category_protection(
@@ -541,9 +541,11 @@ async def test_a_bot_fallback_labels_the_result_with_the_subtext_name_line(
     assert outcome.status == "delivered"
     content = channel.send.await_args.kwargs["content"]
     assert content == fallback_name_prefix(
-        "research", "Routine result (0 9 * * 1, UTC):\n\nAll green @everyone."
+        "research", "Result from the Monday routine at 09:00 UTC:\n\nAll green @everyone."
     )
-    assert content.startswith("-# research\nRoutine result ("), "the label is #530's subtext line"
+    assert content.startswith("-# research\nResult from the Monday routine"), (
+        "the label is #530's subtext line"
+    )
 
 
 @pytest.mark.parametrize("fallback", [False, True])
@@ -564,7 +566,8 @@ async def test_long_routine_delivers_every_word_to_channel_or_creator(
         else [call.kwargs["content"] for call in channel.send.await_args_list]
     )
     assert len(texts) > 1 and all(len(text) <= 2000 for text in texts)
-    delivered = "".join(texts).split("\n\n", 1)[1]
+    # The result is the last paragraph; above it, the post's one line or the DM's two.
+    delivered = "".join(texts).split("\n\n")[-1]
     assert delivered == result, "deliver the beginning and ending, without cutting a word"
     if not fallback:
         assert all(

@@ -139,6 +139,14 @@ ALREADY_REQUESTED: Final[str] = (
 RECORDED_UNDELIVERED: Final[str] = "Request sent. Someone will reply."
 RECEIVED: Final[str] = "Request sent. Someone will reply."
 _OFFER: Final[str] = "Need help with this answer?\n{remaining} {request_word} left"
+#: Under the note form when the answer sits in a channel only turns inside it
+#: read: the note leaves that channel, the conversation does not.
+SEALED_NOTE_HINT: Final[str] = (
+    "Support gets your note and a link, not the conversation.\n\n"
+    "Leave out anything that must stay in this channel."
+)
+#: On the support post for a request from such a channel.
+SEALED_POST_MARKER: Final[str] = "Reply in the original channel."
 
 
 def received_text(*, remaining: int) -> str:

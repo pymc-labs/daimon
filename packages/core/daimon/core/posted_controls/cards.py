@@ -1,7 +1,7 @@
 """Platform-neutral model of a posted control card and its final copy.
 
 A posted control is the public card the agent drops in a channel when it needs
-a private value: "🔑 Add TOGGL_TOKEN to research-bot", with a button that opens
+a private value: "🔑 research-bot needs `TOGGL_TOKEN`", with a button that opens
 a private form. The same card is later edited in place to show what happened.
 
 Discord and Slack render that card with entirely different primitives (V2
@@ -50,6 +50,7 @@ __all__ = [
     "CardButton",
     "CardKind",
     "CardState",
+    "ENV_FILE_KEPT_LINE",
     "EXPIRED_HEADLINE",
     "FOOTER_TEMPLATE",
     "NO_LONGER_VALID_MESSAGE",
@@ -98,7 +99,9 @@ RefusalReason = Literal[
 
 #: `requested` footer, with the two placeholders each renderer fills from
 #: `requester_platform_user_id` and `expires_at_unix`.
-FOOTER_TEMPLATE: Final[str] = "Only {requester} can open this form. Expires {expires}."
+FOOTER_TEMPLATE: Final[str] = "Only {requester} can fill this in. Expires {expires}."
+#: What an `env_file` card says it keeps; Teams swaps the noun for a pasted file.
+ENV_FILE_KEPT_LINE: Final[str] = "We save the keys, not the file."
 RECEIVED_FOOTER: Final[str] = "Received. Saving…"
 EXPIRED_HEADLINE: Final[str] = "⌛ This form expired."
 #: `replaced` is the one state nobody asked for: the requester asked again in
@@ -238,40 +241,27 @@ def _requested_content(
 ) -> tuple[str, tuple[str, ...]]:
     if kind == "env":
         return (
-            f"🔑 Add {target} to {agent_name}",
-            (
-                f"Anyone who talks to {agent_name} can use it.",
-                "The value is not shown in chat.",
-            ),
+            f"🔑 {agent_name} needs `{target}`",
+            (f"Anyone using {agent_name} can use it. The value isn't shown in chat.",),
         )
     if kind == "env_file":
         return (
-            f"🔑 Add keys to {agent_name} from a .env file",
-            (
-                "One KEY=VALUE per line.",
-                "Daimon stores the keys, not a retained copy of your uploaded file.",
-                f"Anyone who talks to {agent_name} can use them.",
-            ),
+            f"🔑 {agent_name} needs keys from a .env file",
+            (f"{ENV_FILE_KEPT_LINE} Anyone using {agent_name} can use them.",),
         )
     if kind == "mcp":
         if mcp_server_url is None:
             raise ValueError("kind='mcp' requires mcp_server_url")
         return (
             f"🔌 Connect {agent_name} to {target}",
-            (
-                f"{mcp_server_url} needs a token.",
-                f"Anyone who talks to {agent_name} can use this connection.",
-            ),
+            (f"{mcp_server_url} needs a token. Anyone using {agent_name} can use it.",),
         )
     if kind == "mcp_oauth":
         if mcp_server_url is None:
             raise ValueError("kind='mcp_oauth' requires mcp_server_url")
         return (
-            f"🔌 Connect {agent_name} to {target} with your account",
-            (
-                f"{mcp_server_url} signs you in through your browser.",
-                "Only you can use your connection; others connect their own.",
-            ),
+            f"🔌 Connect {agent_name} to {target}",
+            (f"Sign in through {mcp_server_url}. Only you can use this connection.",),
         )
     if branch is None:
         raise ValueError(f"kind={kind!r} requires branch")

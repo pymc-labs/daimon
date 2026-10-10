@@ -199,11 +199,10 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
 
     assert refused is True, "a member must not bind a repo to a defaults-managed agent"
     assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
-    assert "working repo" in _sent_message(interaction)
-    assert "Manage Server" in _sent_message(interaction)
-    assert "with Daimon" in _sent_message(interaction)
-    assert "keys" not in _sent_message(interaction)
-    assert "fork" not in _sent_message(interaction)
+    assert _sent_message(interaction) == (
+        "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent."
+    ), "section 4's words, the same on every platform"
 
 
 async def test_unbound_target_remains_admin_only_after_its_default_is_removed(

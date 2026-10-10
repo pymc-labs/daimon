@@ -138,7 +138,6 @@ async def handle_privacy_command(
             )
             return
 
-        preview = await load_purge_preview(sm=runtime.sessionmaker, account_id=account_id)
         async with runtime.sessionmaker() as s:
             token_row = await get_slack_user_token(s, team_id=team_id, slack_user_id=user_id)
         is_slack_connected = token_row is not None
@@ -150,7 +149,6 @@ async def handle_privacy_command(
         await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
             view=build_privacy_main_container(
-                preview,
                 is_slack_connected=is_slack_connected,
                 slack_connect_url=connect_url,
                 policy_url=str(runtime.settings.privacy_policy_url),
@@ -226,6 +224,7 @@ async def handle_privacy_block_action(
                     account_id=account_id,
                     user_name=user_name,
                     view_id=current_view_id,
+                    display_name=resolve_bot_display_name(runtime.settings),
                 ),
             )
         elif action_id == "privacy_export":

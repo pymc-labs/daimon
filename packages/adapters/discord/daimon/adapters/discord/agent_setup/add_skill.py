@@ -62,8 +62,8 @@ ADD_SKILL_LABEL: Final = "➕ Add skill"
 ADD_LABEL: Final = "Add"
 CANCEL_LABEL: Final = "Cancel"
 BUILT_IN_MESSAGE: Final = (
-    "This is a starting agent and can't be changed directly. Ask an admin to copy it, "
-    "or ask me to make you a new agent."
+    "You can't change a starting agent.\n\n"
+    "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 _SHOWN_FILES: Final = 15
 _PATH_CHARS: Final = 80

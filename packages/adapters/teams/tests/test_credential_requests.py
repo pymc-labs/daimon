@@ -340,26 +340,25 @@ async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
     dispatch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
+@pytest.mark.parametrize("supports_sign_in", [False, True])
 async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     db_session_factory: async_sessionmaker[AsyncSession],
     account_id: uuid.UUID,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str,
+    supports_sign_in: bool,
 ) -> None:
-    if failure == "slow_rejection":
-        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     row = await _request(db_session_factory, account_id, kind="mcp")
     async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
         unconfigured = await post_activity(service, _submit(row.token))
     assert "not finished being set up" in unconfigured["task"]["value"]
 
     accepted = False
+    metadata = "https://mcp.example/.well-known/oauth-protected-resource"
 
     async def probe_impl(url: str, token: str) -> McpProbe:
-        if failure == "slow_rejection" and not accepted:
-            await asyncio.sleep(0.2)
-        return McpProbe(status_code=200 if accepted else 401, resource_metadata_url=None)
+        return McpProbe(
+            status_code=200 if accepted else 401,
+            resource_metadata_url=metadata if supports_sign_in else None,
+        )
 
     probe = AsyncMock(side_effect=probe_impl)
     runtime = dataclasses.replace(
@@ -368,18 +367,31 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     fake, store = TeamsApiFake(), AsyncMock()
     with patch.object(module, "connect_mcp_server_with_token", store):
         async with _running(fake, runtime) as (service, dispatch):
-            await post_activity(service, _submit(row.token))
+            refused = await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
             store.assert_not_awaited()
             dispatch.assert_not_awaited()
-            assert "That token was rejected" in _edits(fake)[-1]
-            if failure == "slow_rejection":
-                assert any("Still saving" in edit for edit in _edits(fake))
+            body = refused["task"]["value"]["card"]["content"]["body"]
+            shown = [b for b in body if b.get("color") == "Attention"]
+            expected = [
+                "That token didn't work. Nothing was saved.",
+                "Check the token and try the form again.",
+            ]
+            if supports_sign_in:
+                expected.append(
+                    "This server also lets you sign in. Ask the agent to connect your account."
+                )
+            assert [b["text"] for b in shown] == expected, (
+                "the dialog stays open with Discord's and Slack's words; sign-in only if offered"
+            )
+            assert [b.get("spacing") for b in shown[1:]] == ["Medium"] * (len(expected) - 1), (
+                "a blank line's gap between the lines"
+            )
+            assert "That token was rejected" in _edits(fake)[-1], "the card offers the form again"
             async with db_session_factory() as session:
                 retry = await peek_credential_request(session, token=row.token)
             assert retry is not None and retry.used_at is None and retry.outcome == "token_rejected"
             accepted = True
-            monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 

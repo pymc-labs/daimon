@@ -21,7 +21,12 @@ import uuid
 from typing import Any
 
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.privacy import PurgePreview, summary_line
+from daimon.core.privacy import (
+    PRIVACY_TITLE,
+    PurgePreview,
+    delete_scope_lines,
+    privacy_lines,
+)
 from daimon.core.purge import AccountPurgeResult
 
 # ---------------------------------------------------------------------------
@@ -32,8 +37,8 @@ from daimon.core.purge import AccountPurgeResult
 def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     """Build cascade preview section blocks.
 
-    Port of privacy_panel/cascade.py:25-75 (Discord) — three groups:
-    what-will-be-deleted / what-stays-in-MA / what-is-kept-elsewhere.
+    Port of privacy_panel/cascade.py (Discord) — two groups:
+    what-will-be-deleted / what-is-kept-elsewhere.
     """
     will_happen_lines: list[str] = []
     if preview.linked_principals.count > 0:
@@ -95,14 +100,6 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         "\n".join(will_happen_lines) if will_happen_lines else "_(nothing to delete)_"
     )
 
-    stays_text = (
-        "🔐 *What stays in Managed Agents*\n"
-        "• Agent definitions, system prompts, MCP tokens\n"
-        "• Session transcripts, turn message content\n"
-        "• Skill repo references — the repos themselves stay on GitHub\n"
-        "• Retention is governed by Anthropic's Managed Agents policy."
-    )
-
     kept_text = (
         "📋 *What is intentionally kept elsewhere*\n"
         "• Usage records are retained for service integrity and cannot be erased on request.\n"
@@ -113,8 +110,6 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
 
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": will_happen_text}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": stays_text}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": kept_text}},
     ]
@@ -140,16 +135,16 @@ def build_loading_view() -> dict[str, Any]:
 
 
 def build_privacy_main_container(
-    preview: PurgePreview,
     *,
     is_slack_connected: bool,
     slack_connect_url: str | None,
     policy_url: str,
     display_name: str = "daimon",
 ) -> dict[str, Any]:
-    """Main privacy view: held-data summary + three trust-model groups + action buttons.
+    """Main privacy view: the title, two lines on who stores what, then the buttons.
 
-    Port of privacy_panel/panel.py:38-73 (Discord) adapted to Block Kit.
+    Port of privacy_panel/panel.py (Discord) adapted to Block Kit. The detail
+    categories live in the policy behind the Policy button.
 
     The slack-token button reflects connection state: Disconnect when a user
     token is stored, a Connect url button (signed connect link) when not.
@@ -162,29 +157,6 @@ def build_privacy_main_container(
 
     Returned dict is passed directly to views.update(view=...).
     """
-    summary = escape_mrkdwn(summary_line(preview))
-
-    body_text = (
-        "🪪 *What we hold (our DB)*\n"
-        "• Identity links (Slack/CLI principals under your account)\n"
-        "• Routines you scheduled\n"
-        "• User config rows\n"
-        "• Synced skill ledger rows\n"
-        "• Encrypted GitHub tokens (stored encrypted-at-rest)\n"
-        "• GitHub OAuth handshake records\n"
-        "• The account row itself\n"
-        "\n"
-        "🔐 *What lives in Managed Agents*\n"
-        "• Agent definitions, system prompts, MCP tokens\n"
-        "• Session transcripts, turn message content\n"
-        "• Skill repo references (repos themselves stay on GitHub)\n"
-        "• Retention governed by Anthropic's Managed Agents policy.\n"
-        "\n"
-        "🚫 *What we don't hold*\n"
-        "• Plaintext keys or tokens (GitHub tokens are encrypted-at-rest)\n"
-        "• Message content (we only log structural events)"
-    )
-
     action_elements: list[dict[str, Any]] = [
         {
             "type": "button",
@@ -215,19 +187,10 @@ def build_privacy_main_container(
     elif slack_connect_url is not None:
         action_elements.append(_connect_button(slack_connect_url))
 
+    body = "\n\n".join(escape_mrkdwn(line) for line in privacy_lines(display_name))
     blocks: list[dict[str, Any]] = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*🔒 Privacy*\n{escape_mrkdwn(display_name)} holds: {summary}",
-            },
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": body_text},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{PRIVACY_TITLE}*"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
         {"type": "actions", "elements": action_elements},
     ]
 
@@ -244,10 +207,12 @@ def build_delete_modal(
     account_id: uuid.UUID,
     user_name: str,
     view_id: str,
+    display_name: str = "daimon",
 ) -> dict[str, Any]:
     """Single delete confirmation modal.
 
-    Combines the cascade preview (what-will-be-deleted / stays-in-MA / kept-elsewhere)
+    Opens on what Delete removes and leaves (`delete_scope_lines`), then
+    combines the cascade preview (what-will-be-deleted / kept-elsewhere)
     with a plain_text_input for typed-username confirmation in ONE modal.
 
     callback_id = "privacy_delete"; private_metadata carries account_id + user_name +
@@ -263,7 +228,12 @@ def build_delete_modal(
         separators=(",", ":"),  # minimal whitespace to stay well under 3000 chars
     )
 
-    blocks: list[dict[str, Any]] = _cascade_blocks(preview)
+    scope = "\n\n".join(escape_mrkdwn(line) for line in delete_scope_lines(display_name))
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": scope}},
+        {"type": "divider"},
+        *_cascade_blocks(preview),
+    ]
     blocks.append({"type": "divider"})
     blocks.append(
         {

@@ -126,14 +126,22 @@ def test_cascade_container_renders_nonzero_categories() -> None:
     )
 
 
-def test_cascade_container_includes_what_stays_disclosure() -> None:
-    """D-MA-01: the 'What stays in Managed Agents' group is mandatory."""
-    container = build_cascade_preview_container(_make_preview())
-    joined = _joined_text(container)
-    assert "What stays in Managed Agents" in joined, (
-        f"Cascade container must include the 'What stays in MA' disclosure; got {joined!r}"
-    )
-    assert "Anthropic" in joined, "Retention disclosure must mention Anthropic (D-MA-01)"
+def test_cascade_container_says_what_delete_removes_and_what_stays() -> None:
+    """D-MA-01: the confirm says what Delete reaches at Anthropic and what it leaves.
+
+    `purge_account` deletes the account's Managed Agents sessions, so the
+    confirm must not claim the conversations stay; agents and memory do.
+    """
+    container = build_cascade_preview_container(_make_preview(), bot_display_name="Daimon")
+    texts = [
+        item.content for item in container.children if isinstance(item, discord.ui.TextDisplay)
+    ]
+    assert texts[1] == (
+        "This deletes Daimon's records about you and tries to delete your conversations "
+        "stored at Anthropic."
+        "\n\nShared agents and their memory stay, and other people may keep using them."
+    ), "the scope sits right under the title, two lines a blank line apart"
+    assert "Session transcripts" not in _joined_text(container), "transcripts do not stay"
 
 
 def test_cascade_container_has_confirm_step_hint() -> None:

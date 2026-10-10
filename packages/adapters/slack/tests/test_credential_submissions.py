@@ -146,7 +146,7 @@ async def test_env_submission_consumes_row_and_writes_the_secret(
     assert rows[0]["content"] == "s3cr3t-value"
     assert row is not None and row.used_at is not None, "the consume must have committed"
     edit = fake_slack_web_client.mock.requests[("POST", _CHAT_UPDATE_URL)][0].kwargs["json"]
-    assert edit["text"] == "🔑 Add OPENAI_API_KEY to tester", (
+    assert edit["text"] == "🔑 tester needs `OPENAI_API_KEY`", (
         "the consumed card keeps its headline instead of collapsing to a marker"
     )
     assert not [b for b in edit["blocks"] if b["type"] == "actions"], (
@@ -1736,9 +1736,10 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
             "Still saving" in json.dumps(edit) for edit in _chat_updates(fake_slack_web_client)
         )
     if failure == "rejection":
-        assert any(
-            "connect it with your account" in t for t in _ephemeral_texts(fake_slack_web_client)
-        ), "the person is pointed at the OAuth path"
+        assert (
+            "That token didn't work. Nothing was saved.\n\nCheck the token and try the form again."
+            in (_ephemeral_texts(fake_slack_web_client))
+        ), "the person learns the token was refused; no sign-in hint for a server without it"
 
     assert request_row.used_at is None
     assert RECEIVED_FOOTER not in json.dumps(card)

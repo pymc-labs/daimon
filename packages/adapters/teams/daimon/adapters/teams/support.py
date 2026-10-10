@@ -90,6 +90,8 @@ from daimon.core.support_escalation import (
     ESCALATE,
     OUT_OF_CREDITS,
     RECEIVED,
+    SEALED_NOTE_HINT,
+    SEALED_POST_MARKER,
     received_text,
     remaining_credits,
 )
@@ -140,11 +142,8 @@ TITLE = "Ask a person"
 FORM_TEXT = "What do you need help with?\n{remaining} {request_word} left"
 USAGE = "Write a few words first."
 NOT_ALLOWED_THERE = "You can't ask the agent in that channel, so you can't ask a person there."
-SEALED_HINT = (
-    "Only turns inside that channel read it. Your note goes to the support team outside it, "
-    "so don't paste anything that has to stay there. They get a link, not the conversation."
-)
-SEALED_LINE = "_From a channel read only from inside: answer there, the conversation stays in it._"
+SEALED_HINT = SEALED_NOTE_HINT
+SEALED_LINE = f"_{SEALED_POST_MARKER}_"
 # ALREADY_REQUESTED, OUT_OF_CREDITS and RECEIVED are the shared core copy
 # (`daimon.core.support_escalation`), re-exported for this module's callers.
 
@@ -231,7 +230,8 @@ def form_text(remaining: int) -> str:
 
 
 def _sealed_hint(sealed: bool) -> list[CardElement]:
-    return [TextBlock(text=SEALED_HINT, is_subtle=True, size="Small", wrap=True)] if sealed else []
+    hint = TextBlock(text=SEALED_HINT, is_subtle=True, size="Small", wrap=True, spacing="Medium")
+    return [hint] if sealed else []
 
 
 def _note(value: str = "") -> TextInput:

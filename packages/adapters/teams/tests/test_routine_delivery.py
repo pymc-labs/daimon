@@ -165,6 +165,6 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(db_session_
     outcome = await _post(db_session_factory, teams, _row(delivery_payload=result))
     assert outcome.status == "delivered"
     assert len(teams.posts) > 1 and all(len(text) <= 4000 for _, text in teams.posts)
-    assert "".join(text for _, text in teams.posts).split("\n\n", 1)[1] == result
+    assert "".join(text for _, text in teams.posts).split("\n\n")[-1] == result
     expected_place = f"a:dm-29:{CREATOR}" if fallback else f"{CHANNEL};messageid=17"
     assert all(where == expected_place for where, _ in teams.posts)

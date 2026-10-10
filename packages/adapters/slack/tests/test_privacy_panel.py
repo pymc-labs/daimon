@@ -24,7 +24,6 @@ from daimon.adapters.slack.privacy_panel.views import (
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.privacy import PurgePreview, PurgePreviewRow, summary_line
 from daimon.core.purge import AccountPurgeResult, PurgeReport
-from daimon.core.stores import routines as routines_store
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -162,64 +161,37 @@ async def test_resolve_privacy_account_returns_none_and_creates_no_principal_on_
     )
 
 
-@pytest.mark.asyncio
-async def test_build_privacy_main_container_renders_summary_and_policy_button(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """build_privacy_main_container includes held-data summary per category + Policy url button."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PRIV_V01")
-    account = await make_account(db_session, tenant=tenant)
-    pp = await make_platform_principal(
-        db_session,
-        platform="slack",
-        external_id="U_PRIV_V01",
-        tenant=tenant,
-        account=account,
-    )
-    # Seed a routine so the routines category is non-zero in the preview.
-    await routines_store.create_routine(
-        db_session,
-        tenant_id=tenant.id,
-        created_by_user_id=pp.external_id,
-        agent_id="ag_priv_test",
-        agent_name="TestAgent",
-        cron_expr="0 9 * * 1",
-        timezone_="UTC",
-        trigger_message="run weekly",
-    )
-    await db_session.commit()
-
-    preview = await load_purge_preview(sm=db_session_factory, account_id=account.id)
+def test_build_privacy_main_container_renders_who_stores_what_and_the_buttons() -> None:
+    """The panel says who stores what in two lines, then Policy, Export, Delete, Disconnect."""
     view = build_privacy_main_container(
-        preview, is_slack_connected=True, slack_connect_url=None, policy_url=_POLICY_URL
+        is_slack_connected=True, slack_connect_url=None, policy_url=_POLICY_URL
     )
 
-    # Extract all mrkdwn/plain_text content from blocks.
-    all_text = _extract_text(view).lower()
-
-    assert "linked principal" in all_text, "summary should mention the seeded linked principal"
-    assert "routine" in all_text, "summary should mention the seeded routine"
+    texts = [block["text"]["text"] for block in view["blocks"] if block["type"] == "section"]
+    assert texts == [
+        "*🔒 Your data*",
+        "daimon stores your linked accounts, routines and settings. "
+        "Saved GitHub keys are encrypted.\n\n"
+        "Anthropic stores your agents and their conversations.",
+    ], "a title, then two lines a blank line apart; the categories are the policy's"
+    labels = [
+        el["text"]["text"]
+        for block in view["blocks"]
+        if block["type"] == "actions"
+        for el in block["elements"]
+    ]
+    assert labels == ["📄 Policy", "📤 Export", "🗑 Delete…", "🔌 Disconnect Slack"]
 
     assert _has_url_button(view, _POLICY_URL), (
         f"view should contain a url button linking to the policy URL ({_POLICY_URL})"
     )
 
 
-@pytest.mark.asyncio
-async def test_build_privacy_main_container_uses_operator_overridden_policy_url(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+def test_build_privacy_main_container_uses_operator_overridden_policy_url() -> None:
     """The Policy button renders whatever policy_url the caller passes in."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PRIV_URL_OVERRIDE")
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-
     overridden_url = "https://example.com/privacy"
-    preview = await load_purge_preview(sm=db_session_factory, account_id=account.id)
     view = build_privacy_main_container(
-        preview, is_slack_connected=True, slack_connect_url=None, policy_url=overridden_url
+        is_slack_connected=True, slack_connect_url=None, policy_url=overridden_url
     )
 
     assert _has_url_button(view, overridden_url), (
@@ -227,19 +199,10 @@ async def test_build_privacy_main_container_uses_operator_overridden_policy_url(
     )
 
 
-@pytest.mark.asyncio
-async def test_privacy_main_view_has_disconnect_button(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+def test_privacy_main_view_has_disconnect_button() -> None:
     """A connected caller's panel includes a Disconnect Slack action button."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PRIV_DISCONNECT")
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-
-    preview = await load_purge_preview(sm=db_session_factory, account_id=account.id)
     view = build_privacy_main_container(
-        preview, is_slack_connected=True, slack_connect_url=None, policy_url=_POLICY_URL
+        is_slack_connected=True, slack_connect_url=None, policy_url=_POLICY_URL
     )
 
     action_ids = [
@@ -254,21 +217,11 @@ async def test_privacy_main_view_has_disconnect_button(
     )
 
 
-@pytest.mark.asyncio
-async def test_privacy_main_view_offers_connect_when_not_connected(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+def test_privacy_main_view_offers_connect_when_not_connected() -> None:
     """A caller with no user token gets a Connect Slack url button instead of
     Disconnect — otherwise the panel offers no way back after disconnecting."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PRIV_CONNECT")
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-
     connect_url = "https://mcp.example.com/oauth/slack/connect?state=SIGNED"
-    preview = await load_purge_preview(sm=db_session_factory, account_id=account.id)
     view = build_privacy_main_container(
-        preview,
         is_slack_connected=False,
         slack_connect_url=connect_url,
         policy_url=_POLICY_URL,
@@ -287,20 +240,11 @@ async def test_privacy_main_view_offers_connect_when_not_connected(
     )
 
 
-@pytest.mark.asyncio
-async def test_privacy_main_view_omits_slack_button_when_unmintable(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+def test_privacy_main_view_omits_slack_button_when_unmintable() -> None:
     """Not connected and no mintable connect URL (no slack/mcp config): the
     panel shows neither slack-token button rather than a dead one."""
-    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PRIV_NOBTN")
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-
-    preview = await load_purge_preview(sm=db_session_factory, account_id=account.id)
     view = build_privacy_main_container(
-        preview, is_slack_connected=False, slack_connect_url=None, policy_url=_POLICY_URL
+        is_slack_connected=False, slack_connect_url=None, policy_url=_POLICY_URL
     )
 
     action_ids = [
@@ -509,7 +453,6 @@ def test_privacy_views_use_the_configured_display_name() -> None:
 
     views = [
         build_privacy_main_container(
-            _make_preview(),
             is_slack_connected=False,
             slack_connect_url=None,
             policy_url=_POLICY_URL,
@@ -523,3 +466,20 @@ def test_privacy_views_use_the_configured_display_name() -> None:
     ]
     for view in views:
         assert "research-bot" in _extract_text(view), "privacy copy must use the configured name"
+
+
+def test_delete_modal_opens_on_what_delete_removes_and_what_stays() -> None:
+    """`purge_account` deletes the account's Managed Agents sessions; agents and memory stay."""
+    view = build_delete_modal(
+        _make_preview(),
+        account_id=uuid.uuid4(),
+        user_name="alice",
+        view_id="V6",
+        display_name="Daimon",
+    )
+    assert view["blocks"][0]["text"]["text"] == (
+        "This deletes Daimon's records about you and tries to delete your conversations "
+        "stored at Anthropic."
+        "\n\nShared agents and their memory stay, and other people may keep using them."
+    ), "the scope comes first, two lines a blank line apart"
+    assert "Session transcripts" not in _extract_text(view), "transcripts do not stay"

@@ -44,6 +44,7 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
 from daimon.core.config import Settings
+from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.permissions import any_writers_none
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -275,11 +276,12 @@ def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
     """The message posted for a routine whose agent did not post itself.
 
     `as_agent` is for a post that carries the agent's own name and face, which
-    already say who it is from; the schedule is kept either way.
+    already say who it is from; the schedule is kept either way, in words
+    only where `routine_phrase` can say it exactly.
     """
     payload = (row.delivery_payload or "").strip()
-    sender = "" if as_agent else f" from {row.agent_name}"
-    return f"Routine result{sender} ({row.cron_expr}, {row.timezone}):\n\n{payload}"
+    owner = "the" if as_agent else f"{row.agent_name}'s"
+    return f"Result from {owner} {routine_phrase(row.cron_expr, row.timezone)}:\n\n{payload}"
 
 
 async def resolve_routine_identity(
@@ -328,22 +330,32 @@ async def resolve_routine_identity(
         return plain
 
 
-_DM_REASONS: Final[dict[str, str]] = {
-    "protected_channel": "its destination's rule lets nobody write there",
-    "creator_cannot_post": "you can no longer post in its destination",
-    "destination_unavailable": "its destination could not be reached (missing, moved, or "
-    "outside this workspace)",
+#: Why the result came by direct message, by skip reason. A destination that
+#: could not be reached (missing, moved, or outside this workspace) is the
+#: fallback for any reason not named here too.
+_DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
+    "protected_channel": (
+        "Your routine couldn't post: posting is blocked there. Here's the result.",
+    ),
+    "creator_cannot_post": (
+        "Your routine couldn't post: you no longer have permission there. Here's the result.",
+    ),
+    "destination_unavailable": (
+        "Your routine couldn't post to its channel. Here's the result.",
+        "Ask the agent to change where it posts.",
+    ),
 }
 
 
 def render_fallback_dm(row: RoutineRow, reason: str) -> str:
-    """The direct message sent to the creator when the destination is unusable."""
-    why = _DM_REASONS.get(reason, "its destination could not be used")
-    return (
-        f"Your routine for {row.agent_name} ({row.cron_expr}, {row.timezone}) finished, but "
-        f"{why}, so its result is here instead. Update the routine's destination to fix "
-        f"this.\n\n{(row.delivery_payload or '').strip()}"
-    )
+    """The direct message sent to the creator when the destination is unusable.
+
+    The agent and schedule first, then why the result is here, then the result.
+    """
+    why = _DM_REASONS.get(reason, _DM_REASONS["destination_unavailable"])
+    schedule = schedule_words(row.cron_expr, row.timezone)
+    payload = (row.delivery_payload or "").strip()
+    return "\n\n".join((f"{row.agent_name}, {schedule}", *why, payload))
 
 
 def delivery_refusal(

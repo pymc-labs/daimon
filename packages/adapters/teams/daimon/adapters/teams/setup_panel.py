@@ -102,9 +102,11 @@ log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
+#: Who may mint is an admin, or an admin of every channel the agent's rule runs
+#: it in, binding it to one of them; the refusal names only the way out.
 NEEDS_ADMIN = (
-    "Minting an access token for {name} needs an admin, or an admin of every channel "
-    "its rule runs it in, binding it to one of them."
+    "You can't create this token.\n\n"
+    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
@@ -657,7 +659,7 @@ class SetupPanel:
             await self._audit(
                 actor, "coding_token_mint", outcome="denied", reason=f"authz:{decision.reason}"
             )
-            return dialog_message(NEEDS_ADMIN.format(name=name))
+            return dialog_message(NEEDS_ADMIN)
         if target is None:
             return dialog_message(GONE)
         account_id = await get_or_create_account(self._runtime, actor)
