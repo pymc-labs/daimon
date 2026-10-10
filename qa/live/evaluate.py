@@ -28,7 +28,11 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
             raise Pending(assertion.pending_extension)
         if kind == "interrupt_within_s":
             raise Pending("headless interrupt hook is not implemented")
-        if kind == "db_check":
+        if kind == "http_check":
+            from qa.live.http_probe import check_http
+
+            passed, reason = check_http(assertion)
+        elif kind == "db_check":
             actual = backend.db_check(assertion.sql or "", turn or (turns[-1] if turns else None))
             passed = actual == assertion.expect
             reason = f"read-only query result: {actual!r}"

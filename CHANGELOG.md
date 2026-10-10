@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Plain words and spaced text for feedback, help, billing, memory, routines, and wizard panels across Discord, Slack, and Teams.
+- Treat unmentioned QA channel history seeds as unbilled context, preserving actual turn numbering.
+
 - Fix QA answer line anchors with MULTILINE, retain agent subtext headers per turn, and support channel text assertions.
 
 ### Added

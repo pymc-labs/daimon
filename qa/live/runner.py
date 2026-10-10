@@ -84,6 +84,32 @@ class Executor:
                 )
             )
             return result
+        if (
+            self.env == "staging"
+            and scenario.set == "A"
+            and scenario.surface == "headless"
+            and not scenario.setup
+            and not scenario.steps
+            and not scenario.teardown
+            and scenario.assertions
+            and all(a.kind == "http_check" for a in scenario.assertions)
+        ):
+            context = Context(
+                {**self.backend.context(), "nonce": uuid.uuid4().hex[:8]}, result, Path(".")
+            )
+            try:
+                for assertion in scenario.assertions:
+                    resolved = Assertion.model_validate(
+                        context.substitute(assertion.model_dump(mode="json", by_alias=True))
+                    )
+                    result.checks.append(evaluate(resolved, [], self.backend, self.judge))
+            except Exception as exc:
+                result.errors.append(exception_evidence(exc, "http_check"))
+                result.checks.append(
+                    Check("execution", "PENDING", "harness error: " + type(exc).__name__)
+                )
+            result.finalize()
+            return result
         if scenario.set == "B" or scenario.surface != "discord":
             result.checks.append(Check("surface", "PENDING", "human/platform hook required"))
             return result
@@ -329,6 +355,10 @@ class Executor:
                 destination = next((t.thread_id for t in reversed(result.turns) if t.thread_id), "")
                 if not destination:
                     raise Pending("thread_reply requires an observed thread")
+            if kind == "channel_message" and not step.mention and not step.reply_to:
+                message = self.backend.send(destination, step, mention=False)
+                result.seed_messages.append({"message_id": message, "channel_id": destination})
+                return
             self.backend.verify_model(destination)
             started_at = utcnow()
             self.trigger_attempted = True

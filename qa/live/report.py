@@ -23,6 +23,7 @@ class Result:
     env: str
     status: Status = "PENDING"
     checks: list[Check] = field(default_factory=list[Check])
+    seed_messages: list[Message] = field(default_factory=list[Message])
     turns: list[Turn] = field(default_factory=list[Turn])
     notes: list[str] = field(default_factory=list[str])
     channel_id: str | None = None

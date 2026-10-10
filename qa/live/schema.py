@@ -91,8 +91,13 @@ class Assertion(Contract):
         "thread_name",
         "channel_text_present",
         "channel_text_absent",
+        "http_check",
     ]
     turn: int | None = Field(default=None, ge=1)
+    url: str | None = None
+    expect_status: int | None = Field(default=None, ge=100, le=599)
+    expect_content_type: str | None = None
+    body_absent: str | None = None
     since_turn: int | None = Field(default=None, ge=1)
     maximum: float | None = Field(default=None, alias="max", ge=0)
     minimum: int = Field(default=0, alias="min", ge=0)
@@ -119,7 +124,7 @@ class Assertion(Contract):
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
         if (
-            self.kind not in {"db_check", "interrupt_within_s"}
+            self.kind not in {"db_check", "interrupt_within_s", "http_check"}
             and self.turn is None
             and self.since_turn is None
         ):
@@ -134,6 +139,10 @@ class Assertion(Contract):
                 self.kind.startswith(prefix) or self.kind.startswith("channel_" + prefix)
             ) and not field:
                 raise ValueError(f"{self.kind} requires {prefix} argument")
+        if self.kind == "http_check" and (
+            not self.url or not (self.expect_status or self.expect_content_type or self.body_absent)
+        ):
+            raise ValueError("http_check requires URL and an expectation")
         if self.kind == "same_thread" and self.as_turn is None:
             raise ValueError("same_thread requires as_turn")
         if self.kind == "progress_seen" and self.within_s is None:
@@ -156,7 +165,7 @@ class Assertion(Contract):
             and not self.maximum.is_integer()
         ):
             raise ValueError("message_count max must be an integer")
-        for pattern in (self.pattern, self.pattern_absent, self.name_pattern):
+        for pattern in (self.pattern, self.pattern_absent, self.name_pattern, self.body_absent):
             if pattern:
                 try:
                     re.compile(pattern)
@@ -209,7 +218,10 @@ class Scenario(ScenarioMetadata):
         triggers = sum(
             len(s.texts)
             if s.do == "burst"
-            else s.do in {"mention", "thread_reply", "channel_message", "dm", "headless_interrupt"}
+            else (
+                s.do in {"mention", "thread_reply", "dm", "headless_interrupt"}
+                or (s.do == "channel_message" and (s.mention or bool(s.reply_to)))
+            )
             for s in [*self.setup, *self.steps, *self.teardown]
         )
         if self.tier != "weekly" and any(
@@ -235,7 +247,6 @@ PROPOSED_ASSERTIONS = frozenset(
         "component_present",
         "card_text_now",
         "cli_check",
-        "http_check",
         "any_of",
         "card_edits_min",
         "answer_length_chars",
