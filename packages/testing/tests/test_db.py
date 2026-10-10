@@ -26,7 +26,12 @@ from daimon.testing.db import (
 )
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    AsyncSessionTransaction,
+    async_sessionmaker,
+)
 from sqlalchemy.pool import NullPool
 
 # A pid past this host's pid_max (4194304 on Linux) can never be alive.
@@ -215,6 +220,14 @@ async def test_background_face_transaction_finishes_before_worker_schema_drop(
     schema = f"test_f{os.getpid()}_{uuid.uuid4().hex[:8]}"
     engine = build_test_engine(os.environ["DAIMON_DATABASE__TEST_URL"], schema, poolclass=NullPool)
     started = asyncio.Event()
+    rollback_started = asyncio.Event()
+    release_rollback = asyncio.Event()
+    original_exit = AsyncSessionTransaction.__aexit__
+
+    async def delayed_exit(self: AsyncSessionTransaction, *args: object) -> None:
+        rollback_started.set()
+        await release_rollback.wait()
+        await original_exit(self, *args)
 
     async def blocked_face(session: AsyncSession, **_kwargs: object) -> None:
         await session.execute(text("SELECT id FROM tenants FOR KEY SHARE"))
@@ -223,8 +236,10 @@ async def test_background_face_transaction_finishes_before_worker_schema_drop(
 
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", blocked_face)
     task: asyncio.Task[None] | None = None
+    drain: asyncio.Task[None] | None = None
     try:
         await _create_schema_with_tables(engine, schema)
+        monkeypatch.setattr(AsyncSessionTransaction, "__aexit__", delayed_exit)
         task = agent_identity.queue_agent_face(
             async_sessionmaker(engine),
             tenant_id=uuid.uuid4(),
@@ -237,10 +252,19 @@ async def test_background_face_transaction_finishes_before_worker_schema_drop(
         # Existing suite-local autouse fixtures may request cancellation first.
         # The shared DB cleanup must still see and await that task's rollback.
         agent_identity.cancel_pending_agent_faces()
-        await _drain_background_tasks()
+        await asyncio.wait_for(rollback_started.wait(), timeout=2)
+        drain = asyncio.create_task(_drain_background_tasks())
+        await asyncio.sleep(0)
+        assert task.cancelling() == 1, "cleanup must not interrupt an in-flight rollback"
+        assert not drain.done(), "cleanup must wait for the shielded SQLAlchemy rollback"
+        release_rollback.set()
+        await asyncio.wait_for(drain, timeout=2)
         assert task.done(), "cleanup must await cancellation and transaction rollback"
         await asyncio.wait_for(_drop_schema(engine, schema), timeout=10)
     finally:
+        release_rollback.set()
+        if drain is not None and not drain.done():
+            await asyncio.gather(drain, return_exceptions=True)
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

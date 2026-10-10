@@ -179,7 +179,11 @@ async def ensure_agent_face(
 def cancel_pending_agent_faces() -> None:
     """Request cancellation of test face renders; retain them until they finish."""
     for task in list(_face_tasks.values()):
-        task.cancel()
+        # SQLAlchemy shields transaction rollback in a child task. A second
+        # cancellation of the outer face task could finish it before that
+        # rollback completes, making an await of the face task insufficient.
+        if not task.done() and not task.cancelling():
+            task.cancel()
     _face_started.clear()
     _face_failures.clear()
 
