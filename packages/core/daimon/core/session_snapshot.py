@@ -106,6 +106,9 @@ class SessionSnapshot(BaseModel):
     environment_id: str
     github_mode: Literal["legacy", "app"] = "legacy"
     repo_urls: tuple[str, ...] = ()
+    # Every repo the session's App tokens cover, mounted or not. A new grant
+    # changes this set, and the session must be replaced to receive the token.
+    token_repo_urls: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
@@ -374,6 +377,7 @@ def desired_snapshot(
     repo_url: str | None,
     github_mode: Literal["legacy", "app"] = "legacy",
     repo_urls: tuple[str, ...] = (),
+    token_repo_urls: tuple[str, ...] = (),
     repo_branch: str | None,
     memory_store_id: str | None,
     vault_id: str | None,
@@ -409,6 +413,7 @@ def desired_snapshot(
         environment_id=environment_id,
         github_mode=github_mode,
         repo_urls=repo_urls if github_mode == "app" else (),
+        token_repo_urls=token_repo_urls if github_mode == "app" else (),
         repo_url=repo_url,
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,

@@ -55,7 +55,7 @@ from daimon.core.sessions import create_session
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
-from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
 from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
@@ -338,12 +338,32 @@ async def create_ma_session(
     # App tokens sit in the vault even when no working repo is mounted; record an
     # issue time only when this session was actually delivered some.
     has_app_tokens = False
+    token_repo_urls: tuple[str, ...] = ()
     if github_mode == "app":
         async with deps.sessionmaker() as session:
-            has_app_tokens = any(
-                row.status == "delivered"
+            delivered = [
+                row
                 for row in await list_session_tokens(session, session_id=ma_session.id)
-            )
+                if row.status == "delivered"
+            ]
+            has_app_tokens = bool(delivered)
+            if delivered:
+                names = {
+                    repo.repo_id: repo.repo_full_name
+                    for repo in await list_authorized_repos(
+                        session, tenant_id=tenant_id, agent_id=agent_uuid
+                    )
+                }
+                token_repo_urls = tuple(
+                    sorted(
+                        {
+                            f"https://github.com/{names[repo_id]}"
+                            for row in delivered
+                            for repo_id in row.repo_ids
+                            if repo_id in names
+                        }
+                    )
+                )
     snapshot = snapshot_from_created_session(
         ma_session,
         env_sha256=env_sha256,
@@ -361,7 +381,7 @@ async def create_ma_session(
         ),
         sent_skills=session_skills(admission.agent, admission.channel_skills),
         github_mode=github_mode,
-    )
+    ).model_copy(update={"token_repo_urls": token_repo_urls})
     return CreatedSession(
         ma_session_id=ma_session.id,
         snapshot=snapshot,

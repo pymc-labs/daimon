@@ -483,3 +483,22 @@ def test_app_session_without_tokens_never_rotates() -> None:
         )
         == ReuseAsIs()
     )
+
+
+def test_new_token_only_grant_replaces_the_session() -> None:
+    # No working repo is mounted, but a new grant must still reach the session:
+    # its token can only arrive with a fresh session.
+    url = "https://github.com/example/new"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(),
+        token_repo_urls=(),
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(update={"token_repo_urls": (url,)})
+    decision = decide_session_compatibility(
+        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+    )
+    assert decision == ReplaceSession(reasons=("repo_set",))

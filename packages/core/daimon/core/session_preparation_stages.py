@@ -33,7 +33,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import GithubAppSettings
 from daimon.core.credential_env import assemble_env_bytes
-from daimon.core.github_app_session import effective_repo_urls
+from daimon.core.github_app_session import effective_repo_url_sets
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -297,6 +297,19 @@ async def desired_snapshot_for(
             session, tenant_id=tenant_id, agent_id=agent_uuid
         )
 
+    app_urls = (
+        await effective_repo_url_sets(
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            account_id=account_id,
+            is_external=is_external,
+            config=github_app or GithubAppSettings(),
+            fernet=fernet,
+        )
+        if mode == "app"
+        else ((), ())
+    )
     return desired_snapshot(
         agent,
         hidden_mcp_server_names=await resolve_hidden_mcp_server_names(
@@ -308,21 +321,8 @@ async def desired_snapshot_for(
         ),
         environment_id=environment_id,
         github_mode=mode,
-        repo_urls=(
-            await effective_repo_urls(
-                sessionmaker,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-                account_id=account_id,
-                is_external=is_external,
-                config=github_app or GithubAppSettings(),
-                fernet=fernet,
-                # Compared with the session's mounted resources: the working repo only.
-                mounted_only=True,
-            )
-            if mode == "app"
-            else ()
-        ),
+        repo_urls=app_urls[1],
+        token_repo_urls=app_urls[0],
         env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
         repo_url=None if binding is None else f"https://github.com/{binding.repo_url}",
         repo_branch=None if binding is None else binding.default_branch,
