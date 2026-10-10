@@ -75,14 +75,14 @@ import discord
 log = structlog.get_logger()
 
 _SHARED_AGENT_MESSAGE: Final[str] = (
-    "Changing this shared agent's working repo needs a server admin (Manage Server). "
-    "Ask a server admin to give it access to the repo with Daimon."
+    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
 
 _SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
-    "Adding skills to this shared agent needs a server admin (Manage Server). "
-    "Ask a server admin to import them with Daimon, or fork the agent and add them to the fork."
+    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
 _AGENT_GONE_MESSAGE: Final[str] = (

@@ -54,6 +54,23 @@ ROOT = "https://daimon.example.com"
 REPO = "https://github.com/acme/skills"
 KINDS = ("mcp", "skill_repo", "repo", "mcp_oauth")
 POLICIES = ("open", "pinned_inside", "pinned_outside", "sealed", "pinned_sealed")
+#: Refusals reworded since BASE on purpose (plain words, batch 1 section 4):
+#: the historical adapter's copy maps to today's before the two are compared.
+RENAMED_COPY = (
+    (
+        "This agent answers for other people here, so changing its repo or its keys needs an "
+        "admin. Ask me and I'll write the request for them, or ask me to make you a new agent "
+        "of your own.",
+        "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent.",
+    ),
+    (
+        "This agent answers for other people here, so adding skills to it needs an admin. Ask "
+        "me and I'll write the request for them, or ask me to fork it and add them to the fork.",
+        "Other people use this agent. Adding skills needs an admin.\n\n"
+        "Ask me to draft a request for an admin, or to make you a new agent.",
+    ),
+)
 
 
 @cache
@@ -446,7 +463,10 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
                         )
                     )
                 )
-                messages.append(("dialog", str(response.model_dump())))
+                dialog = json.dumps(response.model_dump())
+                for old, new in RENAMED_COPY:
+                    dialog = dialog.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
+                messages.append(("dialog", dialog))
                 for task in spawned:
                     await task
 
