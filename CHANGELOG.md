@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Haiku 5.5 can be picked as an agent model and is metered.** It is billed at Anthropic's list price by prompt length: $0.10 input and $0.50 output per million tokens up to a 100,000-token prompt, and five times that above it. Before this, turns on `claude-haiku-5-5` were recorded as free.
+
+- A channel admin can connect GitHub repos, including personal ones, to an agent they manage (one limited to their channels and not a Daimon default agent), from the agent's Connect GitHub or by asking the agent. Repos connected for an agent belong to it: no other agent can be given them, by anyone. Connecting again adds repos and keeps the ones it has. A server admin's Connect for one agent works the same way. Whoever manages the agent can remove its repos, which removes only that agent's access. If the agent had a saved GitHub key, the key is retired once its working repo and skill repos are among its repos.
+
 - An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.
 
 ### Changed
@@ -851,7 +854,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before.
 
 - Per-turn token, cache and estimated provider-cost telemetry shares the terminal outcome row; operators can query tenant usage by channel and origin with `daimon usage turns`. MCP SDK polling outcomes retain unknown usage rather than zero. Billing and admission behavior are unchanged.
-
 
 - Opt-in Discord and Slack DM conversations: admins enable with `/dm enable`;
   `/dm` moves recent channel context into a private, resettable session. Every

@@ -1300,11 +1300,19 @@ admission before any of this runs.
 
 - **GitHub connection invitations** are issued with `daimon github connect-link`
   for a tenant admin, `/github connect` on Discord and Slack, or the
-  `github_connect` MCP tool from a conversation. They can target one agent;
-  self-serve links are refused for legacy-mode agents with a saved GitHub key,
-  working or skill repo credential, or a channel pin. An operator-issued agent
-  link may stage an update for an operator to finish with
-  `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
+  `github_connect` MCP tool from a conversation. They can target one agent.
+  Repos confirmed through a link for one agent belong to that agent
+  (`tenant_github_repos.scope_agent_id`): no other agent can be granted them
+  or get them in a token, and the same repo on two agents is two rows. A
+  server admin, or a channel admin for a non-managed agent local to and held
+  by their channels (the `github_grant` terms), may make such a link; the
+  confirm step checks again that the requester still manages the agent. A
+  confirmed link retires the agent's saved GitHub key only when its working
+  repo (with write) and private skill repos are among its repos; otherwise the
+  repos stay staged until the agent's GitHub panel saves a complete set. An
+  agent limited to channels by a rule may use only repos connected for it.
+  An operator-issued agent link may stage an update for an operator to finish
+  with `daimon github finish-update`. When the separate `DAIMON_GITHUB_APP__*`
   credentials and
   encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
   `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
