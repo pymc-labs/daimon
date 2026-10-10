@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import JsonValue, TypeAdapter
 
@@ -31,7 +32,7 @@ from mux.conformance.budget import (
 )
 from mux.conformance.gemini import PENDING_REASONS, GeminiScript
 from mux.conformance.live_probe import ProbeOutcome, ProbeRun, ProbeRunError, run_probe
-from mux.conformance.recording import Recorder, RequestMetadata
+from mux.conformance.recording import Audit, Recorder, RecordingError, RequestMetadata
 from mux.conformance.runner import Adapter, PendingKind, PendingReason, Result, run_fixture
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
@@ -60,6 +61,53 @@ SCOPE = Scope(
     principal_id="probe",
     authorization_id="explicit-live-probe",
 )
+
+
+class EvidenceAliases:
+    """Per-run opaque identity map, applied before the unchanged recorder."""
+
+    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
+        self.secrets = secrets
+        self.ids: dict[str, str] = {}
+
+    def identity(self, value: str) -> str:
+        if Audit(self.secrets).plain(value, False):
+            raise RecordingError("credential-shaped identity; tape refused")
+        if len(value) < 24:
+            return value
+        if value not in self.ids:
+            self.ids[value] = f"resource-{len(self.ids) + 1}"
+        return self.ids[value]
+
+    def path(self, value: str) -> str:
+        return "/".join(self.identity(part) for part in value.split("/"))
+
+    def event(self, source: Event) -> Event:
+        # Only identity fields are transformed. Message/tool content continues
+        # through the recorder's full credential and encoded-content audit.
+        def project(value: JsonValue, field: str = "") -> JsonValue:
+            if isinstance(value, dict):
+                return {key: project(item, key) for key, item in value.items()}
+            if isinstance(value, list):
+                return [project(item, field) for item in value]
+            if isinstance(value, str) and field in {
+                "id",
+                "session_id",
+                "turn_id",
+                "root_turn_id",
+                "item_id",
+                "call_id",
+                "event_id",
+                "ordering_domain",
+                "observation_id",
+                "input_id",
+                "caused_by",
+                "cursor",
+            }:
+                return ":".join(self.identity(part) for part in value.split(":"))
+            return value
+
+        return Event.model_validate(project(source.model_dump(mode="json")))
 
 
 @dataclass(frozen=True)
@@ -203,6 +251,7 @@ async def smoke(
     bounded = LimitedTransport(source, settings.max_total_tokens)
     metadata_recorded = 0
     facts_recorded = False
+    aliases = EvidenceAliases(secrets)
 
     def observe(meter: UsageObservation, *, complete: bool) -> ActualSpend:
         tokens = TokenUsage(
@@ -232,12 +281,17 @@ async def smoke(
 
     def record(recorder: Recorder, events: tuple[Event, ...]) -> None:
         nonlocal metadata_recorded, facts_recorded
+        events = tuple(aliases.event(item) for item in events)
         if request_metadata:
             pending = request_metadata[metadata_recorded:]
             for metadata in pending[:-1]:
-                recorder.record(metadata, ())
+                recorder.record(
+                    metadata.model_copy(update={"path": aliases.path(metadata.path)}), ()
+                )
             if pending:
-                recorder.record(pending[-1], events)
+                recorder.record(
+                    pending[-1].model_copy(update={"path": aliases.path(pending[-1].path)}), events
+                )
             metadata_recorded = len(request_metadata)
         elif not facts_recorded:
             recorder.record(RequestMetadata(method="GET", path="/host/smoke/events"), events)
@@ -632,6 +686,7 @@ async def run_sdk_smoke(
     from mux.drivers.gemini.transport import API_REVISION, SDKTransport
 
     metadata: list[RequestMetadata] = []
+    aliases = EvidenceAliases((key,))
     active_model = settings.model
     call_index = 0
 
@@ -644,7 +699,10 @@ async def run_sdk_smoke(
             body = dict(parsed)
         metadata.append(
             RequestMetadata.from_request(
-                request.method, str(request.url), headers=request.headers, body=body
+                request.method,
+                aliases.path(urlsplit(str(request.url)).path),
+                headers=request.headers,
+                body=body,
             )
         )
 
@@ -652,6 +710,7 @@ async def run_sdk_smoke(
         nonlocal call_index
         await response.aread()
         observation_sha256: str | None = None
+        raw: Object = {}
         try:
             raw = TypeAdapter[Object](Object).validate_json(response.content)
             counts = usage_metadata(raw)
@@ -677,6 +736,18 @@ async def run_sdk_smoke(
                 "usageMetadata": counts,
                 "usage_observation_sha256": observation_sha256,
                 "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
+                "interaction_status": raw.get("status")
+                if raw.get("status")
+                in (
+                    "in_progress",
+                    "requires_action",
+                    "completed",
+                    "cancelled",
+                    "failed",
+                    "incomplete",
+                    "budget_exceeded",
+                )
+                else None,
             },
         )
 
