@@ -132,3 +132,24 @@ All provider calls here use SDK mock transports; no key, database, live provider
 or judge is contacted.
 
 Focused verification: `uv run pytest tests/judge/test_headless_executor.py -q -n 2`.
+
+`headless_output.capture_headless_return` awaits an explicitly bound headless
+host invocation and records the exact string received by its caller. Receipts
+retain a unique evidence ID and monotonic invocation/return clocks, and can be
+serialized for offline replay. Failure, cancellation, invalid output or invalid
+clocks refuse the receipt. Empty or whitespace-only returns close this boundary
+without a visible message. The caller must use the turn's clock and associate
+the receipt with its independently captured root/session.
+
+This capture covers only `headless_return`; it does not certify a Discord post,
+card, reaction, routing or tool execution. Native text and render/on_state
+snapshots must not be substituted for a returned string. The real headless host
+test uses scripted SDK HTTP/SSE to verify that pre-tool narration, tool results
+and text beyond the host's 1000-character limit do not reach this boundary.
+The test also covers an actual tool-only empty return. It exercises the existing
+legacy headless host and driver; mux admission/session reuse are separate runner
+checks. Binding these receipts to the effects oracle is a following slice once
+that oracle lands on integration. This capture alone
+does not change any TARGET-53 score or claim platform parity.
+
+Focused verification: `uv run pytest tests/judge/test_headless_output.py`.
