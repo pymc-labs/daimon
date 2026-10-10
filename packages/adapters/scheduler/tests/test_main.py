@@ -2558,21 +2558,34 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     await client.close()
 
 
-async def test_run_loops_without_a_usage_sweep_runs_ticks_alone() -> None:
-    """With the sweep switched off, ticks still run and stop cleanly."""
+async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> None:
+    """With the usage sweep switched off, ticks and privacy deletion retries still run."""
     stop = asyncio.Event()
     ticks = 0
+    privacy_passes = 0
 
     async def tick() -> None:
         nonlocal ticks
         ticks += 1
+        await asyncio.sleep(0)
         if ticks == 3:
             stop.set()
 
+    async def privacy_sweep() -> None:
+        nonlocal privacy_passes
+        privacy_passes += 1
+
     async with asyncio.timeout(5):
-        await _run_loops(tick=tick, usage_sweep=None, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=tick,
+            usage_sweep=None,
+            privacy_sweep=privacy_sweep,
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert ticks == 3, f"ticks run without a usage sweep, got {ticks}"
+    assert privacy_passes >= 1, "a pending erasure must not wait on the usage sweep switch"
 
 
 @pytest.mark.parametrize(("enabled", "expected"), [(False, 0), (True, 1)])
