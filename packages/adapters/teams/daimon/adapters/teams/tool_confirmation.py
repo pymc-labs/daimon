@@ -84,7 +84,7 @@ def _footer(
         return (f"Only {name} can approve or deny", f"Expires {{{{TIME({expires})}}}}")
     if card.state in {"approved", "denied"}:
         return (f"by {answered_by or name}",)
-    return ()
+    return () if card.footer is None else (card.footer,)
 
 
 def confirmation_adaptive_card(

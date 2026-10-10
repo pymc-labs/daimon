@@ -187,6 +187,7 @@ async def test_an_unanswered_card_expires() -> None:
     assert answer == "expired"
     view = message.edit.await_args.kwargs["view"]
     assert _texts(view)[0].startswith("**Expired")
+    assert any("Approval timed out. Ask again to run it." in text for text in _texts(view))
 
 
 async def test_a_cancelled_wait_retires_the_card() -> None:

@@ -157,6 +157,9 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
 
     assert answer == "expired"
     assert client.chat_update.await_args.kwargs["text"].startswith("Expired")
+    assert "Approval timed out. Ask again to run it." in str(
+        client.chat_update.await_args.kwargs["attachments"]
+    )
 
 
 async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> None:

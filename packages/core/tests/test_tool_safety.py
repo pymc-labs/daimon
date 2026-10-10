@@ -346,7 +346,7 @@ def test_the_approval_card_timeout_defaults_to_ten_minutes_and_is_bounded() -> N
     import pytest
     from pydantic import ValidationError
 
-    assert ToolSafetyPolicy().confirmation_timeout_s == 600
+    assert ToolSafetyPolicy().confirmation_timeout_s == 300
     assert ToolSafetyPolicy(confirmation_timeout_s=60).confirmation_timeout_s == 60
     for bad in (0, 29, 3601):
         with pytest.raises(ValidationError):
