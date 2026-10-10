@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import math
 import re
 
 import httpx
@@ -158,7 +160,7 @@ def test_cost_of_gemini_catalog_name_returns_none() -> None:
 # The published list price of every agent model, as read from
 # AGENT_PRICING_SOURCE on the date below. Changing a row in pricing.py without
 # changing it here fails, so a price edit always comes with a fresh check.
-_PUBLISHED_AGENT_PRICES_2026_10_08: dict[str, ModelRates] = {
+_PUBLISHED_AGENT_PRICES_2026_10_10: dict[str, ModelRates] = {
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-8": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -167,14 +169,22 @@ _PUBLISHED_AGENT_PRICES_2026_10_08: dict[str, ModelRates] = {
     "claude-sonnet-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.20),
     "claude-sonnet-4-6": ModelRates(input=3.0, output=15.0, cache_write=3.75, cache_read=0.30),
     "claude-haiku-4-5": ModelRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.10),
+    "claude-haiku-5-5": ModelRates(
+        input=0.10,
+        output=0.50,
+        cache_write=0.125,
+        cache_read=0.01,
+        long_context_over=100_000,
+        long_context=ModelRates(input=0.50, output=2.50, cache_write=0.625, cache_read=0.05),
+    ),
 }
 
 
 def test_agent_rows_match_the_dated_price_list() -> None:
-    assert AGENT_PRICING_CHECKED_ON == "2026-10-08", (
+    assert AGENT_PRICING_CHECKED_ON == "2026-10-10", (
         "re-check every row against the pricing page, then move this date and the table name"
     )
-    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_10_08, (
+    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_10_10, (
         "an agent price changed: check it against AGENT_PRICING_SOURCE and update both tables"
     )
 
@@ -199,9 +209,11 @@ def test_agent_rows_match_the_live_pricing_page() -> None:
     for line in page.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         # The model table comes first: name, input, 5m write, 1h write, cache read, output.
-        if len(cells) != 6 or not cells[1].startswith("$") or cells[0] in published:
+        # A tiered model's first row is its standard tier: "Claude Haiku 5.5 (for prompts up to ...)".
+        name = re.sub(r"\s*\(.*\)$", "", cells[0]) if cells else ""
+        if len(cells) != 6 or not cells[1].startswith("$") or name in published:
             continue
-        published[cells[0]] = ModelRates(
+        published[name] = ModelRates(
             input=_money(cells[1]),
             output=_money(cells[5]),
             cache_write=_money(cells[2]),
@@ -209,7 +221,8 @@ def test_agent_rows_match_the_live_pricing_page() -> None:
         )
     for model_id, rates in AGENT_MODEL_PRICING.items():
         name = _display_name(model_id)
-        assert published.get(name) == rates, (
+        base = dataclasses.replace(rates, long_context_over=None, long_context=None)
+        assert published.get(name) == base, (
             f"{model_id} is billed at {rates}, the pricing page lists {published.get(name)}"
         )
 
@@ -229,3 +242,43 @@ def test_an_unknown_model_still_prices_at_none() -> None:
     assert MODEL_PRICING.get("claude-haiku-4-5-2025") is None, (
         "only an 8-digit date suffix falls back"
     )
+
+
+def _usage(input_tokens: int, output_tokens: int, cache_write: int = 0, cache_read: int = 0):
+    from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
+        BetaManagedAgentsSpanModelUsage,
+    )
+
+    return BetaManagedAgentsSpanModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_write,
+        cache_read_input_tokens=cache_read,
+    )
+
+
+def test_haiku_5_5_prices_a_short_prompt_at_the_standard_tier() -> None:
+    from daimon.core.pricing import MODEL_PRICING, cost_of
+
+    cost = cost_of(_usage(50_000, 1_000, cache_read=50_000), MODEL_PRICING["claude-haiku-5-5"])
+    assert cost is not None and math.isclose(
+        cost, (50_000 * 0.10 + 1_000 * 0.50 + 50_000 * 0.01) / 1_000_000
+    )
+
+
+def test_haiku_5_5_prices_a_prompt_over_100k_at_the_long_context_tier() -> None:
+    from daimon.core.pricing import MODEL_PRICING, cost_of
+
+    cost = cost_of(_usage(60_000, 1_000, cache_read=40_001), MODEL_PRICING["claude-haiku-5-5"])
+    assert cost is not None and math.isclose(
+        cost, (60_000 * 0.50 + 1_000 * 2.50 + 40_001 * 0.05) / 1_000_000
+    )
+
+
+def test_haiku_5_5_is_selectable_and_gemini_3_8_flash_is_priced() -> None:
+    from daimon.core.pricing import MODEL_PRICING
+
+    assert "claude-haiku-5-5" in ALLOWED_MODEL_IDS, (
+        "the latest cheap Claude model must be selectable"
+    )
+    assert MODEL_PRICING["gemini-3.8-flash"].input == 0.75
