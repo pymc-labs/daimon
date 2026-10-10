@@ -1,6 +1,7 @@
 """Neutral telemetry keeps legacy stage totals, deduplication and unknowns."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
@@ -8,6 +9,7 @@ from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState, UsageTotals
 from daimon.testing.ma_models import ma_model_usage
 from mux.contracts.ids import ResourceRef
+from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic.usage import observation_from_event
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
@@ -21,7 +23,7 @@ SESSION = ResourceRef(
 )
 
 
-def span():
+def span() -> BetaManagedAgentsSpanModelRequestEndEvent:
     return BetaManagedAgentsSpanModelRequestEndEvent(
         id="usage",
         type="span.model_request_end",
@@ -36,7 +38,7 @@ def span():
     )
 
 
-def observation(raw=None):
+def observation(raw: dict[str, Any] | None = None) -> UsageObservation:
     return observation_from_event(raw or span().model_dump(mode="json"), SESSION, observed_at=NOW)
 
 
@@ -55,7 +57,7 @@ def test_owned_usage_matches_legacy_totals_and_dedupes_the_native_event():
 
 
 @pytest.mark.parametrize("missing", ["input_tokens", "cache_read_input_tokens", "output_tokens"])
-def test_partial_observation_sums_each_reported_stage_independently(missing):
+def test_partial_observation_sums_each_reported_stage_independently(missing: str) -> None:
     raw = span().model_dump(mode="json")
     raw["model_usage"][missing] = None
     owned = observation(raw)
@@ -71,7 +73,7 @@ def test_partial_observation_sums_each_reported_stage_independently(missing):
 @pytest.mark.parametrize(
     "changed", [{"grain": "turn"}, {"grain": "session"}, {"basis": "cumulative"}]
 )
-def test_overlapping_grains_and_cumulative_counts_are_rejected(changed):
+def test_overlapping_grains_and_cumulative_counts_are_rejected(changed: dict[str, str]) -> None:
     with pytest.raises(ValueError, match="disjoint model-request"):
         UsageTotals().add_observation(observation().model_copy(update=changed))
 

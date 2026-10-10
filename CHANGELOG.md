@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bound OpenAI session cleanup with idle polling and HTTP 409 recovery, preserving deletion keys, shared vaults and unknown-outcome failures.
 
+- The experimental mux turn path verifies cancellation through observed stop evidence and uses scoped ports for recovery replay and session cleanup. Headless mux turns require the caller's authorized tenant and account; approval cards and the default legacy path retain their existing behavior.
+
 - Add an experimental neutral turn bridge behind `DAIMON_TURN__PATH=mux`; legacy remains the default, with unchanged input order, lifecycle effects and host accounting.
 
 - Discord and Slack Connect GitHub buttons now show a link emoji.

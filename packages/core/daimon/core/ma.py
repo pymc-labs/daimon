@@ -38,6 +38,7 @@ from daimon.core.mux_compat import (
     retrieve_agent,
 )
 from mux.contracts.ids import Scope
+from mux.drivers.anthropic.transport import LegacyTurnTransport
 
 log = structlog.get_logger()
 
@@ -90,14 +91,10 @@ async def replay_events(
     `__cause__`.
     """
 
-    async def _walk() -> list[SessionEvent]:
-        events: list[SessionEvent] = []
-        async for event in anthropic.beta.sessions.events.list(session_id=session_id):
-            events.append(event)
-        return events
-
     try:
-        return await asyncio.wait_for(_walk(), timeout=timeout_s)
+        return await asyncio.wait_for(
+            LegacyTurnTransport(anthropic, session_id).replay(), timeout=timeout_s
+        )
     except TimeoutError as err:
         raise TurnError(
             kind="upstream",
@@ -160,13 +157,11 @@ async def send_interrupt_and_wait(
     The caller owns rendering (`lifecycle.on_render("… interrupting")`). This
     helper is pure I/O-and-wait.
     """
-    await anthropic.beta.sessions.events.send(
-        session_id,
-        events=[{"type": "user.interrupt"}],
-    )
+    transport = LegacyTurnTransport(anthropic, session_id)
+    await transport.send([{"type": "user.interrupt"}])
 
     async def _wait_for_terminal_idle() -> None:
-        stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
+        stream = await transport.open_interrupt_stream()
         async for event in stream:
             if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
                 continue
@@ -233,10 +228,7 @@ async def interrupt_orphaned_session(
         timeout_s = ORPHAN_INTERRUPT_TIMEOUT_S
     try:
         await asyncio.wait_for(
-            anthropic.beta.sessions.events.send(
-                session_id,
-                events=[{"type": "user.interrupt"}],
-            ),
+            LegacyTurnTransport(anthropic, session_id).send([{"type": "user.interrupt"}]),
             timeout=timeout_s,
         )
     except TimeoutError:

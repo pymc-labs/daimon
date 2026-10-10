@@ -49,7 +49,7 @@ from mux.drivers.anthropic.sessions_lifecycle import (
     SessionWalk,
     WorkspaceTransfer,
 )
-from mux.drivers.anthropic.turn import AnthropicEvents
+from mux.drivers.anthropic.turn import AnthropicEventHistoryWalk, AnthropicEvents, EventHistoryWalk
 from mux.drivers.anthropic.usage import AnthropicUsage, UsageWalk
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.anthropic import MANAGED_AGENTS
@@ -125,6 +125,9 @@ class AnthropicManagedAgents:
             (CoreVaults, "anthropic.vaults", 1): native_vaults,
             (SessionResources, "anthropic.session_resources", 1): self.session_admin,
             (NativeSessionResources, "anthropic.session_resources", 1): self.session_admin,
+            (EventHistoryWalk, "anthropic.event_history", 1): AnthropicEventHistoryWalk(
+                client, self.account_scope_id, authorization
+            ),
             (ResourceWalk, "anthropic.resource_walk", 1): AnthropicResourceWalk(
                 self.agents, self.environments, native_skills, native_versions
             ),

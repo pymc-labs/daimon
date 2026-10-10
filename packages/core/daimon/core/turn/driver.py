@@ -71,7 +71,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
-from daimon.core.ma import replay_events, send_interrupt_and_wait, terminal_stop_reason
+from daimon.core.ma import terminal_stop_reason
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
     build_confirmation_events,
@@ -81,7 +81,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
-from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO, TurnConnectionLost, TurnIO, TurnStream
+from daimon.core.turn.io import LegacyTurnIO, TurnConnectionLost, TurnIO, TurnStream, turn_io
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import (
@@ -100,12 +100,13 @@ from daimon.core.turn.termination import (
     TerminationReason,
     normalized_stop_reason,
     normalized_termination_reason,
+    stop_termination_reason,
     termination_reason,
 )
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.drivers.anthropic.transport import LegacyTurnTransport
-from mux.errors import ProviderError, ScopeViolation
+from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
@@ -571,24 +572,15 @@ async def run_turn(
     Returns the final `TurnState`.
     """
     selected_path = path if path is not None else load_turn_settings().path
-    io: TurnIO
-    if selected_path == "legacy":
-        io = LegacyTurnIO(anthropic, session_id)
-    else:
-        if scope is None:
-            raise ScopeViolation(session_id, "mux turns require the caller's authorized scope")
-        if backend is None:
-            from daimon.core.turn.io import default_mux_turn_io
-
-            io = default_mux_turn_io(
-                anthropic, scope, session_id, read_timeout_s=stream_read_timeout_s
-            )
-        else:
-            if session_ref is None or session_ref.id != session_id:
-                raise ScopeViolation(
-                    session_id, "an injected backend requires the bound session ref"
-                )
-            io = MuxTurnIO(backend, scope, session_ref)
+    io = turn_io(
+        anthropic,
+        session_id,
+        path=selected_path,
+        backend=backend,
+        scope=scope,
+        session_ref=session_ref,
+        read_timeout_s=stream_read_timeout_s,
+    )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
 
@@ -970,7 +962,7 @@ async def _pump(
                         reason=cycle.reason,
                         status=status,
                     )
-                    replayed = await replay_events(anthropic, session_id=session_id)
+                    replayed = await io.replay()
                     current_turn_events = _events_since_last_turn_boundary(
                         replayed, tool_confirmation=tool_confirmation
                     )
@@ -1094,7 +1086,7 @@ async def _pump(
         except _InterruptInConsume:
             await _cancel_render()
             return await _handle_interrupt_in_consume(
-                anthropic=anthropic,
+                io=io,
                 session_id=session_id,
                 state_cell=state_cell,
                 lifecycle=lifecycle,
@@ -1413,7 +1405,7 @@ async def _consume_with_reconnect(
                 "turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason
             )
             await lifecycle.on_reconnect(reconnect_reason)
-            replayed = await replay_events(anthropic, session_id=session_id)
+            replayed = await io.replay()
             if cancel.is_set():
                 raise _InterruptedDuringRecovery(phase="replay")
             current_turn_events = _events_since_last_turn_boundary(
@@ -1830,7 +1822,7 @@ async def _finalize_interrupted(
 
 async def _handle_interrupt_in_consume(
     *,
-    anthropic: AsyncAnthropic,
+    io: TurnIO,
     session_id: str,
     state_cell: list[TurnState],
     lifecycle: TurnLifecycle,
@@ -1842,11 +1834,7 @@ async def _handle_interrupt_in_consume(
     route to on_terminal_success on ack or on_terminal_failure on timeout.
     """
     try:
-        await send_interrupt_and_wait(
-            anthropic,
-            session_id=session_id,
-            timeout_s=interrupt_timeout_s,
-        )
+        stop = await io.interrupt(timeout_s=interrupt_timeout_s)
     except TurnError as err:
         # send_interrupt_and_wait raises TurnError(kind="interrupt_timeout")
         # on its timeout; propagate through the on_terminal_failure path.
@@ -1869,11 +1857,26 @@ async def _handle_interrupt_in_consume(
         await lifecycle.on_terminal_failure(state_cell[0], err)
         return state_cell[0]
 
+    reason = TerminationReason.INTERRUPTED if stop is None else stop_termination_reason(stop)
+    if reason.is_failure:
+        error = TurnError(
+            kind="upstream",
+            message=(
+                "session terminated by MA"
+                if reason == TerminationReason.SESSION_TERMINATED
+                else "MA ended the turn without confirming the interruption"
+            ),
+        )
+        state_cell[0] = dataclasses.replace(state_cell[0], error=error, termination=reason)
+        await render_once(state_cell[0])
+        await lifecycle.on_terminal_failure(state_cell[0], error)
+        return state_cell[0]
+
     log.info("turn.interrupt.sent", session_id=session_id)
     await lifecycle.on_interrupt_sent("cancel_event")
     log.info("turn.interrupt.acked", session_id=session_id)
     # Ack arrived -- partial state is "clean" (refinements §5).
-    state_cell[0] = dataclasses.replace(state_cell[0], termination=TerminationReason.INTERRUPTED)
+    state_cell[0] = dataclasses.replace(state_cell[0], termination=reason)
     await render_once(state_cell[0])
     log.info(
         "turn.completed",

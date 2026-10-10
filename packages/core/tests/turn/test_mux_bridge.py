@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any, Literal
 
 import pytest
+from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import neutral_inputs
 from daimon.core.turn.posture import BillingExempt
@@ -52,7 +54,7 @@ async def test_real_http_and_host_effects_match_both_paths(
         }[stop]
         ending = make_status_idle(event_id="ended", stop_reason=reason)
     raw = [message.model_dump(mode="json"), ending.model_dump(mode="json")]
-    results = []
+    results: list[tuple[Any, ...]] = []
     for path in ("legacy", "mux"):
         transport = ScriptedTransport()
         transport.queue(
@@ -103,7 +105,9 @@ async def test_real_http_and_host_effects_match_both_paths(
 
 
 @pytest.mark.parametrize("path", ["legacy", "mux"])
-async def test_idle_stream_opens_before_post_and_needs_no_first_event(path: str) -> None:
+async def test_idle_stream_opens_before_post_and_needs_no_first_event(
+    path: Literal["legacy", "mux"],
+) -> None:
     import json
 
     import httpx
@@ -186,12 +190,12 @@ async def test_mux_scope_is_required_before_any_provider_io() -> None:
 
 
 def test_host_inputs_roundtrip_wire_order_and_deny_text() -> None:
-    batch = [
+    batch: list[BetaManagedAgentsEventParams] = [
         {"type": "user.message", "content": [{"type": "text", "text": "question"}]},
         {"type": "system.message", "content": [{"type": "text", "text": "host framing"}]},
     ]
     assert translate_inputs(neutral_inputs(batch)) == batch
-    deny = [
+    deny: list[BetaManagedAgentsEventParams] = [
         {
             "type": "user.tool_confirmation",
             "tool_use_id": "call",
@@ -203,7 +207,7 @@ def test_host_inputs_roundtrip_wire_order_and_deny_text() -> None:
 
 
 async def test_future_native_root_idle_preserves_legacy_completion_without_reconnect() -> None:
-    raw = [
+    raw: list[dict[str, object]] = [
         {
             "id": "future-idle",
             "type": "session.status_idle",
@@ -211,7 +215,7 @@ async def test_future_native_root_idle_preserves_legacy_completion_without_recon
             "processed_at": _NOW.isoformat(),
         }
     ]
-    results = []
+    results: list[list[dict[str, Any]]] = []
     for path in ("legacy", "mux"):
         transport = ScriptedTransport()
         transport.queue(

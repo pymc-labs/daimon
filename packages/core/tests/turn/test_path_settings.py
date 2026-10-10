@@ -39,15 +39,18 @@ def test_turn_path_rejects_unknown_backend(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-async def test_runtime_path_fallback_honors_env_and_keeps_explicit_overrides(monkeypatch, explicit):
-    from types import SimpleNamespace
+async def test_runtime_path_fallback_honors_env_and_keeps_explicit_overrides(
+    monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
     from unittest.mock import MagicMock
     from uuid import UUID
 
     from daimon.core.ma_resolver import new_resolver_cache
-    from daimon.core.scope import DeploymentDefault
+    from daimon.core.scope import DeploymentDefault, ResolvedConfig
+    from daimon.core.turn.admission import Admission
     from daimon.core.turn.deps import build_turn_deps
-    from daimon.core.turn.run import _turn_port_kwargs
+    from daimon.core.turn.run import _turn_port_kwargs  # pyright: ignore[reportPrivateUsage]
+    from daimon.testing.ma_models import ma_agent, ma_environment
     from daimon.testing.ma_transport import ScriptedTransport
 
     monkeypatch.setenv("DAIMON_TURN__PATH", "mux")
@@ -67,13 +70,20 @@ async def test_runtime_path_fallback_honors_env_and_keeps_explicit_overrides(mon
         )
         kwargs = _turn_port_kwargs(
             deps,
-            SimpleNamespace(grant=None, account_id=UUID(int=4)),
+            Admission(
+                account_id=UUID(int=4),
+                agent=ma_agent(),
+                environment=ma_environment(),
+                config=ResolvedConfig(),
+            ),
             "session",
             tenant_id=UUID(int=3),
         )
     assert deps.turn_path == ("legacy" if explicit else None)
+    assert "path" in kwargs
     assert kwargs["path"] == ("legacy" if explicit else "mux")
     if not explicit:
+        assert "scope" in kwargs
         assert kwargs["scope"].tenant_id == str(UUID(int=3))
         assert kwargs["scope"].account_id == str(UUID(int=4))
     assert transport.requests == []

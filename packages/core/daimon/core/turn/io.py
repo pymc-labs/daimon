@@ -7,9 +7,11 @@ that decoding and must disappear when those consumers adopt neutral events.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol, cast
+from datetime import UTC, datetime, timedelta
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 import anthropic
@@ -17,17 +19,23 @@ import httpx
 from anthropic._models import construct_type
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
+    BetaManagedAgentsSessionEvent,
     BetaManagedAgentsStreamSessionEvents,
 )
+from daimon.core.config import load_turn_settings
+from daimon.core.errors import TurnError
+from daimon.core.ma import REPLAY_TIMEOUT_S, replay_events, send_interrupt_and_wait
 from mux.contracts.actions import InputEvent, NativeInput, UserMessage, UserToolConfirmation
 from mux.contracts.events import ContentPart, Event, ImagePart, TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.receipts import StopObservation
 from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic.transport import LegacyTurnTransport
+from mux.drivers.anthropic.turn import EventHistoryWalk
 from mux.drivers.anthropic.usage import observation_from_event
-from mux.errors import ProviderError, UnsupportedCapability
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import JsonValue, TypeAdapter
 
 _JSON_INPUTS = TypeAdapter(list[dict[str, JsonValue]])
@@ -50,6 +58,11 @@ class TurnIO(Protocol):
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None: ...
     async def status(self) -> str: ...
     async def open_stream(self, *, read_timeout_s: float) -> TurnStream: ...
+    async def replay(
+        self, *, timeout_s: float = REPLAY_TIMEOUT_S
+    ) -> list[BetaManagedAgentsSessionEvent]: ...
+    async def interrupt(self, *, timeout_s: float) -> StopObservation | None: ...
+    async def archive(self) -> None: ...
 
 
 class TurnConnectionLost(Exception):
@@ -86,6 +99,8 @@ class _LegacyStream(AsyncIterator[TurnEvent]):
 class LegacyTurnIO:
     def __init__(self, client: anthropic.AsyncAnthropic, session_id: str) -> None:
         self._transport = LegacyTurnTransport(client, session_id)
+        self._client = client
+        self._session_id = session_id
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         await self._transport.send(events)
@@ -96,11 +111,31 @@ class LegacyTurnIO:
     async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
         return _LegacyStream(await self._transport.open_stream(read_timeout_s=read_timeout_s))
 
+    async def replay(
+        self, *, timeout_s: float = REPLAY_TIMEOUT_S
+    ) -> list[BetaManagedAgentsSessionEvent]:
+        return await replay_events(self._client, session_id=self._session_id, timeout_s=timeout_s)
+
+    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
+        await send_interrupt_and_wait(
+            self._client, session_id=self._session_id, timeout_s=timeout_s
+        )
+        return None
+
+    async def archive(self) -> None:
+        await self._transport.archive()
+
 
 class _MuxStream(AsyncIterator[TurnEvent]):
-    def __init__(self, source: AsyncIterator[Event], session: ResourceRef) -> None:
+    def __init__(
+        self,
+        source: AsyncIterator[Event],
+        session: ResourceRef,
+        on_record: Callable[[Event], None],
+    ) -> None:
         self._source = source
         self._session = session
+        self._on_record = on_record
 
     def __aiter__(self) -> _MuxStream:
         return self
@@ -112,6 +147,7 @@ class _MuxStream(AsyncIterator[TurnEvent]):
                 # The existing host consumes finalized messages only. Preview
                 # authority cannot bill, mutate durable history or end a turn.
                 continue
+            self._on_record(event)
             record = event.native.record
             if event.native.provider != "anthropic" or not isinstance(record, dict):
                 raise UnsupportedCapability(("legacy_event_codec",), "daimon.turn")
@@ -195,9 +231,16 @@ def neutral_inputs(events: Sequence[BetaManagedAgentsEventParams]) -> tuple[Inpu
 
 class MuxTurnIO:
     def __init__(self, backend: ManagedAgents, scope: Scope, session: ResourceRef) -> None:
+        if session.kind != "session" or (
+            not (scope.is_platform or scope.is_legacy_host_authorized)
+            and (session.tenant_id != scope.tenant_id or session.account_id != scope.account_id)
+        ):
+            raise ScopeViolation(session.id, "turn session differs from the authorized scope")
         self._backend = backend
         self._scope = scope
         self._session = session
+        self._turn_id: str | None = None
+        self._operation_id = str(uuid4())
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         receipt = await _native_error_edge(
@@ -220,13 +263,95 @@ class MuxTurnIO:
             session.state, session.state
         )
 
+    async def archive(self) -> None:
+        await _native_error_edge(
+            self._backend.sessions.archive(self._scope, self._session, key=str(uuid4()))
+        )
+
     async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
         # The injected Events implementation owns its read timeout. The default
         # Anthropic composition receives this value when the host builds it.
         source = await _native_error_edge(
             self._backend.events.open_stream(self._scope, self._session)
         )
-        return _MuxStream(source, self._session)
+        return _MuxStream(source, self._session, self._remember_root)
+
+    def _remember_root(self, event: Event) -> None:
+        if event.turn_id is not None:
+            self._turn_id = event.turn_id
+
+    async def replay(
+        self, *, timeout_s: float = REPLAY_TIMEOUT_S
+    ) -> list[BetaManagedAgentsSessionEvent]:
+        history = self._backend.extension(
+            EventHistoryWalk, namespace="anthropic.event_history", version=1
+        )
+
+        async def walk() -> list[BetaManagedAgentsSessionEvent]:
+            events: list[BetaManagedAgentsSessionEvent] = []
+            source = history.walk(self._scope, self._session)
+            try:
+                while True:
+                    try:
+                        event = await _native_error_edge(source.__anext__())
+                    except StopAsyncIteration:
+                        break
+                    if event.authority == "preview":
+                        continue
+                    self._remember_root(event)
+                    record = event.native.record
+                    if event.native.provider != "anthropic" or not isinstance(record, dict):
+                        raise UnsupportedCapability(("legacy_event_codec",), "daimon.turn")
+                    events.append(
+                        cast(
+                            BetaManagedAgentsSessionEvent,
+                            construct_type(type_=BetaManagedAgentsSessionEvent, value=record),
+                        )
+                    )
+            finally:
+                close = getattr(source, "aclose", None)
+                if callable(close):
+                    await cast(Callable[[], Awaitable[None]], close)()
+            return events
+
+        try:
+            return await asyncio.wait_for(walk(), timeout=timeout_s)
+        except TimeoutError as error:
+            raise TurnError(
+                kind="upstream", message=f"MA event replay did not complete within {timeout_s}s"
+            ) from error
+
+    async def interrupt(self, *, timeout_s: float) -> StopObservation:
+        receipt = await _native_error_edge(
+            self._backend.events.cancel(
+                self._scope,
+                self._session,
+                turn_id=self._turn_id or self._operation_id,
+                key=str(uuid4()),
+            )
+        )
+        if receipt.session != self._session:
+            raise ProviderError("upstream", retryable=False, native_code="foreign_cancel_receipt")
+        deadline = datetime.now(UTC) + timedelta(seconds=timeout_s)
+        stopped = await _native_error_edge(
+            self._backend.events.wait_stopped(
+                self._scope,
+                receipt,
+                deadline=deadline,
+            )
+        )
+        if stopped.receipt_operation_id != receipt.operation_id:
+            raise ProviderError("upstream", retryable=False, native_code="foreign_stop_observation")
+        if not stopped.stopped:
+            raise TurnError(
+                kind="interrupt_timeout",
+                message=(
+                    f"MA did not acknowledge interrupt within {timeout_s}s"
+                    if datetime.now(UTC) >= deadline
+                    else f"MA SSE stream closed without terminal idle (timeout {timeout_s}s)"
+                ),
+            )
+        return stopped
 
 
 def default_mux_turn_io(
@@ -264,3 +389,26 @@ def default_mux_turn_io(
         account_id=scope.account_id,
     )
     return MuxTurnIO(backend, scope, ref)
+
+
+def turn_io(
+    client: anthropic.AsyncAnthropic,
+    session_id: str,
+    *,
+    path: Literal["legacy", "mux"] | None = None,
+    backend: ManagedAgents | None = None,
+    scope: Scope | None = None,
+    session_ref: ResourceRef | None = None,
+    read_timeout_s: float = 120.0,
+) -> TurnIO:
+    """Bind every turn helper to the same authorized session as its driver."""
+    selected = path if path is not None else load_turn_settings().path
+    if selected == "legacy":
+        return LegacyTurnIO(client, session_id)
+    if scope is None:
+        raise ScopeViolation(session_id, "mux turns require the caller's authorized scope")
+    if backend is None:
+        return default_mux_turn_io(client, scope, session_id, read_timeout_s=read_timeout_s)
+    if session_ref is None or session_ref.id != session_id:
+        raise ScopeViolation(session_id, "an injected backend requires the bound session ref")
+    return MuxTurnIO(backend, scope, session_ref)

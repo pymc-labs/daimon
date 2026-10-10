@@ -36,6 +36,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from mux.contracts.events import Event, TurnEndedPayload
+from mux.contracts.receipts import StopObservation
 
 __all__ = ["TerminationReason", "denial_termination_reason", "termination_reason"]
 
@@ -105,6 +106,21 @@ class TerminationReason(StrEnum):
 
 
 _NOT_FAILURES = frozenset({TerminationReason.COMPLETED, TerminationReason.INTERRUPTED})
+
+
+def stop_termination_reason(stop: StopObservation) -> TerminationReason:
+    """Map observed root truth; a receipt or missing outcome is not completion."""
+    if not stop.stopped:
+        return TerminationReason.INTERRUPT_TIMEOUT
+    if stop.outcome is None:
+        return TerminationReason.UNKNOWN
+    return {
+        "completed": TerminationReason.COMPLETED,
+        "interrupted": TerminationReason.INTERRUPTED,
+        "errored": TerminationReason.UPSTREAM,
+        "terminated": TerminationReason.SESSION_TERMINATED,
+    }.get(stop.outcome, TerminationReason.UNKNOWN)
+
 
 _BY_VALUE: dict[str, TerminationReason] = {m.value: m for m in TerminationReason}
 
