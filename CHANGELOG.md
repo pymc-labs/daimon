@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nobody configured admits exactly as before. A configured channel whose
   backend can't run on this deployment yet is refused with a message naming
   the channel's backend, never quietly run on another one.
+- Prepare offline live-scenario recipes for the 33 immutable oracle cases, with typed blockers and structural outcome assertions for the disposable Haiku QA harness.
+
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
 
 - Prepare an explicit Gemini SDK smoke and recorded offline conformance harness, with a private MockTransport dry-run, the $30/$24 live admission guard and an exact Flash-Lite model pin before credential access.
