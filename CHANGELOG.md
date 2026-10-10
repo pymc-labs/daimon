@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Turn cards on Discord, Slack, and Teams now add each Haiku 5.5 request's cost at its own prompt-length rate.
+- Live QA alerts advance dedupe after durable inbox delivery and record queued or failed tsend status without halting a catalog pass.
+
 - Live QA burst posts follow their declared cadence with concurrent per-trigger watchers; first-response latency uses Discord creation/edit timestamps, and anchored text checks keep content separate from embed footers.
 
 - Live QA records private redacted tracebacks for harness errors, reports them as PENDING without root alerts, and retries a transient read-only model-probe failure once before refusing a trigger.

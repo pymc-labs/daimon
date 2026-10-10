@@ -232,16 +232,22 @@ def test_alert_fail_dedupe_recovery_and_retry(
     assert "RECOVERY" in calls[-1][-1]
 
 
-def test_alert_delivery_failure_does_not_advance_state(
+def test_queued_alert_advances_durable_inbox_dedupe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1))
     alerts = Alerter(
         Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
     )
-    with pytest.raises(RuntimeError, match="delivery failed"):
-        alerts.notify(Result("run", "QA-D1-TEST", "staging", "FAIL"), tmp_path / "run.json")
-    assert not alerts.state_path.exists()
+    result = Result("run", "QA-D1-TEST", "staging", "FAIL")
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    state = json.loads(alerts.state_path.read_text())["staging:QA-D1-TEST"]
+    assert state["status"] == "FAIL"
+    assert "tsend exit 1" in state["delivery"]
+    files = list((tmp_path / "inbox").glob("qa-canary-FAIL-*.md"))
+    assert len(files) == 1
+    assert "delivered-pending" in files[0].read_text()
 
 
 def test_report_has_json_evidence_and_five_line_summary(
@@ -252,3 +258,21 @@ def test_report_has_json_evidence_and_five_line_summary(
     path = report(result, tmp_path)
     assert json.loads(path.read_text())["status"] == "PASS"
     assert len(capsys.readouterr().out.splitlines()) == 5
+
+
+@pytest.mark.parametrize("error", [OSError("offline"), subprocess.TimeoutExpired("fake", 30)])
+def test_alert_command_exception_does_not_halt_or_duplicate(
+    error: Exception, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", failed)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
+    )
+    result = Result("run", "QA-D1-TEST", "staging", "FAIL")
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(list((tmp_path / "inbox").glob("*.md"))) == 1
+    assert type(error).__name__ in alerts.state_path.read_text()

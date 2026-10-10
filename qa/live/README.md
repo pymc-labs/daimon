@@ -252,3 +252,5 @@ configured lingering to survive logout. A failed service records its result and
 alerts; overlapping starts of the same oneshot service are avoided by systemd.
 The daily cap can refuse later hourly runs if estimates or other QA exhaust it.
 Production prerequisites and the separate approval are in [PROD-CANARY.md](PROD-CANARY.md).
+
+The handoff inbox file is the durable alert channel. Dedupe advances as soon as that file is written; tsend exit/status is retained there and in alert state. A busy composer (exit 1) is delivered-pending and does not halt a full pass or cause duplicate notices.

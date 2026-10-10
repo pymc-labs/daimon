@@ -91,9 +91,10 @@ def main() -> int:
         path = report(result, args.results)
         try:
             Alerter(config.alerts, args.results / "alert-state.json").notify(result, path)
-        except (OSError, RuntimeError):
-            print("alert delivery failed; check the handoff inbox and configured command")
-            return 1
+        except (OSError, RuntimeError) as exc:
+            result.notes.append(f"alert inbox unavailable: {type(exc).__name__}; pass continues")
+            report(result, args.results)
+            print("alert inbox unavailable; pass continues with retained result evidence")
         failed |= result.status != "PASS"
         if result.status != "PASS":
             break  # Stop spending after failure or an unavailable capability.
