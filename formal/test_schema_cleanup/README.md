@@ -30,6 +30,8 @@ but has no server query log to identify its competing transaction directly.
 The model has one face task and one teardown, with each `await` or transaction
 boundary represented separately. A face task may also finish on its own.
 `FaceRollback` assumes cancellation reaches the task and SQLAlchemy's
-transaction context returns its connection; the Postgres regression checks
-that assumption. The model omits other background work and detailed table
+transaction context returns its connection. SQLAlchemy shields that rollback
+in a child task, so the caller must not cancel the outer task a second time;
+the Postgres regression pauses the rollback and checks this exact ordering.
+The model omits other background work and detailed table
 dependencies, and its result is bounded to this one-task ordering.
