@@ -127,6 +127,9 @@ class FakeBackend:
     def deployment_image(self) -> str:
         return "a" * 40
 
+    def deployment_quiet(self) -> Message:
+        return {"quiet": True}
+
     def deployment_events(self, start: datetime, end: datetime, turns: list[Turn]) -> list[Message]:
         return []
 
