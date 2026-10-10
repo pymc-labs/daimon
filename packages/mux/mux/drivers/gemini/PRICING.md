@@ -32,3 +32,13 @@ zero. See [the official Interactions reference](https://ai.google.dev/api/intera
 Only the latest cumulative interaction snapshot enters N9's `settle()`, with
 thoughts added once to visible output and cached reads subtracted from input.
 Repeated polling snapshots are never summed. Unknown usage retains a hold.
+
+N9's version-2 actual-spend contract receives every known token field even when
+the cache count, tariff or completion is unknown. Overruns are checked before
+price verification and latch subsequent admission off. Ledger request IDs are
+SHA256 digests of neutral observation IDs; per-response counter artifacts carry
+the same digest. This avoids interpreting native opaque IDs as credentials.
+Workflow status and accounting verification are separate: overrun or failed
+receipts can retain estimated_unverified spend, while verified known actuals
+release holds. Primary/Lite require dated official prices before key access;
+the primary's checked-in effective interval ends at 2027-01-01.

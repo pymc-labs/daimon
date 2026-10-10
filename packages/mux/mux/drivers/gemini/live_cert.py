@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import stat
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -16,9 +18,11 @@ from pydantic import JsonValue, TypeAdapter
 
 from mux.conformance.budget import (
     LIVE_MODEL_ALLOWLIST,
+    ActualSpend,
     BudgetConfig,
     BudgetGuard,
     BudgetRefused,
+    MeasuredRequest,
     ProbePlan,
     Reservation,
     SpendReceipt,
@@ -34,6 +38,7 @@ from mux.contracts.events import AgentMessagePayload, Event, TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionFilter, SessionSpec
+from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.fake import MemoryStorage
 from mux.drivers.gemini.transport import Object, Transport, object_value
@@ -93,6 +98,22 @@ def validate_shared_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
     config = validate_budget(path, settings)
     for model in MODEL_CHAIN[1:]:
         validate_budget(path, replace(settings, model=model))
+    for model in (MODEL_CHAIN[0], MODEL_CHAIN[2]):
+        price = config.providers["gemini"].models[model]
+        if (
+            price.source != PRICE_SOURCE
+            or price.actual(
+                TokenUsage(
+                    input_tokens=0,
+                    output_tokens=0,
+                    input_cached_tokens=0,
+                    input_cache_write_tokens=0,
+                ),
+                datetime.now(UTC),
+            )
+            is None
+        ):
+            raise BudgetRefused("live Gemini probes require current dated official prices")
     if config.ledger_path.resolve() != SHARED_SPEND_PATH:
         raise BudgetRefused("live Gemini probes require the approved N9 shared spend ledger")
     return config
@@ -178,15 +199,49 @@ async def smoke(
 ) -> ProbeRun:
     """C07 is a budget/evidence tag. This narrow smoke does not pass live C07."""
     validate_budget(guard.config_path, settings)
+    observed_guard = guard if isinstance(guard, ReceiptGuard) else ReceiptGuard(guard)
     bounded = LimitedTransport(source, settings.max_total_tokens)
+    metadata_recorded = 0
+    facts_recorded = False
+
+    def observe(meter: UsageObservation, *, complete: bool) -> ActualSpend:
+        tokens = TokenUsage(
+            input_tokens=meter.input_tokens,
+            output_tokens=meter.output_tokens,
+            input_cached_tokens=meter.input_cached_tokens,
+            input_cache_write_tokens=0,  # Smoke never creates explicit caches.
+        )
+        actual = ActualSpend(
+            requests=(
+                MeasuredRequest(
+                    id=hashlib.sha256(meter.id.encode()).hexdigest(),
+                    observed_at=meter.observed_at,
+                    tokens=tokens,
+                    pricing_basis="standard-global"
+                    if settings.model != "gemini-flash-latest"
+                    else None,
+                ),
+            ),
+            # No paid container/grounding tools configured; inline Antigravity
+            # compute is currently unbilled in preview per the dated review.
+            containers=(),
+            usage_complete=complete,
+        )
+        observed_guard.latest_actual = actual
+        return actual
 
     def record(recorder: Recorder, events: tuple[Event, ...]) -> None:
+        nonlocal metadata_recorded, facts_recorded
         if request_metadata:
-            for metadata in request_metadata[:-1]:
+            pending = request_metadata[metadata_recorded:]
+            for metadata in pending[:-1]:
                 recorder.record(metadata, ())
-            recorder.record(request_metadata[-1], events)
-        else:
+            if pending:
+                recorder.record(pending[-1], events)
+            metadata_recorded = len(request_metadata)
+        elif not facts_recorded:
             recorder.record(RequestMetadata(method="GET", path="/host/smoke/events"), events)
+        facts_recorded = True
 
     async def invoke(recorder: Recorder) -> ProbeOutcome:
         ma = GeminiManagedAgents(
@@ -250,6 +305,10 @@ async def smoke(
                     raise ProviderError(
                         "upstream", retryable=False, native_code="unknown_smoke_send"
                     )
+                # Preserve accepted POST facts even if the first GET fails.
+                accepted_usage = await ma.usage.list(SCOPE, s.ref, page=PageRequest(limit=100))
+                if len(accepted_usage.data) == 1:
+                    observe(accepted_usage.data[0], complete=False)
                 while True:
                     projection = await ma.events.reconcile(SCOPE, s.ref)
                     measured = await ma.usage.reconcile(SCOPE, s.ref)
@@ -258,6 +317,7 @@ async def smoke(
                             "upstream", retryable=False, native_code="smoke_meter_count"
                         )
                     meter = measured[0]
+                    actual = observe(meter, complete=projection.state == "idle")
                     tokens = TokenUsage(
                         input_tokens=meter.input_tokens,
                         output_tokens=meter.output_tokens,
@@ -271,7 +331,7 @@ async def smoke(
                         journal = await ma.events.list(SCOPE, s.ref, page=PageRequest(limit=100))
                         record(recorder, journal.data)
                         return ProbeOutcome(
-                            usage=tokens,
+                            actual=actual,
                             result=Result(
                                 "C07",
                                 "fail",
@@ -322,18 +382,9 @@ async def smoke(
                     ),
                 )
                 return ProbeOutcome(
-                    usage=TokenUsage(
-                        input_tokens=meter.input_tokens,
-                        output_tokens=meter.output_tokens,
-                        input_cached_tokens=meter.input_cached_tokens,
-                        input_cache_write_tokens=0,
-                    ),
+                    actual=actual,
                     result=result,
                 )
-        except BaseException:
-            # Error calls also retain redacted request metadata, never their body.
-            record(recorder, ())
-            raise
         finally:
             if bounded.accepted_id is not None and not terminal:
                 # Best effort, bounded; an unobserved acceptance remains charged
@@ -343,11 +394,14 @@ async def smoke(
                         await bounded.cancel(bounded.accepted_id)
                 except (ProviderError, TimeoutError):
                     pass
+            # Include cleanup requests after they reach transport; never export
+            # a request body, or duplicate facts already recorded on completion.
+            record(recorder, ())
 
     plan = ProbePlan(
         provider="gemini", model=settings.model, fixture_id="C07", limits=settings.limits
     )
-    return await run_probe(guard, plan, output, invoke, secrets=secrets)
+    return await run_probe(observed_guard, plan, output, invoke, secrets=secrets)
 
 
 async def record_offline_matrix(
@@ -414,6 +468,7 @@ class ReceiptGuard(BudgetGuard):
         self.reservation: Reservation | None = None
         self.receipt: SpendReceipt | None = None
         self.reported_usage: TokenUsage | None = None
+        self.latest_actual: ActualSpend | None = None
 
     def reserve(self, plan: ProbePlan, *, fixture_exists: bool = False) -> Reservation:
         self.reservation = super().reserve(plan, fixture_exists=fixture_exists)
@@ -426,17 +481,16 @@ class ReceiptGuard(BudgetGuard):
         status: Literal["completed", "failed", "cancelled"],
         limits: TokenLimits,
         usage: TokenUsage | None = None,
+        actual: ActualSpend | None = None,
     ) -> SpendReceipt:
-        self.reported_usage = usage
-        # The moving alias has no independently published tariff/resolved model
-        # proof. Keep its hold until N9 can verify the actual resolved price.
-        verified = reservation.receipt.model != "gemini-flash-latest" and (
-            usage is not None
-            and usage.input_cached_tokens is not None
-            and usage.input_cache_write_tokens is not None
-        )
+        actual = actual or self.latest_actual
+        self.reported_usage = actual.requests[-1].tokens if actual and actual.requests else usage
         self.receipt = super().settle(
-            reservation, status=status, limits=limits, usage=usage if verified else None
+            reservation,
+            status=status,
+            limits=limits,
+            usage=usage if actual is None else None,
+            actual=actual,
         )
         return self.receipt
 
@@ -520,15 +574,11 @@ async def smoke_with_fallback(
                         "price_review_date": PRICE_REVIEW_DATE,
                         "price_source": PRICE_SOURCE,
                         "price_per_million": observed.reservation.price.model_dump(mode="json"),
-                        "actual_usd": str(observed.receipt.cost_estimate_usd)
-                        if observed.receipt.status == "completed"
+                        "actual_usd": str(observed.receipt.actual_usd)
+                        if observed.receipt.actual_usd is not None
                         else None,
-                        "held_usd": "0"
-                        if observed.receipt.status == "completed"
-                        else str(observed.receipt.reserved_usd),
-                        "verification": "measured"
-                        if observed.receipt.status == "completed"
-                        else "estimated, unverified",
+                        "held_usd": str(observed.receipt.held_usd),
+                        "verification": observed.receipt.accounting_status,
                         "reported_tokens": observed.reported_usage.model_dump(mode="json")
                         if observed.reported_usage is not None
                         else None,
@@ -588,7 +638,7 @@ async def run_sdk_smoke(
     async def capture(request: httpx.Request) -> None:
         nonlocal active_model
         body: dict[str, object] | None = None
-        if request.method == "POST":
+        if request.method == "POST" and request.url.path.rstrip("/").endswith("/interactions"):
             parsed = TypeAdapter(dict[str, JsonValue]).validate_json(request.content)
             active_model = str(object_value(parsed["agent_config"])["model"])
             body = dict(parsed)
@@ -601,9 +651,15 @@ async def run_sdk_smoke(
     async def capture_usage(response: httpx.Response) -> None:
         nonlocal call_index
         await response.aread()
+        observation_sha256: str | None = None
         try:
             raw = TypeAdapter[Object](Object).validate_json(response.content)
             counts = usage_metadata(raw)
+            interaction = raw.get("id")
+            if isinstance(interaction, str):
+                observation_sha256 = hashlib.sha256(
+                    f"gemini:{interaction}:usage".encode()
+                ).hexdigest()
         except ValueError:
             # A non-JSON refusal still has an HTTP status; retain unknown facts
             # without recording the unsafe response or blocking SDK error mapping.
@@ -619,6 +675,7 @@ async def run_sdk_smoke(
                 "http_status": response.status_code,
                 "price_review_date": PRICE_REVIEW_DATE,
                 "usageMetadata": counts,
+                "usage_observation_sha256": observation_sha256,
                 "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
             },
         )
@@ -631,7 +688,7 @@ async def run_sdk_smoke(
         if request.headers.get("Api-Revision") != API_REVISION:
             raise ValueError("mock probe omitted the pinned API revision")
         stamp = datetime.now(UTC).isoformat()
-        if request.method == "POST":
+        if request.method == "POST" and request.url.path.rstrip("/").endswith("/interactions"):
             body = json.loads(request.content)
             if body["agent_config"].get("model") not in MODEL_CHAIN:
                 raise ValueError("explicit probe model missing")
@@ -724,6 +781,14 @@ async def run_prepared(
                                 "cached_input": "1",
                                 "cache_write_input": "1",
                                 "output": "4",
+                                **(
+                                    {
+                                        "effective_from": PRICE_REVIEW_DATE,
+                                        "source": PRICE_SOURCE,
+                                    }
+                                    if model != "gemini-flash-latest"
+                                    else {}
+                                ),
                             }
                             for model in MODEL_CHAIN
                         },

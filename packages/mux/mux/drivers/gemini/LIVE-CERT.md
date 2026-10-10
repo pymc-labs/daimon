@@ -62,6 +62,11 @@ response, including refusals and repeated reads, saves a sanitized four-counter
 usage artifact. Only one cumulative snapshot settles each interaction; polling
 does not multiply charges. The moving alias retains its hold until its resolved
 price is verified. A non-JSON refusal records unknown counters and its status.
+N9's actual-spend contract retains known counters on incomplete or unverified
+results and still latches overruns before pricing. Accepted POST usage also
+survives a failed poll. Cancel POST metadata is recorded after cleanup reaches
+transport; cancellation never changes the selected model. Expired or undated
+primary/Lite prices refuse before key access.
 
 The official local runtime snapshot (`source-G-runtime.txt:1314-1319`) describes
 max_total_tokens as best effort and excludes cached tokens. The financial

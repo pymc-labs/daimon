@@ -10,7 +10,10 @@
           "input": "0.75",
           "cached_input": "0.075",
           "cache_write_input": "0.75",
-          "output": "3.75"
+          "output": "3.75",
+          "effective_from": "2026-10-10",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing",
+          "effective_until": "2027-01-01"
         },
         "gemini-flash-latest": {
           "input": "1.50",
@@ -22,7 +25,9 @@
           "input": "0.30",
           "cached_input": "0.03",
           "cache_write_input": "0.30",
-          "output": "2.50"
+          "output": "2.50",
+          "effective_from": "2026-10-10",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing"
         }
       }
     }
