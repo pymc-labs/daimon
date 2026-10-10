@@ -77,22 +77,30 @@ class GroupLookups:
         """The lookup for groups of `workspace_id` on `platform`; None when none can run.
 
         On Discord it takes a user id and gives their roles (`GroupMembers`).
+        Answers are cached `GROUP_MEMBERS_TTL_S`.
         """
+        fetch = self._fetch(platform, workspace_id)
+        if fetch is None:
+            return None
+        return lambda key: self.cache.members((platform, workspace_id, key), lambda: fetch(key))
+
+    def live_members(self, platform: str, workspace_id: str) -> GroupMembers | None:
+        """`members` asked of the platform every time, for an authorization that
+        must not outlive a removal: confirming repos for an agent someone manages.
+
+        Any failure raises `GroupLookupFailed`, which grants nothing.
+        """
+        return self._fetch(platform, workspace_id)
+
+    def _fetch(self, platform: str, workspace_id: str) -> GroupMembers | None:
         if platform == "slack" and self.fernet is not None:
-            return lambda group_id: self.cache.members(
-                ("slack", workspace_id, group_id),
-                lambda: self._slack_members(workspace_id, group_id),
-            )
+            return lambda group_id: self._slack_members(workspace_id, group_id)
         teams = self.teams_client
         if platform == "teams" and teams is not None:
-            return lambda group_id: self.cache.members(
-                ("teams", group_id), lambda: _team_owner_ids(teams, group_id)
-            )
+            return lambda group_id: _team_owner_ids(teams, group_id)
         discord = self.discord
         if platform == "discord" and discord is not None:
-            return lambda user_id: self.cache.members(
-                ("discord", workspace_id, user_id), lambda: discord.roles(workspace_id, user_id)
-            )
+            return lambda user_id: discord.roles(workspace_id, user_id)
         return None
 
     async def _slack_members(self, team_id: str, group_id: str) -> frozenset[str]:

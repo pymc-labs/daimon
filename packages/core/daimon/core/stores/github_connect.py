@@ -800,6 +800,13 @@ async def _missing_required_repos(
     return missing
 
 
+async def missing_required_repos(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[MissingRepo]:
+    """The working repo (needing write) and private skill repos the agent's grants don't cover."""
+    return await _missing_required_repos(session, tenant_id=tenant_id, agent_id=agent_id)
+
+
 async def _check_required_repos(
     session: AsyncSession,
     *,
