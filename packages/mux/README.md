@@ -431,3 +431,13 @@ Host accounting requires fixed coverage sets across revisions of each alternate
 provider observation ID. It refuses overlapping sibling aggregates at ingest,
 including shared transitive descendants which have not arrived yet. Corrections
 may update amounts within that fixed coverage; dynamic coverage is unsupported.
+
+## Frozen host tool/resource inventory
+
+The offline [QA-53 inventory](../../tests/parity/tool_parity/README.md) records
+default skills, MCP discovery and resource dependencies for the frozen scenario
+set, with typed gaps and pending host registrations. Run
+`uv run pytest -q tests/parity/test_qa_tool_parity.py` to check the actual MCP
+caller-visible names/schemas through all three provider encoders, native builtin
+allowlisted deltas, and the SDK default Anthropic request. This is availability
+and compiler evidence; it does not certify live cross-provider host turns.
