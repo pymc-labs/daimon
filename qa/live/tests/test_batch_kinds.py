@@ -169,6 +169,34 @@ def test_late_answer_edits_cannot_hide_or_invent_chunk_gaps() -> None:
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
 
 
+def test_same_turn_running_card_delivery_uses_its_answer_edit() -> None:
+    turn = observed(1, "card")
+    turn.card_history = [{"message_id": "card", "phase": "running"}]
+    turn.messages = [
+        {
+            "id": "card",
+            "content": "chunk one",
+            "timestamp": (turn.started_at + timedelta(seconds=1)).isoformat(),
+            "edited_timestamp": (turn.started_at + timedelta(seconds=17)).isoformat(),
+        },
+        {
+            "id": "chunk2",
+            "content": "chunk two",
+            "timestamp": (turn.started_at + timedelta(seconds=17.237)).isoformat(),
+        },
+    ]
+    check = Assertion(kind="chunks_gap_max_s", turn=1, maximum=5)
+    result = evaluate(check, [turn], FakeBackend(), FakeJudge())
+    assert result.status == "PASS" and "0.237" in result.reason
+    turn.messages[1]["timestamp"] = (turn.started_at + timedelta(seconds=23)).isoformat()
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+    turn.messages[0].pop("edited_timestamp")
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+    # A terminal-only observation cannot prove that creation preceded answer delivery.
+    turn.card_history[0]["phase"] = "terminal"
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+
+
 @pytest.mark.parametrize(
     "args",
     [
