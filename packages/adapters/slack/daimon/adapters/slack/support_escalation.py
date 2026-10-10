@@ -92,6 +92,8 @@ from daimon.core.support_escalation import (
     ESCALATE,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
+    SEALED_NOTE_HINT,
+    SEALED_POST_MARKER,
     UNAVAILABLE,
     has_credit,
     is_enabled,
@@ -133,11 +135,6 @@ POLICY_UNREADABLE: Final = (
 )
 CHECK_FAILED: Final = "That didn't work. Try again."
 FORM_DID_NOT_OPEN: Final = "That didn't work. Try again."
-SEALED_NOTE_HINT: Final = (
-    "Only turns inside this channel read it. Your note goes to the support team outside it, so "
-    "don't paste anything that has to stay here. They get a link to this answer, "
-    "not its content."
-)
 
 
 def slack_support_enabled(support: SupportSettings) -> bool:
@@ -597,10 +594,8 @@ def render_escalation_post(*, submission: SupportSubmission, link: str | None, s
     where = link if link is not None else f"message {s.message_ts} in channel {s.channel_id}"
     lines = [f"*Human support requested* by {who}", where]
     if sealed:
-        lines.append(
-            "_From a channel read only from inside: answer there, the conversation stays in it._"
-        )
-    return "\n".join(lines) + "\n\n" + escape_mrkdwn(s.note)
+        lines.append(f"_{SEALED_POST_MARKER}_")
+    return "\n\n".join([*lines, escape_mrkdwn(s.note)])
 
 
 async def _dm_channel_admins(

@@ -134,6 +134,9 @@ async def test_a_thread_of_a_channel_with_admins_dms_them_not_the_escalation_cha
     bot.open_member_dm.assert_awaited_once_with(int(_GUILD), 40)
     body = dm.send.await_args.args[0]
     assert "help please" in body and f"/{_THREAD}/444" in body
+    head, link, note = body.split("\n\n")
+    assert head.startswith("**Human support requested** by "), "who asked, then a blank line"
+    assert link.endswith(f"/{_THREAD}/444") and note == "help please", "link, then the note"
     escalation.send.assert_not_awaited()
     assert await _delivered(db_session_factory) == [True]
 

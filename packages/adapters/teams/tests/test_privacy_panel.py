@@ -140,8 +140,10 @@ async def test_command_shows_holdings_and_export_summarises_them(
         await service.turns.drain(timeout=30)
         export = await post_activity(service, _click("export"))
 
-    panel = json.dumps(teams_api_fake.activity_requests[-1].body)
-    assert "holds: 1 linked principal(s)" in panel, "the panel summarises what is held"
+    panel = json.dumps(teams_api_fake.activity_requests[-1].body, ensure_ascii=False)
+    assert "🔒 Your data" in panel and "Anthropic stores your agents" in panel, (
+        "the panel says who stores what; the categories are the policy's"
+    )
     assert POLICY_URL in panel and "Action.OpenUrl" in panel, "the policy opens as a link"
     assert "holds: 1 linked principal(s)" in json.dumps(export), "export shows the summary"
 
@@ -204,3 +206,32 @@ async def test_a_click_from_another_organisation_is_refused(
         response = await post_activity(service, click)
 
     assert response["value"] == DENIED, "an unverified clicker sees nothing"
+
+
+def test_the_panel_and_the_confirm_put_a_blank_line_between_lines() -> None:
+    from daimon.adapters.teams.privacy_card import confirm_card, panel_card
+    from daimon.core.privacy import PurgePreview, PurgePreviewRow
+
+    panel = panel_card(bot="Daimon", policy_url=POLICY_URL).model_dump(by_alias=True)
+    title, *lines, actions = panel["body"]
+    assert title["text"] == "🔒 Your data"
+    assert [(b["text"], b.get("spacing")) for b in lines] == [
+        (
+            "Daimon stores your linked accounts, routines and settings. "
+            "Saved GitHub keys are encrypted.",
+            "Medium",
+        ),
+        ("Anthropic stores your agents and their conversations.", "Medium"),
+    ], "two lines, each a blank line's gap below the one before"
+    assert actions.get("spacing") == "Medium", "the buttons get their own gap too"
+
+    zero = PurgePreviewRow(count=0, example=None)
+    preview = PurgePreview.model_validate(dict.fromkeys(PurgePreview.model_fields, zero))
+    confirm = confirm_card(preview, account_id=uuid.uuid4(), name="Ada", bot="Daimon").model_dump(
+        by_alias=True
+    )
+    assert [b.get("text") for b in confirm["body"][1:3]] == [
+        "This deletes Daimon's records about you and your conversations stored at Anthropic.",
+        "Agents and their memory stay, and other people may keep using them.",
+    ], "the confirm opens on what Delete removes and what stays"
+    assert "Session transcripts" not in json.dumps(confirm), "transcripts do not stay"

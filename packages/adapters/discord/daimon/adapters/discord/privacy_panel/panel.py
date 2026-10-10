@@ -1,6 +1,6 @@
 """PrivacyPanelView + build_privacy_main_container + Policy/Export/Delete/Done buttons.
 
-Main panel: no accent. Three trust-model groups in one TextDisplay.
+Main panel: no accent. Two lines on who stores what; the detail is the policy's.
 Clicking Delete… transitions to the CascadePreviewView (red).
 """
 
@@ -9,42 +9,10 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.discord import layout
-from daimon.adapters.discord.privacy_panel.state import PurgePreview
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.privacy import PRIVACY_TITLE, privacy_lines
 
 import discord
-
-
-def _summary_line(preview: PurgePreview) -> str:
-    """Render one-line summary of held-data counts for the header subtext."""
-    parts: list[str] = []
-    if preview.linked_principals.count > 0:
-        parts.append(f"{preview.linked_principals.count} linked principal(s)")
-    if preview.routines.count > 0:
-        parts.append(f"{preview.routines.count} routine(s)")
-    if preview.user_configs.count > 0:
-        parts.append(f"{preview.user_configs.count} user config row(s)")
-    if preview.user_skills.count > 0:
-        parts.append(f"{preview.user_skills.count} synced skill(s)")
-    if preview.github_credentials.count > 0:
-        parts.append(f"{preview.github_credentials.count} GitHub token(s)")
-    if preview.github_user_links.count > 0:
-        parts.append(f"{preview.github_user_links.count} GitHub user link(s)")
-    if preview.github_oauth_states.count > 0:
-        parts.append(f"{preview.github_oauth_states.count} OAuth handshake record(s)")
-    if preview.mcp_tokens.count > 0:
-        parts.append(f"{preview.mcp_tokens.count} MCP token(s)")
-    if preview.agent_github_binding.count > 0:
-        parts.append(f"{preview.agent_github_binding.count} per-agent GitHub link(s)")
-    if preview.slack_user_tokens.count > 0:
-        parts.append(f"{preview.slack_user_tokens.count} Slack user token(s)")
-    if preview.slack_turn_contexts.count > 0:
-        parts.append(f"{preview.slack_turn_contexts.count} Slack turn context(s)")
-    if preview.direct_message_conversations.count > 0:
-        parts.append(f"{preview.direct_message_conversations.count} private conversation(s)")
-    if preview.channel_admins.count > 0:
-        parts.append(f"{preview.channel_admins.count} channel admin grant(s)")
-    return ", ".join(parts) if parts else "nothing visible to you yet"
 
 
 def _export_placeholder_message(bot_display_name: str) -> str:
@@ -57,39 +25,16 @@ def _export_placeholder_message(bot_display_name: str) -> str:
 
 
 def build_privacy_main_container(
-    preview: PurgePreview, *, user_name: str, bot_display_name: str = "daimon"
+    *, bot_display_name: str = "daimon"
 ) -> discord.ui.Container[discord.ui.LayoutView]:
-    """Main panel V2 container — no accent, three trust-model groups.
+    """Main panel V2 container — no accent: the title and who stores what.
 
-    Pure: no I/O, no ActionRows. The view shell appends hairline + ActionRow.
+    The detail categories live in the policy behind the Policy button. Pure:
+    no I/O, no ActionRows. The view shell appends hairline + ActionRow.
     """
-    body_rows: list[str] = [
-        "🪪 **What we hold (our DB)**",
-        "-# Identity links (Discord/CLI principals under your account)",
-        "-# Routines you scheduled",
-        "-# User config rows",
-        "-# Synced skill ledger rows",
-        "-# Encrypted GitHub tokens (token stored encrypted-at-rest in our DB)",
-        "-# GitHub OAuth handshake records",
-        "-# The account row itself",
-        "",
-        "🔐 **What lives in Managed Agents**",
-        "-# Agent definitions, system prompts, MCP tokens",
-        "-# Session transcripts, turn message content",
-        "-# Skill repo references (the repos themselves stay on GitHub)",
-        "-# Retention is governed by Anthropic's Managed Agents policy.",
-        "",
-        "🚫 **What we don't hold**",
-        "-# Plaintext GitHub tokens (GitHub tokens are encrypted-at-rest in our DB)",
-        "-# Message content (we only log structural events)",
-    ]
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
-        layout.header(
-            "🔒 Privacy",
-            subtext=f"for **{user_name}** — {bot_display_name} holds: {_summary_line(preview)}",
-        ),
-        layout.hairline(),
-        discord.ui.TextDisplay("\n".join(body_rows)),
+        layout.header(PRIVACY_TITLE),
+        discord.ui.TextDisplay("\n\n".join(privacy_lines(bot_display_name))),
     )
     return container
 
@@ -102,14 +47,12 @@ class PrivacyPanelView(discord.ui.LayoutView):
         account_id: uuid.UUID,
         allowed_user_id: int,
         user_name: str,
-        preview: PurgePreview,
     ) -> None:
         super().__init__(timeout=600)
         self.runtime = runtime
         self.account_id = account_id
         self.allowed_user_id = allowed_user_id
         self.user_name = user_name
-        self._preview = preview
         self._bot_display_name = (
             runtime.settings.discord.bot_display_name
             if runtime.settings.discord is not None
@@ -143,9 +86,7 @@ class PrivacyPanelView(discord.ui.LayoutView):
         action_row: discord.ui.ActionRow[PrivacyPanelView] = discord.ui.ActionRow(
             policy_btn, export_btn, delete_btn, done_btn
         )
-        container = build_privacy_main_container(
-            preview, user_name=user_name, bot_display_name=self._bot_display_name
-        )
+        container = build_privacy_main_container(bot_display_name=self._bot_display_name)
         container.add_item(layout.hairline())
         container.add_item(action_row)
         self.add_item(container)
@@ -181,9 +122,7 @@ class PrivacyPanelView(discord.ui.LayoutView):
         # Controls-less re-render (view=None empties a V2 message).
         await interaction.response.edit_message(
             view=layout.static_view(
-                build_privacy_main_container(
-                    self._preview, user_name=self.user_name, bot_display_name=self._bot_display_name
-                )
+                build_privacy_main_container(bot_display_name=self._bot_display_name)
             ),
             allowed_mentions=discord.AllowedMentions.none(),
         )

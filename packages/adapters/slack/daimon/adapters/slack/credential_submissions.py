@@ -93,7 +93,7 @@ from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
     decide_mcp_connect,
 )
-from daimon.core.mcp_token_check import is_token_rejected, rejected_token_message
+from daimon.core.mcp_token_check import check_token, rejected_token_message
 from daimon.core.mcp_token_connect import (
     McpAgentGoneError,
     McpAttachFailedError,
@@ -847,9 +847,8 @@ async def _refuse_mcp_replacement(
         text=(mcp_permission_message(row.target_name or "The agent") + " Nothing was saved.")
         if policy_refused
         else (
-            f"{row.target_name or 'The agent'} already has `{row.target}` (or a token for "
-            "that URL) and is shared here, so replacing it needs a workspace admin. "
-            "Nothing was saved."
+            f"{row.target_name or 'The agent'} already has this connection. Nothing was saved."
+            "\n\nOnly a workspace admin can replace it."
         ),
     )
 
@@ -979,16 +978,17 @@ async def run_mcp_credential_submission(
         )
         # Ask the server first, as on Discord: a rejected token must not be
         # stored, mirrored and attached only to fail every later turn (#79).
-        if await is_token_rejected(
+        rejection = await check_token(
             runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=value
-        ):
+        )
+        if rejection is not None:
             await _refuse_for_rejected_token(runtime, client, row=consumed, token=token)
             await post_ephemeral(
                 client,
                 thread_ts=thread_ts,
                 channel_id=channel_id,
                 user_id=user_id,
-                text=rejected_token_message(mcp_server_url),
+                text=rejected_token_message(rejection),
             )
             return
         try:

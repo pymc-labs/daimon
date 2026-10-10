@@ -44,9 +44,9 @@ MAX_LISTED: Final = 15
 LISTING_MAX_CHARS: Final = 3_000
 """Room for the listing inside Discord's 4000-character cap on a message's text."""
 EXPLAINER: Final = (
-    "-# Server admins run every channel. A channel's admins may change agents that answer "
-    "only in channels they run, and pick those channels' default agent. Built-in agents and "
-    "the server default stay with server admins."
+    "-# Channel admins pick this channel's agent and edit agents that only work in their "
+    "channels.\n\n"
+    "-# Starting agents and the default agent stay with server admins."
 )
 
 

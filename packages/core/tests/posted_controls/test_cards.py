@@ -167,25 +167,22 @@ def test_only_requested_carries_buttons_requester_and_expiry(
 def test_requested_copy_names_the_key_and_who_can_use_it() -> None:
     card = build("env", "requested")
 
-    assert card.headline == f"🔑 Add TOGGL_TOKEN to {AGENT}", "the headline names key and agent"
-    assert card.facts == (
-        f"Anyone who talks to {AGENT} can use it.",
-        "The value is not shown in chat.",
-    ), "the env card states shared ownership and that the value stays out of chat"
+    assert card.headline == f"🔑 {AGENT} needs `TOGGL_TOKEN`", "the headline names key and agent"
+    assert card.facts == (f"Anyone using {AGENT} can use it. The value isn't shown in chat.",), (
+        "the env card states shared ownership and that the value stays out of chat"
+    )
     assert card.buttons[0].label == "🔐 Enter it privately", "env collects one value privately"
 
 
 def test_requested_env_file_copy_describes_the_upload() -> None:
     card = build("env_file", "requested")
 
-    assert card.headline == f"🔑 Add keys to {AGENT} from a .env file", (
+    assert card.headline == f"🔑 {AGENT} needs keys from a .env file", (
         "the bulk headline names the file, not a single key"
     )
-    assert card.facts == (
-        "One KEY=VALUE per line.",
-        "Daimon stores the keys, not a retained copy of your uploaded file.",
-        f"Anyone who talks to {AGENT} can use them.",
-    ), "the upload card explains the format and what is kept"
+    assert card.facts == (f"We save the keys, not the file. Anyone using {AGENT} can use them.",), (
+        "the upload card says what is kept and who can use it"
+    )
     assert card.buttons[0].label == "🔐 Upload it privately", "env_file takes a file, not a value"
 
 
@@ -193,11 +190,24 @@ def test_requested_mcp_copy_names_the_server_and_its_url() -> None:
     card = build("mcp", "requested")
 
     assert card.headline == f"🔌 Connect {AGENT} to Linear", "the headline names the service"
-    assert card.facts == (
-        f"{MCP_URL} needs a token.",
-        f"Anyone who talks to {AGENT} can use this connection.",
-    ), "the mcp card shows the fixed endpoint and shared use"
+    assert card.facts == (f"{MCP_URL} needs a token. Anyone using {AGENT} can use it.",), (
+        "the mcp card shows the fixed endpoint and shared use"
+    )
     assert card.buttons[0].label == "🔐 Enter the token privately", "mcp collects a bearer token"
+
+
+def test_requested_sign_in_copy_names_the_url_and_that_the_connection_is_yours() -> None:
+    card = build("mcp_oauth", "requested")
+
+    assert card.headline == f"🔌 Connect {AGENT} to Notion", "the headline names the service"
+    assert card.facts == (f"Sign in through {MCP_URL}. Only you can use this connection.",), (
+        "the sign-in card names where you sign in and that the connection is yours alone"
+    )
+    assert card.buttons[0].label == "🔗 Connect my account", "sign-in opens the browser flow"
+
+
+def test_requested_footer_says_who_can_fill_it_in_and_when_it_expires() -> None:
+    assert FOOTER_TEMPLATE == "Only {requester} can fill this in. Expires {expires}."
 
 
 def test_requested_repo_copy_names_the_branch_and_whose_token_it_is() -> None:
@@ -569,7 +579,7 @@ def test_card_for_request_reads_the_row() -> None:
     """Every fact the card shows comes off the durable request row."""
     card = card_for_request(_request_row("mcp", "linear", MCP_URL), state="requested")
     assert card.headline == f"🔌 Connect {AGENT} to linear", "the row names agent and server"
-    assert card.facts[0] == f"{MCP_URL} needs a token.", "the row carries the server url"
+    assert card.facts[0].startswith(f"{MCP_URL} needs a token."), "the row carries the server url"
 
 
 def test_card_for_request_unpacks_the_repo_target() -> None:

@@ -281,15 +281,28 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
   the text the way agent replies are escaped, so `<!channel>` and `<!here>`
   stay literal.
 
-The post reads `Routine result from <agent> (<cron>, <timezone>):` followed by
-the result. With agent identity on for the workspace, Slack and Discord post it
-as the agent, with its name and face. Discord then drops the agent's name from
-the line, `Routine result (<cron>, <timezone>):`, because the webhook or, without
-one, the bot's subtext name label already carries it. Slack keeps the original
-line, since a workspace without `chat:write.customize` accepts the post but
-silently drops the agent's header. The built-in agent and Teams keep the
-original line. The fallback direct message to the creator stays Daimon's own
-notice. An empty result is `skipped/no_result`.
+The post reads `Result from <agent>'s <schedule>:` followed by the result, for
+example `Result from team-020-analyst's daily routine at 09:00 UTC:`. The
+schedule is in words only for the cron shapes that say exactly one thing (every
+day, weekdays or one weekday at a time, and every hour on the hour, as
+`daily`, `weekday`, `Monday` and `hourly`); any other expression stays cron
+text, `routine (<cron>, <timezone>)`. The timezone is always kept
+(`daimon.core.cron_words`). With agent identity on for the workspace, Slack and
+Discord post it as the agent, with its name and face. Discord then drops the
+agent's name from the line, `Result from the <schedule>:`, because the webhook
+or, without one, the bot's subtext name label already carries it. Slack keeps
+the original line, since a workspace without `chat:write.customize` accepts the
+post but silently drops the agent's header. The built-in agent and Teams keep
+the original line. An empty result is `skipped/no_result`.
+
+The fallback direct message to the creator stays Daimon's own notice: the
+agent and schedule (`team-020-analyst, every day at 09:00 UTC`), then why the
+result came by DM, then the result, a blank line between each. The reason
+reads `Your routine couldn't post to its channel. Here's the result.` with
+`Ask the agent to change where it posts.` for a destination that could not be
+reached; `Your routine couldn't post: you no longer have permission there.`
+for `creator_cannot_post`; and `Your routine couldn't post: posting is blocked
+there.` for `protected_channel`, each ending `Here's the result.`
 
 The outbox is a small at-most-once queue on the routine row rather than a wake
 (`daimon.core.continuity.wakes`): a wake runs an agent turn in a thread,

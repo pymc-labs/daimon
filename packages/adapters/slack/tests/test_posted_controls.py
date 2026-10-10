@@ -111,12 +111,12 @@ async def test_received_state_keeps_the_headline_and_drops_the_button(
     await edit_posted_card(fake_slack_web_client.client, row=_row(), state="received")
 
     payload = _payload(fake_slack_web_client.mock)
-    assert payload["text"] == "🔑 Add OPENAI_API_KEY to specialist", (
+    assert payload["text"] == "🔑 specialist needs `OPENAI_API_KEY`", (
         "received repeats the requested headline rather than collapsing the card"
     )
     assert not _actions(payload), "a consumed request must not keep a live button"
     facts = [b for b in payload["blocks"] if b["type"] == "context"]
-    assert any("Anyone who talks to specialist can use it." in str(b) for b in facts), (
+    assert any("Anyone using specialist can use it." in str(b) for b in facts), (
         "received keeps the facts the requested card showed"
     )
     assert RECEIVED_FOOTER in str(payload["blocks"][-1]), "received ends on its own footer"

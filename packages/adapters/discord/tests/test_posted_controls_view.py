@@ -78,7 +78,7 @@ def test_requested_card_renders_headline_facts_button_and_footer_in_order() -> N
 
     texts = _text(view)
     assert texts[0] == f"**{card.headline}**", "the headline leads the card, bolded"
-    assert texts[1] == "\n".join(f"-# {fact}" for fact in card.facts), (
+    assert texts[1] == "\n\n".join(f"-# {fact}" for fact in card.facts), (
         "every fact renders as one subtext block, in the core-owned order"
     )
     rows = _action_rows(view)
@@ -91,14 +91,33 @@ def test_requested_card_renders_headline_facts_button_and_footer_in_order() -> N
     assert buttons[0].style is discord.ButtonStyle.primary, "the form button is the primary action"
 
 
-def test_requested_footer_renders_the_requester_mention_and_a_relative_expiry() -> None:
+def test_title_body_buttons_and_footer_each_get_their_own_gap() -> None:
+    kinds = [
+        type(item).__name__ for item in _container(build_card_view(_requested_card())).children
+    ]
+    assert kinds == [
+        "TextDisplay",
+        "Separator",
+        "TextDisplay",
+        "Separator",
+        "ActionRow",
+        "Separator",
+        "TextDisplay",
+    ], "an invisible separator sits between the title, the body, the buttons and the footer"
+    multi = _requested_card(state="refused", refusal="token_rejected")
+    (body,) = _text(build_card_view(multi))[1:]
+    assert "\n\n" in body and "-# " in body.split("\n\n")[1], "facts sit a blank line apart"
+
+
+def test_requested_footer_renders_the_requester_mention_and_the_expiry_time() -> None:
     view = build_card_view(_requested_card())
 
     footer = _text(view)[-1]
     assert footer.startswith("-# "), "the footer renders as subtext"
     assert f"<@{_REQUESTER}>" in footer, "the footer names the requester as a real mention"
-    assert f"<t:{int(_EXPIRES_AT.timestamp())}:R>" in footer, (
-        "the expiry renders as Discord's relative timestamp, never a formatted string"
+    assert f"Expires <t:{int(_EXPIRES_AT.timestamp())}:t>." in footer, (
+        "the expiry renders as Discord's short-time timestamp (Expires 15:42.), "
+        "in the reader's own clock, never a formatted string"
     )
     assert "{requester}" not in footer and "{expires}" not in footer, (
         "no template placeholder may survive into the rendered card"

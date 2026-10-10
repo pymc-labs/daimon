@@ -20,10 +20,7 @@ from daimon.adapters.discord.checks import resolve_tenant_for_interaction
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.privacy_panel.embeds import build_deleted_state_container
 from daimon.adapters.discord.privacy_panel.panel import PrivacyPanelView
-from daimon.adapters.discord.privacy_panel.read import (
-    load_purge_preview,
-    resolve_privacy_account,
-)
+from daimon.adapters.discord.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from sqlalchemy.exc import SQLAlchemyError
@@ -108,16 +105,11 @@ class PrivacyCog(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            preview = await load_purge_preview(
-                session_factory=runtime.sessionmaker,
-                account_id=account_id,
-            )
             view = PrivacyPanelView(
                 runtime=runtime,
                 account_id=account_id,
                 allowed_user_id=interaction.user.id,
                 user_name=user_name,
-                preview=preview,
             )
             await interaction.followup.send(
                 view=view,

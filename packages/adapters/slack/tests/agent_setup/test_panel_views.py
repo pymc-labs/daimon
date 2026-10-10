@@ -45,6 +45,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     LEGACY_ACTION_IDS,
     build_agents_view,
     build_channel_admins_form,
+    build_channel_skills_form,
     build_creating_view,
     build_details_view,
     build_new_agent_form,
@@ -1439,3 +1440,26 @@ def test_channel_admins_form_without_a_group_listing_says_so_and_offers_no_group
     inputs = [block["block_id"] for block in form["blocks"] if block["type"] == "input"]
     assert inputs == [CHANNEL_ADMINS_INPUT_ID], "no group select to clear the groups by accident"
     assert any("usergroups:read" in text for text in _texts(form)), "the missing scope is named"
+
+
+def test_channel_admins_form_explains_admins_in_two_lines() -> None:
+    form = build_channel_admins_form(meta=_meta(view="channel_admins"), user_ids=[])
+    assert _texts(form)[-2:] == [
+        "Empty the lists to clear it.",
+        "Channel admins pick this channel's agent and edit agents that only work in their "
+        "channels.\n\nStarting agents and the default agent stay with workspace admins.",
+    ], "each line its own block or a blank line apart"
+
+
+def test_channel_skills_form_names_the_channel_hints_the_field_and_says_who_can_change() -> None:
+    form = build_channel_skills_form(meta=_meta(view="channel_skills"), rows=[])
+    assert form["blocks"][0]["text"]["text"] == f"*Extra skills in <#{_CHANNEL_ID}>*", (
+        "no ' · ' separator"
+    )
+    (field,) = [block for block in form["blocks"] if block["type"] == "input"]
+    assert field["label"]["text"] == "Add a skill"
+    assert field["hint"]["text"] == "A library skill, or one uploaded to this channel's agent."
+    assert _texts(form)[-1] == (
+        "These skills apply only here, from the next message.\n\n"
+        "Only workspace admins can change them."
+    )

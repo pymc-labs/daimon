@@ -282,7 +282,7 @@ async def test_a_sealed_origin_is_marked_in_the_post(
     await _submit(runtime, "", ("other",))
 
     (body,) = _posts(permalink)
-    assert "read only from inside" in body["text"]
+    assert "_Reply in the original channel._" in body["text"]
     assert body["text"].split("\n")[1] == _PERMALINK
 
 

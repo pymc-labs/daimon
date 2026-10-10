@@ -10,7 +10,13 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.teams.card_actions import button, error_text, heading, text_card, text_lines
-from daimon.core.privacy import PurgePreview, summary_line
+from daimon.core.privacy import (
+    PRIVACY_TITLE,
+    PurgePreview,
+    delete_scope_lines,
+    privacy_lines,
+    summary_line,
+)
 from daimon.core.purge import AccountPurgeResult
 from microsoft_teams.cards import (
     Action,
@@ -19,29 +25,13 @@ from microsoft_teams.cards import (
     CardElement,
     ExecuteAction,
     OpenUrlAction,
+    TextBlock,
     TextInput,
 )
 
 VERB = "privacy"
 CONFIRM_INPUT = "confirm_name"
 
-_HOLD = (
-    "🪪 **What we hold (our DB)**",
-    "Identity links (Teams and CLI principals under your account), routines you scheduled, "
-    "user config rows, synced skill ledger rows, encrypted GitHub tokens, GitHub OAuth "
-    "handshake records and the account row itself.",
-)
-_MANAGED_AGENTS = (
-    "🔐 **What lives in Managed Agents**",
-    "Agent definitions, system prompts and MCP tokens; session transcripts and turn message "
-    "content; skill repo references (the repos stay on GitHub). Retention is governed by "
-    "Anthropic's Managed Agents policy.",
-)
-_NOT_HELD = (
-    "🚫 **What we don't hold**",
-    "Plaintext keys or tokens (GitHub tokens are encrypted at rest), or message content "
-    "(we only log structural events).",
-)
 _KEPT = (
     "📋 **What is intentionally kept elsewhere**",
     "Usage records are retained for service integrity and cannot be erased on request. "
@@ -59,17 +49,22 @@ def no_data_card(bot: str) -> AdaptiveCard:
     return text_card("🔒 Privacy", f"You have no {bot} account.")
 
 
-def panel_card(preview: PurgePreview, *, bot: str, policy_url: str) -> AdaptiveCard:
-    """What is held and where, with Policy, Export and Delete."""
+def _spaced(*lines: str) -> list[CardElement]:
+    """Wrapped lines, each a blank line's gap below the one before."""
+    return [TextBlock(text=line, wrap=True, spacing="Medium") for line in lines]
+
+
+def panel_card(*, bot: str, policy_url: str) -> AdaptiveCard:
+    """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
     actions: list[Action] = [
         OpenUrlAction(title="📄 Policy", url=policy_url),
         button(VERB, "📤 Export", "export"),
         button(VERB, "🗑 Delete…", "delete", style="destructive"),
     ]
     body: list[CardElement] = [
-        heading("🔒 Privacy"),
-        *text_lines(f"{bot} holds: {summary_line(preview)}", *_HOLD, *_MANAGED_AGENTS, *_NOT_HELD),
-        ActionSet(actions=actions),
+        heading(PRIVACY_TITLE),
+        *_spaced(*privacy_lines(bot)),
+        ActionSet(actions=actions, spacing="Medium"),
     ]
     return AdaptiveCard(body=body, fallback_text="Privacy")
 
@@ -111,13 +106,19 @@ def _will_happen(preview: PurgePreview) -> list[str]:
 
 
 def confirm_card(
-    preview: PurgePreview, *, account_id: uuid.UUID, name: str, error: str | None = None
+    preview: PurgePreview,
+    *,
+    account_id: uuid.UUID,
+    name: str,
+    bot: str = "daimon",
+    error: str | None = None,
 ) -> AdaptiveCard:
     """What deleting removes and keeps, then a typed-name confirmation."""
     body: list[CardElement] = [heading("Confirm delete")]
     if error:
         body.append(error_text(error))
-    body += text_lines("⚡ **What will happen**", *_will_happen(preview), *_MANAGED_AGENTS, *_KEPT)
+    body += _spaced(*delete_scope_lines(bot))
+    body += text_lines("⚡ **What will happen**", *_will_happen(preview), *_KEPT)
     body.append(TextInput(id=CONFIRM_INPUT, label=f"Type '{name}' to confirm", placeholder=name))
     delete = button(VERB, "Delete", "confirm_delete", style="destructive", account=str(account_id))
     body.append(ActionSet(actions=[delete, button(VERB, "Cancel", "refresh")]))

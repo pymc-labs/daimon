@@ -28,7 +28,6 @@ from daimon.adapters.discord.privacy_panel.panel import (
     _export_placeholder_message,  # pyright: ignore[reportPrivateUsage]
     build_privacy_main_container,
 )
-from daimon.adapters.discord.privacy_panel.state import PurgePreview, PurgePreviewRow
 from daimon.core.config import DiscordSettings
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from pydantic import SecretStr
@@ -71,29 +70,6 @@ def _make_thread(messages: list[discord.Message]) -> discord.Thread:
     thread.starter_message = None
     thread.parent = None
     return thread
-
-
-def _make_preview() -> PurgePreview:
-    zero = PurgePreviewRow(count=0, example=None)
-    return PurgePreview(
-        linked_principals=PurgePreviewRow(count=1, example="Discord:1234567890"),
-        principal_links=zero,
-        routines=zero,
-        user_configs=zero,
-        account=PurgePreviewRow(count=1, example=None),
-        user_skills=zero,
-        github_credentials=zero,
-        github_user_links=zero,
-        github_oauth_states=zero,
-        mcp_tokens=zero,
-        agent_github_binding=zero,
-        slack_user_tokens=zero,
-        slack_turn_contexts=zero,
-        credential_requests=zero,
-        wizard_sessions=zero,
-        message_feedback=zero,
-        support_escalations=zero,
-    )
 
 
 def _collect_text(
@@ -233,16 +209,12 @@ class TestPrivacyCommandDescription:
 
 class TestPrivacyMainContainer:
     def test_unset_matches_todays_text(self) -> None:
-        texts = _collect_text(build_privacy_main_container(_make_preview(), user_name="Alice"))
-        assert "daimon holds" in texts
+        texts = _collect_text(build_privacy_main_container())
+        assert "daimon stores your linked accounts" in texts
 
     def test_set_name_changes_text(self) -> None:
-        texts = _collect_text(
-            build_privacy_main_container(
-                _make_preview(), user_name="Alice", bot_display_name="daimon-staging"
-            )
-        )
-        assert "daimon-staging holds" in texts
+        texts = _collect_text(build_privacy_main_container(bot_display_name="daimon-staging"))
+        assert "daimon-staging stores your linked accounts" in texts
 
 
 class TestExportPlaceholderMessage:

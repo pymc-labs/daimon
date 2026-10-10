@@ -157,13 +157,12 @@ _REPO_KINDS = ("repo", "skill_repo")
 _MAX_GITHUB_TOKEN_CHARS = 255
 _COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
-    "This agent answers for other people here, so changing its repo or its keys needs an "
-    "admin. Ask me and I'll write the request for them, or ask me to make you a new agent "
-    "of your own."
+    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _SHARED_AGENT_SKILLS = (
-    "This agent answers for other people here, so adding skills to it needs an admin. Ask "
-    "me and I'll write the request for them, or ask me to fork it and add them to the fork."
+    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
 _AGENT_GONE = "That agent no longer exists — ask again and a fresh request will be posted."

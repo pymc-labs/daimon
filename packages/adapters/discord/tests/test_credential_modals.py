@@ -2542,9 +2542,9 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     assert spent is not None and spent.outcome == "token_rejected"
     if failure == "rejection":
         text = interaction.followup.send.call_args.args[0]
-        assert "did not accept" in text and "connect it with your account" in text, (
-            "the person learns the token was refused and that OAuth is the way out"
-        )
+        assert text == (
+            "That token didn't work. Nothing was saved.\n\nCheck the token and try the form again."
+        ), "the person learns the token was refused; no sign-in hint for a server without it"
 
     assert spent.used_at is None, "a rejected token keeps the form usable"
     card = _card_text(_card_edits(interaction)[-1])

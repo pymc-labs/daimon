@@ -259,7 +259,7 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         )
         return (
             f"**Human support requested** by {interaction.user.mention} "
-            f"({interaction.user})\n{link}\n\n{note}"
+            f"({interaction.user})\n\n{link}\n\n{note}"
         )
 
     async def _origin_channel_id(self, bot: commands.Bot) -> str:

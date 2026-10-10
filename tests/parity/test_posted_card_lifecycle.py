@@ -32,6 +32,7 @@ import pytest
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.posted_controls import WRONG_REQUESTER_MESSAGE, build_posted_card, expired_message
+from daimon.core.posted_controls.teams_card import teams_wording
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.agent_mcp_credentials import list_credentials
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -168,6 +169,9 @@ async def test_posted_card_requested_copy_matches_core_renderer(
         expires_at=_SOME_EXPIRY,
         token=token,
     )
+    if driver.param_id == "teams":
+        # A TextBlock shows backticks literally, so Teams words the key name bare.
+        expected = teams_wording(expected)
     posted = _last(driver)
     assert posted.state == "requested", f"a freshly posted card is requested, got {posted.state!r}"
     assert posted.headline == expected.headline, (

@@ -36,11 +36,10 @@ def test_requested_card_renders_section_facts_actions_and_footer() -> None:
     )
     assert blocks[0]["text"] == {
         "type": "mrkdwn",
-        "text": f"*🔑 Add TOGGL_TOKEN to {AGENT}*",
+        "text": f"*🔑 {AGENT} needs `TOGGL_TOKEN`*",
     }, "the headline is the bold section text"
     assert [element["text"] for element in blocks[1]["elements"]] == [
-        f"Anyone who talks to {AGENT} can use it.",
-        "The value is not shown in chat.",
+        f"Anyone using {AGENT} can use it. The value isn't shown in chat.",
     ], "each fact becomes its own context element"
 
 
@@ -63,8 +62,7 @@ def test_requested_footer_names_the_requester_and_a_live_expiry() -> None:
     (element,) = blocks[3]["elements"]
 
     assert element["text"] == (
-        f"Only <@{REQUESTER}> can open this form. "
-        f"Expires <!date^{EXPIRES_UNIX}^{{time}}|17:30 UTC>."
+        f"Only <@{REQUESTER}> can fill this in. Expires <!date^{EXPIRES_UNIX}^{{time}}|17:30 UTC>."
     ), "the footer substitutes the mention and Slack's live-date token into the template"
     assert "{requester}" not in element["text"], (
         "no placeholder may survive into the rendered block"

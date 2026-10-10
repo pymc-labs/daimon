@@ -859,7 +859,7 @@ async def test_on_coding_tools_lets_a_channel_admin_mint_only_bound_for_their_ag
 
     call = interaction.response.send_message.call_args
     if bound is None:
-        assert call.args[0] == mcp_access_mod.coding_tools_refusal("expert-bot"), (
+        assert call.args[0] == mcp_access_mod.CODING_TOOLS_REFUSAL, (
             "a refused channel admin gets the explanatory refusal"
         )
         assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (
@@ -874,3 +874,23 @@ async def test_on_coding_tools_lets_a_channel_admin_mint_only_bound_for_their_ag
     assert (row.platform, row.channel_id) == ("discord", bound), (
         "a channel admin's token is always bound to their channel"
     )
+
+
+@pytest.mark.parametrize("channel_id", [None, "555"])
+def test_render_mcp_config_puts_a_blank_line_between_lines(channel_id: str | None) -> None:
+    content = mcp_access_mod.render_mcp_config(
+        agent_name="expert-bot",
+        public_url="https://mcp.example.com/mcp",
+        jwt="jwt-value",
+        channel_id=channel_id,
+    )
+    paragraphs = content.split("\n\n")
+    head = [
+        "**Use expert-bot from your coding tools**",
+        "Copy the setup below now. The token is shown only once.",
+    ]
+    if channel_id is not None:
+        head.append("It runs in <#555>, with that channel's rules and budget.")
+    assert paragraphs[: len(head)] == head, "the channel line only for a channel-bound token"
+    assert paragraphs[len(head)].startswith("**Run this:**\n```\nclaude mcp add")
+    assert paragraphs[len(head) + 1].startswith("**Or paste into `.mcp.json`:**\n```json\n")

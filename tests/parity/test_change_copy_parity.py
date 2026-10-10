@@ -174,7 +174,8 @@ async def test_discord_env_key_add_ack_matches_core_renderer(
         )
     )
     headline, *facts = expected.split("\n")
-    posted_headline, *posted_facts = posted.split("\n")
+    # The posted facts sit a blank line apart; the renderer's are one per line.
+    posted_headline, *posted_facts = (line for line in posted.split("\n") if line)
     assert classify_card_state(posted_headline.strip("*")) == "applied", (
         f"the card must mark the state on its first line, got {posted_headline!r}"
     )

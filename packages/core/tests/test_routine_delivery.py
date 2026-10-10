@@ -23,6 +23,7 @@ from daimon.core.routine_delivery import (
     destination_shape_error,
     placement_unknown_is_unsafe,
     poll_deliveries_once,
+    render_fallback_dm,
     render_fallback_post,
     render_routine_controls,
     resolve_routine_identity,
@@ -192,11 +193,50 @@ def test_the_fallback_post_carries_the_tail() -> None:
 def test_the_fallback_post_names_the_agent_unless_the_post_carries_its_identity() -> None:
     row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
     assert render_fallback_post(row) == (
-        "Routine result from research (0 17 * * 5, Europe/London):\n\nAll green."
+        "Result from research's Friday routine at 17:00 Europe/London:\n\nAll green."
     )
     assert render_fallback_post(row, as_agent=True) == (
-        "Routine result (0 17 * * 5, Europe/London):\n\nAll green."
+        "Result from the Friday routine at 17:00 Europe/London:\n\nAll green."
     ), "the agent's own header says who it is from; the schedule stays"
+
+
+def test_the_fallback_post_keeps_a_schedule_it_cannot_say_exactly_as_cron() -> None:
+    row = _row(agent_name="research", cron_expr="*/15 9-17 * * 1-5", timezone="UTC")
+    assert render_fallback_post(row) == (
+        "Result from research's routine (*/15 9-17 * * 1-5, UTC):\n\nAll green."
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "why"),
+    [
+        (
+            "destination_unavailable",
+            "Your routine couldn't post to its channel. Here's the result.\n\n"
+            "Ask the agent to change where it posts.",
+        ),
+        (
+            "creator_cannot_post",
+            "Your routine couldn't post: you no longer have permission there. Here's the result.",
+        ),
+        (
+            "protected_channel",
+            "Your routine couldn't post: posting is blocked there. Here's the result.",
+        ),
+        (
+            "something_new",
+            "Your routine couldn't post to its channel. Here's the result.\n\n"
+            "Ask the agent to change where it posts.",
+        ),
+    ],
+)
+def test_the_fallback_dm_names_agent_and_schedule_then_why_then_the_result(
+    reason: str, why: str
+) -> None:
+    row = _row(agent_name="research", cron_expr="0 9 * * *", timezone="UTC")
+    assert render_fallback_dm(row, reason) == (
+        f"research, every day at 09:00 UTC\n\n{why}\n\nAll green."
+    ), "each line of the DM sits a blank line from the next"
 
 
 def _identity_settings(*, enabled: bool) -> Settings:

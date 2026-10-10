@@ -338,15 +338,17 @@ _MAX_OPTION_TEXT: Final = 75
 CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
 """Room for the listing, its heading and "and N more" in one section's 3000 characters."""
 CHANNEL_ADMINS_NOTE: Final = (
-    "Workspace admins run every channel. A channel's admins may change agents that answer "
-    "only in channels they run, and pick those channels' default agent. Built-in agents and "
-    "the workspace default stay with workspace admins."
+    "Channel admins pick this channel's agent and edit agents that only work in their "
+    "channels.\n\n"
+    "Starting agents and the default agent stay with workspace admins."
 )
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
+CHANNEL_SKILLS_HEADER: Final = "Extra skills"
 CHANNEL_SKILLS_NOTE: Final = (
-    "Added to whatever agent answers in this channel, here only, from the next message: a "
-    "workspace library skill, or one uploaded to this channel's agent. Workspace admins only."
+    "These skills apply only here, from the next message.\n\nOnly workspace admins can change them."
 )
+#: Beside the Add a skill field: which skills can be named.
+CHANNEL_SKILLS_ADD_HINT: Final = "A library skill, or one uploaded to this channel's agent."
 OPERATOR_TOKENS_LABEL: Final = "Operator tokens"
 MAX_OPERATOR_TOKEN_LINES: Final = 25
 OPERATOR_TOKENS_NOTE: Final = (
@@ -994,10 +996,13 @@ def _channel_admins_blocks(
 def _channel_skills_blocks(
     rows: Sequence[ChannelSkillRow], *, channel_id: str
 ) -> list[dict[str, Any]]:
-    names = ", ".join(f"`{escape_mrkdwn(row.name)}`" for row in rows) or "_none_"
+    names = (
+        ", ".join(f"`{escape_mrkdwn(row.name)}` ({escape_mrkdwn(row.version)})" for row in rows)
+        or "_none_"
+    )
     edit = _button(action_id=ACTION_CHANNEL_SKILLS, label="Edit")
     return [
-        _section(f"*{CHANNEL_SKILLS_LABEL}* of <#{channel_id}>\n{names}", accessory=edit),
+        _section(f"*{CHANNEL_SKILLS_HEADER} in <#{channel_id}>*\n\n{names}", accessory=edit),
         _context(CHANNEL_SKILLS_NOTE),
         {"type": "divider"},
     ]
@@ -1152,7 +1157,7 @@ def build_channel_admins_form(
         blocks.append(_context(GROUPS_UNLISTED_NOTE))
     elif group_input := _groups_input(groups, group_ids):
         blocks += [group_input, _context(GROUP_GRANT_WARNING)]
-    blocks.append(_context(f"Empty the lists to clear it. {CHANNEL_ADMINS_NOTE}"))
+    blocks += [_context("Empty the lists to clear it."), _context(CHANNEL_ADMINS_NOTE)]
     return finish_modal(
         title=CHANNEL_ADMINS_LABEL,
         blocks=blocks,
@@ -1168,11 +1173,12 @@ def build_channel_skills_form(
 ) -> dict[str, Any]:
     """Add a skill to `meta.channel_id`, or tick its current ones to remove them."""
     blocks: list[dict[str, Any]] = [
-        _section(f"Extra skills for whatever agent answers in <#{meta.channel_id}>."),
+        _section(f"*{CHANNEL_SKILLS_HEADER} in <#{meta.channel_id}>*"),
         {
             "type": "input",
             "block_id": CHANNEL_SKILLS_ADD_INPUT_ID,
             "label": {"type": "plain_text", "text": "Add a skill"},
+            "hint": {"type": "plain_text", "text": CHANNEL_SKILLS_ADD_HINT},
             "optional": True,
             "element": {
                 "type": "plain_text_input",

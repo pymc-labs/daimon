@@ -406,7 +406,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     ),
     "routine_delete": lambda: routines_card.confirm_delete_card(_routine()),
     "privacy_none": lambda: privacy_card.no_data_card(NAME),
-    "privacy": lambda: privacy_card.panel_card(_preview(), bot=NAME, policy_url=URL),
+    "privacy": lambda: privacy_card.panel_card(bot=NAME, policy_url=URL),
     "privacy_export": lambda: privacy_card.export_card(_preview(), bot=NAME),
     "privacy_confirm": lambda: privacy_card.confirm_card(
         _preview(), account_id=uuid.UUID(int=0), name=EMOJI * 256, error=NAME_MISMATCH

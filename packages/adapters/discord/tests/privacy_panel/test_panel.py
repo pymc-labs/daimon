@@ -13,9 +13,8 @@ from daimon.adapters.discord.privacy_panel.panel import (
     PrivacyPanelView,
     build_privacy_main_container,
 )
-from daimon.adapters.discord.privacy_panel.state import PurgePreviewRow
 
-from .conftest import _make_preview, _make_runtime
+from .conftest import _make_runtime
 
 
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
@@ -37,7 +36,6 @@ def _make_view(**overrides: Any) -> PrivacyPanelView:
         "account_id": uuid.uuid4(),
         "allowed_user_id": 999_999_999_111,
         "user_name": "carlos",
-        "preview": _make_preview(),
     }
     base.update(overrides)
     return PrivacyPanelView(**base)
@@ -122,74 +120,12 @@ async def test_interaction_check_accepts_invoker() -> None:
     interaction.response.send_message.assert_not_awaited()
 
 
-def test_main_container_header_starts_with_privacy() -> None:
-    """Main container first TextDisplay must start with '## 🔒 Privacy'."""
-    container = build_privacy_main_container(_make_preview(), user_name="carlos")
-    texts = _text_displays(container)
-    assert texts, "Container must have at least one TextDisplay"
-    assert texts[0].startswith("## 🔒 Privacy"), (
-        f"Main container header must start with '## 🔒 Privacy'; got {texts[0]!r}"
-    )
-
-
-def test_main_container_header_contains_user_name() -> None:
-    container = build_privacy_main_container(_make_preview(), user_name="carlos")
-    texts = _text_displays(container)
-    assert texts, "Container must have at least one TextDisplay"
-    assert "carlos" in texts[0], f"Main container header must include user_name; got {texts[0]!r}"
-
-
-def test_summary_line_includes_phase_76_categories_when_nonzero() -> None:
-    """Header summary must surface user_skills / github_credentials / oauth_states.
-
-    Disclosure undercount guard one layer above the drift-guard: a user whose
-    only held data is e.g. an encrypted GitHub token must not see the header
-    claim 'nothing visible to you yet'.
-    """
-    preview = _make_preview(
-        linked_principals=PurgePreviewRow(count=0, example=None),
-        user_skills=PurgePreviewRow(count=2, example="brainstorming"),
-        github_credentials=PurgePreviewRow(count=1, example="octocat"),
-        github_oauth_states=PurgePreviewRow(count=3, example=None),
-    )
-    container = build_privacy_main_container(preview, user_name="carlos")
-    header = _text_displays(container)[0]
-    assert "2 synced skill(s)" in header, (
-        f"Header summary must include the user_skills count; got {header!r}"
-    )
-    assert "1 GitHub token(s)" in header, (
-        f"Header summary must include the github_credentials count; got {header!r}"
-    )
-    assert "3 OAuth handshake record(s)" in header, (
-        f"Header summary must include the github_oauth_states count; got {header!r}"
-    )
-    assert "nothing visible to you yet" not in header, (
-        "Header must NOT claim 'nothing visible to you yet' while holding "
-        f"category rows; got {header!r}"
-    )
-
-
-def test_summary_line_omits_phase_76_categories_when_zero() -> None:
-    """Zero-count categories stay out of the header summary."""
-    preview = _make_preview(linked_principals=PurgePreviewRow(count=1, example="Discord:1"))
-    container = build_privacy_main_container(preview, user_name="carlos")
-    header = _text_displays(container)[0]
-    for fragment in ("synced skill", "GitHub token", "OAuth handshake"):
-        assert fragment not in header, (
-            f"Zero-count category {fragment!r} must not appear in the header; got {header!r}"
-        )
-
-
-def test_main_container_body_contains_all_three_trust_model_groups() -> None:
-    """D-LAYOUT-02: in-our-DB / MA-upstream / nowhere."""
-    container = build_privacy_main_container(_make_preview(), user_name="carlos")
-    joined = "\n".join(_text_displays(container))
-    assert "🪪 **What we hold" in joined, (
-        f"Main container must include 'What we hold (our DB)' group; got {joined!r}"
-    )
-    assert "🔐 **What lives in Managed Agents**" in joined, (
-        f"Main container must include 'What lives in Managed Agents' group; got {joined!r}"
-    )
-    assert "🚫 **What we don't hold**" in joined, (
-        f"Main container must include 'What we don't hold' group; got {joined!r}"
-    )
+def test_main_container_is_the_title_and_two_lines_on_who_stores_what() -> None:
+    """The detail categories live behind Policy; the panel says who stores what."""
+    container = build_privacy_main_container(bot_display_name="Daimon")
+    assert _text_displays(container) == [
+        "## 🔒 Your data",
+        "Daimon stores your linked accounts, routines and settings. "
+        "Saved GitHub keys are encrypted.\n\n"
+        "Anthropic stores your agents and their conversations.",
+    ], "a title, then two lines a blank line apart"

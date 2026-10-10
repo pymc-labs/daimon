@@ -15,8 +15,12 @@ def test_requested_card_opens_the_dialog_with_the_token_and_a_local_time_footer(
     body = card["body"]
     assert isinstance(body, list)
     headline, *facts, actions, footer = body
-    assert headline["text"] == f"🔑 Add TOGGL_TOKEN to {AGENT}"
-    assert len(facts) == 2, "each fact is its own line"
+    assert headline["text"] == f"🔑 {AGENT} needs TOGGL_TOKEN", "a TextBlock shows no backticks"
+    assert len(facts) == 1, "each fact is its own line"
+    assert [b.get("spacing") for b in (*facts, actions, footer)] == ["Medium"] * 3, (
+        "title, body, buttons and footer each sit a blank line apart"
+    )
+    assert footer["text"].startswith("Only the person who asked can fill this in. Expires ")
     (button,) = actions["actions"]
     assert button["type"] == "Action.Submit"
     assert button["data"] == {

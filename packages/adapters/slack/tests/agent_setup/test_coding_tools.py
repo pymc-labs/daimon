@@ -22,6 +22,7 @@ import structlog.testing
 import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.agent_setup.coding_tools import (
+    NEEDS_ADMIN_MESSAGE,
     NOT_CONFIGURED_MESSAGE,
     TOKEN_REVOKED_MESSAGE,
     handle_coding_tools_click,
@@ -134,6 +135,25 @@ def test_render_coding_tools_message_carries_both_artifacts_and_a_revoke_button(
     )
 
 
+@pytest.mark.parametrize("channel_id", [None, "C0BOUND"])
+def test_coding_tools_message_is_a_title_then_lines_a_blank_line_apart(
+    channel_id: str | None,
+) -> None:
+    _text, blocks = render_coding_tools_message(
+        agent_name=_AGENT_NAME,
+        public_url=_PUBLIC_URL,
+        jwt="jwt-value",
+        jti=uuid.uuid4(),
+        channel_id=channel_id,
+    )
+    title, body = (block["text"]["text"] for block in blocks[:2])
+    assert title == f"*Use {_AGENT_NAME} from your coding tools*"
+    lines = ["Copy the setup below now. The token is shown only once."]
+    if channel_id is not None:
+        lines.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
+    assert body == "\n\n".join(lines), "the channel line only for a channel-bound token"
+
+
 async def test_coding_tools_click_posts_the_one_liner_and_never_logs_the_token(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -198,7 +218,7 @@ async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
         posted = _ephemerals(mock)
 
     assert len(posted) == 1, "a refused click is explained, never silent"
-    assert "workspace admin" in posted[0]["text"], "the refusal names who can do it"
+    assert posted[0]["text"] == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
     assert "Bearer" not in json.dumps(posted[0]), "a refused click mints nothing"
     assert await _audited(db_session_factory, tenant.id) == [
         ("panel:coding_token_mint", "denied")
@@ -435,7 +455,7 @@ async def test_coding_tools_click_lets_a_channel_admin_mint_only_bound_for_their
     assert len(posted) == 1, "one click, one ephemeral"
     rendered = json.dumps(posted[0].get("blocks") or posted[0])
     if not bound:
-        assert "workspace admin" in posted[0]["text"], "the refusal names who can do it"
+        assert posted[0]["text"] == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
         assert "Bearer" not in rendered, "a refused channel admin mints nothing"
         return
     token = rendered.split("Authorization: Bearer ")[1].split("\\")[0].split(" ")[0]

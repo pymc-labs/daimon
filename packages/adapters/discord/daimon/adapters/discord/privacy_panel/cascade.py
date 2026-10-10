@@ -11,14 +11,17 @@ from daimon.adapters.discord import layout, theme
 from daimon.adapters.discord.privacy_panel.modal import DeleteConfirmModal
 from daimon.adapters.discord.privacy_panel.state import PurgePreview
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.privacy import delete_scope_lines
 
 import discord
 
 
 def build_cascade_preview_container(
-    preview: PurgePreview,
+    preview: PurgePreview, *, bot_display_name: str = "daimon"
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Red-accent V2 container for the cascade delete preview.
+
+    Opens on what Delete removes and leaves (`delete_scope_lines`).
 
     Pure: no I/O, no ActionRows. The view shell appends hairline + ActionRow.
     """
@@ -86,12 +89,6 @@ def build_cascade_preview_container(
         "⚡ **What will happen**",
         *(will_happen_rows if will_happen_rows else ["-# _(nothing to delete)_"]),
         "",
-        "🔐 **What stays in Managed Agents**",
-        "-# Agent definitions, system prompts, MCP tokens",
-        "-# Session transcripts, turn message content",
-        "-# Skill repo references — the repos themselves stay on GitHub",
-        "-# Retention is governed by Anthropic's Managed Agents policy.",
-        "",
         "📋 **What is intentionally kept elsewhere**",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
         "-# Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
@@ -105,6 +102,7 @@ def build_cascade_preview_container(
             "🗑 Confirm delete",
             subtext="**irreversible** — re-onboarding starts from scratch",
         ),
+        discord.ui.TextDisplay("\n\n".join(delete_scope_lines(bot_display_name))),
         layout.hairline(),
         discord.ui.TextDisplay("\n".join(body_rows)),
         accent_colour=theme.COLOR_RED,
@@ -145,7 +143,12 @@ class CascadePreviewView(discord.ui.LayoutView):
         action_row: discord.ui.ActionRow[CascadePreviewView] = discord.ui.ActionRow(
             confirm_btn, cancel_btn
         )
-        container = build_cascade_preview_container(preview)
+        bot_display_name = (
+            runtime.settings.discord.bot_display_name
+            if runtime.settings.discord is not None
+            else "daimon"
+        )
+        container = build_cascade_preview_container(preview, bot_display_name=bot_display_name)
         container.add_item(layout.hairline())
         container.add_item(action_row)
         self.add_item(container)
@@ -168,7 +171,6 @@ class CascadePreviewView(discord.ui.LayoutView):
             account_id=self.account_id,
             allowed_user_id=self.allowed_user_id,
             user_name=self.user_name,
-            preview=self.preview,
         )
         await interaction.response.edit_message(
             view=new_view,

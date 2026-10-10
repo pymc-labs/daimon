@@ -2429,9 +2429,8 @@ async def test_request_agent_key_on_teams_posts_a_card_and_edits_it_when_replace
     assert str(post.url).endswith(f"/v3/conversations/{_TEAMS_CHAT}/activities"), "origin chat"
     card = json.loads(post.content)["attachments"][0]
     assert card["contentType"] == "application/vnd.microsoft.card.adaptive"
-    row = await peek_credential_request(
-        db_session, token=card["content"]["body"][3]["actions"][0]["data"]["token"]
-    )
+    (action_set,) = (b for b in card["content"]["body"] if b["type"] == "ActionSet")
+    row = await peek_credential_request(db_session, token=action_set["actions"][0]["data"]["token"])
     assert row is not None and row.platform == "teams" and row.posted_message_id == first.message_id
     assert str(put.url).endswith(f"/activities/{first.message_id}"), "the old card is edited"
     assert REPLACED_HEADLINE in put.content.decode(), "and says it was replaced"

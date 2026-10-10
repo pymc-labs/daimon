@@ -47,8 +47,9 @@ def _card_footer(card: PostedCard) -> str | None:
     """The card's footer as Discord renders it, or `None` when it has none.
 
     Only the `requested` footer is a template: it names the requester as a
-    mention and the expiry as a relative timestamp, both of which are Discord
-    spellings core cannot produce. Every other state's footer is final text.
+    mention and the expiry as a short-time timestamp ("Expires 15:42." in the
+    reader's own clock), both of which are Discord spellings core cannot
+    produce. Every other state's footer is final text.
     """
     if card.footer is None:
         return None
@@ -58,7 +59,7 @@ def _card_footer(card: PostedCard) -> str | None:
         raise ValueError("a requested card must carry a requester and an expiry")
     return card.footer.format(
         requester=f"<@{card.requester_platform_user_id}>",
-        expires=f"<t:{card.expires_at_unix}:R>",
+        expires=f"<t:{card.expires_at_unix}:t>",
     )
 
 
@@ -66,17 +67,19 @@ def build_card_view(card: PostedCard) -> discord.ui.LayoutView:
     """Render one `PostedCard` as the V2 `LayoutView` Discord posts and edits.
 
     Component order is a contract: the bolded headline, the facts as one
-    subtext block, then — only when the card has buttons — an invisible
-    separator and one action row, then the footer as subtext. Every state
-    wears the same amber accent: the headline emoji is the state marker, so
-    nothing here ever turns green on success.
+    subtext block, then — only when the card has buttons — one action row,
+    then the footer as subtext. An invisible separator sits between each
+    pair, so the title, body, buttons and footer each get their own gap.
+    Every state wears the same amber accent: the headline emoji is the state
+    marker, so nothing here ever turns green on success.
     """
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         accent_colour=discord.Colour(COLOR_AMBER)
     )
     container.add_item(discord.ui.TextDisplay(f"**{card.headline}**"))
     if card.facts:
-        container.add_item(discord.ui.TextDisplay("\n".join(f"-# {fact}" for fact in card.facts)))
+        container.add_item(discord.ui.Separator(visible=False))
+        container.add_item(discord.ui.TextDisplay("\n\n".join(f"-# {fact}" for fact in card.facts)))
     if card.buttons:
         container.add_item(discord.ui.Separator(visible=False))
         action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
@@ -85,6 +88,7 @@ def build_card_view(card: PostedCard) -> discord.ui.LayoutView:
         container.add_item(action_row)
     footer = _card_footer(card)
     if footer is not None:
+        container.add_item(discord.ui.Separator(visible=False))
         container.add_item(discord.ui.TextDisplay(f"-# {footer}"))
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
