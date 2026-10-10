@@ -232,7 +232,9 @@ def test_no_agent_post_ignores_subject_and_pins() -> None:
 @pytest.mark.parametrize(
     "operation", [kind for kind in get_args(OperationKind) if kind not in _NEW_ADMIN_ONLY]
 )
-def test_shared_agent_table_matches(operation: OperationKind) -> None:
+def test_shared_agent_table_matches_except_stricter_mutation_ownership(
+    operation: OperationKind,
+) -> None:
     for is_admin, managed, reachable, local, held, unattended, unplaced in itertools.product(
         (False, True), repeat=7
     ):
@@ -244,9 +246,22 @@ def test_shared_agent_table_matches(operation: OperationKind) -> None:
             runs_unattended_beyond_caller=unattended,
             has_unplaced_run=unplaced,
         )
-        assert new_decide_operation(
-            operation, is_admin=is_admin, target=target
-        ) == _old_decide_operation(operation, is_admin=is_admin, target=target), (
+        expected = _old_decide_operation(operation, is_admin=is_admin, target=target)
+        # Intentional security change: unreachable is not proof of ownership,
+        # and new MCP names mutate the spec even when the token is personal.
+        if operation == "mcp_connect":
+            expected = (
+                "allow"
+                if is_admin
+                else "managed_agent"
+                if managed
+                else "allow"
+                if local and held
+                else "needs_admin"
+            )
+        elif operation not in _OLD_POSTED_TOKEN and not is_admin and not managed:
+            expected = "allow" if local and held else "needs_admin"
+        assert new_decide_operation(operation, is_admin=is_admin, target=target) == expected, (
             operation,
             is_admin,
             target,

@@ -1,14 +1,10 @@
 """Per-target runtime gate: is the named agent currently reachable in this tenant?
 
-Blast-radius rule for whoever adds the next tool: **blast radius of one
-agent -> open; blast radius of the whole tenant -> admin.** Creating, forking,
-or configuring an agent nobody has scoped only ever affects that one agent, so
-it stays open to any member. The moment an agent is a channel or workspace
-default, changing the fields that shape what it says and does reaches every
-user who talks to it — that requires admin.
+An admin may edit a target's setup. A member must administer every channel
+named by its agent rule, and every place it answers or runs must stay inside
+those channels. An unbound agent is never assumed to belong to the caller.
 
-``description`` is deliberately not in the gated set: it is a label, not
-something that changes what the agent does or can reach. ``tools`` IS in the
+Every spec field, including ``description``, requires mutation ownership. ``tools`` IS in the
 gated set even though ``mcp_servers`` might look like the more obvious target:
 an ``mcp_toolset`` entry in ``tools`` is how an attached MCP server actually
 becomes reachable by the model, so gating ``mcp_servers`` while leaving
@@ -35,7 +31,7 @@ from daimon.core.stores.channel_admins import get_channel_admins
 from fastmcp.exceptions import ToolError
 
 REACHABILITY_GATED_FIELDS: Final[frozenset[str]] = frozenset(
-    {"system", "model", "skills", "mcp_servers", "tools"}
+    {"system", "model", "skills", "mcp_servers", "tools", "description"}
 )
 
 UNPLACED_RUN_REASON: Final[str] = (
@@ -45,8 +41,7 @@ UNPLACED_RUN_REASON: Final[str] = (
 """Refusal wording for `TargetFacts.has_unplaced_run`, after the agent's name."""
 
 NOT_HELD_REASON: Final[str] = (
-    "was not made for, limited by its rule to or given to the channels this caller administers "
-    "by a server admin"
+    "is not limited by a channel rule exclusively to channels this caller administers"
 )
 """Refusal wording for a local agent that is not the channel admin's, after its name."""
 
@@ -183,13 +178,14 @@ async def require_admin_for_reachable_agent(
     agent_name: str,
     agent: BetaManagedAgentsAgent | None = None,
 ) -> None:
-    """Raise ``ToolError`` if a non-admin caller is patching a currently-reachable agent.
+    """Raise ``ToolError`` unless the caller owns this rule-bound agent or is an admin.
 
     Returns immediately for an admin caller without touching the database.
     For a non-admin caller, reads the tenant's config cascade and raises when
     ``agent_name`` currently resolves for any user in this tenant (channel,
-    tenant, or deployment tier), unless the caller administers every channel
-    the agent answers in. ``tenant_id`` always comes from ``auth.tenant_id`` —
+    tenant, or deployment tier), unless its rule names only channels the caller administers
+    and every answer and run stays inside those channels. ``tenant_id`` always
+    comes from ``auth.tenant_id`` —
     never from a caller-supplied parameter — so a caller cannot point the read
     at another tenant's config rows. The decision itself is
     `daimon.core.operation_policy.decide_operation`'s. Pass the resolved
@@ -214,7 +210,7 @@ async def require_admin_for_reachable_agent(
             )
         elif facts.has_unplaced_run:
             why = UNPLACED_RUN_REASON
-        elif facts.is_local_to_caller_channels:
+        elif not facts.is_held_by_caller:
             why = NOT_HELD_REASON
         else:
             why = (
@@ -226,5 +222,5 @@ async def require_admin_for_reachable_agent(
             f"ask a workspace or server admin to make the requested change to '{agent_name}'; "
             "carry the "
             "specific action from the conversation into that handoff. Do not retry. "
-            "Creating or forking your own agent is not gated."
+            "An admin can provision a channel-restricted agent that you administer."
         )

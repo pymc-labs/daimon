@@ -114,11 +114,15 @@ class _World:
         )
 
 
-async def _world(factory: async_sessionmaker[AsyncSession]) -> _World:
+async def _world(factory: async_sessionmaker[AsyncSession], *, owned: bool = False) -> _World:
     async with factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
         account = await make_account(session, tenant=tenant)
-    return _World(factory, tenant.id, account.id)
+    world = _World(factory, tenant.id, account.id)
+    if owned:
+        await _pin(world, CHANNEL_ID)
+        await _make_channel_admin(world, CHANNEL_ID)
+    return world
 
 
 def _details(name: str = "helper") -> AgentDetails:
@@ -216,7 +220,7 @@ async def _route(
         )
 
 
-async def test_a_member_opens_the_form_for_an_agent_that_answers_nowhere(
+async def test_an_unbound_agent_refuses_a_members_form(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory)
@@ -225,9 +229,10 @@ async def test_a_member_opens_the_form_for_an_agent_that_answers_nowhere(
 
     await _button(view, ADD_SKILL_LABEL).callback(interaction)
 
-    (modal,) = interaction.response.send_modal.await_args.args
-    assert isinstance(modal, AddSkillModal)
-    assert len(modal.children) <= 5, "a modal holds at most five components"
+    interaction.response.send_modal.assert_not_awaited()
+    assert (
+        "needs someone with Manage Server" in interaction.response.send_message.await_args.args[0]
+    )
 
 
 async def test_a_built_in_agent_is_refused_with_the_fork_route(
@@ -262,7 +267,7 @@ async def test_a_server_default_needs_a_server_admin(
 async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Only once a server admin made it the channel's default; a member's binding is not enough."""
+    """An admin-set default alone is insufficient; the explicit rule grants ownership."""
     world = await _world(db_session_factory)
     agent = world.put_agent()
     await _route(world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)))
@@ -287,6 +292,7 @@ async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
     await _route(
         world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
     )
+    await _pin(world, CHANNEL_ID)
     channel_admin = _interaction()
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
     channel_admin.response.send_modal.assert_awaited_once()
@@ -309,7 +315,7 @@ def _attachment(data: bytes, filename: str) -> MagicMock:
 async def test_a_pasted_skill_is_previewed_and_nothing_is_uploaded(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     interaction = _interaction()
 
@@ -327,7 +333,7 @@ async def test_a_pasted_skill_is_previewed_and_nothing_is_uploaded(
 async def test_an_uploaded_zip_flags_its_scripts_and_an_oversized_file_is_never_read(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -413,7 +419,7 @@ async def _preview(world: _World, agent: RosterAgent) -> SkillPreviewView:
 async def test_add_uploads_the_agents_own_skill_and_records_who_added_it(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     preview = await _preview(world, agent)
     monkeypatch.setattr(add_skill_mod, "load_details_for", AsyncMock(return_value=_details()))
@@ -446,7 +452,7 @@ async def test_add_uploads_the_agents_own_skill_and_records_who_added_it(
 async def test_add_re_reads_the_agent_and_refuses_one_that_became_built_in(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     preview = await _preview(world, agent)
     world.put_agent(managed=True)
@@ -498,9 +504,12 @@ async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an
     outside.response.send_modal.assert_not_awaited()
     assert outside.response.send_message.await_args.args[0] == PIN_WRITE_REFUSAL
 
-    for allowed in (_interaction(channel_id=OTHER_CHANNEL_ID), _interaction(admin=True)):
-        await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(allowed)
-        allowed.response.send_modal.assert_awaited_once()
+    inside = _interaction(channel_id=OTHER_CHANNEL_ID)
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(inside)
+    inside.response.send_modal.assert_not_awaited()
+    admin = _interaction(admin=True)
+    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(admin)
+    admin.response.send_modal.assert_awaited_once()
 
     await _make_channel_admin(world, OTHER_CHANNEL_ID)
     channel_admin = _interaction()
@@ -512,10 +521,11 @@ async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an
 async def test_a_member_in_a_thread_of_a_pinned_channel_may_add(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A thread is inside its parent channel's pin; a thread elsewhere is not."""
+    """The team member administers the channel named by its real rule."""
     world = await _world(db_session_factory)
     agent = world.put_agent()
     await _pin(world, OTHER_CHANNEL_ID)
+    await _make_channel_admin(world, OTHER_CHANNEL_ID)
 
     inside = _interaction(channel_id=THREAD_ID, thread_of=OTHER_CHANNEL_ID)
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(inside)
@@ -523,13 +533,13 @@ async def test_a_member_in_a_thread_of_a_pinned_channel_may_add(
 
     elsewhere = _interaction(channel_id=THREAD_ID, thread_of=CHANNEL_ID)
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(elsewhere)
-    elsewhere.response.send_modal.assert_not_awaited()
+    elsewhere.response.send_modal.assert_awaited_once()  # The verified rule owner may configure from anywhere.
 
 
 async def test_a_pin_added_after_the_button_refuses_the_submit_and_the_add(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     preview = await _preview(world, agent)
     await _pin(world, OTHER_CHANNEL_ID)
@@ -548,7 +558,7 @@ async def test_a_pin_added_after_the_button_refuses_the_submit_and_the_add(
 async def test_an_agent_shared_after_the_button_refuses_the_submit_and_the_add(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     preview = await _preview(world, agent)
     await _route(world, TenantScopeRef(tenant_id=world.tenant_id))
@@ -568,7 +578,7 @@ async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattache
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The attach re-checks the agent as it is then, not as it was at the click."""
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
     preview = await _preview(world, agent)
     upload = world._skills  # pyright: ignore[reportPrivateUsage]

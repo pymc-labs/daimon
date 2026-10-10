@@ -72,21 +72,25 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
     # --- shared agent change: a channel admin needs a local agent that is theirs ---
     *[
         (
-            f"shared change by channel admin {name}",
+            f"shared change by channel admin {name}, reachable={reachable}",
             OPEN,
             {
                 "subject": ACME_CHANNEL_ADMIN,
                 "action": Action.CHANGE_SHARED_AGENT,
                 "surface": Surface.CONFIG,
                 "operation_family": family,
-                "reach": AgentReach(reachable=True, local_to_caller=local, held_by_caller=held),
+                "reach": AgentReach(
+                    reachable=reachable, local_to_caller=local, held_by_caller=held
+                ),
             },
             ALLOW if local and held else _deny("admin_required"),
         )
         for family in ("spec", "attachment")
+        for reachable in (False, True)
         for name, local, held in (
             (f"{family} local and theirs", True, True),
             (f"{family} local, someone else's", True, False),
+            (f"{family} unbound", False, False),
             (f"{family} theirs, lost its locality", False, True),
         )
     ],

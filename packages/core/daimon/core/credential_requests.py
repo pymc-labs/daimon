@@ -57,6 +57,7 @@ CredentialRequestKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "
 # "applied" — the write landed. "stale_replacement" — the compare-and-set
 # precondition the card promised no longer held (someone else wrote, or the
 # key was removed). "write_failed" — the write itself raised.
+# "policy_refused" — mutation ownership refused a new MCP connection.
 # "replaced_by_newer" — nobody clicked it: the same person asked again in the
 # same thread for the same agent, and the newer form retired this one so the
 # thread never holds two live buttons for one intent. "token_rejected" — the
@@ -66,6 +67,7 @@ CredentialRequestOutcome = Literal[
     "applied",
     "stale_replacement",
     "write_failed",
+    "policy_refused",
     "replaced_by_newer",
     "token_rejected",
     "declined",
@@ -171,3 +173,12 @@ def build_button_label(
 def availability_for_request(row: CredentialRequestRow) -> ChangeAvailability:
     """A private-form save is 'saved' when nothing was waiting on it, else 'next_message'."""
     return "saved" if row.requested_work is None else "next_message"
+
+
+def mcp_permission_message(agent_name: str) -> str:
+    """Shared permission wording for a refused MCP mint or new connection."""
+    return (
+        f"Changing '{agent_name}'s MCP connections needs a server or workspace admin, "
+        "or an admin of every channel named by its rule, with every use staying inside "
+        "those channels. The caller does not have that permission."
+    )

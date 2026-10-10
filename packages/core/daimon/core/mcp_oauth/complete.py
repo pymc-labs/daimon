@@ -31,7 +31,11 @@ from daimon.core.channel_admins import (
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
-from daimon.core.mcp_attach import attach_mcp_server_to_agent, decide_mcp_connect
+from daimon.core.mcp_attach import (
+    McpServerReplaceRefusedError,
+    attach_mcp_server_to_agent,
+    decide_mcp_connect,
+)
 from daimon.core.mcp_oauth.flow import exchange_authorization_code
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenEndpointAuthMethod
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
@@ -162,15 +166,14 @@ async def complete_mcp_oauth_flow(
             now=now,
             before_write=still_allowed,
         )
-    # The grant is in this person's vault now, which is what makes them
-    # connected: their sessions mount the server, nobody else's do. Stamped
-    # before the attach, since a grant outlives an agent that has gone away.
-    async with session_factory() as session, session.begin():
-        await flows_store.mark_flow_completed(session, state=flow.state, now=now)
+    # Do not advertise a completed grant until the spec mutation is authorized:
+    # grant records also determine which servers other people's sessions hide.
     agent = await find_agent_by_derived_uuid(
         anthropic, tenant_id=flow.tenant_id, agent_id=flow.agent_id
     )
     if agent is None:
+        async with session_factory() as session, session.begin():
+            await flows_store.mark_flow_completed(session, state=flow.state, now=now)
         return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
     async with session_factory() as session:
         requester = await get_account_with_tenant(session, account_id=flow.account_id)
@@ -216,18 +219,27 @@ async def complete_mcp_oauth_flow(
             default=default,
             shares_token=False,
         )
-        try:
-            attached = await attach_mcp_server_to_agent(
-                anthropic,
-                agent.id,
-                server_name=flow.server_name,
-                url=flow.mcp_server_url,
-                replace_allowed=decision.replace_allowed,
-                before_update=still_allowed,
-            )
-        except McpOAuthWriteRefusedError:
+        if decision.refused:
             await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
-            raise
+            if decision.replaces:
+                raise McpServerReplaceRefusedError(server_name=flow.server_name)
+            raise McpOAuthWriteRefusedError
+        attached = agent
+        if decision.attaches:
+            try:
+                attached = await attach_mcp_server_to_agent(
+                    anthropic,
+                    agent.id,
+                    server_name=flow.server_name,
+                    url=flow.mcp_server_url,
+                    replace_allowed=decision.replace_allowed,
+                    before_update=still_allowed,
+                )
+            except (McpOAuthWriteRefusedError, McpServerReplaceRefusedError):
+                await _withdraw_grant(anthropic, credential_id=credential_id, vault_id=vault_id)
+                raise
+    async with session_factory() as session, session.begin():
+        await flows_store.mark_flow_completed(session, state=flow.state, now=now)
     return McpOAuthCompletion(
         vault_id=vault_id, credential_id=credential_id, ma_agent_id=attached.id
     )

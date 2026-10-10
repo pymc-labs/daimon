@@ -291,7 +291,7 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[ROLE], user_ids=[]
     )
-    with pytest.raises(ToolError, match="not made for, limited by its rule to or given to"):
+    with pytest.raises(ToolError, match="not limited by a channel rule"):
         await require_admin_for_reachable_agent(
             runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
         )
@@ -304,10 +304,15 @@ async def test_channel_admin_may_edit_an_agent_local_to_their_channel(
             mode="agent",
             set_by_admin=True,
         )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"helper": (CHANNEL,)}),
+        )
     await require_admin_for_reachable_agent(
         runtime, role_member, agent_name="helper", agent=_agent(tenant_id, "helper")
     )
-    with pytest.raises(ToolError, match="is currently a default agent here .* an admin must"):
+    with pytest.raises(ToolError, match="an admin must"):
         await require_admin_for_reachable_agent(
             runtime, role_member, agent_name="shared", agent=_agent(tenant_id, "shared")
         )
@@ -345,6 +350,11 @@ async def test_a_channel_admin_refusal_names_a_conversation_in_no_known_channel(
             agent_name="helper",
             mode="agent",
             set_by_admin=True,
+        )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"helper": (CHANNEL,)}),
         )
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
@@ -439,6 +449,11 @@ async def test_channel_admin_loses_an_agent_that_runs_a_server_admins_routine(
             mode="agent",
             set_by_admin=True,
         )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"helper": (CHANNEL,)}),
+        )
     await _set_channel_admins_impl(
         runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
     )
@@ -496,6 +511,11 @@ async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
             agent_name="helper",
             mode="agent",
             set_by_admin=True,
+        )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"helper": (CHANNEL,)}),
         )
     agent = ma_agent(
         id="agent_helper",

@@ -550,12 +550,24 @@ async def test_external_submit_matches_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, admin, monkeypatch)
         )
-    assert results[0] == results[1]
+    if kind == "mcp" and results[1][1] == "policy_refused":
+        # Intentional drift: a denied new connection is a permission receipt,
+        # not a failed write. Keep historical adapter side effects equivalent.
+        assert results[0][1] == "write_failed"
+        assert results[0][0] == results[1][0] is True
+        assert results[0][2:7] == results[1][2:7]
+        assert results[0][8:] == results[1][8:]
+        assert results[1][8] == ()
+        assert ("dispatch",) not in results[1][7]
+        assert "admin of every channel named by its rule" in str(results[1][7])
+        assert "does not have that permission" in str(results[1][7])
+    else:
+        assert results[0] == results[1]
     if kind == "mcp" and policy == "open" and shared and not admin:
         assert results[1][0] is True
-        assert results[1][1] == ("applied" if existing == "new" else "write_failed")
-        if existing != "new":
-            assert results[1][8] == ()
+        # A private token never grants permission to attach even a new server.
+        assert results[1][1] == ("policy_refused" if existing == "new" else "write_failed")
+        assert results[1][8] == ()
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))

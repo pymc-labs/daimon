@@ -32,10 +32,12 @@ from daimon.adapters.slack.agent_policy import (
 )
 from daimon.adapters.slack.credential_submissions import refuse_if_shared_and_not_admin_for_request
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.scope import ChannelScopeRef
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant, make_tenant_config
@@ -227,7 +229,7 @@ async def test_spec_edit_refuses_a_member_when_the_target_answers_somewhere(
         )
 
 
-async def test_spec_edit_allows_a_member_when_the_target_answers_nowhere(
+async def test_spec_edit_refuses_a_member_when_the_target_answers_nowhere(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """An unreachable agent has no live gate to defend, so a member may edit it."""
@@ -252,8 +254,8 @@ async def test_spec_edit_allows_a_member_when_the_target_answers_nowhere(
             user_id=_USER_ID,
         )
 
-        assert refused is False, "an unshared agent stays member-editable"
-        assert _EPHEMERAL_KEY not in mock.requests, "a pass-through posts nothing"
+        assert refused is True, "unreachable does not establish ownership"
+        assert _ephemeral_texts(mock) == [NEEDS_ADMIN_SPEC_MESSAGE]
 
 
 async def test_refuse_unless_allowed_refuses_when_the_agent_id_is_gone(
@@ -444,6 +446,11 @@ async def test_repo_bind_allows_a_channel_admin_for_an_agent_local_to_their_chan
                 agent_name=_AGENT_NAME,
                 mode="agent",
                 set_by_admin=True,
+            )
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(agent_channel_pins={_AGENT_NAME: (_CHANNEL_ID,)}),
             )
             await session.commit()
         assert not await refused(), "the channel admin runs the only channel it answers in"

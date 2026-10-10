@@ -535,7 +535,7 @@ async def test_callback_repo_kind_member_against_defaults_managed_target_refuses
     )
 
 
-async def test_callback_repo_kind_member_against_non_managed_non_reachable_target_opens_modal(
+async def test_callback_repo_kind_member_unbound_target_refuses_modal(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     ma_agent_id = "agent_button_private"
@@ -551,11 +551,8 @@ async def test_callback_repo_kind_member_against_non_managed_non_reachable_targe
 
     await item.callback(interaction)
 
-    interaction.response.send_modal.assert_awaited_once()
-    sent_modal = interaction.response.send_modal.call_args.args[0]
-    assert isinstance(sent_modal, RepoBindModal), (
-        "a member binding a repo to their own, unshared agent must reach the modal"
-    )
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
 
 
 async def test_callback_repo_kind_pre_filter_timeout_opens_modal_and_submit_time_gate_still_refuses(

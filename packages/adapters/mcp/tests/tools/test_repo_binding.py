@@ -141,7 +141,7 @@ async def test_bind_public_repo_writes_a_public_proof_binding(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client(tenant.id))
-    auth = _auth_identity(tenant_id=tenant.id, account_id=caller.id, is_admin=False)
+    auth = _auth_identity(tenant_id=tenant.id, account_id=caller.id, is_admin=True)
     github, seen = _github()
 
     async with (
@@ -304,7 +304,7 @@ async def test_bind_public_repo_asks_about_uncommitted_work_once_then_stores_the
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client(tenant.id))
-    auth = _auth_identity(tenant_id=tenant.id, account_id=caller.id, is_admin=False)
+    auth = _auth_identity(tenant_id=tenant.id, account_id=caller.id, is_admin=True)
     github, _seen = _github()
 
     async with (
@@ -418,7 +418,7 @@ async def test_bind_public_repo_confirmation_never_claims_a_copy(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client(tenant.id))
-    auth = _auth_identity(tenant_id=tenant.id, account_id=caller.id, is_admin=False)
+    auth = _auth_identity(tenant_id=tenant.id, account_id=caller.id, is_admin=True)
     github, _seen = _github()
 
     async with (

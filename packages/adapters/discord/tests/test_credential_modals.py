@@ -857,7 +857,7 @@ async def test_mcp_modal_submit_consumes_token_and_writes_vault_credential(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     assert len(creds_created) == 1, "exactly one credential must be POSTed to the per-agent vault"
@@ -904,7 +904,7 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _interaction()
+    interaction = _admin_interaction()
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
@@ -930,7 +930,7 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     )
     retry_modal = McpCredentialModal(runtime=retry_runtime, request_row=row)
     retry_modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
-    retry_interaction = _interaction()
+    retry_interaction = _admin_interaction()
     await retry_modal.on_submit(retry_interaction)
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
@@ -1011,7 +1011,7 @@ async def test_mcp_modal_disables_the_button_even_when_the_write_below_it_fails(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     edits = _card_edits(interaction)
@@ -1139,7 +1139,7 @@ async def test_repo_modal_public_repo_blank_token_admin_binds_anon_against_manag
     assert binding.proof_kind == "public"
 
 
-async def test_repo_modal_public_repo_blank_token_member_binds_anon_against_own_target(
+async def test_repo_modal_public_repo_blank_token_admin_binds_anon_against_target(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1156,13 +1156,11 @@ async def test_repo_modal_public_repo_blank_token_member_binds_anon_against_own_
     )
 
     modal = RepoBindModal(runtime=runtime, request_row=row)
-    await modal.on_submit(_member_interaction())
+    await modal.on_submit(_admin_interaction())
 
     async with db_session_factory() as session:
         binding = await get_binding(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
-    assert binding is not None, (
-        "a member binding a public repo to their own, unshared agent must succeed"
-    )
+    assert binding is not None, "an admin binding a public repo to an unbound agent must succeed"
     assert binding.ma_secret_ref == "anon:"
     assert binding.proof_kind == "public"
 
@@ -1684,6 +1682,9 @@ async def test_skill_repo_modal_passes_seeded_names_and_admin_status_to_the_sync
     interaction = _admin_interaction() if is_admin else _member_interaction()
     await modal.on_submit(_as_card_interaction(interaction))
 
+    if not is_admin:
+        sync.assert_not_awaited()
+        return
     assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
     assert sync.call_args.kwargs["is_admin"] is is_admin
 
@@ -2357,7 +2358,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
         runtime=_runtime(sessionmaker=db_session_factory), request_row=env_row
     )
     env_modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
-    env_interaction = _card_interaction()
+    env_interaction = _as_card_interaction(_admin_interaction())
     await env_modal.on_submit(env_interaction)
     env_interaction.followup.send.assert_not_awaited()
     assert "NO_TOAST_TOKEN saved for tester." in _card_text(_card_edits(env_interaction)[-1]), (
@@ -2380,7 +2381,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     )
     mcp_modal = McpCredentialModal(runtime=mcp_runtime, request_row=mcp_row)
     mcp_modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
-    mcp_interaction = _card_interaction()
+    mcp_interaction = _as_card_interaction(_admin_interaction())
     await mcp_modal.on_submit(mcp_interaction)
     mcp_interaction.followup.send.assert_not_awaited()
     assert "tester is connected to linear." in _card_text(_card_edits(mcp_interaction)[-1]), (
@@ -2521,7 +2522,7 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     assert probed == [("https://mcp.notion.com/mcp", _MCP_TOKEN)], "the server is asked first"
@@ -2684,7 +2685,7 @@ async def test_mcp_attach_failure_publishes_no_token(
     modal = McpCredentialModal(runtime=runtime, request_row=row)
     modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
 
-    interaction = _card_interaction()
+    interaction = _as_card_interaction(_admin_interaction())
     await modal.on_submit(interaction)
 
     card = _card_text(_card_edits(interaction)[-1])
@@ -3112,3 +3113,39 @@ async def test_a_family_change_during_an_admin_rotation_is_still_refused(
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
     assert persisted is not None and persisted.outcome == "stale_replacement"
+
+
+async def test_mcp_modal_refuses_member_attachment_to_an_unbound_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed_mcp_request(
+        db_session_factory, mcp_server_url="https://ext.example.com/mcp", with_origin=True
+    )
+    vault_id = "vlt_credmodal"
+    per_agent_display = f"daimon-mcp:{row.account_id}:{row.agent_id}"
+    creds_created: list[dict[str, Any]] = []
+    agent_updates: list[dict[str, Any]] = []
+
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_stub_anthropic(
+            _vault_handler(
+                vault_id,
+                per_agent_display,
+                creds_created,
+                tenant_id=str(row.tenant_id),
+                agent_updates=agent_updates,
+            )
+        ),
+        public_url=HttpUrl("https://mcp.example.com/mcp"),
+        jwt_secret="x" * 32,
+    )
+    modal = McpCredentialModal(runtime=runtime, request_row=row)
+    modal.token_input._value = _MCP_TOKEN  # pyright: ignore[reportPrivateUsage]
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    assert creds_created == []
+    assert agent_updates == [], "a posted token never authorizes an unbound agent spec"

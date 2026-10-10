@@ -32,15 +32,14 @@ from daimon.adapters.slack.agent_setup.state import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
-from daimon.core.defaults.metadata import tenant_scoped_display_title
-from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
@@ -180,10 +179,26 @@ class _World:
         return client
 
 
-async def _world(factory: async_sessionmaker[AsyncSession]) -> _World:
+async def _world(factory: async_sessionmaker[AsyncSession], *, owned: bool = False) -> _World:
     async with factory.begin() as session:
         tenant = await make_tenant(session, platform="slack", workspace_id=TEAM)
     assert tenant.id == derive_tenant_uuid(platform="slack", workspace_id=TEAM)
+    if owned:
+        async with factory.begin() as session:
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(agent_channel_pins={"helper": (META.channel_id,)}),
+            )
+            await set_channel_admins(
+                session,
+                tenant_id=tenant.id,
+                platform="slack",
+                channel_id=META.channel_id,
+                role_ids=[],
+                user_ids=[USER],
+                actor_account_id=None,
+            )
     return _World(factory, tenant.id)
 
 
@@ -191,7 +206,7 @@ def _told(client: MagicMock) -> list[str]:
     return [call.kwargs["text"] for call in client.chat_postEphemeral.await_args_list]
 
 
-async def test_a_member_adds_to_an_agent_that_answers_nowhere_and_details_refresh(
+async def test_an_unbound_agent_refuses_a_members_skill_add(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world = await _world(db_session_factory)
@@ -199,22 +214,9 @@ async def test_a_member_adds_to_an_agent_that_answers_nowhere_and_details_refres
 
     client = await world.run(monkeypatch)
 
-    assert world.created == [
-        tenant_scoped_display_title(tenant_id=world.tenant_id, name="notes", agent_name="helper")
-    ], "never the shared library"
-    assert _told(client) == ["helper now has the skill *notes*."]
-    client.views_update.assert_awaited_once_with(view_id="V1", view={"v": 1})
-    async with db_session_factory() as session:
-        row = await load_user_skill(
-            session,
-            tenant_id=world.tenant_id,
-            principal_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="ag_helper"),
-            agent_name="helper",
-            name="notes",
-        )
-    assert row is not None
-    assert (row.source, row.origin) == ("upload", "pasted")
-    assert row.added_by_account_id is not None, "the adder is attributed"
+    assert world.created == []
+    assert _told(client) == [NEEDS_ADMIN_SKILL_MESSAGE]
+    client.views_update.assert_not_awaited()
 
 
 async def test_a_member_is_refused_on_the_workspace_default(
@@ -278,13 +280,23 @@ async def test_a_pinned_agent_takes_an_add_only_from_inside_its_channels_or_an_a
     outside = await world.run(monkeypatch)
     assert _told(outside) == [PIN_WRITE_REFUSAL] and world.created == []
 
+    async with db_session_factory.begin() as session:
+        await set_channel_admins(
+            session,
+            tenant_id=world.tenant_id,
+            platform="slack",
+            channel_id="C0PINNED",
+            role_ids=[],
+            user_ids=[USER],
+            actor_account_id=None,
+        )
     inside = await world.run(monkeypatch, meta=dataclasses.replace(META, channel_id="C0PINNED"))
     assert _told(inside) == ["helper now has the skill *notes*."]
     admin = await world.run(monkeypatch, admin=True)
     assert _told(admin) == ["helper already had the skill *notes*."]
 
 
-async def test_the_members_own_conversation_with_the_agent_is_not_sharing(
+async def test_own_conversation_does_not_grant_unbound_agent_ownership(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world = await _world(db_session_factory)
@@ -305,14 +317,15 @@ async def test_the_members_own_conversation_with_the_agent_is_not_sharing(
 
     client = await world.run(monkeypatch)
 
-    assert _told(client) == ["helper now has the skill *notes*."]
+    assert _told(client) == [NEEDS_ADMIN_SKILL_MESSAGE]
+    assert world.created == []
 
 
 async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattached(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The attach re-checks the agent as it is then."""
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     world.put_agent()
     upload = world._skills  # pyright: ignore[reportPrivateUsage]
 
@@ -335,7 +348,7 @@ async def test_the_attach_rechecks_the_fresh_agent_not_a_lookup_by_its_old_name(
 ) -> None:
     """Renamed during the upload to the workspace default's name while a new agent takes
     the old one: the fresh copy is shared, whatever the name now finds."""
-    world = await _world(db_session_factory)
+    world = await _world(db_session_factory, owned=True)
     world.put_agent()
     async with db_session_factory.begin() as session:
         await set_fields(

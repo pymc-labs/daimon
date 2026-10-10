@@ -24,9 +24,9 @@ A private conversation counts as the channel `/dm` ran in: its DM channel's
 row and its `dm:` scope answer only while it is the tenant's live conversation
 there, and then as that source channel.
 
-Locality alone never makes an agent a channel admin's: it must also be theirs
-(`daimon.core.authz.channel_admin_holds`), which this module reads the facts
-for (its creation channel, its pins, the defaults server admins set to it).
+Mutation locality also requires an agent rule limited to the caller's channels,
+including for an agent not currently answering anywhere. Creation records and
+admin-set defaults continue to authorize binding, but not spec mutations.
 """
 
 from __future__ import annotations
@@ -89,6 +89,7 @@ WIDE_SHARING_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
         "agent_spec_edit",
         "key_replace",
         "key_remove",
+        "mcp_connect",
         "mcp_replace",
         "mcp_remove",
         "repo_bind",
@@ -342,7 +343,7 @@ async def load_agent_reach(
 
 class _Locality(NamedTuple):
     is_local: bool
-    # And the agent is the caller's (`channel_admin_holds`); read only when local.
+    # Mutation ownership: an agent rule names only administered channels.
     is_held: bool = False
     # Why a reachable agent is not local, when that is the reason; both False when local.
     held_back_by_unattended_run: bool = False
@@ -377,19 +378,18 @@ async def _caller_locality(
         caller_account_id=caller_account_id,
         caller_platform_user_id=caller_platform_user_id,
     )
-    if reach.is_local_to(administered, platform_user_id=caller.platform_user_id):
+    if reach.may_move_into(administered, platform_user_id=caller.platform_user_id):
+        held = await _caller_holds(
+            session,
+            tenant_id=tenant_id,
+            agent_names=agent_names,
+            caller=caller,
+            administered=administered,
+        )
         return _Locality(
-            is_local=True,
-            is_held=await _caller_holds(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                agent_names=agent_names,
-                ma_agent_id=ma_agent_id,
-                caller=caller,
-                administered=administered,
-                reach=reach,
-            ),
+            is_local=held
+            or reach.is_local_to(administered, platform_user_id=caller.platform_user_id),
+            is_held=held,
         )
     return _Locality(
         is_local=False,
@@ -404,25 +404,19 @@ async def _caller_holds(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    platform: str,
     agent_names: tuple[str, ...],
-    ma_agent_id: str | None,
     caller: ChannelAdminCaller,
     administered: frozenset[str],
-    reach: AgentReach,
 ) -> bool:
-    """Shell half of `channel_admin_holds`. An unreadable policy counts no pin."""
+    """Mutation ownership requires a rule limited to administered channels.
+
+    Creation records and admin-set defaults can authorize binding an agent,
+    but do not authorize changing its spec. An unreadable policy counts no rule.
+    """
     try:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     except AccessPolicyUnreadable:
         policy = TenantAccessPolicy()
-    created_for = (
-        await get_creation_channel(
-            session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, platform=platform
-        )
-        if ma_agent_id is not None
-        else None
-    )
     return channel_admin_holds(
         policy,
         subject=build_subject(
@@ -431,10 +425,7 @@ async def _caller_holds(
             administered_channel_ids=administered,
         ),
         agent=AgentRef.of(*agent_names),
-        standing=AgentStanding(
-            created_for_channel_id=created_for,
-            admin_default_channel_ids=reach.admin_default_channel_ids,
-        ),
+        standing=AgentStanding(),
     )
 
 
@@ -685,8 +676,8 @@ async def load_target_facts(
 ) -> TargetFacts:
     """The policy facts for one target, reading only what the decision depends on.
 
-    A server admin, a posted-token write or a managed target reads nothing; an
-    agent nobody reaches skips the channel admin read. `agent_names` is every
+    A server admin, a posted-token write or a managed target reads nothing.
+    Ownership is checked even for an unreachable target. `agent_names` is every
     name the agent carries (`daimon.core.agent_pins.agent_pin_names`). The
     caller ids leave the caller's own routines and sessions out of a wide
     sharing read (`WIDE_SHARING_OPERATIONS`) and of locality alike; None counts
@@ -722,7 +713,7 @@ async def load_target_facts(
             caller_account_id=caller_account_id,
             caller_platform_user_id=caller_platform_user_id,
         )
-        if reachable and not unplaceable
+        if not unplaceable
         else _Locality(is_local=False)
     )
     return TargetFacts(

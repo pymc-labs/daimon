@@ -37,6 +37,7 @@ from daimon.adapters.discord.credential_repo_bind import (
     resolve_repo_binding_credential,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -44,6 +45,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import scoped_config_write
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
@@ -204,14 +206,10 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
     assert "fork" not in _sent_message(interaction)
 
 
-async def test_reachable_non_managed_target_flips_with_the_scope_row(
+async def test_unbound_target_remains_admin_only_after_its_default_is_removed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Branches (d) and (e) share one refusal message, so text alone cannot tell
-    them apart. Running the same fixture with and without the scope row that
-    makes the agent reachable, and asserting the result flips, is the only way
-    to pin branch (e) specifically — deleting it would leave this test green
-    with the scope row removed unless the flip is checked both ways."""
+    """Removing reachability never creates member ownership."""
     ma_agent_id = "agent_reachable_1"
     agent_name = "bot"
     async with db_session_factory() as session, session.begin():
@@ -245,13 +243,8 @@ async def test_reachable_non_managed_target_flips_with_the_scope_row(
     refused_when_unreachable = await refuse_if_shared_and_not_admin_for_request(
         unscoped_interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
     )
-    assert refused_when_unreachable is False, (
-        "removing the only scope row naming this agent must free it for its own member"
-    )
-    assert refused_when_reachable != refused_when_unreachable, (
-        "only branch (e), reachability, can produce this flip — a deleted branch (e) "
-        "would leave both calls returning True"
-    )
+    assert refused_when_unreachable is True, "unbound agents remain admin-only"
+    assert _sent_message(unscoped_interaction) == _SHARED_AGENT_MESSAGE
 
 
 async def test_channel_admin_binds_to_an_agent_local_to_their_channel_only(
@@ -310,12 +303,19 @@ async def test_channel_admin_binds_to_an_agent_local_to_their_channel_only(
             interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
         )
 
-    assert await refused("local-bot") is False, "made for the admin's channel and local to it"
+    assert await refused("local-bot") is True, "creation alone is insufficient"
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_channel_pins={"local-bot": ("500",)}),
+        )
+    assert await refused("local-bot") is False, "an explicit local rule grants ownership"
     assert await refused("bound-bot") is True, "a member's binding does not make it the admin's"
     assert await refused("wide-bot") is True, "the server default stays with server admins"
 
 
-async def test_non_managed_non_reachable_target_member_allowed_no_ephemeral(
+async def test_unbound_target_member_refused(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     ma_agent_id = "agent_private_1"
@@ -331,9 +331,8 @@ async def test_non_managed_non_reachable_target_member_allowed_no_ephemeral(
         interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
     )
 
-    assert refused is False, "a private, unreachable agent is the member's own to bind a repo to"
-    interaction.response.send_message.assert_not_called()
-    interaction.followup.send.assert_not_called()
+    assert refused is True
+    assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
 
 
 async def test_admin_passes_on_defaults_managed_target_before_any_ma_request(
