@@ -92,3 +92,18 @@ def test_card_clips_long_agent_name() -> None:
         == "Nothing is connected yet.\n\n"
         + f"Tap the button and tick the repos {name[:80]} can use."
     )
+
+
+def test_card_names_the_requested_repo_and_the_exact_clicks() -> None:
+    card = cards.build_connect_card(
+        agent_name="ResearchBot",
+        identity_enabled=False,
+        avatar_url=None,
+        public_base_url="https://daimon.example",
+        requested_repo="acme/data",
+    )
+    assert card.description == (
+        "Nothing is connected yet.\n\n"
+        "Tap the button. On the page, click Add repos, tick acme/data, "
+        "click Add repos again, then Save changes."
+    )

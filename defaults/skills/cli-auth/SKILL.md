@@ -10,12 +10,17 @@ tokens for external CLIs. Export the result under the appropriate name
 before running CLI commands.
 
 For a GitHub App session, the filesystem has at most one working repo at
-`/workspace/<owner>/<repo>`. Other repos granted to this agent have
-`GH_TOKEN_*` credentials; clone one by name when asked. Inspect only this
+`/workspace/<owner>/<repo>`. Other repos granted to this agent are reached by
+token: clone one with `gh repo clone owner/repo` (gh reads `GH_TOKEN`). If gh
+fails, use `git clone https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git`.
+Plain `git clone` or `git ls-remote` without the token only reaches the
+mounted repo and public repos, so never conclude you have no access from them.
+If a repo is granted but none is the working repo, say how to set one: "To put
+it in my workspace, ask me to make it the working repo." Inspect only this
 agent's granted repos when a list is needed. Do not name a private repo to
 someone who cannot see it.
 The `get_cli_token("github")` tool is unavailable in App mode. Never ask for a
-token in App mode. `GH_TOKEN` is for the working repo when set. If `gh` is not
+token in App mode. If `gh` is not
 installed, use `curl` for GitHub API calls or the GitHub Copilot MCP tools for
 repository operations.
 
