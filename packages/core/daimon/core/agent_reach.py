@@ -93,6 +93,7 @@ WIDE_SHARING_OPERATIONS: Final[frozenset[OperationKind]] = frozenset(
         "mcp_replace",
         "mcp_remove",
         "repo_bind",
+        "github_connect",
         "github_grant",
         "skill_repo_connect",
         "skill_add",

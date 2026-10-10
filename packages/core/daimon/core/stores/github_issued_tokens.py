@@ -230,9 +230,19 @@ async def select_stale_tokens(
                     ON grant_row.tenant_id = token.tenant_id
                    AND grant_row.agent_id = token.agent_id
                    AND grant_row.repo_id = repo.repo_id
-                  LEFT JOIN tenant_github_repos AS auth_row
-                    ON auth_row.tenant_id = token.tenant_id
-                   AND auth_row.repo_id = repo.repo_id
+                  -- The row the agent may use: its own, else the server-wide one.
+                  LEFT JOIN LATERAL (
+                    SELECT candidate.*
+                    FROM tenant_github_repos AS candidate
+                    WHERE candidate.tenant_id = token.tenant_id
+                      AND candidate.repo_id = repo.repo_id
+                      AND (
+                        candidate.scope_agent_id IS NULL
+                        OR candidate.scope_agent_id = token.agent_id
+                      )
+                    ORDER BY candidate.scope_agent_id IS NULL
+                    LIMIT 1
+                  ) AS auth_row ON true
                   WHERE grant_row.repo_id IS NULL
                      OR grant_row.staged
                      OR auth_row.repo_id IS NULL
