@@ -27,7 +27,7 @@ def turn(backend: FakeBackend) -> Turn:
         {"kind": "text_absent", "pattern": "ORANGE"},
         {"kind": "card_finalized"},
         {"kind": "reaction_present", "emoji": "👍"},
-        {"kind": "attachments", "min": 1, "max": 1, "name_pattern": r"\.csv$", "unique": True},
+        {"kind": "attachments", "min": 1, "max": 1, "unique": True},
         {"kind": "log_absent", "event": "session.replaced"},
         {"kind": "judge", "rubric": "Contains APPLE"},
     ],

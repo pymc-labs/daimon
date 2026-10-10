@@ -166,6 +166,28 @@ def test_invalid_known_step_not_hidden_by_proposal(tmp_path: Path, scenario: Sce
         load_catalog(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        {"kind": "attachments", "turn": 2, "max": 0, "name_pattern": r"\.typ$"},
+        {"kind": "reaction_present", "turn": 2, "emoji": "👍", "within_s": 5},
+    ],
+)
+def test_unimplemented_parameter_semantics_are_pending(
+    tmp_path: Path, scenario: Scenario, assertion: dict[str, object]
+) -> None:
+    import yaml
+
+    from qa.live.schema import ProposedScenario
+
+    values = scenario.model_dump(by_alias=True)
+    values["assert"] = [assertion]
+    (tmp_path / "later.yaml").write_text(yaml.safe_dump(values))
+    entry = load_catalog(tmp_path)[0]
+    assert isinstance(entry, ProposedScenario)
+    assert entry.unsupported
+
+
 def test_approved_placeholders_and_regex_quantifiers_load(
     tmp_path: Path, scenario: Scenario
 ) -> None:

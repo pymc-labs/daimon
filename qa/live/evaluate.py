@@ -13,6 +13,8 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
     turn = next((t for t in turns if t.number == assertion.turn), None)
     evidence: list[str] = []
     try:
+        if assertion.pending_extension:
+            raise Pending(assertion.pending_extension)
         if kind == "interrupt_within_s":
             raise Pending("headless interrupt hook is not implemented")
         if kind == "db_check":

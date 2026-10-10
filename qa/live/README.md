@@ -97,7 +97,9 @@ The original Discord assertion kinds are implemented: response and terminal
 latency, thread location/reuse, observed progress, blank messages, parent-channel
 posts, silent drops, regex presence and
 absence over content and all embed text, settled cards, reactions, attachment
-counts/names/uniqueness, scoped logs, read-only SQL, and the fixed Haiku judge.
+counts/uniqueness, scoped logs, read-only SQL, and the fixed Haiku judge.
+The approved filtered attachment counts (`name_pattern`) and timed reaction
+observations remain PENDING until the FULL stage implements their semantics.
 The approved global regex assertions are appended to every executed turn: no
 `(empty response)`, raw platform/API exception copy, or `access_token=` output.
 

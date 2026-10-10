@@ -102,6 +102,14 @@ class Assertion(Contract):
     expect: JsonValue = None
     rubric: str | None = None
 
+    @property
+    def pending_extension(self) -> str | None:
+        if self.kind == "attachments" and self.name_pattern is not None:
+            return "filtered attachment counts (P5)"
+        if self.kind == "reaction_present" and self.within_s is not None:
+            return "timed reaction observation"
+        return None
+
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
         if self.kind not in {"db_check", "interrupt_within_s"} and self.turn is None:
@@ -162,6 +170,8 @@ class Scenario(ScenarioMetadata):
 
     @model_validator(mode="after")
     def consistency(self) -> Self:
+        if any(a.pending_extension for a in self.assertions):
+            raise ValueError("scenario requires an unimplemented assertion extension")
         if self.set == "B" and not self.human:
             raise ValueError("set B requires human checklist")
         if (
@@ -272,7 +282,9 @@ class ProposedScenario(ScenarioMetadata):
             if assertion.get("turn") == 0:
                 features.add("whole-run turn 0")
                 normalized["turn"] = 1
-            Assertion.model_validate(normalized)
+            supported = Assertion.model_validate(normalized)
+            if supported.pending_extension:
+                features.add(supported.pending_extension)
         if PLACEHOLDER.search(str([self.setup, self.steps, self.assertions, self.teardown])):
             features.add("catalog fixture/context placeholders")
         if not features:
