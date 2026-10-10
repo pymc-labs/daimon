@@ -49,6 +49,65 @@ def recording(
     return RunEvidence(scenario_id="followup", backend=backend, turns=turns)
 
 
+@pytest.mark.parametrize("decision", ("approved", "denied", "timed_out"))
+def test_approval_cannot_authorize_an_unlinked_execution(
+    decision: Literal["approved", "denied", "timed_out"],
+) -> None:
+    source = rich_turn()
+    approvals = (source.approvals[0], source.approvals[1].model_copy(update={"state": decision}))
+    extra = tuple(
+        item.model_copy(
+            update={
+                "call_id": "unapproved-call",
+                "evidence_id": f"unapproved-{item.evidence_id}",
+                "order": item.order + 4,
+            }
+        )
+        for item in source.tools
+    )
+    linked = source.tools if decision == "approved" else ()
+    report = evaluate(
+        recording(rich_turn(approvals=approvals, tools=(*linked, *extra))),
+        [
+            {
+                "kind": "approval_effect",
+                "turn": 1,
+                "tool_name": "publish",
+                "decision": decision,
+            }
+        ],
+    )
+    assert report.status == "FAIL"
+    assert report.checks[0].code == "TOOL_EXECUTED_WITHOUT_APPROVAL"
+    assert all(item.evidence_id in report.checks[0].evidence_ids for item in extra)
+
+
+@pytest.mark.parametrize("kind", ("log_present", "log_absent"))
+def test_setup_log_window_is_valid_but_pending_without_capture(kind: str) -> None:
+    report = evaluate(
+        recording(turn()), [{"kind": kind, "turn": 0, "event": "agent_fork.dropped_skills"}]
+    )
+    assert report.status == "PENDING"
+    assert report.checks[0].code == "TURN_NOT_CAPTURED"
+
+
+def test_every_unapproved_matching_call_is_checked_without_effect_count_maximum() -> None:
+    source = rich_turn()
+    tools = tuple(item.model_copy(update={"call_id": "unapproved"}) for item in source.tools)
+    report = evaluate(
+        recording(rich_turn(tools=tools)),
+        [
+            {
+                "kind": "approval_effect",
+                "turn": 1,
+                "tool_name": "publish",
+                "decision": "approved",
+            }
+        ],
+    )
+    assert report.status == "FAIL"
+
+
 @pytest.mark.parametrize("backend", ("anthropic", "openai", "gemini"))
 def test_provider_identity_does_not_change_structural_outcomes(
     backend: Literal["anthropic", "openai", "gemini"],
