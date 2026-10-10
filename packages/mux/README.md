@@ -530,4 +530,10 @@ map and agents with no references. Inline authorization, native credential
 bindings and mixed authentication refuse before session creation. Only a
 resolver value bound to the caller and exact destination enters the ephemeral
 session request; actual SDK DEBUG logs retain its redacted representation.
-Verified anonymous and custom tools preserve their existing request bytes.
+Credential-free anonymous-only and custom tools preserve their existing request
+bytes. All MCP destinations require HTTPS without userinfo, query strings,
+fragments or malformed authority. A closed native tool/transport shape refuses
+headers, authentication and undeclared credential carriers before resolution.
+Every MCP tool copied into an authenticated session override must match its own
+scoped resolver binding exactly; mixed bound/anonymous MCP definitions refuse
+before agent creation. Multiple independently bound servers remain supported.

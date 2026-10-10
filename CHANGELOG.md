@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.
+- Reject credential-bearing URLs and undeclared fields on every OpenAI MCP entry; authenticated overrides require an exact scoped resolver binding for every server before resolution or session POST.
+
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.

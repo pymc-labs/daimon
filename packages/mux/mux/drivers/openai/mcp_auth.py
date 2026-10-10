@@ -23,6 +23,26 @@ _REF = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 MCPSecretResolver = Callable[[Scope, str, str], Awaitable[str]]
 
 
+def _destination(value: object) -> bool:
+    """Accept only a literal HTTPS destination without credential carriers."""
+    if not isinstance(value, str) or any(c.isspace() for c in value) or "\\" in value:
+        return False
+    try:
+        url = urlsplit(value)
+        return (
+            value.startswith("https://")
+            and bool(url.hostname)
+            and url.username is None
+            and url.password is None
+            and "%" not in url.netloc
+            and "?" not in value
+            and "#" not in value
+            and (url.port is None or 0 < url.port <= 65535)
+        )
+    except ValueError:
+        return False
+
+
 def validate(connection: MCPConnection, context: Context) -> None:
     if connection.transport != "streamable_http":
         raise context.unsupported("mcp_transport")
@@ -38,19 +58,10 @@ def validate(connection: MCPConnection, context: Context) -> None:
         raise context.unsupported("mcp_allowed_tools")
     if "required" in policy and not isinstance(policy["required"], bool):
         raise context.unsupported("mcp_required")
-    if connection.credential_ref is not None:
-        if _REF.fullmatch(connection.credential_ref) is None:
-            raise context.unsupported("mcp_credential_reference")
-        url = urlsplit(connection.url)
-        if (
-            url.scheme != "https"
-            or not url.hostname
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-        ):
-            raise context.unsupported("credential_https_mcp_destination")
+    if not _destination(connection.url):
+        raise context.unsupported("credential_https_mcp_destination")
+    if connection.credential_ref is not None and _REF.fullmatch(connection.credential_ref) is None:
+        raise context.unsupported("mcp_credential_reference")
 
 
 def tool(connection: MCPConnection, context: Context) -> Object:
@@ -71,6 +82,10 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
         return {}
     for connection in authenticated:
         validate(connection, context)
+    if len(authenticated) != len(connections):
+        # An authenticated override may copy only resolver-bound MCP tools.
+        # Anonymous-only agents retain their credential-free native requests.
+        raise context.unsupported("unbound_mcp_destination")
     value = json.dumps([c.model_dump(mode="json") for c in authenticated], separators=(",", ":"))
     if len(value) > 512:
         raise context.unsupported("mcp_credential_metadata_size")
@@ -89,26 +104,18 @@ def _validate_native_auth(tools: Sequence[Object]) -> None:
             continue
         transport = object_json(native["transport"])
         if (
-            transport.get("authorization") is not None
-            or transport.get("headers")
-            or any(
-                native.get(key) is not None
-                for key in (
-                    "credential_id",
-                    "credential_ref",
-                    "authorization",
-                    "auth",
-                )
-            )
-            or native.get("headers")
-            or any(
-                transport.get(key) is not None
-                for key in (
-                    "credential_id",
-                    "credential_ref",
-                    "auth",
-                )
-            )
+            set(native)
+            - {
+                "type",
+                "server_label",
+                "transport",
+                "connection_origin",
+                "allowed_tools",
+                "required",
+            }
+            or set(transport) - {"type", "server_url"}
+            or transport.get("type") != "http"
+            or not _destination(transport.get("server_url"))
             or native.get("connection_origin") not in (None, "service")
         ):
             # Never include the rejected value or provider payload in errors.
@@ -127,6 +134,8 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
     connections = _CONNECTIONS.validate_json(value)
     if not connections or len({c.name for c in connections}) != len(connections):
         raise ValueError("invalid MCP credential references")
+    if len([t for t in tools if t.get("type") == "mcp"]) != len(connections):
+        raise ValueError("native MCP destination is not host-resolver bound")
     for connection in connections:
         if connection.credential_ref is None:
             raise ValueError("missing MCP credential reference")

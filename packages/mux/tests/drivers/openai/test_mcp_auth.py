@@ -88,6 +88,8 @@ class Wire:
             transport = object_json(mcp["transport"])
             if self.fail == "changed_url":
                 transport["server_url"] = "https://other.example.com/mcp"
+            if self.fail == "changed_path":
+                transport["server_url"] = URL + "/fictional-private-path"
             if self.fail == "changed_policy":
                 mcp["allowed_tools"] = ["mutating_tool"]
             if self.fail == "native_auth":
@@ -177,6 +179,7 @@ async def test_bearer_is_session_only_and_sdk_debug_logging_redacts_it(
     [
         "secret_failure",
         "changed_url",
+        "changed_path",
         "changed_policy",
         "native_auth",
         "native_headers",
@@ -217,12 +220,20 @@ async def test_failed_or_foreign_binding_refuses_before_session_write(failure: s
 @pytest.mark.parametrize(
     "connection",
     [
-        MCPConnection(name="m", url=url, credential_ref="host:owned-token")
+        MCPConnection(name="m", url=url, credential_ref=reference)
+        for reference in (None, "host:owned-token")
         for url in (
             "http://qa.example.com/mcp",
             "https://user:token@qa.example.com/mcp",
             "https://qa.example.com/mcp?token=secret",
             "https://qa.example.com/mcp#secret",
+            "https://@qa.example.com/mcp",
+            "https://qa.example.com/mcp?",
+            "https://qa.example.com/mcp#",
+            "https://qa.example.com/mcp\n",
+            "https://qa.example.com:invalid/mcp",
+            "https://user%3Asecret%40qa.example.com/mcp",
+            "https://qa.example.com\\@secondary.example.com/mcp",
         )
     ]
     + [
@@ -476,27 +487,14 @@ async def test_auth_preserves_the_admitted_g1_model_and_delegation_controls() ->
     assert object_json(tools[-1]["transport"])["authorization"] == "Bearer " + wire.secret
 
 
-async def test_session_auth_preserves_anonymous_mcp_and_custom_tool_bytes() -> None:
+async def test_authenticated_override_refuses_anonymous_unbound_destination() -> None:
     wire = Wire()
     requested = spec().model_copy(
         update={
-            "tools": (
-                ToolSpec(name="web_search", kind="builtin"),
-                ToolSpec(
-                    name="owned_helper",
-                    kind="custom",
-                    description="Owned helper",
-                    input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
-                ),
-            ),
             "mcp_servers": (
-                MCPConnection(
-                    name="public",
-                    url="https://public.example.com/mcp",
-                    tool_policy={"allowed_tools": [], "required": False},
-                ),
+                MCPConnection(name="public", url="https://public.example.com/mcp"),
                 *(spec().mcp_servers or ()),
-            ),
+            )
         }
     )
     async with AsyncOpenAI(
@@ -504,25 +502,10 @@ async def test_session_auth_preserves_anonymous_mcp_and_custom_tool_bytes() -> N
         base_url="https://openai.invalid/v1",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
     ) as sdk:
-        driver = wire.driver(sdk)
-        agent = await driver.agents.create(SCOPE, requested, key="mixed-tools-agent")
-        await driver.sessions.create(
-            SCOPE,
-            SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
-            key="mixed-tools-session",
-        )
-    saved = objects(wire.agent["tools"])
-    overridden = objects(
-        object_json(object_json(json.loads(wire.requests[-1].content))["agent"])["tools"]
-    )
-    assert len(saved) == len(overridden) == 4
-    for original, session_tool in zip(saved[:-1], overridden[:-1], strict=True):
-        assert json.dumps(original, separators=(",", ":")) == json.dumps(
-            session_tool, separators=(",", ":")
-        )
-    assert saved[-2]["server_label"] == "public"
-    assert "authorization" not in object_json(overridden[-2]["transport"])
-    assert wire.resolve_calls == [(SCOPE, "host:owned-token", URL)]
+        with pytest.raises(UnsupportedCapability) as refused:
+            await wire.driver(sdk).agents.create(SCOPE, requested, key="mixed-tools-agent")
+    assert refused.value.missing == ("unbound_mcp_destination",)
+    assert not wire.requests and not wire.resolve_calls
 
 
 async def test_cancelled_resolver_cancels_before_session_post() -> None:
@@ -565,6 +548,16 @@ async def test_cancelled_resolver_cancels_before_session_post() -> None:
         "credential_ref",
         "transport_credential",
         "environment_origin",
+        "url_userinfo",
+        "url_empty_userinfo",
+        "url_query",
+        "url_fragment",
+        "url_http",
+        "root_headers",
+        "root_auth",
+        "transport_auth",
+        "transport_token",
+        "root_token",
     ],
 )
 async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_post(
@@ -588,7 +581,26 @@ async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_pos
             "transport": {"type": "http", "server_url": "https://secondary.example.com/mcp"},
         }
         transport = object_json(secondary["transport"])
-        if authentication == "authorization":
+        if authentication.startswith("url_"):
+            transport["server_url"] = {
+                "url_userinfo": "https://user:" + sentinel + "@secondary.example.com/mcp",
+                "url_empty_userinfo": "https://@secondary.example.com/mcp",
+                "url_query": "https://secondary.example.com/mcp?token=" + sentinel,
+                "url_fragment": "https://secondary.example.com/mcp#" + sentinel,
+                "url_http": "http://secondary.example.com/mcp",
+                "url_path": "https://secondary.example.com/" + sentinel,
+            }[authentication]
+        elif authentication == "root_headers":
+            secondary["headers"] = {"X-Api-Key": sentinel}
+        elif authentication == "root_auth":
+            secondary["auth"] = {"password": sentinel}
+        elif authentication == "transport_auth":
+            transport["auth"] = {"password": sentinel}
+        elif authentication == "transport_token":
+            transport["access_token"] = sentinel
+        elif authentication == "root_token":
+            secondary["api_key"] = sentinel
+        elif authentication == "authorization":
             transport["authorization"] = "Bearer " + sentinel
         elif authentication == "headers":
             transport["headers"] = {"Authorization": "Bearer " + sentinel}
@@ -632,6 +644,41 @@ async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_pos
     )
 
 
+async def test_clean_secondary_destination_requires_exact_scoped_binding() -> None:
+    wire = Wire()
+
+    def unbound_destination(request: httpx.Request) -> httpx.Response:
+        response = wire.handle(request)
+        if request.url.path != "/v1/agents/a":
+            return response
+        raw = object_json(response.json())
+        raw["tools"] = [
+            *objects(raw["tools"]),
+            {
+                "type": "mcp",
+                "server_label": "secondary",
+                "transport": {"type": "http", "server_url": "https://secondary.example.com/mcp"},
+            },
+        ]
+        return httpx.Response(200, json=raw)
+
+    async with AsyncOpenAI(
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(unbound_destination)),
+    ) as sdk:
+        driver = wire.driver(sdk)
+        agent = await driver.agents.create(SCOPE, spec(), key="agent")
+        with pytest.raises(ProviderError):
+            await driver.sessions.create(
+                SCOPE,
+                SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+                key="unbound-session",
+            )
+    assert wire.resolve_calls == []
+    assert all(request.url.path != "/v1/agents/sessions" for request in wire.requests)
+
+
 async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -651,10 +698,19 @@ async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_de
 
     requested = spec().model_copy(
         update={
+            "tools": (
+                *(spec().tools or ()),
+                ToolSpec(
+                    name="owned_helper",
+                    kind="custom",
+                    description="Owned helper",
+                    input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
+                ),
+            ),
             "mcp_servers": (
                 *(spec().mcp_servers or ()),
                 MCPConnection(name="secondary", url=second_url, credential_ref="host:secondary"),
-            )
+            ),
         }
     )
     async with AsyncOpenAI(
@@ -681,6 +737,12 @@ async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_de
     posts = [request for request in wire.requests if request.url.path == "/v1/agents/sessions"]
     assert len(posts) == 1
     tools = objects(object_json(object_json(json.loads(posts[0].content))["agent"])["tools"])
+    saved = objects(wire.agent["tools"])
+    assert len(saved) == len(tools) == 4
+    for original, overridden in zip(saved[:2], tools[:2], strict=True):
+        assert json.dumps(original, separators=(",", ":")) == json.dumps(
+            overridden, separators=(",", ":")
+        )
     assert [
         object_json(tool["transport"])["authorization"] for tool in tools if tool["type"] == "mcp"
     ] == ["Bearer " + value for value in values.values()]
