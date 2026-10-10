@@ -19,12 +19,20 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 
 @dataclass(frozen=True)
 class ModelRates:
-    """USD per 1,000,000 tokens, by stage."""
+    """USD per 1,000,000 tokens, by stage.
+
+    A model priced in tiers by prompt size (Claude Haiku 5.5) sets
+    `long_context_over` and `long_context`: a request whose prompt (input plus
+    cache-write plus cache-read tokens) exceeds the threshold prices at the
+    `long_context` rates instead.
+    """
 
     input: float
     output: float
     cache_write: float
     cache_read: float
+    long_context_over: int | None = None
+    long_context: ModelRates | None = None
 
 
 # Agent models — what an agent's `model` may be set to. List price in USD per
@@ -34,7 +42,7 @@ class ModelRates:
 # provider cost. `test_pricing.py` pins every row and has an opt-in live check
 # (`pytest -m contract packages/core/tests/test_pricing.py`) against the page.
 AGENT_PRICING_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
-AGENT_PRICING_CHECKED_ON = "2026-10-08"
+AGENT_PRICING_CHECKED_ON = "2026-10-10"
 AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -44,6 +52,14 @@ AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-sonnet-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.20),
     "claude-sonnet-4-6": ModelRates(input=3.0, output=15.0, cache_write=3.75, cache_read=0.30),
     "claude-haiku-4-5": ModelRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.10),
+    "claude-haiku-5-5": ModelRates(
+        input=0.10,
+        output=0.50,
+        cache_write=0.125,
+        cache_read=0.01,
+        long_context_over=100_000,
+        long_context=ModelRates(input=0.50, output=2.50, cache_write=0.625, cache_read=0.05),
+    ),
 }
 
 # Models pinned by MCP tools (media generation, etc.) — metered like agent
@@ -63,6 +79,9 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
         input=2.00, output=120.00, cache_write=0.0, cache_read=0.0
     ),
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
+    # Through 2026-12-31; Google doubles every rate on 2027-01-01. The hourly
+    # cache storage charge is not modeled.
+    "gemini-3.8-flash": ModelRates(input=0.75, output=3.75, cache_write=0.0, cache_read=0.075),
 }
 
 _SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
@@ -104,6 +123,13 @@ def cost_of(
     """
     if rates is None:
         return None
+    prompt = usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
+    if (
+        rates.long_context is not None
+        and rates.long_context_over is not None
+        and prompt > rates.long_context_over
+    ):
+        rates = rates.long_context
     return (
         usage.input_tokens * rates.input / 1_000_000
         + usage.output_tokens * rates.output / 1_000_000
