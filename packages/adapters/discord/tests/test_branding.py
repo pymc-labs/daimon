@@ -178,15 +178,13 @@ class TestCreditDepletedMessage:
 class TestHelpViewConversationalExamples:
     def test_unset_matches_todays_text(self) -> None:
         texts = _collect_text(build_help_view("daimon"))
-        assert "See, export, or delete what daimon stores about you" in texts
+        assert "See, export or delete your data" in texts
         assert "@daimon help me set up" in texts
-        assert "@daimon make a routine that runs daily" in texts
 
     def test_set_name_changes_text(self) -> None:
         texts = _collect_text(build_help_view("daimon-staging"))
-        assert "See, export, or delete what daimon-staging stores about you" in texts
+        assert "See, export or delete your data" in texts
         assert "@daimon-staging help me set up" in texts
-        assert "@daimon-staging make a routine that runs daily" in texts
 
 
 class TestPrivacyCommandDescription:

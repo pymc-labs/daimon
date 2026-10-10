@@ -40,8 +40,8 @@ FORM_FIELDS = {
     "message": "What to ask the agent",
 }
 _EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
-# Core caps the panel at 25 rows; 20 fit Teams' 28 KB with emoji labels.
-_ROWS_SHOWN = 20
+# Core caps the panel at 25 rows; 18 fit Teams' 28 KB with emoji labels and a status line.
+_ROWS_SHOWN = 18
 
 Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete"]
 

@@ -344,7 +344,7 @@ async def test_task_fetch_opens_the_dialog_and_task_submit_creates_the_routine(
         opened["task"]["value"]["card"]["contentType"] == "application/vnd.microsoft.card.adaptive"
     )
     assert submitted["task"]["type"] == "message"
-    assert "Created routine on daimon" in submitted["task"]["value"]
+    assert "Routine created for daimon" in submitted["task"]["value"]
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith(f"/activities/{CARD_MESSAGE_ID}"), (
         "the panel the dialog came from refreshes in place"

@@ -398,7 +398,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         10**6,
         user_id="u",
         is_admin=True,
-        notice=routines_card.created_notice(NAME, _routine().cron_expr),
+        notice=routines_card.created_notice(NAME, _routine().cron_expr, _routine().timezone),
     ),
     "routine_output": lambda: routines_card.output_card(_routine()),
     "routine_error": lambda: routines_card.output_card(
