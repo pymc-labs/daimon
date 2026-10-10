@@ -1200,6 +1200,9 @@ deployment constructor is absent is refused before provider transport access.
 
 ### OpenAI deployment runtime
 
+Install the `daimon-mux[openai]` extra in deployments that explicitly enable
+OpenAI channels. The default application dependency remains unchanged.
+
 The application resolves `openai.persistent_workspace` per admitted turn when
 `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` are explicitly
 enabled. Injected runtimes remain supported. Without an injection, export
