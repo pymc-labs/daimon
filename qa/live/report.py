@@ -72,6 +72,19 @@ class Alerter:
         )
         key = f"{result.env}:{result.scenario}"
         prior = state.get(key, {})
+        unavailable = [c for c in result.checks if c.status != "PASS"]
+        if (
+            result.status == "PENDING"
+            and unavailable
+            and all(c.kind == "judge" for c in unavailable)
+        ):
+            # Driver policy: judge infrastructure errors do not page root,
+            # even repeatedly. Other missing evidence still alerts after three.
+            if prior:
+                prior["pending_count"] = "0"
+                state[key] = prior
+                self._save_state(state)
+            return
         now = utcnow()
         pending_count = (
             int(prior.get("pending_count", "0")) + 1 if result.status == "PENDING" else 0

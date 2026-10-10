@@ -136,7 +136,14 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 passed = bool(rows) if kind == "log_present" else not rows
                 reason = f"event {assertion.event}: {len(rows)} scoped log entries"
             elif kind == "judge":
-                passed, reason = judge.evaluate(assertion.rubric or "", turn.text)
+                try:
+                    passed, reason = judge.evaluate(assertion.rubric or "", turn.text)
+                except Pending:
+                    raise
+                except Exception as exc:
+                    # A broken evaluator is unavailable evidence, not a
+                    # product failure. Never expose provider exception bodies.
+                    raise Pending(f"judge execution unavailable: {type(exc).__name__}") from None
             else:
                 raise Pending(f"unimplemented assertion: {kind}")
         return Check(kind, "PASS" if passed else "FAIL", reason, assertion.turn, evidence)

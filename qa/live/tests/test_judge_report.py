@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import urllib.error
 import urllib.request
 from datetime import timedelta
 from pathlib import Path
@@ -59,10 +60,67 @@ def test_fixed_judge_request_and_actual_usage(
     assert judge.usage[0].models == [response_model]
     assert calls[0]["model"] == JUDGE_MODEL
     assert calls[0]["max_tokens"] == 300
-    assert calls[0]["temperature"] == 0
+    assert "temperature" not in calls[0]  # Haiku 5.5 rejects this deprecated option.
     assert calls[0]["output_config"]
     with pytest.raises(Pending, match="budget"):
         judge.evaluate("rubric", "a" * pricing.judge_input_token_limit)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_judge_http_errors_are_pending_without_retry(
+    status: int, monkeypatch: pytest.MonkeyPatch, pricing: Pricing
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-offline-test-key")
+    calls: list[str] = []
+
+    def failed_open(request: urllib.request.Request, timeout: int) -> io.BytesIO:
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, status, "secret provider body", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", failed_open)
+    judge = HaikuJudge(pricing, go=True)
+    with pytest.raises(Pending, match=f"^judge execution unavailable: HTTP {status}$"):
+        judge.evaluate("rubric", "answer")
+    assert len(calls) == 1
+    if status == 400:
+        assert not judge.usage
+    else:
+        assert judge.usage[0].usd is None
+        assert judge.usage[0].models == [JUDGE_MODEL]
+
+
+def test_judge_only_pending_never_alerts_but_failed_verdict_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake-tsend", "%618"]),
+        tmp_path / "state.json",
+    )
+    result = Result(
+        "run",
+        "QA-D1-TEST",
+        "staging",
+        "PENDING",
+        [
+            Check("text_absent", "PASS", "correct product answer"),
+            Check("judge", "PENDING", "judge execution unavailable: HTTP 400"),
+        ],
+    )
+    for _ in range(6):
+        alerts.notify(result, tmp_path / "run.json")
+    assert not calls
+    assert not (tmp_path / "inbox").exists()
+    result.checks[-1] = Check("judge", "FAIL", "incorrect answer")
+    result.finalize()
+    alerts.notify(result, tmp_path / "run.json")
     assert len(calls) == 1
 
 
