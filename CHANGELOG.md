@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
+
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.
 

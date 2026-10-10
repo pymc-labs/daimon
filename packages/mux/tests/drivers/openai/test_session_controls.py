@@ -236,3 +236,63 @@ async def test_session_override_disables_and_verifies_delegation(native_enabled)
 def test_enabled_delegation_cannot_be_requested_by_host_controls():
     with pytest.raises(ValidationError):
         SessionControls.model_validate({"multi_agent_enabled": True})
+
+
+@pytest.mark.asyncio
+async def test_g1_session_shape_omits_optional_spending_control_per_current_reference():
+    """2026-10-10 Agents create reference: spend_control is optional USD cents.
+
+    Source: /api/reference/python/resources/beta/subresources/agents/subresources/
+    sessions/methods/create; hashed lane snapshot 2026-10-10T070515Z lines24213+.
+    The documented minimum is strictly positive, with no higher numeric minimum.
+    Our project rejected this optional field (HTTP400 param=spend_control), so
+    G1 omits it rather than guessing a new amount or a different wire shape.
+    """
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"id": "a", "metadata": {}, "multi_agent": {"enabled": False}}
+            )
+        raw = native_session()
+        raw["agent"] = {"id": "a", "model": "gpt-6-luna", "multi_agent": {"enabled": False}}
+        return httpx.Response(200, json=raw)
+
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, identity: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(
+                model="gpt-6-luna", multi_agent_enabled=False, container_size="small"
+            ),
+        )
+        await driver.sessions.create(
+            SCOPE,
+            SessionSpec(
+                agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+                agent_revision=Revision(local=0),
+                config_revision=1,
+            ),
+            key="g1-optional-spend",
+        )
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("GET", "/v1/agents/a"),
+        ("POST", "/v1/agents/sessions"),
+    ]
+    assert json.loads(seen[-1].content) == {
+        "agent_id": "a",
+        "agent": {"model": "gpt-6-luna", "multi_agent": {"enabled": False}},
+        "environment": {"type": "openai_hosted", "container_size": "small"},
+        "metadata": {"mux_tenant": "t", "mux_config_revision": "1"},
+    }
+    assert seen[-1].headers["OpenAI-Beta"] == "agents=v1"
+    assert seen[-1].headers["Idempotency-Key"] == "g1-optional-spend"

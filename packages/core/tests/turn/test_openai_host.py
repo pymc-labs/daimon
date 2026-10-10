@@ -80,6 +80,7 @@ class Wire:
         self.cancelled = False
         self.saved_delegation = False
         self.session_delegation = False
+        self.expected_spend_limit = 4
 
     def session(self):
         return {
@@ -113,7 +114,10 @@ class Wire:
             body = json.loads(req.content)
             assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
             assert body["environment"]["container_size"] == "small"
-            assert body["spend_control"] == {"limit": 4}
+            if self.expected_spend_limit is None:
+                assert "spend_control" not in body
+            else:
+                assert body["spend_control"] == {"limit": self.expected_spend_limit}
             if self.fail_create:
                 raise httpx.ReadError("offline lost acknowledgment")
             return httpx.Response(200, json=self.session())
@@ -1082,3 +1086,19 @@ async def test_native_command_pair_survives_live_and_recovery_journal(composed, 
         assert [event.type for event in saved] == ["agent.tool_use", "agent.tool_result"]
         assert [event.id for event in saved] == [event.id for event in pairs]
         assert [event.native for event in saved] == [event.native for event in pairs]
+
+
+async def test_host_runtime_allows_omitted_optional_spend_control(composed):
+    request, wire, _, _, runtime = composed
+    runtime = replace(
+        runtime, controls=runtime.controls.model_copy(update={"spend_limit_usd_cents": None})
+    )
+    assert runtime_for(runtime, REVISION) is runtime
+    wire.expected_spend_limit = None
+    request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref.id == SESSION_ID
+    body = json.loads(next(r.content for r in wire.requests if r.method == "POST"))
+    assert "spend_control" not in body
+    assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
+    assert body["environment"]["container_size"] == "small"
