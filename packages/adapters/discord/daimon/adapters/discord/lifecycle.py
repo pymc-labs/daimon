@@ -95,6 +95,7 @@ class _CardWriteSequencer:
         self.dirty: set[int] = set()
         self.repair_task: asyncio.Task[None] | None = None
         self.repair_id: int | None = None
+        self.terminal_tasks: set[asyncio.Task[bool]] = set()
 
     @staticmethod
     def key(message: discord.Message) -> int:
@@ -158,7 +159,10 @@ class _CardWriteSequencer:
                 pending.discard(token)
                 if not pending:
                     del self.inflight[message_id]
-            if applied and message_id in self.terminal_ready:
+            if applied and (
+                message_id in self.terminal_ready
+                or any(target == message_id for target, _, _ in self.terminal_tokens.values())
+            ):
                 self.dirty.add(message_id)
         self.queue_repair()
 
@@ -194,9 +198,8 @@ class _CardWriteSequencer:
     ) -> None:
         try:
             if epoch == self.epoch and version == self.terminal_version.get(self.key(message)):
-                async with asyncio.timeout(_REPAIR_EDIT_S):
-                    edit = self.owner._urgent_edit or self.owner._edit  # pyright: ignore[reportPrivateUsage]
-                    await edit(message, _allow_replacement=False, **kwargs)
+                edit = self.owner._urgent_edit or self.owner._edit  # pyright: ignore[reportPrivateUsage]
+                await edit(message, _allow_replacement=False, **kwargs)
         except Exception:
             log.warning("turn.terminal_card_reassert_failed", exc_info=True)
         finally:
@@ -570,15 +573,66 @@ class DiscordTurnLifecycle:
                     message = self._message_ref
                 if card_write:
                     log.info("turn.card_write_dispatched", **fields)
-                async with asyncio.timeout(_TERMINAL_EDIT_S if terminal else None):
-                    result = await self._perform_edit_message(
-                        message,
-                        progress=progress,
-                        recover_missing=recover_missing,
-                        missing_is_error=missing_is_error,
-                        urgent=terminal,
-                        **kwargs,
+                if terminal:
+
+                    async def finish_terminal(terminal_token: object | None = token) -> bool:
+                        succeeded = False
+                        try:
+                            succeeded = await self._perform_edit_message(
+                                message,
+                                progress=progress,
+                                recover_missing=recover_missing,
+                                missing_is_error=missing_is_error,
+                                urgent=True,
+                                **kwargs,
+                            )
+                            if card_write:
+                                log.info(
+                                    "turn.card_write_completed"
+                                    if succeeded
+                                    else "turn.card_write_dropped",
+                                    **fields,
+                                )
+                                if succeeded:
+                                    log.info("turn.card_terminal_applied", **fields)
+                            return succeeded
+                        except Exception as err:
+                            if card_write:
+                                log.info(
+                                    "turn.card_write_dropped", reason=type(err).__name__, **fields
+                                )
+                            raise
+                        finally:
+                            if terminal_token is not None:
+                                self._card_writes.complete(
+                                    original_message,
+                                    terminal_token,
+                                    terminal=True,
+                                    applied=succeeded,
+                                )
+
+                    task = asyncio.create_task(finish_terminal(), name="discord.terminal_edit")
+                    self._card_writes.terminal_tasks.add(task)
+                    task.add_done_callback(self._card_writes.terminal_tasks.discard)
+                    task.add_done_callback(
+                        lambda done_task: (
+                            done_task.exception() if not done_task.cancelled() else None
+                        )
                     )
+                    # The task owns the token and records the real result even after
+                    # this caller's deadline or cancellation.
+                    token = None
+                    done, _ = await asyncio.wait({task}, timeout=_TERMINAL_EDIT_S)
+                    if not done:
+                        raise TimeoutError("terminal card edit is still running")
+                    return task.result()
+                result = await self._perform_edit_message(
+                    message,
+                    progress=progress,
+                    recover_missing=recover_missing,
+                    missing_is_error=missing_is_error,
+                    **kwargs,
+                )
             if card_write:
                 log.info(
                     "turn.card_write_completed" if result else "turn.card_write_dropped",
@@ -795,7 +849,7 @@ class DiscordTurnLifecycle:
             self._card_writes.queue_repair()
             repair = self._card_writes.repair_task
             if last_edit and repair is not None:
-                await asyncio.shield(repair)
+                await asyncio.wait({repair}, timeout=_REPAIR_EDIT_S)
 
     async def _settle_progress(self) -> None:
         self.on_render_stopped()

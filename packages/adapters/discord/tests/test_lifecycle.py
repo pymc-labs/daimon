@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import time
 import types
 import uuid
@@ -42,6 +43,7 @@ from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, Tu
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from discord.http import HTTPClient, Route
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -298,20 +300,139 @@ async def test_abandoned_render_does_not_leave_a_progress_task_waiting_for_termi
 
 async def test_terminal_edit_has_an_application_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lifecycle_module, "_TERMINAL_EDIT_S", 0.01)
-    started = asyncio.Event()
+    started, release = asyncio.Event(), asyncio.Event()
 
     async def send(**kwargs: Any) -> object:
         return _SENTINEL_REF
 
     async def edit(ref: Any, **kwargs: Any) -> None:
         started.set()
-        await asyncio.Event().wait()
+        await release.wait()
 
     lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
     await lc.post_initial()
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(lc.end_card("Done"), 1)
     assert started.is_set()
+    assert len(lc._card_writes.terminal_tasks) == 1
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*lc._card_writes.terminal_tasks), 1)
+    assert lc._card_writes.key(_SENTINEL_REF) in lc._card_writes.terminal_ready
+
+
+async def test_terminal_deadline_does_not_close_discord_global_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lifecycle_module, "_TERMINAL_EDIT_S", 0.01)
+    client = HTTPClient(asyncio.get_running_loop())
+    client._global_over = asyncio.Event()
+    client._global_over.set()
+
+    class Response:
+        def __init__(self, status: int) -> None:
+            self.status = status
+            self.reason = "rate limited" if status == 429 else "OK"
+            self.headers = {"content-type": "application/json", "Via": "fake-discord"}
+
+        async def __aenter__(self) -> Response:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def text(self, **kwargs: Any) -> str:
+            return json.dumps({"global": True, "retry_after": 0.05}) if self.status == 429 else "{}"
+
+    class Session:
+        requests = 0
+
+        def request(self, *args: Any, **kwargs: Any) -> Response:
+            self.requests += 1
+            return Response(429 if self.requests == 1 else 200)
+
+    session = Session()
+    client._HTTPClient__session = session
+
+    async def send(**kwargs: Any) -> object:
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        await client.request(
+            Route(
+                "PATCH", "/channels/{channel_id}/messages/{message_id}", channel_id=20, message_id=1
+            ),
+            json={"content": "Done"},
+        )
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await lc.post_initial()
+    with pytest.raises(TimeoutError):
+        await lc.end_card("Done")
+    assert not client._global_over.is_set()
+    await asyncio.wait_for(asyncio.gather(*lc._card_writes.terminal_tasks), 1)
+    assert client._global_over.is_set()
+    await asyncio.wait_for(client.request(Route("GET", "/channels/{channel_id}", channel_id=99)), 1)
+    assert session.requests == 3
+
+
+@pytest.mark.parametrize("progress_first", [False, True])
+async def test_uncertain_terminal_repairs_late_progress(
+    monkeypatch: pytest.MonkeyPatch, progress_first: bool
+) -> None:
+    monkeypatch.setattr(lifecycle_module, "_TERMINAL_EDIT_S", 0.01)
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
+    progress_started, release_progress = asyncio.Event(), asyncio.Event()
+    terminal_applied, release_terminal = asyncio.Event(), asyncio.Event()
+    current: dict[str, Any] = {}
+    sends = 0
+    terminal_edits = 0
+
+    async def send(**kwargs: Any) -> object:
+        nonlocal sends
+        sends += 1
+        current.update(kwargs)
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        nonlocal terminal_edits
+        embeds = kwargs.get("embeds", [])
+        if embeds and embeds[0].title and "Working" in embeds[0].title:
+            progress_started.set()
+            await release_progress.wait()
+            current.update(kwargs)
+            return
+        terminal_edits += 1
+        current.update(kwargs)  # HTTP 200 has applied the terminal card.
+        if terminal_edits == 1:
+            terminal_applied.set()
+            await release_terminal.wait()  # discord.py can hold its lock after 200.
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await lc.post_initial()
+    lc._last_flush = time.monotonic() - 11
+    tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
+    await asyncio.wait_for(progress_started.wait(), 1)
+    pending = set(lc._progress_edits)
+    lc.on_render_stopped()
+    tick.cancel()
+    await asyncio.gather(tick, return_exceptions=True)
+    with pytest.raises(TimeoutError):
+        await lc.end_card("Done")
+    await terminal_applied.wait()
+    if progress_first:
+        release_progress.set()
+        await asyncio.wait_for(asyncio.gather(*pending), 1)
+    release_terminal.set()
+    await asyncio.wait_for(asyncio.gather(*lc._card_writes.terminal_tasks), 1)
+    if not progress_first:
+        release_progress.set()
+        await asyncio.wait_for(asyncio.gather(*pending), 1)
+    if lc._terminal_reassert_task is not None:
+        await asyncio.wait_for(lc._terminal_reassert_task, 1)
+    assert current["content"] == "Done"
+    assert current["view"] is None
+    assert terminal_edits == 2
+    assert sends == 1
 
 
 def _make_lifecycle(
