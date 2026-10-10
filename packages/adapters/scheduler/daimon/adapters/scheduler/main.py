@@ -129,6 +129,7 @@ from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
+from daimon.core.teams_activity_claim_sweep import sweep_old_teams_activity_claims
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
@@ -610,6 +611,14 @@ async def _sweep_retired_turn_card_intents(
         await sweep_retired_turn_card_intents(sm, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.turn_card_intent_sweep.failed")
+
+
+async def _sweep_teams_activity_claims(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Prune old Teams claims; retry database failures on the next tick."""
+    try:
+        await sweep_old_teams_activity_claims(sm, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.teams_activity_claim_sweep.failed")
 
 
 async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
@@ -1203,6 +1212,7 @@ async def run(
             )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
+            await _sweep_teams_activity_claims(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_github_connect_flows(sm)
@@ -1236,6 +1246,7 @@ async def run(
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
+            await _sweep_teams_activity_claims(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_github_connect_flows(sm)

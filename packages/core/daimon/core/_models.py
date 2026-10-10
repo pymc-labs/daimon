@@ -2024,6 +2024,23 @@ class SlackEventDedup(Base):
     )
 
 
+class TeamsActivityClaim(Base):
+    """Durable admission fence for a Teams activity, including interrupted turns."""
+
+    __tablename__ = "teams_activity_claims"
+    __table_args__ = (Index("ix_teams_activity_claims_created", "created_at"),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    activity_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class FileUpload(Base):
     """A file the agent produced, staged for delivery as a chat attachment.
 

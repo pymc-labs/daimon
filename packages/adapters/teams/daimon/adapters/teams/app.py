@@ -101,6 +101,8 @@ from daimon.core.permissions import home_of
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
+from daimon.core.stores.teams_activity_claims import claim as claim_activity
+from daimon.core.stores.teams_activity_claims import finish_outcome, link_outcome
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -318,8 +320,7 @@ class TeamsApp:
         # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
-        # Bot Framework retries a slow delivery with the same activity id.
-        # Not durable: a retry landing after a restart runs a second turn.
+        # Fast path; the database claim fences redeliveries across workers.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         # Channel id -> when its enable-files sign-in was offered (monotonic).
         self._files_offered: dict[str, float] = {}
@@ -487,12 +488,13 @@ class TeamsApp:
 
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
         key = (conversation_id, activity_id)
-        if key in self._seen:
-            return False
+        return key not in self._seen
+
+    def _remember_delivery(self, conversation_id: str, activity_id: str) -> None:
+        key = (conversation_id, activity_id)
         self._seen[key] = None
         while len(self._seen) > _SEEN_ACTIVITY_CAP:
             self._seen.popitem(last=False)
-        return True
 
     async def handle_message(self, ctx: ActivityContext[MessageActivity]) -> None:
         """SDK message handler: verify, then hand off. Returns before any turn work."""
@@ -508,6 +510,7 @@ class TeamsApp:
             service_url=ctx.conversation_ref.service_url,
         )
         if isinstance(parsed, Refusal):
+            self._remember_delivery(activity.conversation.id, activity.id)
             # Type and reason only, never the text: these drops are otherwise invisible.
             conversation_type = activity.conversation.conversation_type
             if parsed.text is None:
@@ -528,6 +531,17 @@ class TeamsApp:
                         conversation_type=conversation_type,
                         reason=type(exc).__name__,
                     )
+            return
+        async with self.runtime.sessionmaker() as session, session.begin():
+            first = await claim_activity(
+                session,
+                tenant_id=self._tenant_id,
+                conversation_id=activity.conversation.id,
+                activity_id=activity.id,
+                thread_id=parsed.conversation_id,
+            )
+        self._remember_delivery(activity.conversation.id, activity.id)
+        if not first:
             return
         if parsed.unprompted:
             if self.runtime.settings.thread_participation.mode is ParticipationMode.DISABLED:
@@ -863,10 +877,21 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 origin="chat" if continuation is None else "handoff",
-            ):
+            ) as observation:
+                # Link every activity in a composed author batch to this turn.
+                async with self.runtime.sessionmaker() as session, session.begin():
+                    await link_outcome(
+                        session,
+                        tenant_id=tenant_id,
+                        thread_id=inbound.conversation_id,
+                        activity_ids=(*inbound.composed_ids, inbound.activity_id),
+                        outcome_id=observation.id,
+                    )
                 await self._run_turn_observed(
                     inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
                 )
+            async with self.runtime.sessionmaker() as session, session.begin():
+                await finish_outcome(session, outcome_id=observation.id)
         finally:
             release_turn_slot()
 

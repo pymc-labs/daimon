@@ -226,6 +226,7 @@ source_modules = [
     "daimon.core.skill_zip",
     "daimon.core.skills",
     "daimon.core.slack_event_dedup_sweep",
+    "daimon.core.teams_activity_claim_sweep",
     "daimon.core.slack_file_token",
     "daimon.core.slack_files",
     "daimon.core.slack_oauth",

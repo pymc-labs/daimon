@@ -13,6 +13,12 @@ on:
       - main
     paths:
       - "formal/**"
+      - "packages/adapters/teams/daimon/adapters/teams/app.py"
+      - "packages/core/daimon/core/stores/teams_activity_claims.py"
+      - "packages/core/daimon/core/_models.py"
+      - "packages/core/alembic/versions/0079_teams_activity_claims.py"
+      - "packages/core/daimon/core/teams_activity_claim_sweep.py"
+      - "packages/adapters/scheduler/daimon/adapters/scheduler/main.py"
       - ".github/workflows/formal-models.yml"
       - "packages/core/daimon/core/turn/driver.py"
       - "packages/core/daimon/core/turn/reducers.py"
@@ -115,6 +121,12 @@ on:
   pull_request:
     paths:
       - "formal/**"
+      - "packages/adapters/teams/daimon/adapters/teams/app.py"
+      - "packages/core/daimon/core/stores/teams_activity_claims.py"
+      - "packages/core/daimon/core/_models.py"
+      - "packages/core/alembic/versions/0079_teams_activity_claims.py"
+      - "packages/core/daimon/core/teams_activity_claim_sweep.py"
+      - "packages/adapters/scheduler/daimon/adapters/scheduler/main.py"
       - ".github/workflows/formal-models.yml"
       # turn/
       - "packages/core/daimon/core/turn/driver.py"

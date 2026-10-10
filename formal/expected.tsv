@@ -45,6 +45,8 @@ approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval 
 approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
 approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre-fix replay counts queued confirmations as taken; the next one-per-pause idle ends the turn as a re-ask
 # ---- scheduler ----
+teams_activity_claim	TeamsActivityClaim	TeamsActivityClaimSafe	clean	13	-	committed claim survives a crash and suppresses redelivery
+teams_activity_claim	TeamsActivityClaim	TeamsActivityClaimMemory	violates:NoSecondRun	15	-	pre-fix in-memory claim is lost at restart and runs twice
 privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	49	-	durable local commit keeps upstream work across crashes and failures
 privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
 privacy_delete	PrivacyDelete	PrivacyDeleteProgress	clean	49	-	fair restarts and successful API calls eventually delete the session
