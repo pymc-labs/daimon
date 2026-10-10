@@ -260,7 +260,8 @@ class VisibleLatency(EvidenceModel):
 
 class LogExpectation(EvidenceModel):
     kind: Literal["log_present", "log_absent"]
-    turn: int = Field(ge=1)
+    # Catalog turn 0 denotes setup/admin; without its capture it stays PENDING.
+    turn: int = Field(ge=0)
     event: str = Field(min_length=1)
     fields: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
@@ -449,6 +450,7 @@ def tool_check(turn: TurnEvidence, expectation: ToolExpectation) -> CheckResult:
         for action in actions:
             groups.setdefault(action.action_id, []).append(action)
         verified_calls: set[str] = set()
+        authorized_calls: set[str] = set()
         for group in groups.values():
             call_ids = {item.call_id for item in group}
             if len(call_ids) != 1 or group[0].state != "requested":
@@ -470,6 +472,14 @@ def tool_check(turn: TurnEvidence, expectation: ToolExpectation) -> CheckResult:
             if any(item.tool_name != expectation.tool_name for item in linked):
                 return result("FAIL", "TOOL_IDENTITY_CHANGED", actions)
             verified_calls.add(group[0].call_id)
+            if group[-1].state == "approved":
+                authorized_calls.add(group[0].call_id)
+        if (
+            turn.approval_capture_complete
+            and turn.tool_capture_complete
+            and (matching.keys() - authorized_calls)
+        ):
+            return result("FAIL", "TOOL_EXECUTED_WITHOUT_APPROVAL", actions)
         count = len(verified_calls)
         if not turn.approval_capture_complete:
             return result("PENDING", "APPROVAL_CAPTURE_INCOMPLETE", actions)

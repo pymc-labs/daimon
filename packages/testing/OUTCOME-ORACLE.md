@@ -50,6 +50,10 @@ progress card, not only the final answer.
   visible content, including embed titles/descriptions/fields/footers, and joined
   chunks. The runner must flatten those visible leaves into `VisibleText`; agent
   thoughts or hidden provider messages are not visible evidence.
+  Joining includes both an empty separator and a newline: a pattern can span
+  separate messages. Presence waits for complete text capture; observed forbidden
+  text fails immediately. This conservative presence rule differs from the
+  sufficient positive observations used for host logs and first-visible latency.
 - `no_preamble {turn, pattern?}` requires a nonblank visible answer and rejects
   the supplied pattern or the documented default: "came across", conversation
   moved/continued, or "working files could not be saved". It is a deterministic
@@ -58,6 +62,10 @@ progress card, not only the final answer.
 - `card_finalized {turn}` requires every card's latest state to be finalized.
   `progress_seen {turn, within_s?}` requires observed progress, optionally before
   the inclusive deadline. Root completion alone does not prove card finalization.
+  Zero captured cards fails even with complete capture; this is stricter than
+  the catalog's absence-of-progress definition. Attach this stricter predicate
+  to fixtures expected to produce cards; card-less catalog fixtures need an
+  explicit semantic binding rather than inferring that a card was finalized.
 - `tool_succeeded {turn, tool_name, min?, max?}` counts distinct successfully
   executed calls. Each call has exactly one actual executor start and one result
   with the same call ID/name, in order; malformed extra calls fail. Tool names are
@@ -68,6 +76,8 @@ progress card, not only the final answer.
   decision; denied/timed-out calls must never execute. Multiple approval cards
   cannot multiply the number of calls. Capture human/policy decisions at the host
   approval boundary, not from text saying "approved".
+  Every captured execution of the gated tool needs its own approved call ID;
+  an approved/denied action cannot authorize an additional unlinked call.
 - `reply_within_s` / `no_silent_drop {turn, max}` require an actual visible text,
   card or reaction before the inclusive deadline. Queue/error notices count for
   these visibility checks and do not imply root success. A positive observed
@@ -76,6 +86,11 @@ progress card, not only the final answer.
 - `log_present` / `log_absent {turn, event, fields?}` match host event names and
   exact supplied field values. This supports the catalog's replacement reason
   probes without guessing log absence from unchanged final session IDs.
+  List-valued fields match exactly, including order; `["skills", "model"]` does
+  not satisfy `["skills"]`. N9 preserves that assertion or supplies the actual
+  expected list rather than silently using containment. Catalog turn 0 denotes
+  setup/admin logs and returns `PENDING / TURN_NOT_CAPTURED` until setup capture
+  is bound; it is a valid assertion, not malformed input.
 
 Replay without a provider: serialize `RunEvidence.model_dump_json()`, reload with
 `RunEvidence.model_validate_json()`, then call `evaluate` with the same resolved
