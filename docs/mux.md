@@ -1183,3 +1183,10 @@ the action and logs only the boundary name. Foreign dead sessions remain failed
 outcomes; native replacement with its corresponding binding, accounting and
 approval context requires a provider-specific recovery path. Anthropic recovery
 continues to use its existing tool confirmation surface.
+
+For explicitly configured OpenAI sessions, `spend_limit_usd_cents` is an optional
+integer cap in USD cents. The driver verifies its exact native echo on creation,
+reuse and before input. Missing or changed configured limits refuse; omission
+preserves existing behavior. If an acknowledged creation fails verification,
+its native session reference remains in the durable creation claim for exact
+owned cleanup, and preparation does not resend it automatically.

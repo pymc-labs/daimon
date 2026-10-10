@@ -544,3 +544,9 @@ MCP spelling variants), extra fields and multiple bindings refuse before any
 resolver or session write. The override rebuilds these admitted tools and the
 bound MCP connection; it never copies a saved tool object verbatim. Multiple
 bound servers are deferred under RULES 24.
+
+OpenAI explicit session spend limits use integer USD cents and require the
+configured cap to appear unchanged in native session responses before host
+input. Omitted caps preserve existing behavior. Control failures retain scoped
+acknowledged resource references for exact cleanup, without automatic creation
+retry or an exact-spend claim.
