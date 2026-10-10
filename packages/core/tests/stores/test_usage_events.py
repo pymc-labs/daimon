@@ -679,3 +679,30 @@ async def test_usage_events_tenant_isolation(db_session: AsyncSession) -> None:
         db_session, tenant_id=tenant_a.id, since=past
     )
     assert cost_a_after == cost_a, "tenant_b write must not affect tenant_a reads"
+
+
+async def test_costs_by_user_prices_each_haiku_5_5_request_at_its_own_tier(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Two 60k-token prompts stay at the base rate even though together they pass 100k."""
+    short = ma_model_usage(input_tokens=60_000, output_tokens=0)
+    long = ma_model_usage(input_tokens=200_000, output_tokens=0)
+    for event_id, usage in [("evt_a", short), ("evt_b", short), ("evt_c", long)]:
+        await usage_events.record(
+            db_session,
+            tenant_id=tenant_id,
+            platform_user_id="u1",
+            managed_session_id="s1",
+            model="claude-haiku-5-5",
+            model_usage=usage,
+            event_id=event_id,
+        )
+    past = datetime.now(UTC) - timedelta(days=1)
+    out = await usage_events.costs_by_user_in_tenant_since(
+        db_session, tenant_id=tenant_id, since=past
+    )
+    expected = 120_000 * 0.10 / 1_000_000 + 200_000 * 0.50 / 1_000_000
+    assert abs(out["u1"] - expected) < 1e-9, "each request is priced at its own tier"
+    total = await usage_events.cost_for_tenant_since(db_session, tenant_id=tenant_id, since=past)
+    assert abs(total - out["u1"]) < 1e-9, "per-user report agrees with the tenant total"

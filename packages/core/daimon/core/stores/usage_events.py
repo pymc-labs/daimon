@@ -20,7 +20,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
 from daimon.core._models import UsageEvent
-from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.pricing import (
+    LONG_CONTEXT_PROMPT_TOKENS,
+    MODEL_PRICING,
+    cost_of,
+    cost_of_bucket,
+)
 from daimon.core.stores.domain import UsageEventRow
 from sqlalchemy import Select, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -202,16 +207,25 @@ async def costs_by_user_in_tenant_since(
 ) -> dict[str, float]:
     """Per-user spend for a tenant since `since`. EXCLUDES NULL platform_user_id.
 
-    GROUP BY (platform_user_id, model) so cost_of can reprice each model bucket
-    in Python; results are folded back to a per-user total. Pair with
+    GROUP BY (platform_user_id, model, long-prompt tier) so each bucket is
+    repriced in Python at its own rates: summing first and pricing the total
+    would push short Haiku 5.5 requests into its long-context tier. Results
+    are folded back to a per-user total. Pair with
     `turns_by_user_in_tenant_since` to assemble per-user (cost, turns) rows —
     turn counts cannot be derived from this aggregate without double-counting
     sessions that span multiple models.
     """
+    long_prompt = (
+        UsageEvent.input_tokens
+        + UsageEvent.cache_creation_input_tokens
+        + UsageEvent.cache_read_input_tokens
+        > LONG_CONTEXT_PROMPT_TOKENS
+    ).label("long_prompt")
     stmt = (
         select(
             UsageEvent.platform_user_id,
             UsageEvent.model,
+            long_prompt,
             func.sum(UsageEvent.input_tokens).label("in_tok"),
             func.sum(UsageEvent.output_tokens).label("out_tok"),
             func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
@@ -222,7 +236,7 @@ async def costs_by_user_in_tenant_since(
             UsageEvent.platform_user_id.is_not(None),
             UsageEvent.occurred_at >= since,
         )
-        .group_by(UsageEvent.platform_user_id, UsageEvent.model)
+        .group_by(UsageEvent.platform_user_id, UsageEvent.model, long_prompt)
     )
     result = await session.execute(stmt)
     per_user: dict[str, float] = {}
@@ -236,7 +250,7 @@ async def costs_by_user_in_tenant_since(
             cache_creation_input_tokens=int(row.cw_tok or 0),
             cache_read_input_tokens=int(row.cr_tok or 0),
         )
-        c = cost_of(usage, MODEL_PRICING.get(row.model))
+        c = cost_of_bucket(usage, MODEL_PRICING.get(row.model), long_prompt=bool(row.long_prompt))
         per_user[user_id] = per_user.get(user_id, 0.0) + (c if c is not None else 0.0)
     return per_user
 

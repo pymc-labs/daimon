@@ -114,16 +114,32 @@ def cost_of(
     usage: BetaManagedAgentsSpanModelUsage,
     rates: ModelRates | None,
 ) -> float | None:
-    """Compute USD cost for one model_usage payload against `rates`.
+    """Compute USD cost for one model request's usage against `rates`.
 
-    Returns None when rates is None (unknown model id).
+    Returns None when rates is None (unknown model id). `usage` must be one
+    request: the long-context tier depends on that request's prompt length.
+    To price usage summed over many requests, use `cost_of_bucket`.
     """
-    if rates is None:
-        return None
     prompt_tokens = (
         usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
     )
-    if rates.long_context is not None and prompt_tokens > LONG_CONTEXT_PROMPT_TOKENS:
+    return cost_of_bucket(usage, rates, long_prompt=prompt_tokens > LONG_CONTEXT_PROMPT_TOKENS)
+
+
+def cost_of_bucket(
+    usage: BetaManagedAgentsSpanModelUsage,
+    rates: ModelRates | None,
+    *,
+    long_prompt: bool,
+) -> float | None:
+    """USD cost of usage summed over requests that all sit on one side of the threshold.
+
+    `long_prompt` says which side: each request's prompt was over
+    LONG_CONTEXT_PROMPT_TOKENS. Ignored for models with a single rate.
+    """
+    if rates is None:
+        return None
+    if long_prompt and rates.long_context is not None:
         rates = rates.long_context
     return (
         usage.input_tokens * rates.input / 1_000_000
