@@ -3,6 +3,10 @@
 Shell's ``'\\''`` concatenation is valid: it inserts an apostrophe in the
 same argument. An unescaped apostrophe, even in a remote comment, can end the
 argument early and make gcloud reject the remaining words.
+
+Convention: a comment on a payload's closing-quote line (``' # done``) must
+not contain a quote. The guard reads such a quote as opening a new argument
+and fails, which errs toward a loud false positive, never a missed split.
 """
 
 from __future__ import annotations
