@@ -774,6 +774,7 @@ async def _refresh_github_app_sessions(
                     is_external=False,
                     config=settings.github_app,
                     fernet=fernet,
+                    mounted_only=True,
                 )
                 if desired_urls != snapshot.repo_urls and not active_turn:
                     await anthropic_client.beta.sessions.archive(session_id)

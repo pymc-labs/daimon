@@ -464,3 +464,22 @@ def test_token_only_app_session_is_reused_and_still_rotates() -> None:
     )
     assert isinstance(decision, UpdateInPlace)
     assert RotateAppTokens(resource_ids={}) in decision.ops
+
+
+def test_app_session_without_tokens_never_rotates() -> None:
+    # Zero grants: no mounted repo and no issued tokens, so no rotation however old.
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(),
+        repo_resource_ids={},
+        vault_id="session-vault",
+        repo_token_issued_at=None,
+    )
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=recorded, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+        )
+        == ReuseAsIs()
+    )
