@@ -15,8 +15,9 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
-Either way the listing entry, the delivery ledger, is deleted; the sandbox
-keeps its copy, so the agent can still read or paste it later.
+Transient channel upload failures leave the listing entry for a later sweep.
+Otherwise the listing entry, the delivery ledger, is deleted; the sandbox keeps
+its copy, so the agent can still read or paste it later.
 """
 
 from __future__ import annotations
@@ -207,6 +208,12 @@ class TeamsOutputDelivery:
                     status=err.status,
                     reason=err.reason,
                 )
+                # No status covers token/transport failures; 408, 423 (a locked
+                # file or folder), 429 and 5xx can clear on a later sweep. Keep
+                # 401/403 and other permanent responses on the existing skip path
+                # rather than repeatedly retrying denied access.
+                if err.status is None or err.status in (408, 423, 429) or 500 <= err.status < 600:
+                    raise
                 return
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
 

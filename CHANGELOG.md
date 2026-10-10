@@ -74,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Teams keeps a generated file available for another try if its DM file card fails to send after upload.
 - A new agent's face is rendered when the agent is created, so its first card or answer has it instead of the Daimon picture. This covers the setup panels' New agent form, `create_agent`, copies (`fork_agent`, `daimon agents fork`, channel rules that copy an agent) and `daimon agents create`; CLI commands wait up to 10 seconds for it.
 - Discord acknowledges a GitHub requester's Link click before minting the link and resolving the card. Connect cards clip long agent names, escape Discord markdown, and load images from the configured app host.
+- Teams keeps a channel file available for another try when its upload hits a temporary Graph failure.
 - The `used` amount on a finished Discord or Slack answer is what the tenant is debited, markup included, so it agrees with `left`. With a 1.1 markup it showed the raw model cost, 10% low.
 - A deploy no longer stops an answer that is about to finish with "Stopped: Daimon restarted." When a deploy replaces the worker containers, in-flight turns now get up to 60 seconds to finish, as the adapters intended; Docker killed them after its default 10.
 - A finished Discord or Slack answer ends with one short line instead of a five-line Details block: `Ada  12s  $0.042 used  $41.20 left`. Fields are set apart by spacing, not dots. Token counts are gone, and a channel budget's remainder reads `$8.10 left` like the prepaid balance.

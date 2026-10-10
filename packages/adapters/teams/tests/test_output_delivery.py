@@ -447,6 +447,24 @@ async def test_a_refused_channel_upload_is_only_logged_and_deleted(
     assert harness.deletes == ["file_csv"], "the ledger entry goes, as on the skip path"
 
 
+@pytest.mark.parametrize("status", [None, 408, 423, 429, 503])
+async def test_transient_channel_upload_failure_keeps_output_for_retry(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int | None
+) -> None:
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        if status is None:
+            raise httpx.ConnectError("graph unavailable", request=request)
+        return httpx.Response(status, json={"error": {"code": "serviceUnavailable"}})
+
+    harness = _harness(db_session_factory, channel_files=_channel_files(unavailable))
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1")
+
+    assert harness.sender.sent == []
+    assert harness.deletes == [], "a temporary Graph failure must leave the output retryable"
+    assert any(e["event"] == "output_delivery.file_failed" for e in logs)
+
+
 async def test_an_unprompted_turn_posts_no_links_message_when_the_answer_cannot_take_them(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
