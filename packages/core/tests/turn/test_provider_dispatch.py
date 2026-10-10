@@ -199,7 +199,10 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
 
 
 @pytest.mark.parametrize("path", ["legacy", "mux"])
-async def test_unregistered_selection_never_uses_anthropic(path: str) -> None:
+async def test_unregistered_selection_never_uses_anthropic(
+    path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delitem(io_module._TURN_CODECS, PROFILE, raising=False)
     transport = ScriptedTransport()
     async with transport.client() as client:
         with pytest.raises(UnsupportedCapability):
@@ -282,8 +285,9 @@ async def test_preparation_dispatches_before_any_anthropic_binding(
 
 @pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_missing_preparation_fails_before_native_binding(
-    path: str, db_session_factory: async_sessionmaker[AsyncSession]
+    path: str, db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delitem(preparation._PROVIDER_PREPARATIONS, PROFILE, raising=False)
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
@@ -365,6 +369,9 @@ def test_explicit_provider_model_is_accepted_only_when_profile_enabled(
         1,
         resolve_default(BackendConfig(backend=backend, profile=profile, model=model)),
     )
+    monkeypatch.setattr(
+        channel_backend, "RUNNABLE_PROFILES", channel_backend.RUNNABLE_PROFILES - {profile}
+    )
     with pytest.raises(channel_backend.BackendUnsupported):
         channel_backend.check_backend(revision)
     monkeypatch.setattr(channel_backend, "RUNNABLE_PROFILES", frozenset({profile}))
@@ -374,6 +381,8 @@ def test_explicit_provider_model_is_accepted_only_when_profile_enabled(
 async def test_missing_codec_does_not_construct_a_registered_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delitem(io_module._TURN_CODECS, PROFILE, raising=False)
+
     def forbidden(request: TurnBackendRequest) -> TurnBackend:
         raise AssertionError("backend must not be constructed without a codec")
 

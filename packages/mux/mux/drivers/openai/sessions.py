@@ -86,6 +86,9 @@ class OpenAISessions:
     async def _decode(self, scope: Scope, raw: Object) -> Session:
         self._c.record(scope, raw)
         binding = self._binding(scope, raw)
+        expected_agent = binding.native_refs.get("agent")
+        if expected_agent is not None and object_json(raw["agent"]).get("id") != expected_agent:
+            raise ContinuityLost(binding.id, ("session agent identity changed",))
         environment = object_json(raw["environment"])
         persistent = self._c.profile_id == "openai.persistent_workspace"
         if persistent and environment.get("type") != "openai_hosted":
@@ -108,6 +111,10 @@ class OpenAISessions:
                 raise ContinuityLost(
                     binding.id, ("installed skill pins changed or are unavailable",)
                 )
+        if self._controls.model is not None:
+            agent = object_json(raw["agent"])
+            if agent.get("model") != self._controls.model:
+                raise ContinuityLost(binding.id, ("session model differs from admitted model",))
         status = text(raw["status"])
         states = {
             "idle": "idle",
@@ -211,6 +218,8 @@ class OpenAISessions:
         if resolved is not None:
             metadata.update(encode_metadata(resolved, self._c))
         body: Object = {"agent_id": spec.agent.id, "environment": environment, "metadata": metadata}
+        if self._controls.model is not None:
+            body["agent"] = {"model": self._controls.model}
         if self._controls.spend_limit_usd_cents is not None:
             body["spend_control"] = {"limit": self._controls.spend_limit_usd_cents}
         if vaults is not None:

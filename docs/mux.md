@@ -1086,3 +1086,23 @@ Provider recovery can atomically publish a collected journal snapshot through
 binding lease and the same source identity/revision rules as individual records.
 All records, the projection and the supplied cursor commit together; a malformed
 late record leaves the entire batch unchanged.
+
+### OpenAI host turns
+
+Explicit caller-private `openai.persistent_workspace` channels run `gpt-6-luna`
+through the mux turn path when channel backends are enabled and the host supplies
+`OpenAIHostRuntime`. That injection contains scoped provisioned native resource
+references, a private transport factory, small hosted-container and native spend
+controls, durable journal/revision adapters and verified accounting context.
+Missing injection refuses before key discovery. The unconfigured channel still
+uses the existing Anthropic path and requests.
+
+Native preparation publishes its actual session binding and reuses that hosted
+workspace. Fenced send claims survive restart; an uncertain acknowledgement never
+causes an automatic resend. Recovery journals a complete snapshot atomically,
+keeps earlier turns out of current display/usage, and requires observed stop
+before completing cancellation. Nullable usage and missing container cost remain
+pending for reconciliation. Sealed/read-only/publishing-restricted policies,
+shared threads, transfers and changed bound plans refuse in this initial host
+composition. Browser-origin approval is distinct from browser authentication;
+authenticated remote MCP is a separate integration.

@@ -27,6 +27,7 @@ from mux.contracts.events import (
     TurnEndedPayload,
 )
 from mux.drivers.openai._common import objects, text
+from mux.drivers.openai.approvals import origin_request
 from mux.drivers.openai.transport import Object, error_category, object_json
 
 SCHEMA_DATE = "2026-10-09"
@@ -72,6 +73,15 @@ def required_actions(raw: Object) -> tuple[RequiredAction, ...]:
                 RequiredAction(
                     id=text(action["environment_id"]),
                     kind="environment_connection",
+                    payload=action,
+                    native_type=native_type,
+                )
+            )
+        elif origin_request(action) is not None:
+            result.append(
+                RequiredAction(
+                    id=text(action["request_id"]),
+                    kind="tool_confirmation",
                     payload=action,
                     native_type=native_type,
                 )

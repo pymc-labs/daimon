@@ -6,9 +6,10 @@ from collections.abc import Sequence
 
 from pydantic import JsonValue
 
-from mux.contracts.actions import InputEvent, UserMessage, UserToolResult
+from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation, UserToolResult
 from mux.contracts.events import ContentPart, ImagePart, TextPart
 from mux.drivers.openai._common import objects, text
+from mux.drivers.openai.approvals import origin_request
 from mux.drivers.openai.transport import Object
 from mux.errors import UnsupportedCapability
 
@@ -70,8 +71,27 @@ def translate(events: Sequence[InputEvent], session: Object, profile_id: str) ->
             else:
                 wire["output"] = content(event.content, profile_id)
             result.append(wire)
+        elif isinstance(event, UserToolConfirmation):
+            matching = [a for a in actions if a.get("request_id") == event.action_id]
+            if (
+                len(matching) != 1
+                or origin_request(matching[0]) is None
+                or event.deny_message is not None
+                or matching[0].get("turn_id") != session.get("active_root_turn")
+            ):
+                raise UnsupportedCapability(("origin_approval_action",), profile_id)
+            result.append(
+                {
+                    "type": "agent.session.input.computer_use_approval_request_result",
+                    "request_id": event.action_id,
+                    "response": {
+                        "type": "browser_origin_access",
+                        "decision": "approve" if event.decision == "allow" else "deny",
+                    },
+                }
+            )
         else:
-            # A computer-use approval is not a generic tool confirmation.
+            # Unrecognized provider-native inputs are never generic approval.
             raise UnsupportedCapability(
                 ("native_input" if event.type == "native.input" else "tool_confirmation",),
                 profile_id,

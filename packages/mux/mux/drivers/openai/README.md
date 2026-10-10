@@ -112,6 +112,22 @@ these are not resumable native SSE cursors.
 
 ## Host state and usage
 
+Daimon's host adapters in `turn/openai_state.py` persist recovery history,
+usage revisions and per-invocation pre-input baselines through the admitted
+A4 journal/lease. Complete native history is published in one `record_many`
+transaction. Revision checkpoints are host metadata, excluded from provider
+history and display; no SDK meter is invented. `turn/openai_host.py` requires
+an authorized provisioned native `SessionSpec`, durable adapters and scoped
+transport injection. It creates once under a durable claim, publishes its actual
+binding, and reuses the same native environment across host turns. It refuses
+shared threads, transfer, sealed/read-only/publishing-restricted policies and
+changed bound plans rather than erase continuity or bypass host policy.
+
+An explicit `SessionControls.model="gpt-6-luna"` adds the documented
+session `agent.model` override while retaining `agent_id`; the decoder checks
+the returned session model on creation and subsequent reads. Omitting this
+control preserves old request bytes. See the current [session creation reference](https://developers.openai.com/api/reference/resources/agents/subresources/sessions/methods/create).
+
 `RecoveryJournal` and `UsageRevisions` are injected host ports. Journal replacement
 must be atomic; revision allocation must persist and compare/update atomically.
 The host must serialize refreshes per session because the provider exposes no
@@ -165,12 +181,20 @@ SSE replay and atomic `expected_turn` are refused. Session update plans return
 `refuse`, and migration always raises `MigrationUnsupported`. Resource revision
 fingerprints describe a retrieved record; they are not native conditional-write
 preconditions. Input-mode/steering/cancel-target checks depend on host serialization,
-not on a provider CAS. Generic tool confirmations and native input bypasses refuse.
+not on a provider CAS. Unmatched tool confirmations and native input bypasses refuse.
 The current computer-use schema keeps `browser_origin_access` decisions
 (`approve`, `deny`, `cancel`) distinct from `browser_authentication` actions
-(`submit`, `cancel`). Both remain native required actions here; generic host
-approval does not authorize secret-field submission. G1 must implement that
-routing explicitly against the [computer-use guide](https://developers.openai.com/api/docs/guides/agents-api/tools/computer-use).
+(`submit`, `cancel`). Origin requests normalize to typed tool confirmations. An allow/deny answer
+must name exactly one current-root origin request; its wire response is
+`agent.session.input.computer_use_approval_request_result` with
+`response.type=browser_origin_access`. Authentication stays native and refuses
+this route. Unmatched/duplicate/foreign-root requests, native bypass input and
+unsupported denial-message text refuse before a write. Turn serialization
+remains host-owned; this does not claim a native CAS. G1's display codec shows
+the observed origin and reason before the permission pause, keeping neutral
+request provenance separate from display records. Daimon registers the codec
+only for explicitly configured caller-private Luna channels with an injected
+authorized native runtime. See the [computer-use guide](https://developers.openai.com/api/docs/guides/agents-api/tools/computer-use).
 
 
 ### Observed Agents model eligibility
