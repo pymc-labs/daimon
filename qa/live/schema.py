@@ -93,9 +93,13 @@ class Assertion(Contract):
         "channel_text_present",
         "channel_text_absent",
         "http_check",
+        "cli_check",
     ]
     turn: int | None = Field(default=None, ge=1)
     url: str | None = None
+    cmd: str | None = None
+    expect_absent: str | None = None
+    expect_all_of: list[str] | str | None = None
     expect_status: int | None = Field(default=None, ge=100, le=599)
     expect_content_type: str | None = None
     body_absent: str | None = None
@@ -130,7 +134,7 @@ class Assertion(Contract):
         elif self.since_turn is not None:
             raise ValueError("since_turn requires channel_text assertion")
         if (
-            self.kind not in {"db_check", "interrupt_within_s", "http_check"}
+            self.kind not in {"db_check", "interrupt_within_s", "http_check", "cli_check"}
             and self.turn is None
             and self.since_turn is None
         ):
@@ -149,6 +153,13 @@ class Assertion(Contract):
             not self.url or not (self.expect_status or self.expect_content_type or self.body_absent)
         ):
             raise ValueError("http_check requires URL and an expectation")
+        if self.kind == "cli_check":
+            if not self.cmd or not (
+                isinstance(self.expect, str) or self.expect_absent or self.expect_all_of
+            ):
+                raise ValueError("cli_check requires cmd and a text expectation")
+        elif self.cmd or self.expect_absent or self.expect_all_of is not None:
+            raise ValueError("CLI fields require cli_check")
         if self.kind == "same_thread" and self.as_turn is None:
             raise ValueError("same_thread requires as_turn")
         if self.kind == "progress_seen" and self.within_s is None:
@@ -252,7 +263,6 @@ PROPOSED_ASSERTIONS = frozenset(
         "chunks_gap_max_s",
         "component_present",
         "card_text_now",
-        "cli_check",
         "any_of",
         "card_edits_min",
         "answer_length_chars",

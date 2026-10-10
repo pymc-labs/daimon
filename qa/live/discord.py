@@ -563,6 +563,36 @@ class DiscordBackend:
                 raise ValueError("admin hook context must be string bindings")
             self.bindings.update(cast(dict[str, str], bindings))
 
+    def cli_read(self, command: str) -> str:
+        import shlex
+
+        if self.env != "staging":
+            raise Pending("CLI readback is staging-only")
+        tokens = shlex.split(command)
+        if (
+            len(tokens) != 6
+            or tokens[:3] != ["daimon", "agents", "--guild"]
+            or tokens[3] != self.target.guild_id
+            or tokens[4] != "get"
+        ):
+            raise Pending("CLI readback only supports this QA guild's agents get")
+        hook = self.config.admin_hooks.get("cli_check")
+        if not hook:
+            raise Pending("read-only staging CLI hook is not configured")
+        response = subprocess.run(
+            hook,
+            input=json.dumps({"guild_id": self.target.guild_id, "cmd": command, "read_only": True}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if response.returncode:
+            raise Pending(f"read-only staging CLI hook exited {response.returncode}")
+        if len(response.stdout) > 131072:
+            raise Pending("CLI readback exceeds bounded observation")
+        return redact(response.stdout)
+
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]:
         if not turn.thread_id or not turn.ended_at:
             raise Pending("logs require a thread id and bounded turn window")

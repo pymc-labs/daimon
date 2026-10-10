@@ -86,6 +86,9 @@ class FakeBackend:
     def admin(self, step: Step, channel: str) -> None:
         self.events.append(f"admin:{step.tool or step.do}")
 
+    def cli_read(self, command: str) -> str:
+        return '{"description":"qa-original","skills":["qa-echo-skill"],"model":"claude-haiku-5-5"}'
+
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]:
         if self.log_error:
             raise Pending("logging unavailable")
