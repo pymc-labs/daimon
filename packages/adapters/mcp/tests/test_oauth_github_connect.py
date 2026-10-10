@@ -998,7 +998,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
         await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
         picker = await browser.get("/oauth/github/confirm", params={"state": state})
         assert "Bot&#x27;s repos" in picker.text
-        assert "Current repos" in picker.text
+        assert "Connected repos" in picker.text
         assert "Save changes" in picker.text
         fields = dict(
             re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', picker.text)
@@ -1188,16 +1188,30 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             )
 
         state, hidden, rendered = await page()
-        assert "No repos yet" in rendered
+        assert "No repos connected yet" in rendered
+        assert '<dialog id="repo-picker"' in rendered
+        assert '<noscript><section class="gh-fallback">' in rendered
         assert (await save(hidden)).status_code == 200  # No-op keeps the invitation.
-        added = await save(hidden, repo=["101", "102"])
+        added = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
         assert added.status_code == 200
         assert "editor/repo-101" in added.text and "editor/repo-102" in added.text
-        replay = await save(hidden, repo=["101", "102"])
+        async with sessionmaker() as session:
+            grants = await github_access.list_agent_repos(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        assert {repo.repo_id: repo.ceiling_access for repo in grants} == {
+            101: "read",
+            102: "write",
+        }
+        replay = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
         assert replay.status_code == 200 and "editor/repo-101" in replay.text
 
         state, hidden, rendered = await page()
-        assert "Current repos" in rendered and "Read only" in rendered
+        assert "Connected repos" in rendered and "Read only" in rendered
+        assert "Read and write" in rendered
+        assert (await save(hidden, repo="101", access_101="write")).status_code == 403
+        assert (await save(hidden, repo="103", access_103="admin")).status_code == 400
+        assert (await save(hidden, repo="103", access_103=["read", "write"])).status_code == 400
         working = await save(hidden, working="101")
         assert working.status_code == 200 and "Working repo" in working.text
 

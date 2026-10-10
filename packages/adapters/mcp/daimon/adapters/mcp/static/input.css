@@ -237,3 +237,105 @@
 }
 .gh-editor-note { margin: 0 0 22px; font-size: 14px; }
 .gh-editor .gh-finish-status { display: block; }
+
+/* One-list agent repo editor. The tenant-wide connection picker keeps its own layout. */
+.gh-editor { padding-bottom: 105px; }
+.gh-editor .gh-js { display: none; }
+.gh-editor.is-enhanced .gh-js { display: inline-flex; }
+.gh-editor [hidden] { display: none !important; }
+.gh-flow--picker:has(.gh-editor) { max-width: 832px; margin-inline: auto; }
+.gh-editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 23px 0 14px; }
+.gh-editor-toolbar h2 { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 16px; font-weight: 700; }
+.gh-repo-count { padding: 2px 7px; border-radius: 6px; background: #e9eef3; color: #52647e; font-size: 12px; }
+.gh-add-button { align-items: center; gap: 7px; min-height: 42px; padding: 9px 14px; border: 1px solid #d3dce7; border-radius: 8px; background: #fff; color: #132d4e; font-size: 14px; font-weight: 650; cursor: pointer; }
+.gh-add-button:hover, .gh-add-button:focus-visible { background: #edf4f8; }
+.gh-add-button .web-icon { width: 17px; height: 17px; }
+.gh-connected-list { border: 1px solid #dbe2ea; border-radius: 12px; background: #fff; }
+.gh-editor-empty { margin: 0; padding: 30px 20px; color: #62738a; }
+.gh-agent-row { position: relative; padding: 21px 20px; border-bottom: 1px solid #e5e9ef; }
+.gh-agent-row:last-child { border-bottom: 0; }
+.gh-agent-row.gh-added-row { background: #f1faf5; }
+.gh-agent-row.gh-removed-row { background: #fff6f5; }
+.gh-removed-row .gh-row-name { color: #8793a1; text-decoration: line-through; }
+.gh-row-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gh-row-name { min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 700; }
+.gh-row-actions { display: flex; align-items: center; gap: 3px; flex: none; }
+.gh-row-action { display: inline-flex; align-items: center; gap: 5px; min-height: 38px; padding: 7px; border: 0; border-radius: 6px; background: transparent; color: #566982; font-size: 13px; cursor: pointer; }
+.gh-row-action:hover, .gh-row-action:focus-visible { background: #edf1f5; color: #172f50; }
+.gh-remove-action:hover, .gh-remove-action:focus-visible { background: #fff0ef; color: #9d4245; }
+.gh-row-action .web-icon { width: 16px; height: 16px; }
+.gh-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 9px; font-size: 12px; }
+.gh-access-indicator, .gh-working-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: 650; }
+.gh-access-indicator .web-icon, .gh-working-badge .web-icon { width: 14px; height: 14px; }
+.gh-access-read { background: #eaf2fa; color: #245b83; }
+.gh-access-write { background: #fff4df; color: #80560c; }
+.gh-working-badge { background: #e5f4f0; color: #225e55; }
+.gh-editor .gh-working-badge { display: inline-flex; align-items: center; margin-top: 0; }
+.gh-pending-label { color: #347453; font-weight: 650; }
+.gh-removed-row .gh-pending-label { color: #a44c48; }
+.gh-repo-state, .gh-repo-locked { margin: 10px 0 0; color: #65758b; font-size: 12px; }
+.gh-editor .gh-repo-locked { max-width: none; }
+.gh-row-menu { position: absolute; top: 62px; right: 20px; z-index: 4; min-width: 190px; padding: 5px; border: 1px solid #dbe2ea; border-radius: 9px; background: #fff; box-shadow: 0 8px 22px #172d4820; }
+.gh-row-menu button { display: inline-flex; align-items: center; gap: 7px; width: 100%; padding: 9px; border: 0; border-radius: 5px; background: transparent; color: #173454; font-size: 13px; text-align: left; cursor: pointer; }
+.gh-row-menu button:hover, .gh-row-menu button:focus-visible { background: #edf4f6; }
+.gh-row-menu .web-icon { width: 16px; height: 16px; }
+.gh-editor-install { margin: 16px 2px; font-size: 13px; }
+.gh-editor-install a, .gh-dialog-link a { color: #315b7c; text-decoration: underline; }
+.gh-editor-notice { margin: 11px 0; padding: 10px 13px; border-radius: 7px; background: #f2f6f8; color: #42576e; font-size: 13px; }
+.gh-editor-notice a { text-decoration: underline; }
+.gh-repo-dialog { width: min(560px, calc(100vw - 32px)); max-height: min(90vh, 800px); margin: auto; padding: 0; border: 1px solid #dbe2ea; border-radius: 15px; background: #fff; color: #142b49; box-shadow: 0 18px 60px #101f3a33; }
+.gh-repo-dialog::backdrop { background: #12233d88; }
+.gh-dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 23px 24px 14px; }
+.gh-dialog-head h2 { margin: 0; font-size: 22px; font-weight: 700; }
+.gh-dialog-close { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
+.gh-dialog-close:hover, .gh-dialog-close:focus-visible { background: #eef2f5; }
+.gh-dialog-close .web-icon { width: 18px; height: 18px; }
+.gh-dialog-search { position: relative; margin: 0 24px 12px; }
+.gh-dialog-search .web-icon { position: absolute; top: 13px; left: 12px; width: 18px; height: 18px; color: #728297; pointer-events: none; }
+.gh-dialog-search input { width: 100%; min-height: 44px; padding: 9px 12px 9px 40px; border: 1px solid #cdd7e2; border-radius: 8px; background: #fff; font-size: 14px; }
+.gh-dialog-choices { max-height: min(48vh, 430px); overflow-y: auto; padding: 0 24px; }
+.gh-picker-choice { padding: 15px 0; border-top: 1px solid #e5e9ef; }
+.gh-picker-label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+.gh-picker-label input { width: 17px; height: 17px; accent-color: #173d62; }
+.gh-picker-label small { display: block; margin-top: 3px; color: #64768a; font-size: 12px; font-weight: 400; }
+.gh-choice-access { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 11px 0 0 28px; color: #5a6d83; font-size: 13px; }
+.gh-choice-access select { min-height: 35px; padding: 6px 8px; border: 1px solid #d1dce7; border-radius: 6px; background: #fff; color: #173d62; }
+.gh-choice-access small { color: #80560c; }
+.gh-dialog-link { margin: 14px 24px; font-size: 13px; }
+.gh-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 24px; border-top: 1px solid #e5e9ef; background: #f9fbfc; color: #6b7b8f; font-size: 12px; }
+.gh-dialog-footer .gh-primary { min-height: 42px; }
+.gh-dialog-footer .gh-primary:disabled { opacity: .45; cursor: default; }
+.gh-editor-footer { position: fixed; z-index: 5; right: 0; bottom: 0; left: 0; border-top: 1px solid #dbe2ea; background: #fffffff8; box-shadow: 0 -8px 24px #0c1f400d; }
+.gh-editor-footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 880px; margin: auto; padding: 13px 24px; }
+.gh-editor-footer strong { display: block; font-size: 14px; }
+.gh-editor-footer small { display: block; margin-top: 3px; color: #687a90; font-size: 12px; }
+.gh-editor-footer-actions { display: flex; align-items: center; gap: 11px; }
+.gh-editor-discard, .gh-editor-cancel { padding: 8px; border: 0; border-radius: 6px; background: transparent; color: #52677f; font-size: 13px; text-decoration: none; cursor: pointer; }
+.gh-editor-discard:hover, .gh-editor-cancel:hover { background: #edf2f5; }
+.gh-editor-footer .gh-primary:disabled { opacity: .5; cursor: default; }
+.gh-editor-footer .gh-primary { white-space: nowrap; }
+.gh-fallback { margin: 20px 0; padding: 16px; border: 1px solid #dbe2ea; border-radius: 10px; }
+.gh-fallback label { display: block; margin: 10px 0; }
+.gh-fallback select { margin-left: 10px; padding: 7px; border: 1px solid #dbe2ea; border-radius: 6px; }
+@media (max-width: 600px) {
+  .gh-editor { padding-bottom: 145px; }
+  .gh-editor-toolbar { margin-top: 18px; }
+  .gh-add-button { padding: 8px 11px; font-size: 13px; }
+  .gh-agent-row { padding: 17px 14px; }
+  .gh-row-name { font-size: 14px; }
+  .gh-row-action { padding: 6px 4px; font-size: 12px; }
+  .gh-row-menu { right: 14px; }
+  .gh-repo-dialog { width: 100vw; max-width: 100vw; max-height: 90dvh; margin: auto 0 0; border-radius: 18px 18px 0 0; }
+  .gh-dialog-head { padding: 20px 20px 12px; }
+  .gh-dialog-search { margin-right: 20px; margin-left: 20px; }
+  .gh-dialog-choices { padding-right: 20px; padding-left: 20px; }
+  .gh-dialog-footer { padding: 15px 20px; }
+  .gh-editor-footer-inner { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
+  .gh-editor-footer strong { font-size: 13px; }
+  .gh-editor-footer small { font-size: 11px; }
+  .gh-editor-footer-actions { display: contents; }
+  .gh-editor-discard { grid-column: 1; grid-row: 2; justify-self: start; padding: 2px 0; }
+  .gh-editor-footer-actions .gh-primary { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+  .gh-editor-footer-actions .gh-primary { padding: 9px 11px; font-size: 13px; }
+  .gh-editor-cancel { display: none; }
+}
