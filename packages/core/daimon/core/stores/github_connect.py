@@ -71,7 +71,7 @@ async def require_app_eligible_agent(
     if (
         rule is not None
         and rule.runs_in is not None
-        and await _uses_server_wide_repo(session, tenant_id=tenant_id, agent_id=agent_id)
+        and await uses_server_wide_repo(session, tenant_id=tenant_id, agent_id=agent_id)
     ):
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
     if await github_access.get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app":
@@ -82,7 +82,7 @@ async def require_app_eligible_agent(
         raise ClientAgentConnectionError(CLIENT_AGENT_MESSAGE)
 
 
-async def _uses_server_wide_repo(
+async def uses_server_wide_repo(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> bool:
     """Whether a grant or a pending draft of the agent rests on a repo not connected for it."""
@@ -403,6 +403,14 @@ async def sweep_expired_click_intents(session: AsyncSession, *, now: datetime) -
     return cast(CursorResult[Any], result).rowcount
 
 
+_ACCESS_RANK: dict[str, int] = {"none": 0, "read": 1, "write": 2}
+_ACCESS_BY_RANK: tuple[Literal["none", "read", "write"], ...] = ("none", "read", "write")
+
+
+def _higher_access(existing: str, chosen: str, limit: int) -> Literal["none", "read", "write"]:
+    return _ACCESS_BY_RANK[min(max(_ACCESS_RANK[existing], _ACCESS_RANK[chosen]), limit)]
+
+
 class MissingRepo(BaseModel):
     """A repo the agent needs before its saved key can be retired."""
 
@@ -479,13 +487,22 @@ async def activate_confirmed_agent(
         existing = await session.get(
             AgentGitHubGrant, (invitation.tenant_id, agent_id, repo.repo_id)
         )
+        # Connecting only adds: never lower what the agent already has, up to
+        # what the repo's confirmation allows.
+        limit = _ACCESS_RANK[authorized.max_access]
+        baseline = _higher_access(
+            existing.baseline_access if existing is not None else "none", repo.max_access, limit
+        )
+        ceiling = _higher_access(
+            existing.ceiling_access if existing is not None else "read", repo.max_access, limit
+        )
         await github_access.stage_grant(
             session,
             tenant_id=invitation.tenant_id,
             agent_id=agent_id,
             repo_id=repo.repo_id,
-            baseline_access=repo.max_access,
-            ceiling_access=repo.max_access,
+            baseline_access=baseline,
+            ceiling_access=cast(Literal["read", "write"], ceiling),
             granted_by_account_id=invitation.requester_account_id,
             mount_path=existing.mount_path if existing is not None else None,
             is_working_repo=existing.is_working_repo if existing is not None else False,

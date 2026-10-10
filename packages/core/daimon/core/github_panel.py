@@ -8,6 +8,8 @@ from datetime import datetime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
+    GroupLookupFailed,
+    GroupMembers,
     confirm_stored_group_ids,
     grant_group_ids,
     read_stored_admin,
@@ -102,15 +104,18 @@ async def requester_manages_agent(
     agent_name: str | None,
     ma_agent_id: str | None,
     default: DeploymentDefault,
+    is_daimon_managed: bool | None,
+    members: GroupMembers | None,
 ) -> bool:
     """The confirm-time check for a link someone made for one agent, outside a chat turn.
 
-    Reads the requester's stored role and channel admin grants. A Slack or
-    Teams group is not looked up here, so a grant held only through one no
-    longer counts; a grant naming the person, or a Discord role, does.
-    Whether the agent is managed was checked when the link was made.
+    Reads the requester's stored role and channel admin grants, and counts a
+    group or Discord role only as `members` confirms it now. The caller reads
+    `is_daimon_managed` from the live agent. Fails closed: an unknown managed
+    status, a link without the agent's Managed Agents id or a failed group
+    lookup is no.
     """
-    if not agent_name or not ma_agent_id or platform is None:
+    if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
     stored = await read_stored_admin(
         session,
@@ -121,9 +126,20 @@ async def requester_manages_agent(
     )
     if stored.is_admin:
         return True
-    role_ids = await confirm_stored_group_ids(
-        platform, platform_user_id, stored.role_ids, None, named=grant_group_ids(stored.grants)
-    )
+    try:
+        role_ids = (
+            await confirm_stored_group_ids(
+                platform,
+                platform_user_id,
+                stored.role_ids,
+                members,
+                named=grant_group_ids(stored.grants),
+            )
+            if members is not None
+            else frozenset[str]()
+        )
+    except GroupLookupFailed:
+        return False
     return await can_manage_agent_github(
         session,
         tenant_id=tenant_id,
@@ -131,7 +147,7 @@ async def requester_manages_agent(
         caller=ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids),
         agent_names=(agent_name,),
         ma_agent_id=ma_agent_id,
-        is_daimon_managed=False,
+        is_daimon_managed=is_daimon_managed,
         default=default,
     )
 

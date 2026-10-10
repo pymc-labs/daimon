@@ -284,7 +284,12 @@ async def test_panel_activation_refuses_each_saved_state(
     panel = await load_grants_panel(
         db_session, tenant_id=tenant_id, agent_id=agent_id, agent_name="Helper"
     )
-    assert panel.saved_state
+    if saved_kind == "channel_pin":
+        # A pinned agent manages only repos connected for it, so the panel
+        # offers none of the server's; a server-wide grant still refuses.
+        assert not panel.saved_state and panel.repos == ()
+    else:
+        assert panel.saved_state
     await stage_panel_grant(
         db_session,
         tenant_id=tenant_id,
