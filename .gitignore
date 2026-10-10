@@ -47,3 +47,7 @@ formal/tla2tools.jar
 
 # Operator backups contain credentials and private data.
 /backups/
+
+# Operator live QA credentials, evidence and local configuration.
+qa/live/config.local.json
+results/

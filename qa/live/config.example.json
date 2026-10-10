@@ -1,0 +1,49 @@
+{
+  "driver_path": "/home/clsandoval/cs/daimon-private/.claude/skills/daimon-qa/qa.py",
+  "model": "claude-haiku-4-5-20251001",
+  "pricing": {
+    "per_turn_usd": 0.25,
+    "judge_input_per_million": 1.0,
+    "judge_output_per_million": 5.0,
+    "judge_input_token_limit": 12000
+  },
+  "staging": {
+    "guild_id": "1435062989119295640",
+    "category_id": "1435062989119295641",
+    "daimon_id": "1530628070405308456",
+    "qa_user_ids": [
+      "1533049261032341668"
+    ],
+    "project": "pymc-daimon-staging",
+    "enabled": false,
+    "guild_allowlist": [],
+    "database_env": "DAIMON_QA_STAGING_DATABASE_URL",
+    "context": {},
+    "warm_url": "https://staging-daimon-mcp-251774259661.us-east4.run.app/readyz"
+  },
+  "prod": {
+    "guild_id": "1435062989119295640",
+    "category_id": "1435062989119295641",
+    "daimon_id": "1530628070405308456",
+    "qa_user_ids": [
+      "1533049261032341668"
+    ],
+    "project": "pymc-daimon",
+    "enabled": false,
+    "guild_allowlist": [],
+    "database_env": "DAIMON_QA_PROD_DATABASE_URL",
+    "context": {},
+    "warm_url": ""
+  },
+  "alerts": {
+    "inbox": "/home/clsandoval/cs/root-opus-handoff-20260923/inbox",
+    "command": [
+      "/home/clsandoval/cs/root-opus-handoff-20260923/tsend.sh",
+      "%618"
+    ],
+    "cooldown_s": 21600
+  },
+  "admin_hooks": {},
+  "poll_interval_s": 4,
+  "settle_s": 6
+}

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, evaluates assertions, records guarded daily costs and canary evidence, and deduplicates failure/recovery alerts. Offline tests and an uninstalled hourly timer template are included; production canary remains disabled pending approval.
+
 ### Changed
 
 - Teams 👍/👎 are now emoji buttons beside Ask a person instead of Teams' built-in thumbs. Older answers keep the built-in thumbs, which still work.
