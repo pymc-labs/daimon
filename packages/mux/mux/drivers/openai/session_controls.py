@@ -15,5 +15,6 @@ class SessionControls(Contract):
     """
 
     model: Literal["gpt-6-luna"] | None = None
+    multi_agent_enabled: Literal[False] | None = None
     container_size: Literal["small", "medium", "large"] | None = None
     spend_limit_usd_cents: int | None = Field(default=None, gt=0, strict=True)

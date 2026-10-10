@@ -115,6 +115,12 @@ class OpenAISessions:
             agent = object_json(raw["agent"])
             if agent.get("model") != self._controls.model:
                 raise ContinuityLost(binding.id, ("session model differs from admitted model",))
+        if self._controls.multi_agent_enabled is False:
+            multi_agent = object_json(object_json(raw["agent"]).get("multi_agent") or {})
+            if multi_agent.get("enabled") is not False:
+                raise ProviderError(
+                    "permission", retryable=False, native_code="host_delegation_enabled"
+                )
         status = text(raw["status"])
         states = {
             "idle": "idle",
@@ -220,6 +226,15 @@ class OpenAISessions:
         body: Object = {"agent_id": spec.agent.id, "environment": environment, "metadata": metadata}
         if self._controls.model is not None:
             body["agent"] = {"model": self._controls.model}
+        if self._controls.multi_agent_enabled is False:
+            if object_json(agent.get("multi_agent") or {}).get("enabled") is True:
+                raise ProviderError(
+                    "permission", retryable=False, native_code="host_delegation_enabled"
+                )
+            body["agent"] = {
+                **object_json(body.get("agent") or {}),
+                "multi_agent": {"enabled": False},
+            }
         if self._controls.spend_limit_usd_cents is not None:
             body["spend_control"] = {"limit": self._controls.spend_limit_usd_cents}
         if vaults is not None:

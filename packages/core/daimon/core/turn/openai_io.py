@@ -283,6 +283,10 @@ class OpenAITurnIO:
             payload = TurnEndedPayload.model_validate(event.payload)
             self._check_terminal(event)
             self._terminal = payload.outcome
+            if payload.outcome == "errored":
+                # accept_record durably journals this root before display.
+                # An SDK retries_exhausted idle is not a foreign failure.
+                raise ProviderError("upstream", retryable=False, native_code="host_root_failed")
         frames: list[TurnEvent] = []
         if event.type == "session.status_terminated":
             self._terminated = True
@@ -335,6 +339,11 @@ class OpenAITurnIO:
         if new_turn and self._input_started and not self._resuming:
             raise UnsupportedCapability(("host_one_root_per_turn",), PROFILE)
         async with asyncio.timeout(REPLAY_TIMEOUT_S):
+            # The configured driver verifies the admitted model and explicitly
+            # disabled delegation on a fresh native session before every input.
+            current = await _edge(self._backend.sessions.retrieve(self._scope, self._session))
+            if current.ref != self._session:
+                raise ScopeViolation(self._session.id, "foreign OpenAI input session")
             await self._baseline()
         if new_turn:
             self._input_started = True
@@ -433,6 +442,16 @@ class OpenAITurnIO:
             current.sort(
                 key=lambda value: value.type in ("session.turn_ended", "session.status_terminated")
             )
+            # The completed recovery snapshot has already been journaled.
+            # Replay DTOs alone cannot carry a foreign terminal outcome into
+            # the legacy finalizer. Use its existing explicit failure/interrupt
+            # paths; neither retries delivery or sends another cancel.
+            if "errored" in outcomes:
+                raise ProviderError("upstream", retryable=False, native_code="host_root_failed")
+            if "interrupted" in outcomes:
+                from daimon.core.turn.driver import InterruptedDuringRecovery
+
+                raise InterruptedDuringRecovery(phase="replay")
             result: list[BetaManagedAgentsSessionEvent] = []
             for value in current:
                 if value.authority not in ("record", "reconciled") or value.thread_id is not None:

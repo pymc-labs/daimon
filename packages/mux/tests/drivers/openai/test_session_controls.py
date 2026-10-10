@@ -180,3 +180,59 @@ def test_only_luna_is_an_allowed_session_model_control():
     for model in ("gpt-6-astra", "gpt-5-nano", "gpt-6-sol", ""):
         with pytest.raises(ValidationError):
             SessionControls.model_validate({"model": model})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_enabled", [False, True, None])
+async def test_session_override_disables_and_verifies_delegation(native_enabled):
+    from mux.errors import ProviderError
+
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"id": "a", "metadata": {}, "multi_agent": {"enabled": False}}
+            )
+        raw = native_session()
+        raw["agent"] = {
+            "id": "a",
+            "model": "gpt-6-luna",
+            "multi_agent": {"enabled": native_enabled},
+        }
+        return httpx.Response(200, json=raw)
+
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls(model="gpt-6-luna", multi_agent_enabled=False),
+        )
+        spec = SessionSpec(
+            agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+            agent_revision=Revision(local=0),
+            config_revision=1,
+        )
+        if native_enabled is False:
+            await driver.sessions.create(SCOPE, spec, key="create")
+        else:
+            with pytest.raises(ProviderError) as refused:
+                await driver.sessions.create(SCOPE, spec, key="create")
+            assert refused.value.native_code == "host_delegation_enabled"
+    assert json.loads(seen[-1].content)["agent"] == {
+        "model": "gpt-6-luna",
+        "multi_agent": {"enabled": False},
+    }
+
+
+def test_enabled_delegation_cannot_be_requested_by_host_controls():
+    with pytest.raises(ValidationError):
+        SessionControls.model_validate({"multi_agent_enabled": True})

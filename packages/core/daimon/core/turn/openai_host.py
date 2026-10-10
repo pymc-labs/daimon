@@ -48,7 +48,7 @@ from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Authorization
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import Transport
-from mux.errors import ContinuityLost, ScopeViolation, UnsupportedCapability
+from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
@@ -91,6 +91,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     if (
         not runtime.account_scope_id.strip()
         or runtime.controls.model != "gpt-6-luna"
+        or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.container_size != "small"
         or runtime.controls.spend_limit_usd_cents is None
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
@@ -243,6 +244,17 @@ async def _create(
 
 
 async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
+    try:
+        return await _prepare_openai(request)
+    except UnsupportedCapability as error:
+        raise AdmissionDenied(reason="backend_unsupported") from error
+    except ProviderError as error:
+        if error.native_code != "host_delegation_enabled":
+            raise
+        raise AdmissionDenied(reason="backend_unsupported") from error
+
+
+async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     revision = request.admission.backend_revision
     runtime = runtime_for(request.deps.turn_runtimes.get(PROFILE), revision)
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
@@ -252,7 +264,7 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         or revision.thread_mode != "per_caller"
         or request.transfer is not None
     ):
-        raise UnsupportedCapability(("openai_host_shared_or_transfer",), PROFILE)
+        raise AdmissionDenied(reason="backend_unsupported")
     if (
         revision.channel.tenant_id != request.scope.tenant_id
         or revision.channel.platform != request.platform
@@ -267,7 +279,7 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         or current.asks_before_publishing
         or current.slack_turn_context_id is not None
     ):
-        raise UnsupportedCapability(("openai_host_restricted_policy",), PROFILE)
+        raise AdmissionDenied(reason="backend_unsupported")
     request = replace(request, admission=current)
     # Resolve a host-authorized native plan before creating a private transport.
     spec = await runtime.session_plan(request)

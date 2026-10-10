@@ -407,3 +407,13 @@ arguments use the recorder's fixed omission sentinel, so replay does not certify
 argument contents, native HTTP bodies or model quality. The recorder/audit is
 unchanged. Live execution requires a separate lead GO and `gpt-6-luna` only;
 production defaults are unchanged.
+
+The initial explicit host slice requires
+`SessionControls(multi_agent_enabled=False)`. Creation sends the documented
+`agent.multi_agent.enabled=false` override alongside the selected model, refuses
+an enabled saved agent before the session POST, and verifies explicit false in
+every returned native session. Reuse and every host input recheck that setting.
+A missing or enabled snapshot refuses; root-only accounting cannot certify
+delegated work. Child-usage accounting is a follow-up. Omitted controls preserve
+standalone driver request bodies. See the fetched 2026-10-10
+[multi-agent guide](https://developers.openai.com/api/docs/guides/agents-api/multi-agent).

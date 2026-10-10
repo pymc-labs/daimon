@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -77,6 +78,8 @@ class Wire:
         self.fail_create = False
         self.bad_model = False
         self.cancelled = False
+        self.saved_delegation = False
+        self.session_delegation = False
 
     def session(self):
         return {
@@ -84,6 +87,7 @@ class Wire:
             "agent": {
                 "id": "native-agent",
                 "model": "different" if self.bad_model else "gpt-6-luna",
+                "multi_agent": {"enabled": self.session_delegation},
             },
             "environment": {"type": "openai_hosted", "id": "native-environment"},
             "metadata": {"mux_tenant": str(TENANT)},
@@ -97,12 +101,17 @@ class Wire:
         path = req.url.path.removeprefix("/v1")
         if path == "/agents/native-agent":
             return httpx.Response(
-                200, json={"id": "native-agent", "metadata": {"mux_tenant": str(TENANT)}}
+                200,
+                json={
+                    "id": "native-agent",
+                    "metadata": {"mux_tenant": str(TENANT)},
+                    "multi_agent": {"enabled": self.saved_delegation},
+                },
             )
         if path == "/agents/sessions" and req.method == "POST":
             assert req.headers["Idempotency-Key"].startswith("openai:prepare:")
             body = json.loads(req.content)
-            assert body["agent"] == {"model": "gpt-6-luna"}
+            assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
             assert body["environment"]["container_size"] == "small"
             assert body["spend_control"] == {"limit": 4}
             if self.fail_create:
@@ -231,7 +240,10 @@ async def composed(request, db_session_factory, db_clean, monkeypatch):
             session_plan=plan,
             authorization=lambda scope, kind, id_: scope == SCOPE,
             controls=SessionControls(
-                model="gpt-6-luna", container_size="small", spend_limit_usd_cents=4
+                model="gpt-6-luna",
+                multi_agent_enabled=False,
+                container_size="small",
+                spend_limit_usd_cents=4,
             ),
         )
         deps = replace(
@@ -748,11 +760,146 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
 @pytest.mark.parametrize("policy", ["memory_read_only", "source_sealed", "asks_before_publishing"])
 async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy):
+    from daimon.core.turn.errors import AdmissionDenied
+
     request, wire, _, _, _ = composed
     request = replace(request, admission=replace(request.admission, **{policy: True}))
-    with pytest.raises(UnsupportedCapability, match="restricted_policy"):
+    with pytest.raises(AdmissionDenied) as refused:
         await prepare_openai(request)
+    assert refused.value.reason == "backend_unsupported"
     assert wire.requests == []
+
+
+@pytest.mark.parametrize("missing_runtime", [True, False])
+async def test_configured_channel_refuses_unavailable_runtime_before_io(composed, missing_runtime):
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.prepare import bind_session_impl
+
+    request, wire, _, _, runtime = composed
+
+    def forbidden_transport(revision, scope):
+        raise AssertionError("a refused channel must not access a key or transport")
+
+    async def forbidden_plan(request):
+        raise AssertionError("a refused channel must not resolve native resources")
+
+    runtime = replace(runtime, transport_factory=forbidden_transport, session_plan=forbidden_plan)
+    deps = replace(request.deps, turn_runtimes={} if missing_runtime else {PROFILE: runtime})
+    admission = (
+        request.admission
+        if missing_runtime
+        else replace(request.admission, asks_before_publishing=True)
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await bind_session_impl(
+            deps,
+            admission,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            thread_id="thread",
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+    assert refused.value.reason == "backend_unsupported"
+    assert wire.requests == []
+
+
+async def test_delegation_control_is_required_before_native_io(composed):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, _, _, runtime = composed
+    runtime = replace(
+        runtime, controls=runtime.controls.model_copy(update={"multi_agent_enabled": None})
+    )
+    request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+    with pytest.raises(AdmissionDenied) as refused:
+        await prepare_openai(request)
+    assert refused.value.reason == "backend_unsupported"
+    assert wire.requests == []
+
+
+async def test_saved_delegated_agent_refuses_before_session_post(composed):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, _, _, _ = composed
+    wire.saved_delegation = True
+    with pytest.raises(AdmissionDenied) as refused:
+        await prepare_openai(request)
+    assert refused.value.reason == "backend_unsupported"
+    assert all(request.method == "GET" for request in wire.requests)
+
+
+async def test_reused_delegated_session_cannot_settle_only_its_root(composed):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, store, observations, _ = composed
+    await prepare_openai(request)
+    wire.session_delegation = True
+    # Both model meters would be billable. This bounded host refuses the
+    # delegated session before input/usage callbacks, rather than debit root
+    # 100 and silently omit the child's million tokens.
+    wire.turns = [
+        {
+            "id": "root",
+            "session_id": SESSION_ID,
+            "subagent_id": None,
+            "agent_id": "native-agent",
+            "status": "completed",
+            "created_at": 0,
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+        },
+        {
+            "id": "child",
+            "session_id": SESSION_ID,
+            "subagent_id": "delegate",
+            "agent_id": "native-agent",
+            "status": "completed",
+            "created_at": 0,
+            "usage": {"input_tokens": 1000000, "output_tokens": 20},
+        },
+    ]
+    with pytest.raises(AdmissionDenied) as refused:
+        await prepare_openai(request)
+    assert refused.value.reason == "backend_unsupported"
+    assert observations == []
+    assert await store.pending_outbox() == []
+    assert not any(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests)
+
+
+async def test_delegation_drift_after_preparation_refuses_before_input(composed):
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.run import run_prepared_turn
+    from daimon.core.turn.termination import TerminationReason
+
+    request, wire, _, _, _ = composed
+    prepared = await prepare_openai(request)
+    wire.session_delegation = True
+
+    async def reseed():
+        raise AssertionError("delegation refusal must never retry input")
+
+    lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="question",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key="delegation-drift",
+    )
+    await drain_outcomes()
+    assert outcome.state.termination == TerminationReason.UPSTREAM
+    assert outcome.state.error is not None
+    assert lifecycle.terminal_success == []
+    assert not any(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests)
+    assert all(source.closed for source in wire.sources)
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
@@ -771,3 +918,106 @@ async def test_reauthorization_change_before_create_cannot_post(composed, monkey
     with pytest.raises(AdmissionDenied):
         await prepare_openai(request)
     assert wire.requests == []
+
+
+@pytest.mark.parametrize("mode", ["live", "replay"])
+@pytest.mark.parametrize("native_status", ["failed", "cancelled"])
+async def test_final_host_outcome_preserves_observed_root(
+    composed, monkeypatch, mode, native_status
+):
+    """Native terminal -> fenced journal -> actual final host/lifecycle result."""
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn.run import run_prepared_turn
+    from daimon.core.turn.termination import TerminationReason
+
+    request, wire, store, _, _ = composed
+
+    class OutcomeStream(Stream):
+        async def __aiter__(self):
+            # The recovery surveillance stream remains open until history is
+            # atomically published; an eventless loop would not prove replay.
+            if mode == "replay" and len(self.wire.sources) % 2 == 0:
+                await asyncio.Event().wait()
+            if mode == "replay" and len(self.wire.sources) > 1:
+                return
+            await self.wire.sent.wait()
+            root = self.wire.turns[-1]
+            root["status"] = native_status
+            events = [
+                {
+                    "type": "agent.session.turn.in_progress",
+                    "event_id": root["id"] + ":running",
+                    "turn": {**root, "status": "in_progress"},
+                },
+                {
+                    "type": "agent.session.turn.item.done",
+                    "event_id": root["id"] + ":answer",
+                    "turn_id": root["id"],
+                    "item": self.wire.items[-1],
+                },
+            ]
+            if mode == "live":
+                events.append(
+                    {
+                        "type": "agent.session.turn." + native_status,
+                        "event_id": root["id"] + ":done",
+                        "turn": dict(root),
+                    }
+                )
+            for event in events:
+                event["session_id"] = SESSION_ID
+                yield ("data: " + json.dumps(event) + "\n\n").encode()
+            if mode == "replay":
+                raise httpx.ReadError("offline stream lost before terminal")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(sys.modules[__name__], "Stream", OutcomeStream)
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=TENANT,
+        platform="slack",
+        external_user_id="caller",
+        thread_id="thread",
+        session_account_id=ACCOUNT,
+        reuse_existing=True,
+    )
+
+    async def reseed():
+        raise AssertionError("a failed or cancelled root must not be resent")
+
+    lifecycle = RecordingLifecycle()
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="question",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key="native-outcome-" + mode + "-" + native_status,
+    )
+    await drain_outcomes()
+    terminals = [r for r in await store.read_events(SESSION_ID) if r.type == "session.turn_ended"]
+    assert terminals and terminals[-1].payload["outcome"] == (
+        "errored" if native_status == "failed" else "interrupted"
+    )
+    assert sum(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests) == 1
+    assert all(source.closed for source in wire.sources)
+    assert outcome.state.termination == (
+        TerminationReason.UPSTREAM if native_status == "failed" else TerminationReason.INTERRUPTED
+    )
+    assert (
+        lifecycle.terminal_success == []
+        if native_status == "failed" or mode == "replay"
+        else len(lifecycle.terminal_success) == 1
+    )
+    if native_status == "failed" or mode == "replay":
+        assert outcome.state.error is not None
+        assert len(lifecycle.terminal_failures) == 1

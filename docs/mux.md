@@ -1094,7 +1094,9 @@ through the mux turn path when channel backends are enabled and the host supplie
 `OpenAIHostRuntime`. That injection contains scoped provisioned native resource
 references, a private transport factory, small hosted-container and native spend
 controls, durable journal/revision adapters and verified accounting context.
-Missing injection refuses before key discovery. The unconfigured channel still
+Missing injection raises typed `AdmissionDenied(backend_unsupported)` before
+native plan resolution or key discovery. Unsupported shared/transfer and
+restricted-policy preparation also uses that visible host refusal. The unconfigured channel still
 uses the existing Anthropic path and requests.
 
 Native preparation publishes its actual session binding and reuses that hosted
@@ -1106,3 +1108,15 @@ pending for reconciliation. Sealed/read-only/publishing-restricted policies,
 shared threads, transfers and changed bound plans refuse in this initial host
 composition. Browser-origin approval is distinct from browser authentication;
 authenticated remote MCP is a separate integration.
+
+OpenAI failed roots propagate a provider error after their native journal
+commit, both during streaming and recovery. Recovered cancellation enters the
+existing host interruption path after committing the snapshot; neither path
+fabricates a successful idle, resends input, or sends another cancel. The
+shared Anthropic finalizer remains unchanged.
+
+This first OpenAI host slice requires verified delegation-disabled sessions.
+The driver sends and checks `agent.multi_agent.enabled=false`; enabled saved
+agents, missing verification, and delegation drift on reuse or before input
+refuse. Delegated child accounting is deferred and is not certified by root-only
+usage proofs.
