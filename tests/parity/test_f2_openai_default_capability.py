@@ -56,6 +56,7 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from openai import AsyncOpenAI
+from pydantic import JsonValue
 
 ROOT = Path(__file__).resolve().parents[2]
 MCP_URL = "https://qa-mcp.invalid/mcp"
@@ -219,11 +220,14 @@ class _HostServedMcp:
         self.authorizations: list[str] = []
         # (server_label, authorization) for every MCP tool in every session POST.
         self.posted_mcp: list[tuple[str, str | None]] = []
+        # Every session POST body, verbatim, whatever its tools' types.
+        self.posted_bodies: list[str] = []
         self.results: dict[str, Object] = {}
         self.gate_statuses: list[int] = []
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         if (request.method, request.url.path) == ("POST", "/v1/agents/sessions"):
+            self.posted_bodies.append(request.content.decode())
             await self._serve(object_json(json.loads(request.content)))
         response = await self.script.handle(request)
         if (request.method, request.url.path) != ("GET", "/v1/agents/agent"):
@@ -427,33 +431,50 @@ async def test_f2_fails_when_the_mcp_bearer_is_revoked(tmp_path: Path) -> None:
 
 
 _SENTINEL = "fictional-unbound-secondary-private-value"
+_SECONDARY_URL = "https://secondary.example.com/mcp"
+
+
+def _mcp(**transport: JsonValue) -> Object:
+    native: Object = {"type": "http", "server_url": _SECONDARY_URL, **transport}
+    return {"type": "mcp", "server_label": "secondary", "transport": native}
+
+
+# Unbound tools the provider may add to the stored agent, each carrying a credential.
 _UNBOUND: dict[str, Object] = {
     # 9d06f2b's leak: a native authorization copied into the session POST.
-    "authorization": {"authorization": "Bearer " + _SENTINEL},
+    "authorization": _mcp(authorization="Bearer " + _SENTINEL),
+    "headers": _mcp(headers={"Authorization": "Bearer " + _SENTINEL}),
     # cb15780's leaks: the credential carried in the destination itself.
-    "url_userinfo": {"server_url": f"https://user:{_SENTINEL}@secondary.example.com/mcp"},
-    "url_query": {"server_url": f"https://secondary.example.com/mcp?token={_SENTINEL}"},
-    "headers": {"headers": {"Authorization": "Bearer " + _SENTINEL}},
+    "url_userinfo": _mcp(server_url=f"https://user:{_SENTINEL}@secondary.example.com/mcp"),
+    "url_query": _mcp(server_url=f"{_SECONDARY_URL}?token={_SENTINEL}"),
+    # 48a1dc8's leaks: tools whose type is not exactly "mcp".
+    "type_case": {**_mcp(authorization="Bearer " + _SENTINEL), "type": "MCP"},
+    "type_padded": {**_mcp(authorization="Bearer " + _SENTINEL), "type": "mcp "},
+    "remote_mcp": {
+        "type": "remote_mcp",
+        "server_label": "secondary",
+        "server_url": _SECONDARY_URL,
+        "authorization": _SENTINEL,
+    },
+    "function_headers": {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {}},
+        "headers": {"Authorization": "Bearer " + _SENTINEL},
+    },
+    "builtin_authorization": {"type": "web_search", "authorization": _SENTINEL},
 }
 
 
 @pytest.mark.parametrize("carrier", sorted(_UNBOUND))
-async def test_f2_never_copies_an_unbound_mcp_authorization(
+async def test_f2_never_copies_an_unbound_credential(
     carrier: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The provider returns the stored agent with an unbound, credential-bearing server."""
+    """The provider returns the stored agent with an unbound, credential-bearing tool."""
     from daimon.testing.qa_mcp_host import build_host, cleanup, serve
 
     sentinel = _SENTINEL
-    secondary: Object = {
-        "type": "mcp",
-        "server_label": "secondary",
-        "transport": {
-            "type": "http",
-            "server_url": "https://secondary.example.com/mcp",
-            **_UNBOUND[carrier],
-        },
-    }
+    secondary = _UNBOUND[carrier]
     manifest = _manifest()
     database_url = _database_url()
     qa = await build_host(database_url=database_url, port=0, root=tmp_path)
@@ -469,7 +490,8 @@ async def test_f2_never_copies_an_unbound_mcp_authorization(
             (served,) = f2.served
             # Refused before the session POST: nothing was posted, the run bearer was
             # never resolved, and the real host was never called.
-            assert served.posted_mcp == [] and served.authorizations == []
+            assert served.posted_bodies == [] and served.posted_mcp == []
+            assert served.authorizations == []
             assert served.gate_statuses == [] and f2.resolutions == []
             assert served.agent_reads == 2  # the injection reached session creation
             assert sentinel not in json.dumps(result.evidence, default=str)
