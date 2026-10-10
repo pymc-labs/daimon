@@ -251,3 +251,9 @@ keys pass through in M0, without a second replay cache. Bundle existence probes
 use the Artifacts native metadata projection so unused reply fields remain
 optional. Offline ScriptedTransport proofs compare raw request body bytes and
 protocol headers, as well as SDK projections and call order.
+
+Gemini's explicitly invoked probe harness defaults to MockTransport and a private
+spend ledger. It records the offline C-matrix separately from its narrow SDK
+smoke and cannot issue a full live certificate. Live mode uses the pinned key
+file and reviewed shared-ledger budget configuration ($30 allocation, $24 stop).
+See `mux/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
