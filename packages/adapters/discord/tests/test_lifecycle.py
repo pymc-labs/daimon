@@ -7,6 +7,8 @@ message reference as its first positional argument.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import time
 import types
@@ -379,7 +381,8 @@ class TestCleanReplace:
 
         await lc.on_terminal_success(_make_success_state())
 
-        assert "embeds" not in edits[-1][1], "a one-message answer keeps the card's summary"
+        summary = edits[-2][1]["embeds"]
+        assert edits[-1][1]["embeds"] == summary, "a one-message answer keeps the card's summary"
 
     async def test_completion_ping_answer_carries_the_summary_and_the_card_goes(self) -> None:
         deleted: list[object] = []
@@ -2100,3 +2103,130 @@ async def test_terminal_failure_keeps_authored_setup_guidance(wrapped: bool) -> 
     assert card.description == copy
     assert "Try again in a minute" not in str(card.to_dict())
     assert "request id" not in str(card.to_dict())
+
+
+class _CardRace:
+    """A Discord message whose progress edits can be held on the wire.
+
+    `current` is what the message shows: each edit applies when it LANDS, the
+    way Discord does, so an edit released late overwrites whatever came before.
+    """
+
+    def __init__(self) -> None:
+        self.current: dict[str, Any] = {}
+        self.held: list[asyncio.Event] = []
+        self.hold_progress = True
+        self.clock = [0.0]
+
+    async def send(self, **kwargs: Any) -> object:
+        self.current.update(kwargs)
+        return _SENTINEL_REF
+
+    async def edit(self, ref: Any, **kwargs: Any) -> None:
+        embeds = kwargs.get("embeds") or []
+        progress = bool(embeds and embeds[0].title and "Working" in embeds[0].title)
+        if progress and self.hold_progress:
+            gate = asyncio.Event()
+            self.held.append(gate)
+            await gate.wait()
+        self.current.update(kwargs)
+
+    def lifecycle(self) -> DiscordTurnLifecycle:
+        return DiscordTurnLifecycle(
+            send=self.send,
+            edit=self.edit,
+            agent_name="test-agent",
+            model_id="m",
+            clock=lambda: self.clock[0],
+        )
+
+    def title(self) -> str | None:
+        embeds = self.current.get("embeds") or []
+        return embeds[0].title if embeds else None
+
+
+async def _start_held_progress_edit(race: _CardRace, lc: DiscordTurnLifecycle) -> None:
+    """Post the card, then leave one progress edit on the wire and cancel its tick."""
+    await lc.post_initial()
+    race.clock[0] = 30.0
+    tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
+    while not race.held:
+        await asyncio.sleep(0)
+    tick.cancel()  # what the driver does when the turn ends
+    with contextlib.suppress(asyncio.CancelledError):
+        await tick
+
+
+async def test_a_progress_edit_landing_after_the_settle_timeout_cannot_leave_working_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #628, interleaving 1: the settle wait times out, the answer is
+    delivered, and only then does the held progress edit land."""
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_EDIT_SETTLE_S", 0.01)
+    race = _CardRace()
+    lc = race.lifecycle()
+    await _start_held_progress_edit(race, lc)
+
+    await lc.on_terminal_success(_make_success_state("Final answer"))
+    assert race.current["content"] == "Final answer"
+
+    for gate in race.held:
+        gate.set()
+    await lc.wait_settled()
+
+    assert race.title() is None, (
+        f"the final card must be the last thing on the message, got {race.title()!r}"
+    )
+
+
+async def test_the_drivers_final_render_after_cancel_cannot_leave_working_on_it() -> None:
+    """Review of #628, interleaving 2: the driver cancels the render loop, then
+    calls `render_once(final_state)`, starting a SECOND progress edit while the
+    first is still on the wire. Neither may land over the final card."""
+    race = _CardRace()
+    lc = race.lifecycle()
+    await _start_held_progress_edit(race, lc)
+
+    race.clock[0] = 60.0
+    final_render = asyncio.create_task(lc.on_render(_make_success_state("Final answer")))
+    while len(race.held) < 2:
+        await asyncio.sleep(0)
+    terminal = asyncio.create_task(lc.on_terminal_success(_make_success_state("Final answer")))
+    await asyncio.sleep(0)
+    race.held[1].set()  # the newer edit lands first
+    await final_render
+    await terminal
+    race.held[0].set()  # the older one lands last, after the answer
+    await lc.wait_settled()
+
+    assert race.current["content"] == "Final answer"
+    assert race.title() is None, (
+        f"the final card must be the last thing on the message, got {race.title()!r}"
+    )
+
+
+async def test_a_progress_edit_that_lands_in_time_needs_no_reassertion() -> None:
+    race = _CardRace()
+    lc = race.lifecycle()
+    await _start_held_progress_edit(race, lc)
+
+    terminal = asyncio.create_task(lc.on_terminal_success(_make_success_state("Done here")))
+    await asyncio.sleep(0)
+    race.held[0].set()
+    await terminal
+
+    assert lc._reassert_task is None, "nothing was late, so nothing is re-sent"
+    assert race.title() is None and race.current["content"] == "Done here"
+
+
+async def test_no_progress_edit_is_sent_once_the_turn_is_terminal() -> None:
+    race = _CardRace()
+    race.hold_progress = False
+    lc = race.lifecycle()
+    await lc.post_initial()
+    await lc.on_terminal_success(_make_success_state("Done here"))
+    race.clock[0] = 90.0
+
+    await lc.on_render(_running_tool_turn())
+
+    assert race.title() is None, "a render tick after the terminal flush must not edit"

@@ -14,6 +14,7 @@ Design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import time
 import uuid
@@ -70,6 +71,11 @@ EditFn = Callable[..., Awaitable[discord.Message | None]]
 DeleteFn = Callable[[discord.Message], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
+# Longest the terminal flush waits for a progress edit already in flight.
+_PROGRESS_EDIT_SETTLE_S = 5.0
+# Longest a late progress edit is waited on before the final card is put back anyway.
+_PROGRESS_EDIT_LATE_S = 120.0
+_BACKGROUND: set[asyncio.Task[None]] = set()
 
 # A text block sealed by a later tool use posts permanently once it reaches
 # this size; shorter sealed blocks are pre-tool narration and stay in the
@@ -217,6 +223,15 @@ class DiscordTurnLifecycle:
         self._discord_mark: int | None = None
         self._card_discard_failed = False
         self._last_flush: float = 0.0
+        # Every progress-card edit still on the wire. A cancelled render tick does
+        # not recall a request already sent, so the terminal path waits these out
+        # and, for any that outlive the wait, puts the final card back after
+        # they land (`_reassert_final_card`).
+        self._progress_edits: set[asyncio.Future[None]] = set()
+        # What the turn's terminal edits left on the card, to re-assert.
+        self._final_card: dict[str, Any] | None = None
+        self._final_card_message: discord.Message | None = None
+        self._reassert_task: asyncio.Task[None] | None = None
         self._terminal: bool = False
         self._cancel_view = cancel_view
         self._on_first_post = on_first_post
@@ -314,6 +329,13 @@ class DiscordTurnLifecycle:
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         assert message is not None
+        if self._terminal and message is self._message_ref:
+            card = {key: kwargs[key] for key in ("embeds", "embed", "view") if key in kwargs}
+            if card:
+                if self._final_card_message is not message:
+                    self._final_card = None
+                self._final_card = {**(self._final_card or {}), **card}
+                self._final_card_message = message
         try:
             replacement = await self._edit(message, **kwargs)
         except discord.HTTPException as err:
@@ -374,11 +396,21 @@ class DiscordTurnLifecycle:
             await self._on_first_post(self._message_ref)
             self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
-            # Debounce elapsed — edit
-            await self._edit_message(
-                self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
+            # Debounce elapsed — edit. The edit runs as its own task: the driver
+            # cancels the render tick when the turn ends, and a request already
+            # on the wire still lands. Shielding it lets `_flush_terminal` wait
+            # for it, so a progress card can never land on top of the final one
+            # (prod message 1558319563542626336 kept "Working on it… 2m 44s"
+            # under its answer).
+            edit = asyncio.ensure_future(
+                self._edit_message(
+                    self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
+                )
             )
+            self._progress_edits.add(edit)
+            edit.add_done_callback(self._progress_edits.discard)
             self._last_flush = now
+            await asyncio.shield(edit)
         # else: within debounce window — skip
 
     def _apply_usage(self, state: TurnState) -> None:
@@ -423,6 +455,7 @@ class DiscordTurnLifecycle:
             except Exception:
                 log.warning("turn.balance_footer_failed", exc_info=True)
         self._terminal = True
+        await self._settle_progress_edits()
         now = self._clock()
         data = to_embed_data(self._state, now=now)
         embed = build_discord_embed(data)
@@ -432,6 +465,47 @@ class DiscordTurnLifecycle:
             self._card_message_ref = self._message_ref
         else:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
+
+    async def _settle_progress_edits(self) -> None:
+        """Give progress edits already on the wire a bounded chance to land first.
+
+        Bounded so a stuck request cannot hold the answer; any edit still
+        pending afterwards is handled by `_reassert_final_card`.
+        """
+        pending = [edit for edit in self._progress_edits if not edit.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=_PROGRESS_EDIT_SETTLE_S)
+
+    def _reassert_final_card(self) -> None:
+        """Put the final card back once every progress edit still on the wire lands.
+
+        Without this, a progress edit that outlives the settle wait lands after
+        the answer and leaves "Working on it…" under it (prod message
+        1558319563542626336). Runs in the background, so delivery never waits on it.
+        """
+        late = [edit for edit in self._progress_edits if not edit.done()]
+        message = self._final_card_message
+        if not late or self._final_card is None or message is None:
+            return
+        card = dict(self._final_card)
+
+        async def reassert() -> None:
+            await asyncio.wait(late, timeout=_PROGRESS_EDIT_LATE_S)
+            try:
+                await self._edit(message, **card)
+            except Exception:
+                log.warning("turn.final_card_reassert_failed", exc_info=True)
+
+        task = asyncio.create_task(reassert(), name="discord.final_card_reassert")
+        # The loop holds tasks weakly and the lifecycle is dropped after the turn.
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
+        self._reassert_task = task
+
+    async def wait_settled(self) -> None:
+        """Wait for the background final-card re-assertion, if one was needed."""
+        if self._reassert_task is not None:
+            await self._reassert_task
 
     async def _persist_sealed_responses(self, state: TurnState) -> None:
         """Post sealed answers (text blocks a later tool call made immutable)
@@ -485,6 +559,7 @@ class DiscordTurnLifecycle:
             await self._deliver_success(state)
         finally:
             self._mark_ended()
+            self._reassert_final_card()
 
     async def _deliver_success(self, state: TurnState) -> None:
         await self._persist_sealed_responses(state)
@@ -606,7 +681,15 @@ class DiscordTurnLifecycle:
                     allowed_mentions=mentions,
                     **({"attachments": files} if files else {}),
                     # A long answer ends on its last chunk, so the summary moves there.
-                    **({"embeds": []} if len(chunks) > 1 else {}),
+                    # A one-message answer carries the summary itself, so this last
+                    # edit always leaves the final card, whatever landed before it.
+                    **(
+                        {"embeds": []}
+                        if len(chunks) > 1
+                        else {"embeds": [summary]}
+                        if summary is not None
+                        else {}
+                    ),
                 )
 
         try:
@@ -709,6 +792,7 @@ class DiscordTurnLifecycle:
             await self._deliver_failure(state, err)
         finally:
             self._mark_ended()
+            self._reassert_final_card()
 
     async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
         if (limit := spend_limit_error(err)) is not None:
