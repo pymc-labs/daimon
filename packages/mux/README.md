@@ -510,3 +510,16 @@ and browser authentication separate. Provider codecs supply validated native
 response objects and send the chosen body through claimed mutations; the mux
 input contract has no arbitrary native-response bypass. Unsupported
 credential forms remain refused.
+
+The opt-in OpenAI driver accepts `mcp_secrets(scope, credential_ref, destination)`
+for authenticated remote MCP connections. The host must authorize the reference
+and exact HTTPS destination for that tenant/account before returning a bearer.
+Agent definitions store reference intent and the closed `allowed_tools`/`required`
+policy; the driver resolves each session's credential immediately before its
+create request, preserving any admitted model and delegation controls. The native
+session transport carries the bearer with a redacted SDK debug representation.
+Missing resolvers, changed destinations/policies and mixed inline/vault auth
+refuse before a session write. Omitted authentication keeps the existing request
+shape. See the [OpenAI Agents MCP protocol](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).
+Offline SDK/loopback proofs cover discovery, owned reads and revoked credentials;
+they do not certify live model execution or HTTPS service reachability.

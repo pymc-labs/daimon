@@ -14,6 +14,7 @@ from mux.contracts.resources import (
     MCPConnection,
     ToolSpec,
 )
+from mux.drivers.openai import mcp_auth
 from mux.drivers.openai._common import (
     Context,
     objects,
@@ -39,13 +40,18 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
         body["instructions"] = spec.system
     if spec.metadata is not None:
         body["metadata"] = dict(spec.metadata)
-    if spec.metadata is not None and any(reserved(key) for key in spec.metadata):
+    if spec.metadata is not None and any(
+        reserved(key) or key == mcp_auth.KEY for key in spec.metadata
+    ):
         raise context.unsupported("reserved_skill_metadata")
     if spec.skills is not None:
         body["metadata"] = {
             **object_json(body.get("metadata") or {}),
             **encode_metadata(spec.skills, context),
         }
+    credential_intent = mcp_auth.encode(spec.mcp_servers or (), context)
+    if credential_intent:
+        body["metadata"] = {**object_json(body.get("metadata") or {}), **credential_intent}
     if len(object_json(body.get("metadata") or {})) > 15:
         # Leave one native metadata slot for the tenant ownership marker.
         raise context.unsupported("agent_metadata_size")
@@ -82,29 +88,33 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
         else:
             raise context.unsupported("agent_tool")
     for mcp in spec.mcp_servers or ():
-        if mcp.credential_ref is not None or mcp.tool_policy or mcp.transport != "streamable_http":
-            raise context.unsupported("mcp_credentials")
-        tools.append(
-            {
-                "type": "mcp",
-                "server_label": mcp.name,
-                "transport": {"type": "http", "server_url": mcp.url},
-            }
-        )
+        tools.append(mcp_auth.tool(mcp, context))
     if spec.tools is not None or spec.mcp_servers is not None:
         body["tools"] = tools
     return body
 
 
-def agent_spec(raw: Object) -> AgentSpec:
+def agent_spec(raw: Object, context: Context | None = None) -> AgentSpec:
     tools: list[ToolSpec] = []
     servers: list[MCPConnection] = []
+    if context is None and mcp_auth.KEY in object_json(raw.get("metadata") or {}):
+        raise ValueError("credential intent needs scoped driver decoding")
+    credentials = {c.name: c for c in mcp_auth.decode(raw, context)} if context is not None else {}
     for tool in objects(raw.get("tools", [])):
         kind = text(tool["type"])
         if kind == "mcp":
             transport = object_json(tool["transport"])
             servers.append(
-                MCPConnection(name=text(tool["server_label"]), url=text(transport["server_url"]))
+                credentials.get(text(tool["server_label"]))
+                or MCPConnection(
+                    name=text(tool["server_label"]),
+                    url=text(transport["server_url"]),
+                    tool_policy={
+                        key: tool[key]
+                        for key in ("allowed_tools", "required")
+                        if tool.get(key) is not None
+                    },
+                )
             )
         elif kind == "function":
             tools.append(
@@ -139,7 +149,7 @@ class OpenAIAgents:
         return Agent(
             ref=self._c.ref(scope, "agent", text(raw["id"])),
             revision=revision(raw),
-            spec=agent_spec(raw),
+            spec=agent_spec(raw, self._c),
             created_at=timestamp(raw["created_at"]),
         )
 
