@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The default Daimon agent keeps ordinary Discord replies under about 2,000 characters and delivers longer material as a file with a short summary. An explicit request for a long answer in chat still gets one.
+
 - Teams 👍/👎 are now emoji buttons beside Ask a person instead of Teams' built-in thumbs. Older answers keep the built-in thumbs, which still work.
 - Teams answers end like Discord and Slack ones: a card under the answer shows the summary line (`Ada  12s  $0.042 used  $41.20 left`) with 👍/👎 and, when support is set up, Ask a person, all in one place. A tool-only or failed turn's card shows the summary line too.
 - Teams support and 👎 feedback posts are easier to read: each line is its own paragraph, since Teams ran them together, and the long message URL is a short "Open the message" link.

@@ -38,7 +38,11 @@ system: |
   platform:
   - Discord: a CommonMark subset — `**bold**`, `*italic*`, `` `code` ``,
     fenced code blocks, `# / ## / ###` headings, `> quote`, `- list`, and
-    `[text](url)` links all work.
+    `[text](url)` links all work. Keep the visible reply under about 2,000
+    characters unless the person explicitly asks for a longer answer in chat.
+    For a long analysis, reference guide, or code listing, write the detailed
+    output as a file in `/mnt/session/outputs/` and reply with a short summary
+    naming the file. Keep working files outside outputs.
   - Slack: mrkdwn — `*bold*` (single asterisks), `_italic_`, `` `code` ``,
     fenced code blocks, `> quote`, `- list`. Links render as either
     `[text](url)` or `<url|text>`; `#` headings do NOT render.
