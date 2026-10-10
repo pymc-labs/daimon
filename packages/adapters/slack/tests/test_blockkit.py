@@ -250,30 +250,29 @@ class TestToBlocks:
         summary_text = context_blocks[-1]["elements"][0]["text"]
         assert summary_text == "Atlas\u2003\u20035s"
         assert blocks[0]["text"]["text"] == "Something went wrong."
+        assert "rate limited" not in str(blocks)
 
     def test_error_uses_notice_next_step_once(self) -> None:
         state = replace(
             _make_state(phase=TurnPhase.ERROR),
-            notice="Model usage limit reached.\n*Next:* Add credit.\n`rid: test`",
+            notice="Add credit.\n\nRef TEST",
         )
         blocks = to_blocks(state, now=5.0)
         section_texts = [block["text"]["text"] for block in blocks if block["type"] == "section"]
         assert section_texts[1] == "Add credit."
-        assert "*Next:*" not in section_texts[2]
-        assert "Model usage limit reached." in section_texts[2]
-        assert "`rid: test`" in section_texts[2]
+        assert len(section_texts) == 2
+        assert blocks[2]["elements"][0]["text"] == "Ref TEST"
 
     def test_empty_notice_next_step_keeps_retry_text_and_metrics(self) -> None:
         state = replace(
             _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
-            notice="Model usage limit reached.\n*Next:* \n`rid: test`",
+            notice="Add credit.\n\nRef TEST",
             balance_str="$9.95",
         )
         blocks = to_blocks(state, now=12.0)
         sections = _find_blocks_by_type(blocks, "section")
-        assert sections[1]["text"]["text"] == "Mention me to try again."
-        assert "Model usage limit reached." in sections[2]["text"]["text"]
-        assert "`rid: test`" in sections[2]["text"]["text"]
+        assert sections[1]["text"]["text"] == "Add credit."
+        assert blocks[2]["elements"][0]["text"] == "Ref TEST"
         assert "$0.05 used" in blocks[-1]["elements"][0]["text"]
         assert blocks[-1]["elements"][0]["text"].endswith("$9.95")
 

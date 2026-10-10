@@ -24,6 +24,7 @@ from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
+from daimon.core.turn.notices import short_ref
 from ulid import ULID
 
 import discord
@@ -66,11 +67,6 @@ _OUR_SIDE = (
     "Something went wrong on our side.",
     "Try again. If it keeps happening, tell an admin.",
 )
-
-
-def short_ref(request_id: str) -> str:
-    """The last six characters of a request id: the `Ref` a person can quote."""
-    return request_id[-6:].upper()
 
 
 def _guidance(exc: BaseException) -> str | None:

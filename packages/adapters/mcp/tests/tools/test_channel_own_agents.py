@@ -393,7 +393,7 @@ async def test_set_channel_rule_refuses_or_copies_and_releases(
         await _set_channel_rule_impl(
             runtime, world.auth(admin=False), channel_id=ROOM, readers="own", writers="own"
         )
-    with pytest.raises(ToolError, match="no default agent that could be its own"):
+    with pytest.raises(ToolError, match="Own agents only needs a default agent for this channel"):
         await _set_channel_rule_impl(
             runtime, world.auth(), channel_id=NEW_ROOM, readers="own", writers="own"
         )

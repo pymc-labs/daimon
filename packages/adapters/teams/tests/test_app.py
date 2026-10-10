@@ -507,8 +507,7 @@ async def test_a_denied_turn_says_why_without_a_card(
     with patch.object(app_module, "admit", denied):
         await teams._run_turn(make_inbound(), TENANT)
     assert [a.text for a in sender.activities] == [
-        "This organisation's credit is depleted. "
-        "An admin can top up with `billing` in a 1:1 chat with me."
+        "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
     ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
 
@@ -659,7 +658,10 @@ async def test_an_external_participant_outside_an_isolated_channel_is_told_where
         "admission is told how each is treated, and that nothing placed them"
     )
     refusal = admission_refusal_text("external_participant", app_module.TEAMS_REFUSAL_NOUNS)
-    assert [a.text for a in sender.activities] == [refusal] * 2, "the shared refusal copy"
+    dm_refusal = admission_refusal_text(
+        "external_participant", app_module.TEAMS_REFUSAL_NOUNS, in_dm=True
+    )
+    assert [a.text for a in sender.activities] == [refusal, dm_refusal]
 
 
 @dataclasses.dataclass
@@ -753,7 +755,7 @@ async def test_a_queued_turn_posts_its_card_then_waits_behind_it(
                 await task
             if depleted:
                 run.assert_not_called()
-                assert "credit is depleted" in sender.activities[-1].model_dump_json()
+                assert "credit has run out" in sender.activities[-1].model_dump_json()
             else:
                 run.assert_awaited_once()
     assert await _open_intents(db_session_factory) == [], "the card's intent is retired"
@@ -768,12 +770,12 @@ def test_a_channel_without_setup_gets_one_plain_notice(missing: tuple[str, ...])
         environment_name_tier=None,
     )
     assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
-        "Daimon isn't set up in this channel yet.\n\nAsk an admin to send setup to Daimon."
+        "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `setup`."
     )
 
 
 def test_a_stale_setup_says_it_is_out_of_date() -> None:
     err = MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="gone")
     assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
-        "This channel's setup is out of date.\n\nAsk an admin to send setup to Daimon."
+        "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
     )

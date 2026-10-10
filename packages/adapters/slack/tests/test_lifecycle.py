@@ -353,9 +353,8 @@ async def test_spend_limit_posts_notice_and_error_log(
     with structlog.testing.capture_logs() as logs:
         await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
     assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
-    assert (
-        "Daimon has reached its model usage limit for now. The operators have been notified."
-        in _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Daimon has reached its usage limit." in _block_text(
+        _last_update_blocks(fake_slack_web_client)
     )
     assert {
         "event": "anthropic.spend_limit_reached",
@@ -1046,13 +1045,13 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     blocks = _last_update_blocks(fake_slack_web_client)
     notice = render_termination_notice(reason, state=state)
     assert notice is not None
-    section, context = blocks[2], blocks[-1]
+    section, context = blocks[1], blocks[-1]
     assert section["type"] == "section"
-    assert notice.cause in section["text"]["text"]
-    assert blocks[1]["text"]["text"] == notice.next_step
+    assert blocks[0]["text"]["text"] == notice.title
+    assert section["text"]["text"].startswith(notice.next_step)
     assert "*Next:*" not in section["text"]["text"]
-    assert "`fit_model`" in section["text"]["text"], "work in flight is named"
-    assert "`rid: " in section["text"]["text"]
+    assert "`fit_model`" in blocks[2]["elements"][0]["text"], "work in flight is named"
+    assert "Ref " in blocks[3]["elements"][0]["text"]
     assert "0s" in context["elements"][0]["text"]
     assert "xxx" not in _block_text(blocks), "raw error stays in the logs"
 
@@ -1092,11 +1091,12 @@ async def test_terminal_failure_notice_fits_slack_limits_with_many_long_names(
 
     calls = fake_slack_web_client.mock.requests.get(("POST", _UPDATE_URL), [])
     body = calls[-1].kwargs["json"]
-    section = body["blocks"][2]["text"]["text"]
+    section = body["blocks"][1]["text"]["text"]
     assert len(section) <= 3000
-    assert "and 42 more" in section and "and 40 more" in section
-    assert "`rid: " in section
-    assert body["text"].startswith("Tool connection failed: "), "fallback text is the notice"
+    assert "and 42 more" in body["blocks"][0]["text"]["text"]
+    assert "and 40 more" in body["blocks"][2]["elements"][0]["text"]
+    assert "Ref " in body["blocks"][3]["elements"][0]["text"]
+    assert body["text"].startswith("The connections to "), "fallback text is the notice"
     assert len(body["text"]) <= 3000
 
 
@@ -1124,7 +1124,19 @@ async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client:
     with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
         await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
 
-    assert "`rid: 01BOUNDRID`" in _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Ref UNDRID" in _block_text(_last_update_blocks(fake_slack_web_client))
+
+
+async def test_dm_terminal_notice_asks_for_a_message(fake_slack_web_client: Any) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    lc._channel = "D_TEST"
+    await lc.post_initial()
+    await lc.on_terminal_failure(
+        TurnState(termination=TerminationReason.UPSTREAM), RuntimeError("private")
+    )
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Send your message again." in rendered
+    assert "@mention" not in rendered
 
 
 async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> None:
@@ -1142,7 +1154,7 @@ async def test_terminal_failure_does_not_raise(fake_slack_web_client: Any) -> No
     blocks = _last_update_blocks(fake_slack_web_client)
     text = _block_text(blocks)
     assert "Something went wrong." in text
-    assert "`rid: " in text, "the notice carries a request id to find the logged error"
+    assert "Ref " in text, "the notice carries a request id to find the logged error"
     assert "upstream blew up" not in text, "raw exception text stays in the logs"
     assert not _has_actions_block(blocks), "error terminal must drop the cancel button"
 

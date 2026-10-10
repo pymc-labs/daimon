@@ -181,8 +181,8 @@ _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
 # "Daimon can't answer here": the same words as Discord and Slack, with
 # Teams' `setup` command.
-_NOT_SET_UP = "Daimon isn't set up in this channel yet.\n\nAsk an admin to send setup to Daimon."
-_RESOLVER_MISS = "This channel's setup is out of date.\n\nAsk an admin to send setup to Daimon."
+_NOT_SET_UP = "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `setup`."
+_RESOLVER_MISS = "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
@@ -190,7 +190,10 @@ _CANCELLING = "Cancelling…"
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
 TEAMS_REFUSAL_NOUNS = RefusalNouns(
-    scope="organisation", admin="an admin", billing="`billing` in a 1:1 chat with me"
+    scope="organisation",
+    admin="an admin",
+    billing="`billing` in a 1:1 chat with me",
+    setup="`setup`",
 )
 # The log event each refusal is recorded under.
 _DENIALS: dict[AdmissionDenialReason, str] = {
@@ -235,7 +238,10 @@ def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
 
 
 def _admission_refusal(
-    err: MissingTurnConfigError | MAResolverMissError | AdmissionDenied, tenant_id: uuid.UUID
+    err: MissingTurnConfigError | MAResolverMissError | AdmissionDenied,
+    tenant_id: uuid.UUID,
+    *,
+    in_dm: bool = False,
 ) -> str | None:
     """Log a refused admission; what to tell the person, if anything."""
     if isinstance(err, MissingTurnConfigError):
@@ -248,7 +254,7 @@ def _admission_refusal(
     # A protected channel hears nothing, a refusal included.
     if err.reason == "writers_none":
         return None
-    return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS)
+    return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS, in_dm=in_dm)
 
 
 def _agent_name_prefix(
@@ -906,7 +912,7 @@ class TeamsApp:
                 external=ExternalFinding(inbound.is_external, inbound.is_external_known),
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
-            refusal = _admission_refusal(err, tenant_id)
+            refusal = _admission_refusal(err, tenant_id, in_dm=inbound.kind == "dm")
             if refusal is not None and continuation is None:  # queued work settles silently
                 await self._say(inbound, refusal)
             if reraise:

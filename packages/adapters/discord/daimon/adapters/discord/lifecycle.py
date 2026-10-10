@@ -34,21 +34,20 @@ from daimon.adapters.discord.embed import (
     update,
     update_activity,
 )
-from daimon.adapters.discord.errors import USAGE_LIMIT_LINES, bound_request_id, error_lines
+from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
-from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import is_stuck_session, render_termination_notice
+from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -303,6 +302,7 @@ class DiscordTurnLifecycle:
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
         trigger_message: discord.Message | None = None,
+        in_dm: bool | None = None,
         notify_on_completion: bool = False,
         acknowledgment_managed: bool = False,
         render_tables: bool = False,
@@ -322,6 +322,9 @@ class DiscordTurnLifecycle:
         self._requester_id = requester_id
         self._turn_id = turn_id
         self._trigger_message = trigger_message
+        if in_dm is None:
+            in_dm = isinstance(getattr(trigger_message, "channel", None), discord.DMChannel)
+        self._in_dm = in_dm
         self._notify_on_completion = notify_on_completion
         self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
@@ -1229,9 +1232,8 @@ class DiscordTurnLifecycle:
             log.warning("turn.terminal_failure", error=str(err), unprompted=True)
             return
         self._apply_usage(state)
-        label = "Something went wrong"
-        # The card draws the `**Next:**` line as its description.
-        body = "\n\n**Next:** ".join(error_lines(err))
+        label = "Something went wrong."
+        body = "Send your message again." if self._in_dm else "@mention Daimon to try again."
         reason = request_id = None
         # The notice is words on top of the red card, never a reason not to
         # draw it: if building it fails, the card keeps the plain fallback copy.
@@ -1243,38 +1245,15 @@ class DiscordTurnLifecycle:
                 state=state,
                 request_id=request_id,
                 error=err,
-                support_hint="If it keeps happening, ask an admin for help.",
+                in_dm=self._in_dm,
+                agent_name=self._agent_name,
             )
             if notice is not None:
-                if spend_limit_error(err) is not None:
-                    # The approved two lines, with no tenant or limit detail:
-                    # those go to the ops alert and the log above.
-                    cause, next_step = USAGE_LIMIT_LINES
-                    notice = dataclasses.replace(
-                        notice, cause=cause, survived="", next_step=next_step
-                    )
-                    label, body = notice.headline, format_termination_notice(notice)
-                else:
-                    if reason is TerminationReason.UPSTREAM and not is_stuck_session(reason, err):
-                        lines = error_lines(err)
-                        notice = dataclasses.replace(
-                            notice,
-                            cause=lines[0],
-                            survived="Files that were already created may still arrive.",
-                            next_step=lines[1] if len(lines) > 1 else "Send your message again.",
-                        )
-                    guidance_error = err.cause if isinstance(err, TurnError) else err
-                    if isinstance(guidance_error, UserFacingError):
-                        notice = dataclasses.replace(
-                            notice,
-                            cause="This turn couldn't continue.",
-                            next_step=" ".join(error_lines(guidance_error)),
-                        )
-                    label, body = notice.headline, format_termination_notice(notice)
+                label, body = notice.headline, format_termination_notice(notice)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)
         self._state = update(self._state, EmbedEvent(kind="error", label=label))
-        self._state = dataclasses.replace(self._state, notice=body)
+        self._state = dataclasses.replace(self._state, notice=body, notice_title=label)
         await self._flush_terminal()
         log.warning(
             "turn.terminal_failure",

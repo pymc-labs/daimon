@@ -88,7 +88,7 @@ async def test_a_server_admin_limits_and_reopens_a_channel(
         runtime, admin, channel_id=ROOM, readers="inside", writers="none"
     )
     assert (done.readers, done.writers, done.changed) == ("inside", "none", True), done
-    assert "Only turns inside it read it" in done.note, done.note
+    assert "No replies" in done.note, done.note
     again = await _set_channel_rule_impl(runtime, admin, channel_id=ROOM, writers="none")
     assert not again.changed, "repeating the call changes nothing"
 
@@ -120,7 +120,7 @@ async def test_a_channel_kept_to_its_own_agents_keeps_them_until_its_readers_cha
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     admin = _auth(tenant_id, account_id, admin=True)
-    with pytest.raises(ToolError, match="so it keeps them"):
+    with pytest.raises(ToolError, match="Own agents only keeps this channel's agents here"):
         await _set_channel_rule_impl(runtime, admin, channel_id=ISOLATED, release_agents=True)
     closed = await _set_channel_rule_impl(runtime, admin, channel_id=ISOLATED, writers="none")
     assert (closed.readers, closed.writers) == ("own", "none"), "readers stay own"

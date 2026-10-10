@@ -93,22 +93,19 @@
           }),
           dict({
             'text': dict({
-              'text': 'Send your message again. If it keeps happening, share the request id with an admin.',
+              'text': '@mention Daimon to try again.',
               'type': 'mrkdwn',
             }),
             'type': 'section',
           }),
           dict({
-            'text': dict({
-              'text': '''
-                *Details*
-                The turn ended unexpectedly.
-                The conversation and its workspace are kept.
-                `rid: 01TESTREQUESTID0000000000`
-              ''',
-              'type': 'mrkdwn',
-            }),
-            'type': 'section',
+            'elements': list([
+              dict({
+                'text': 'Ref 000000',
+                'type': 'mrkdwn',
+              }),
+            ]),
+            'type': 'context',
           }),
           dict({
             'type': 'divider',
@@ -123,12 +120,7 @@
             'type': 'context',
           }),
         ]),
-        'text': '''
-          Something went wrong: The turn ended unexpectedly.
-          The conversation and its workspace are kept.
-          Send your message again. If it keeps happening, share the request id with an admin.
-          Request id: 01TESTREQUESTID0000000000
-        ''',
+        'text': 'Something went wrong.\\n\\n@mention Daimon to try again.\\n\\nRef 000000',
       }),
     ]),
   })

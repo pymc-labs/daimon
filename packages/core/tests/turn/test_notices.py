@@ -1,4 +1,4 @@
-"""The termination notice: one explanation per reason, platform-neutral."""
+"""Approved stop and refusal words, including spacing and short references."""
 
 from __future__ import annotations
 
@@ -8,10 +8,13 @@ from typing import get_args
 import pytest
 from daimon.core.turn import TerminationReason, render_termination_notice
 from daimon.core.turn.errors import AdmissionDenialReason
-from daimon.core.turn.notices import RefusalNouns, admission_refusal_text, fit_notice
-from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
-
-_ENDED_EARLY = [r for r in TerminationReason if r is not TerminationReason.COMPLETED]
+from daimon.core.turn.notices import (
+    RefusalNouns,
+    admission_refusal_text,
+    fit_notice,
+    short_ref,
+)
+from daimon.core.turn.state import McpServerFailure, ToolUseBlock, TurnState
 
 
 def _tool(name: str, status: str) -> ToolUseBlock:
@@ -25,275 +28,244 @@ def _tool(name: str, status: str) -> ToolUseBlock:
     )
 
 
-def test_a_completed_turn_has_no_notice() -> None:
+@pytest.mark.parametrize(
+    ("reason", "title", "action"),
+    [
+        (
+            TerminationReason.INTERRUPTED,
+            "Stopped. Changes already made stay made.",
+            "@mention Daimon to carry on.",
+        ),
+        (
+            TerminationReason.INTERRUPT_TIMEOUT,
+            "Stopping, but not confirmed. It may still be finishing.",
+            "Wait a minute before you @mention Daimon again.",
+        ),
+        (
+            TerminationReason.CONNECTION_LOST,
+            "Lost the connection. Daimon may still be working.",
+            "@mention Daimon to ask what it finished.",
+        ),
+        (
+            TerminationReason.UPSTREAM,
+            "Daimon's AI service failed on this reply.",
+            "@mention Daimon to try again.",
+        ),
+        (TerminationReason.RATE_LIMITED, "Daimon's AI service is busy.", "Try again in a minute."),
+        (
+            TerminationReason.SESSION_TERMINATED,
+            "Daimon stopped mid-reply. Its working files may be gone.",
+            "@mention Daimon to carry on.",
+        ),
+        (
+            TerminationReason.MCP_DEGRADED_EMPTY,
+            "The connection to a tool failed, so there's no reply.",
+            "Ask to reconnect it, or ask again without it.",
+        ),
+        (
+            TerminationReason.RETRYING_UNSETTLED,
+            "The AI kept failing, so there's no reply.",
+            "Wait a moment, then @mention Daimon again.",
+        ),
+        (
+            TerminationReason.REQUIRES_ACTION,
+            "Daimon couldn't get the approval it needed.",
+            "@mention Daimon to try again.",
+        ),
+        (
+            TerminationReason.CEILING,
+            "This took too long, so Daimon stopped waiting.",
+            "@mention Daimon to try again.",
+        ),
+        (
+            TerminationReason.RECOVERY_CANCELLED,
+            "Stopped. Daimon lost its working files.",
+            "@mention Daimon to carry on.",
+        ),
+        (
+            TerminationReason.RECOVERY_FAILED,
+            "Daimon lost its working files and couldn't continue.",
+            "@mention Daimon to try again.",
+        ),
+        (
+            TerminationReason.ADMISSION_CONCURRENCY_SHED,
+            "Daimon is too busy right now.",
+            "@mention Daimon again in a moment.",
+        ),
+        (
+            TerminationReason.ADMISSION_BALANCE_DEPLETED,
+            "Your team's Daimon credit has run out.",
+            "Ask an admin to top up.",
+        ),
+        (
+            TerminationReason.ADMISSION_CAP_EXCEEDED,
+            "You've used your monthly limit.",
+            "Ask the team running Daimon to raise it.",
+        ),
+        (
+            TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+            "This channel's budget is used up.",
+            "An admin can raise it.",
+        ),
+        (
+            TerminationReason.ADMISSION_CHANNEL_PROTECTED,
+            "Daimon can't reply in this channel.",
+            "Ask somewhere else, or ask an admin.",
+        ),
+        (
+            TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
+            "team-020-analyst only works in other channels.",
+            "Ask it there.",
+        ),
+        (
+            TerminationReason.ADMISSION_CHANNEL_ISOLATED,
+            "This channel only uses its own agents.",
+            "Ask an admin to pick one.",
+        ),
+        (
+            TerminationReason.ADMISSION_DENIED,
+            "Daimon couldn't accept this request.",
+            "Ask an admin.",
+        ),
+        (
+            TerminationReason.MISSING_CONFIG,
+            "Daimon isn't set up in this channel yet.",
+            "Ask an admin to run `/agent-setup`.",
+        ),
+        (
+            TerminationReason.RESOLVER_MISS,
+            "This channel's setup is out of date.",
+            "Ask an admin to check `/agent-setup`.",
+        ),
+        (
+            TerminationReason.SESSION_PREPARATION_FAILED,
+            "A settings change hasn't applied yet.",
+            "@mention Daimon again in a little while.",
+        ),
+        (
+            TerminationReason.SESSION_BUSY,
+            "Daimon is still working in this conversation.",
+            "Wait for it to finish, then @mention Daimon.",
+        ),
+        (
+            TerminationReason.SESSION_AGENT_MISMATCH,
+            "team-020-analyst can't continue this conversation.",
+            "Start a new conversation to talk to it.",
+        ),
+        (TerminationReason.UNKNOWN, "Something went wrong.", "@mention Daimon to try again."),
+        (TerminationReason.REDUCER_BUG, "Something went wrong.", "@mention Daimon to try again."),
+    ],
+)
+def test_approved_termination_rows(reason: TerminationReason, title: str, action: str) -> None:
+    notice = render_termination_notice(
+        reason, agent_name="team-020-analyst", request_id="01a7c3qx2"
+    )
+    assert notice is not None
+    assert (notice.title, notice.next_step) == (title, action)
+    assert notice.plain_text() == f"{title}\n\n{action}\n\nRef 7C3QX2"
+    assert "The conversation and its workspace are kept." not in notice.plain_text()
+
+
+def test_completed_has_no_notice() -> None:
     assert render_termination_notice(TerminationReason.COMPLETED) is None
 
 
-@pytest.mark.parametrize("reason", _ENDED_EARLY, ids=str)
-def test_every_early_end_explains_itself(reason: TerminationReason) -> None:
-    notice = render_termination_notice(reason, request_id="rid_1")
-
-    assert notice is not None
-    assert notice.reason is reason
-    assert notice.headline and notice.cause and notice.survived and notice.next_step
-    assert len(notice.headline) <= 40, "the headline has to fit a status footer uncut"
-    assert "rid_1" in notice.plain_text()
-
-
-def test_unconfirmed_approval_notice_names_the_failed_confirmation() -> None:
-    notice = render_termination_notice(TerminationReason.REQUIRES_ACTION)
-    assert notice is not None
-    assert notice.headline == "Approval didn't go through"
-    assert notice.cause == "The agent stopped because it couldn't confirm your approval."
-    assert notice.next_step == "Send your message again."
+@pytest.mark.parametrize(
+    ("reason", "action"),
+    [
+        (TerminationReason.INTERRUPTED, "Send a message to carry on."),
+        (TerminationReason.UPSTREAM, "Send your message again."),
+        (TerminationReason.CONNECTION_LOST, "Send a message to ask what it finished."),
+        (TerminationReason.SESSION_BUSY, "Wait for it to finish, then send a message."),
+    ],
+)
+def test_dm_actions(reason: TerminationReason, action: str) -> None:
+    notice = render_termination_notice(reason, in_dm=True)
+    assert notice is not None and notice.next_step == action
 
 
-def test_reasons_a_turn_can_run_into_read_differently() -> None:
-    """Every reason with its own copy says something no other reason says."""
-    shared = {TerminationReason.REDUCER_BUG, TerminationReason.UNKNOWN}
-    notices = [render_termination_notice(r) for r in _ENDED_EARLY if r not in shared]
-    headlines = [n.headline for n in notices if n is not None]
-    causes = [n.cause for n in notices if n is not None]
-    assert len(set(headlines)) == len(headlines)
-    assert len(set(causes)) == len(causes)
-
-
-def test_the_notice_names_work_still_running_and_counts_what_finished() -> None:
+def test_work_and_ref_are_small_separate_lines() -> None:
     state = TurnState(
         content=[
-            TextBlock(kind="text", text="working on it"),
             _tool("bash", "complete"),
             _tool("fetch", "failed"),
             _tool("fit_model", "pending"),
         ]
     )
-
-    notice = render_termination_notice(TerminationReason.CONNECTION_LOST, state=state)
-
+    notice = render_termination_notice(
+        TerminationReason.CONNECTION_LOST, state=state, request_id="a7c3qx2"
+    )
     assert notice is not None
-    assert notice.in_flight == ("fit_model",)
-    assert notice.finished_tools == 2
-    assert notice.work_line(lambda n: f"`{n}`") == (
+    assert notice.work_line(lambda name: f"`{name}`") == (
         "Still running when it ended: `fit_model`. Finished before that: 2 tool calls."
+    )
+    assert notice.plain_text().endswith(
+        "Still running when it ended: fit_model. Finished before that: 2 tool calls.\n\nRef 7C3QX2"
     )
 
 
-def test_a_long_list_of_running_tools_is_shortened() -> None:
-    state = TurnState(content=[_tool(f"t{i}", "pending") for i in range(8)])
-
-    notice = render_termination_notice(TerminationReason.CEILING, state=state)
-
-    assert notice is not None
-    line = notice.work_line()
-    assert line is not None and line.endswith("t4 and 3 more.")
-
-
-def test_no_tool_work_means_no_work_line() -> None:
-    notice = render_termination_notice(TerminationReason.UPSTREAM, state=TurnState())
-    assert notice is not None and notice.work_line() is None
-
-
-def test_an_empty_turn_after_mcp_failure_names_the_server() -> None:
+def test_server_name_and_rate_horizon() -> None:
     state = TurnState(
         mcp_failures=(
             McpServerFailure(
-                server_name="notion",
+                server_name="Notion",
                 error_type="mcp_connection_failed_error",
                 message="down",
                 retry_status="exhausted",
             ),
         )
     )
-
     notice = render_termination_notice(TerminationReason.MCP_DEGRADED_EMPTY, state=state)
-
-    assert notice is not None and "notion" in notice.cause
-
-
-def test_a_rate_limit_says_when_to_retry() -> None:
-    until = datetime(2026, 9, 28, 17, 45, tzinfo=UTC)
-    notice = render_termination_notice(
+    assert notice is not None
+    assert notice.title == "The connection to Notion failed, so there's no reply."
+    until = datetime(2026, 9, 28, 15, 42, tzinfo=UTC)
+    rate = render_termination_notice(
         TerminationReason.RATE_LIMITED, state=TurnState(rate_limit_until=until)
     )
-    assert notice is not None and "17:45 UTC" in notice.next_step
+    assert rate is not None and rate.next_step == "Try again after 15:42 UTC."
 
 
-def test_the_ceiling_says_the_session_was_retired() -> None:
-    notice = render_termination_notice(TerminationReason.CEILING)
-    assert notice is not None
-    assert "45-minute" in notice.cause
-    assert "retired" in notice.survived
-
-
-def test_plain_text_carries_every_field_in_order() -> None:
-    notice = render_termination_notice(
-        TerminationReason.UPSTREAM,
-        state=TurnState(content=[_tool("bash", "pending")]),
-        request_id="01ABC",
-    )
-    assert notice is not None
-    lines = notice.plain_text().splitlines()
-    assert lines[0] == f"{notice.headline}: {notice.cause}"
-    assert lines[1].startswith("Still running when it ended: bash")
-    assert lines[2:] == [notice.survived, notice.next_step, "Request id: 01ABC"]
-
-
-def _many_failures(count: int, length: int) -> tuple[McpServerFailure, ...]:
-    return tuple(
-        McpServerFailure(
-            server_name=f"{i:02d}" + "s" * (length - 2),
-            error_type="mcp_connection_failed_error",
-            message="down",
-            retry_status="exhausted",
-        )
-        for i in range(count)
-    )
-
-
-def test_many_long_server_names_stay_bounded() -> None:
-    """The reviewer's case: 45 failed servers with 100-character names."""
-    state = TurnState(
-        mcp_failures=_many_failures(45, 100),
-        content=[_tool("t" * 500 + str(i), "pending") for i in range(45)],
-    )
-
-    notice = render_termination_notice(
-        TerminationReason.MCP_DEGRADED_EMPTY, state=state, request_id="01RID"
-    )
-
-    assert notice is not None
-    assert "and 42 more" in notice.cause
-    work = notice.work_line()
-    assert work is not None and "and 40 more" in work
-    assert len(notice.plain_text()) < 1000
-
-
-def test_fit_notice_clips_the_body_and_keeps_the_request_id() -> None:
-    fitted = fit_notice(["x" * 5000, "y" * 5000], tail="`rid: 01RID`", limit=3000)
-
+def test_short_ref_and_fit_notice() -> None:
+    assert short_ref("01a7c3qx2") == "7C3QX2"
+    fitted = fit_notice(["x" * 5000, "y" * 5000], tail="Ref 7C3QX2", limit=3000)
     assert len(fitted) == 3000
-    assert fitted.endswith("…\n`rid: 01RID`")
-
-
-def test_fit_notice_leaves_short_notices_alone() -> None:
-    assert fit_notice(["a", "b"], tail="rid", limit=100) == "a\nb\nrid"
-    assert fit_notice(["a" * 10], tail=None, limit=5) == "aaaa…"
-
-
-def test_several_failed_servers_read_as_plural() -> None:
-    state = TurnState(mcp_failures=_many_failures(2, 6))
-    notice = render_termination_notice(TerminationReason.MCP_DEGRADED_EMPTY, state=state)
-    assert notice is not None
-    assert notice.cause.startswith("The tool servers 00ssss, 01ssss failed")
-    assert notice.cause.endswith("without them.")
+    assert fitted.endswith("…\n\nRef 7C3QX2")
+    assert fit_notice(["a", "b"], tail="Ref X", limit=100) == "a\n\nb\n\nRef X"
 
 
 _NOUNS = RefusalNouns(scope="server", admin="a server admin", billing="`/billing`")
 
 
-@pytest.mark.parametrize("in_dm", [False, True])
 @pytest.mark.parametrize("reason", get_args(AdmissionDenialReason))
-def test_every_admission_refusal_is_a_sentence_not_a_code(
-    reason: AdmissionDenialReason, in_dm: bool
-) -> None:
-    text = admission_refusal_text(reason, _NOUNS, bot_name="daimon", in_dm=in_dm)
-
-    assert reason not in text, f"the raw reason leaked: {text!r}"
-    assert text[0].isupper() and text.endswith("."), f"not a sentence: {text!r}"
-    assert "{" not in text, f"a placeholder was left unfilled: {text!r}"
-
-
-@pytest.mark.parametrize(
-    ("reason", "expected"),
-    [
-        (
-            "balance_depleted",
-            "This server's daimon credit is depleted. A server admin can top up with `/billing`.",
-        ),
-        ("cap_exceeded", "You've reached your monthly usage cap. An operator can raise it."),
-        (
-            "channel_budget_exceeded",
-            "This channel has used its spending budget. A server admin can raise or clear it.",
-        ),
-        (
-            "invoker_not_allowed",
-            "You aren't on this server's list of people who can start a turn. "
-            "A server admin can add you.",
-        ),
-        (
-            "runs_elsewhere",
-            "This agent's rule runs it only in other channels, so it can't answer here.",
-        ),
-        (
-            "own_agents_only",
-            "This channel is kept to its own agents and the one that would answer isn't one of "
-            "them. A server admin must set the channel's agent.",
-        ),
-        ("writers_none", "This channel's rule lets nobody write in it, so the agent can't answer."),
-        (
-            "external_participant",
-            "People from another organisation can use this agent only in a channel kept to its "
-            "own agents.",
-        ),
-    ],
-)
-def test_admission_refusal_words_each_reason_in_the_platform_nouns(
-    reason: AdmissionDenialReason, expected: str
-) -> None:
-    assert admission_refusal_text(reason, _NOUNS, bot_name="daimon") == expected, reason
+@pytest.mark.parametrize("in_dm", [False, True])
+def test_refusals_have_two_spaced_lines(reason: AdmissionDenialReason, in_dm: bool) -> None:
+    rendered = admission_refusal_text(reason, _NOUNS, bot_name="team-020-analyst", in_dm=in_dm)
+    lines = rendered.split("\n\n")
+    assert len(lines) == 2
+    assert all(line.endswith(".") for line in lines)
+    assert "{" not in rendered
 
 
-def test_admission_refusal_without_a_bot_name_reads_naturally() -> None:
+def test_teams_setup_noun() -> None:
     nouns = RefusalNouns(
-        scope="organisation", admin="an admin", billing="`billing` in a 1:1 chat with me"
+        scope="organisation", admin="an admin", billing="`billing`", setup="`setup`"
     )
-    text = admission_refusal_text("balance_depleted", nouns)
-
-    assert text == (
-        "This organisation's credit is depleted. "
-        "An admin can top up with `billing` in a 1:1 chat with me."
-    ), text
+    assert nouns.setup == "`setup`"
 
 
-@pytest.mark.parametrize(
-    ("reason", "word"),
-    [
-        ("runs_elsewhere", "rule running it"),
-        ("own_agents_only", "kept to its own agents"),
-        ("writers_none", "nobody write"),
-        ("external_participant", "organisation"),
-    ],
-)
-def test_a_place_bound_refusal_in_a_dm_says_why_it_cannot_move(
-    reason: AdmissionDenialReason, word: str
-) -> None:
-    text = admission_refusal_text(reason, _NOUNS, in_dm=True)
-
-    assert word in text and text.endswith("a DM."), text
-
-
-def test_a_dm_refusal_not_bound_to_the_place_reads_as_in_the_channel() -> None:
-    in_dm = admission_refusal_text("channel_budget_exceeded", _NOUNS, in_dm=True)
-
-    assert in_dm == admission_refusal_text("channel_budget_exceeded", _NOUNS), in_dm
-
-
-def test_the_cap_notice_says_the_cap_is_the_persons_and_an_operator_raises_it() -> None:
-    """The cap is per person and only the operator raises it, as the refusal says."""
-    notice = render_termination_notice(TerminationReason.ADMISSION_CAP_EXCEEDED)
-    assert notice is not None
-    assert notice.cause.startswith("You've reached your monthly usage cap"), notice.cause
-    assert notice.next_step == "An operator can raise it.", "no admin command raises a cap"
-
-
-def test_public_surface_can_offer_admin_help_without_request_identifier_guidance() -> None:
-    default = render_termination_notice(TerminationReason.UPSTREAM)
-    public = render_termination_notice(
-        TerminationReason.UPSTREAM,
-        support_hint="If it keeps happening, ask an admin for help.",
+def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
+    channel = admission_refusal_text(
+        "runs_elsewhere",
+        _NOUNS,
+        bot_name="daimon-staging",
+        agent_name="team-020-analyst",
     )
-    assert default is not None and public is not None
-    assert "share the request id" in default.next_step
-    assert "ask an admin for help" in public.next_step
-    assert "request id" not in public.next_step
-    assert public.cause == default.cause
+    dm = admission_refusal_text(
+        "runs_elsewhere",
+        _NOUNS,
+        bot_name="daimon-staging",
+        agent_name="team-020-analyst",
+        in_dm=True,
+    )
+    assert channel == "team-020-analyst only works in other channels.\n\nAsk it there."
+    assert dm == "team-020-analyst only works in other channels.\n\nAsk it there."

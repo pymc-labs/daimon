@@ -23,6 +23,7 @@ from daimon.core.channel_rules import (
     ChannelRuleRefused,
     RuleChange,
     copy_name,
+    describe_rule,
     render_rule_refusal,
     set_agent_rule,
     set_category_rule,
@@ -60,6 +61,43 @@ ADMIN = Subject(is_admin=True)
 DEFAULT = DeploymentDefault(agent_name="daimon")
 OWN = ChannelRule(readers="own", writers="own")
 RULES = {"roamer": AgentRule(runs_in=("c6", "c7")), "homebody": AgentRule(runs_in=("c8",))}
+
+
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        (ChannelRule(), "Open: this channel adds no limits."),
+        (
+            ChannelRule(readers="inside"),
+            "Private: agents read it only while answering here.",
+        ),
+        (OWN, "Own agents only: only this channel's agents read and post here."),
+        (ChannelRule(writers="none"), "No replies: agents can't post here."),
+        (
+            ChannelRule(readers="inside", writers="none"),
+            "No replies: agents can't post here.",
+        ),
+    ],
+)
+def test_rule_names(rule: ChannelRule, expected: str) -> None:
+    assert describe_rule(rule) == expected
+
+
+def test_change_notes_use_approved_words() -> None:
+    change = RuleChange(
+        channel_id="#team-020",
+        before=ChannelRule(),
+        rule=OWN,
+        changed=True,
+        agent_name="team-020-analyst",
+        copied_from="analyst",
+        dropped_skills=("finance", "helper"),
+    )
+    assert change.notes == (
+        "Own agents only: only this channel's agents read and post here.",
+        "Made team-020-analyst, a copy of analyst, for this channel.",
+        "Skills not copied: finance, helper.",
+    )
 
 
 def test_copy_name_slugs_the_channel_and_avoids_taken_names() -> None:
@@ -199,7 +237,7 @@ async def test_own_readers_keeps_the_channels_agent_there(
     assert not again.changed, "repeating is a no-op"
     inside = await _set_rule(client, db_session_factory, tenant.id, "c1", readers="inside")
     assert inside.changed and inside.kept == ("local",), "the agent's rule stays unless asked"
-    assert "still run only there" in " ".join(inside.notes), inside.notes
+    assert "still works only here" in " ".join(inside.notes), inside.notes
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.channel_rules == {"c1": ChannelRule(readers="inside")}
     assert "local" in policy.agent_rules, "the agent rule stays"

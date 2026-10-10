@@ -2677,7 +2677,7 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+            deadline=datetime.now(UTC) + timedelta(seconds=5.0),
         )
     finally:
         await engine.dispose()

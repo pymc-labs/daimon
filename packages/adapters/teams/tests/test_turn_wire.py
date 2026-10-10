@@ -427,9 +427,9 @@ async def test_stream_that_drops_mid_answer_leaves_the_failure_notice_and_no_ans
     assert streams == [], "the driver reconnected once"
     status, notice = teams_api_fake.activity_requests
     assert (notice.method, _path(notice)) == ("PUT", _path(status) + "/m-1"), "the card is closed"
-    text, _summary = _texts(notice)
+    text = _texts(notice)[0]
     lost = render_termination_notice(TerminationReason.CONNECTION_LOST)
-    assert lost is not None and text.startswith(f"❌ {lost.headline}: "), "the drop, named"
+    assert lost is not None and text.startswith(lost.title + "\n\n"), "the drop, named"
     assert "first half" not in text, "no partial answer"
     assert _actions(notice) == [] and "text" not in notice.body, "no Cancel, no answer message"
 

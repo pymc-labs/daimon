@@ -521,7 +521,7 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
             if err.reason != "writers_none":
                 await channel.send(
-                    "Your answers were recorded. "
+                    "Your answers were recorded.\n\n"
                     + admission_refusal_message(err.reason, bot.runtime.settings)
                 )
             return
@@ -594,6 +594,7 @@ async def run_wizard_submit_turn_observed(
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
+                in_dm=isinstance(interaction.channel, discord.DMChannel),
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
                 markup=bot.runtime.turn_deps.markup,
@@ -703,6 +704,7 @@ async def run_wizard_submit_turn_observed(
                 send=_send_embed,
                 edit=_edit_message,
                 agent_name=agent.name,
+                in_dm=isinstance(interaction.channel, discord.DMChannel),
                 model_id=agent.model.id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(

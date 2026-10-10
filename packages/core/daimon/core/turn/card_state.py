@@ -59,7 +59,9 @@ class CardState:
     balance_str: str | None = None
     text_preview: str | None = None
     error_reason: str = ""
-    """Why the turn failed; leads the ERROR card's footer."""
+    """Internal failure label from the event; never rendered directly."""
+    notice_title: str = ""
+    """Approved title for a terminal notice; never populated from exception text."""
     notice: str = ""
     """Rendered termination notice; the ERROR card's body."""
 

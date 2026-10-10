@@ -26,6 +26,7 @@ from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
+from daimon.core.turn.notices import short_ref
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from ulid import ULID
@@ -82,11 +83,6 @@ _SESSION_AGENT_MISMATCH = (
     "Your existing work is preserved. Continuing with this responder currently "
     "requires a new conversation."
 )
-
-
-def short_ref(request_id: str) -> str:
-    """The last six characters of a request id: the `Ref` a person can quote."""
-    return request_id[-6:].upper()
 
 
 def _guidance(exc: BaseException) -> str | None:

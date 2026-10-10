@@ -197,7 +197,7 @@ class PermissionsView(PanelViewBase):
                 writers=change.rule.writers,
                 copied=bool(change.copied_from),
             )
-            notice = "\n".join(f"-# {note}" for note in change.notes)
+            notice = "\n\n".join(f"-# {note}" for note in change.notes)
         await self.swap_to(
             interaction,
             PermissionsView(

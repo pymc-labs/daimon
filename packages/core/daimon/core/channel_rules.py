@@ -111,21 +111,21 @@ def as_writers(value: object) -> ChannelWriters | None:
     return None
 
 
-_READERS_NOTES: Mapping[ChannelReaders, str] = {
-    "any": "any turn may read it",
-    "inside": "only turns inside it read it",
-    "own": "only its own agents run there, and only turns inside it read it",
-}
-_WRITERS_NOTES: Mapping[ChannelWriters, str] = {
-    "any": "anyone may post there",
-    "own": "only its own agents post there",
-    "none": "nothing posts there, daimon included",
-}
-
-
 def describe_rule(rule: ChannelRule) -> str:
-    """One sentence saying what `rule` does. Pure."""
-    return f"{_READERS_NOTES[rule.readers].capitalize()}; {_WRITERS_NOTES[rule.writers]}."
+    """Plain name and explanation of a channel rule."""
+    if rule.writers == "none":
+        return "No replies: agents can't post here."
+    if rule.readers == "own":
+        return "Own agents only: only this channel's agents read and post here."
+    if rule.readers == "inside":
+        return "Private: agents read it only while answering here."
+    return "Open: this channel adds no limits."
+
+
+def _join_agents(agents: tuple[str, ...]) -> str:
+    if len(agents) == 1:
+        return agents[0]
+    return f"{', '.join(agents[:-1])} and {agents[-1]}"
 
 
 def render_rule_refusal(
@@ -139,52 +139,49 @@ def render_rule_refusal(
             return "That rule can't be set there."
         case "own_on_both":
             return (
-                "Only a channel read by its own agents alone takes writers own, and such a "
-                "channel is posted in by its own agents or by nobody."
+                "Own agents only needs this channel's agents to read and post here. "
+                "No replies lets no agent post here."
             )
         case "keeps_own_agents":
             return (
-                "Only its own agents run in this channel, so it keeps them. Change who can "
-                "read it first."
+                "Own agents only keeps this channel's agents here. Change to Private or Open first."
             )
         case "no_channel_agent":
             return (
-                "This channel has no default agent that could be its own. Ask for a copy of "
-                "the agent answering here instead."
+                "Own agents only needs a default agent for this channel. "
+                "Ask for a copy of the agent answering here."
             )
         case "managed_channel_agent":
             return (
-                f"{name} is built in, so it can't be one channel's own agent. Ask for a copy "
-                f"of {name} instead."
+                f"{name} is built in, so it can't be used for Own agents only. "
+                f"Ask for a copy of {name}."
             )
         case "shared_channel_agent":
             return (
-                f"{name} also answers outside this channel, so it can't be one of its own "
-                f"agents. Ask for a copy of {name} instead."
+                f"{name} also answers outside this channel, so it can't be used for "
+                f"Own agents only. Ask for a copy of {name}."
             )
         case "shared_ruled_agent":
             # An agent with a rule can't be copied (`authorize(FORK)`), so no copy is offered.
             return (
-                f"{name} also answers outside this channel, so it can't be one of its own "
-                "agents, and an agent with a rule can't be copied. Stop it answering "
-                "elsewhere first."
+                f"{name} also answers outside this channel, so it can't be used for "
+                "Own agents only. An agent with a rule can't be copied. "
+                "Stop it answering elsewhere first."
             )
         case "agent_runs_elsewhere":
             return (
-                f"{name}'s agent rule names other channels, so it can't be this channel's own "
-                "agent, and an agent with a rule can't be copied. Change its rule first."
+                f"{name}'s rule names other channels, so it can't be used for Own agents only. "
+                "An agent with a rule can't be copied. Change its rule first."
             )
         case "agent_not_found":
             return f"There is no agent named {name}."
         case "agent_has_home":
             return (
-                f"{name} is the own agent of {channel_id}, which only its own agents read. "
+                f"{name} is an agent of {channel_id}, which is set to Own agents only. "
                 "Change that channel's readers first, releasing its agents."
             )
         case "own_channel_alone":
-            return (
-                f"Only its own agents read {channel_id}, so an agent rule naming it names it alone."
-            )
+            return f"{channel_id} is set to Own agents only, so an agent rule names it alone."
 
 
 class ChannelRuleRefused(DaimonError):
@@ -229,21 +226,22 @@ class RuleChange:
         """What the change means, sentence by sentence, for the person who made it."""
         notes = [describe_rule(self.rule)]
         if self.copied_from is not None:
-            notes.append(f"{self.agent_name}, a copy of {self.copied_from}, is its own agent.")
+            notes.append(f"Made {self.agent_name}, a copy of {self.copied_from}, for this channel.")
         elif self.agent_name is not None:
-            notes.append(f"{self.agent_name} is its own agent and runs only there.")
+            notes.append(f"{self.agent_name} now works only in {self.channel_id}.")
         if self.dropped_skills:
-            notes.append(f"Left off the copy: {', '.join(self.dropped_skills)}.")
+            notes.append(f"Skills not copied: {', '.join(self.dropped_skills)}.")
         if self.kept:
+            agents = _join_agents(self.kept)
+            show = "show" if len(self.kept) > 1 else "shows"
+            work = "work" if len(self.kept) > 1 else "works"
             notes.append(
-                f"{', '.join(self.kept)} still run only there, but show elsewhere again; "
-                "releasing them lets them run elsewhere, bringing what they remembered there."
+                f"{agents} {show} in other channels again, but still {work} only here. "
+                "Release them to work elsewhere; their memory goes with them."
             )
         if self.released:
-            notes.append(
-                f"{', '.join(self.released)} may now run elsewhere, bringing what they "
-                "remembered there."
-            )
+            agents = _join_agents(self.released)
+            notes.append(f"{agents} can now work in other channels, with their memory.")
         if self.network_warning is not None:
             notes.append(self.network_warning)
         return tuple(notes)
@@ -261,8 +259,9 @@ class ChannelRuleStatus:
     def line(self) -> str:
         agents = ", ".join(self.agents) or "none"
         return (
-            f"Who can read it: {READERS_LABELS[self.rule.readers]} · Who can post: "
-            f"{WRITERS_LABELS[self.rule.writers]} · Agents kept here: {agents}"
+            f"Who can read it: {READERS_LABELS[self.rule.readers]}\n\n"
+            f"Who can post: {WRITERS_LABELS[self.rule.writers]}\n\n"
+            f"Agents kept here: {agents}"
         )
 
 

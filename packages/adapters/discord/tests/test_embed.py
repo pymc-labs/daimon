@@ -43,7 +43,7 @@ def _call(name: str, status: Literal["pending", "complete", "failed"] = "pending
 
 
 def test_max_length_error_notice_keeps_the_summary_line() -> None:
-    tail = "\n**Next:** Add credit.\n`rid: test`"
+    tail = "\n\n-# Ref TEST"
     notice = "x" * (950 - len(tail)) + tail
     assert len(notice) == 950
     state = dataclasses.replace(
@@ -53,23 +53,19 @@ def test_max_length_error_notice_keeps_the_summary_line() -> None:
     )
     embed = build_discord_embed(to_embed_data(state, now=12.0))
 
-    assert embed.description == "Add credit."
-    assert embed.fields[0].value == notice.replace("**Next:** Add credit.\n", "")
-    assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
+    assert embed.description == notice
     assert embed.footer.text == "test-agent\u2003\u200312s\u2003\u2003$0.05 used\u2003\u2003$9.95"
 
 
 def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
     state = dataclasses.replace(
         _make_state(phase=TurnPhase.ERROR, cost_str="$0.05"),
-        notice="Model usage limit reached.\n**Next:** \n`rid: test`",
+        notice="Ask an admin to add credit.\n\n-# Ref TEST",
         balance_str="$9.95",
     )
     embed = build_discord_embed(to_embed_data(state, now=12.0))
 
-    assert embed.description == "Mention me to try again."
-    assert "Model usage limit reached." in embed.fields[0].value
-    assert "`rid: test`" in embed.fields[0].value
+    assert embed.description == "Ask an admin to add credit.\n\n-# Ref TEST"
     assert embed.footer.text is not None
     assert "$0.05 used" in embed.footer.text
     assert embed.footer.text.endswith("$9.95")
@@ -233,7 +229,7 @@ class TestToEmbedData:
     def test_error_collapses_to_footer_with_cross_and_reason(self) -> None:
         error = to_embed_data(_make_state(phase=TurnPhase.ERROR), now=3.0)
         assert error.title == "Something went wrong."
-        assert error.description == "Mention me to try again."
+        assert error.description == "@mention Daimon to try again."
         assert error.footer == "test-agent\u2003\u20033s"
         assert error.details is None
 
@@ -246,6 +242,7 @@ class TestToEmbedData:
         )
         data = to_embed_data(dataclasses.replace(state, error_reason="rate limited"), now=3.0)
         assert data.footer == "Atlas\u2003\u20033s"
+        assert data.title == "Something went wrong."
 
     def test_update_carries_cost_forward(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING, cost_str="$0.04")

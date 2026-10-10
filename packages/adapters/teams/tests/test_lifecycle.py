@@ -249,7 +249,7 @@ async def test_a_failed_turn_card_carries_the_summary_line() -> None:
     error = TurnError(kind="upstream", message="overloaded")
     await lifecycle.on_terminal_failure(TurnState(error=error), error)
 
-    _notice, summary = _card_body(sender, -1)
+    summary = _card_body(sender, -1)[-1]
     assert summary["text"] == "Ada\u2003\u200312s" and summary["isSubtle"], "as on Slack"
     assert not _rated(sender.activities[-1]), "a failure is not an answer to rate"
 
@@ -289,7 +289,7 @@ async def test_a_spend_limit_alerts_the_operators(monkeypatch: pytest.MonkeyPatc
     with structlog.testing.capture_logs() as logs:
         await lifecycle.on_terminal_failure(TurnState(error=err), err)
     assert alerts == ["spend_limit:org_cap"]
-    assert "reached its model usage limit" in _card_json(sender, -1)
+    assert "reached its usage limit" in _card_json(sender, -1)
     assert {
         "event": "anthropic.spend_limit_reached",
         "log_level": "error",
@@ -609,9 +609,18 @@ async def test_failure_closes_the_card_with_the_termination_notice_once() -> Non
 
     assert len(sender.sent) == 2, "the card closes once"
     text = _card_text(sender, 1)
-    assert text.startswith("❌ Agent service error: "), "the notice replaces the raw error"
-    assert text.endswith("\n\nRequest id: rid-1"), "one paragraph per line, rid last"
+    assert text.startswith("Daimon's AI service failed on this reply.")
+    assert "Ref RID-1" in _card_json(sender, 1)
     assert lifecycle.card_closed
+
+
+async def test_direct_chat_terminal_notice_asks_for_a_message() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, direct_chat=True)
+    error = TurnError(kind="upstream", message="overloaded")
+    await lifecycle.on_terminal_failure(TurnState(error=error), error)
+    assert "Send your message again." in _card_json(sender, 1)
+    assert "@mention" not in _card_json(sender, 1)
 
 
 async def test_a_notice_that_fails_to_build_falls_back_to_the_raw_error() -> None:
@@ -623,18 +632,45 @@ async def test_a_notice_that_fails_to_build_falls_back_to_the_raw_error() -> Non
     error = TurnError(kind="upstream", message="overloaded")
     await lifecycle.on_terminal_failure(TurnState(error=error), error)
 
-    assert _card_text(sender, 1) == "❌ overloaded", "the card still closes"
+    assert _card_text(sender, 1) == "Something went wrong.\n\n@mention Daimon to try again."
 
 
 def test_an_oversized_notice_fits_the_teams_limit_and_keeps_the_request_id() -> None:
     notice = render_termination_notice(TerminationReason.UPSTREAM, request_id="rid-1")
     assert notice is not None
-    huge = dataclasses.replace(notice, cause="x" * 10_000)
+    huge = dataclasses.replace(notice, title="x" * 10_000)
 
     text = card.termination_text(huge)
 
     assert len(text) <= card.TEAMS_LIMIT, "Teams rejects an oversized message"
-    assert text.endswith("…\n\nRequest id: rid-1"), "clipped before the tail"
+    assert text.endswith("…\n\nRef RID-1"), "clipped before the tail"
+
+
+def test_teams_draws_work_and_ref_as_small_text() -> None:
+    notice = render_termination_notice(
+        TerminationReason.CONNECTION_LOST,
+        state=TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use",
+                    id="tu_1",
+                    type="agent.tool_use",
+                    name="fetch",
+                    input={},
+                )
+            ]
+        ),
+        request_id="01A7C3QX2",
+    )
+    assert notice is not None
+    rendered = card.notice_card(card.termination_text(notice)).model_dump(
+        mode="json", by_alias=True
+    )
+    body = rendered["attachments"][0]["content"]["body"]
+    assert body[0]["text"].startswith("Lost the connection. Daimon may still be working.")
+    assert body[1]["size"] == "Small" and body[1]["isSubtle"]
+    assert body[2]["text"] == "Ref 7C3QX2"
+    assert body[2]["size"] == "Small" and body[2]["isSubtle"]
 
 
 class _HungSender:

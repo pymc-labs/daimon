@@ -394,7 +394,7 @@ class ChannelSettingsDialog:
             await self._audit(actor, "channel_rule", outcome="error", reason="failed")
             return f"{exc} Nothing changed."
         await self._audit(actor, "channel_rule", outcome="allowed", reason="completed")
-        return " ".join(change.notes)
+        return "\n\n".join(change.notes)
 
     async def _save_admins(
         self,

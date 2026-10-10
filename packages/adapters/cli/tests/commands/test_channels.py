@@ -409,7 +409,7 @@ async def test_rule_set_copies_an_agent_keeps_it_there_then_opens(
     assert policy.channel_rules == {CHANNEL: OWN}, "only its own agents read it"
     assert policy.agent_rules == {name: AgentRule(runs_in=(CHANNEL,))}, "the copy runs there alone"
     assert "now readers own, writers own" in _out(console)
-    assert f"{name}, a copy of shared, is its own agent" in _out(console)
+    assert f"Made {name}, a copy of shared, for this channel" in _out(console)
 
     await channels_rule_set(**where, channel_id=CHANNEL, readers="inside")
     async with db_session_factory() as s:
@@ -478,7 +478,7 @@ async def test_rule_set_copies_without_a_label_when_discord_errors(
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
     assert policy.channel_rules == {CHANNEL: OWN}, "the lookup error never aborts the change"
-    assert "channel-000002, a copy of shared, is its own agent" in _out(console)
+    assert "Made channel-000002, a copy of shared, for this channel" in _out(console)
 
 
 async def test_rule_set_names_a_slack_copy_after_the_channel(
@@ -516,7 +516,7 @@ async def test_rule_set_names_a_slack_copy_after_the_channel(
         slack_transport=httpx.MockTransport(conversations_info),
     )
 
-    assert "launch-room, a copy of shared, is its own agent" in _out(console)
+    assert "Made launch-room, a copy of shared, for this channel" in _out(console)
 
 
 async def test_rule_set_takes_a_teams_thread_as_its_channel(
@@ -546,7 +546,7 @@ async def test_rule_set_takes_a_teams_thread_as_its_channel(
     assert policy.agent_rules == {"channel-growth": AgentRule(runs_in=(TEAMS_CHANNEL,))}, (
         "the copy, named from the id, runs in the channel alone"
     )
-    assert "channel-growth, a copy of shared, is its own agent" in _out(console)
+    assert "Made channel-growth, a copy of shared, for this channel" in _out(console)
 
 
 async def test_rule_set_refuses_bad_flag_mixes(

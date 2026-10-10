@@ -7,15 +7,8 @@
         'embeds': list([
           dict({
             'color': 15548997,
-            'description': 'Send your message again. If it keeps happening, ask an admin for help.',
+            'description': '@mention Daimon to try again.\\n\\n-# Ref 000000',
             'fields': list([
-              tuple(
-                'Notice',
-                list([
-                  'The turn ended unexpectedly.',
-                  'The conversation and its workspace are kept.',
-                ]),
-              ),
             ]),
             'footer': 'Atlas\u2003\u200315s\u2003\u2003$0.003 used',
             'title': 'Something went wrong.',

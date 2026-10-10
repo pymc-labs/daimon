@@ -146,7 +146,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
     )
     reply = client.chat_postEphemeral.await_args.kwargs["text"]
     if over_budget:
-        assert reply.startswith("This channel has used its spending budget."), reply
+        assert reply.startswith("This channel's budget is used up."), reply
         client.conversations_open.assert_not_awaited()
         start_dm.assert_not_awaited()
     else:
@@ -190,7 +190,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     )
 
     reply = client.chat_postMessage.await_args.kwargs["text"]
-    assert reply.startswith("This channel has used its spending budget."), reply
+    assert reply.startswith("This channel's budget is used up."), reply
     assert "thread_ts" not in client.chat_postMessage.await_args.kwargs
 
 

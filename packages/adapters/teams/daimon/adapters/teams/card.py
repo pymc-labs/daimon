@@ -135,13 +135,10 @@ def termination_text(notice: TerminationNotice) -> str:
 
     One paragraph per line: a card TextBlock drops single line breaks.
     """
-    lines = [f"❌ {notice.headline}: {notice.cause}"]
+    lines = [notice.title, notice.next_step]
     if (work := notice.work_line()) is not None:
         lines.append(work)
-    lines += [notice.survived, f"Next: {notice.next_step}"]
-    # `fit_notice` joins the tail with one newline; the leading one makes it a paragraph.
-    tail = f"\nRequest id: {notice.request_id}" if notice.request_id is not None else None
-    return fit_notice(["\n\n".join(lines)], tail=tail, limit=TEAMS_LIMIT)
+    return fit_notice(lines, tail=notice.ref_line, limit=TEAMS_LIMIT)
 
 
 def _summary_line(summary: str) -> TextBlock:
@@ -157,8 +154,22 @@ def notice_card(
     Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
     """
     body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
-    fallback = fit_notice([text], tail=None, limit=_FALLBACK_MAX_CHARS)
-    elements: list[CardElement] = [TextBlock(text=body, wrap=True)]
+    fallback_parts = text.rsplit("\n\n", 1)
+    fallback = (
+        fit_notice([fallback_parts[0]], tail=fallback_parts[1], limit=_FALLBACK_MAX_CHARS)
+        if len(fallback_parts) == 2 and fallback_parts[1].startswith("Ref ")
+        else fit_notice([text], tail=None, limit=_FALLBACK_MAX_CHARS)
+    )
+    parts = body.split("\n\n")
+    small: list[str] = []
+    while parts and (
+        parts[-1].startswith("Ref ")
+        or parts[-1].startswith("Still running when it ended:")
+        or parts[-1].startswith("Finished before that:")
+    ):
+        small.insert(0, parts.pop())
+    elements: list[CardElement] = [TextBlock(text="\n\n".join(parts), wrap=True)]
+    elements.extend(_summary_line(line) for line in small)
     if summary:
         elements.append(_summary_line(summary))
     if actions:
