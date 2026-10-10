@@ -9,6 +9,7 @@ Per `guideline:architecture` "Functional core, imperative shell".
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
@@ -64,9 +65,33 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
 }
 
+_SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
+
+
+class _ModelPricing(dict[str, ModelRates]):
+    """Price table that also prices a dated snapshot id at its alias's row.
+
+    Managed Agents echoes snapshot ids such as `claude-haiku-4-5-20251001`;
+    the table lists aliases (`claude-haiku-4-5`). Without this fallback a
+    turn on a snapshot id priced at None and went unbilled.
+    """
+
+    def __missing__(self, key: str) -> ModelRates:
+        alias = _SNAPSHOT_SUFFIX.sub("", key)
+        if alias != key and super().__contains__(alias):
+            return super().__getitem__(alias)
+        raise KeyError(key)
+
+    def get(self, key: str, default: ModelRates | None = None) -> ModelRates | None:  # type: ignore[override]
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
 # Every metered model, for cost lookups. Agent selectability comes from
 # AGENT_MODEL_PRICING alone (see `constants.ALLOWED_MODEL_IDS`).
-MODEL_PRICING: dict[str, ModelRates] = {**AGENT_MODEL_PRICING, **TOOL_MODEL_PRICING}
+MODEL_PRICING: dict[str, ModelRates] = _ModelPricing({**AGENT_MODEL_PRICING, **TOOL_MODEL_PRICING})
 
 
 def cost_of(

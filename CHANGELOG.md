@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
+
 - The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
 - Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress.
 

@@ -212,3 +212,20 @@ def test_agent_rows_match_the_live_pricing_page() -> None:
         assert published.get(name) == rates, (
             f"{model_id} is billed at {rates}, the pricing page lists {published.get(name)}"
         )
+
+
+def test_a_dated_snapshot_id_prices_at_its_alias_row() -> None:
+    from daimon.core.pricing import MODEL_PRICING
+
+    alias = MODEL_PRICING["claude-haiku-4-5"]
+    assert MODEL_PRICING.get("claude-haiku-4-5-20251001") == alias, "snapshot id uses the alias row"
+    assert MODEL_PRICING["claude-haiku-4-5-20251001"] == alias
+
+
+def test_an_unknown_model_still_prices_at_none() -> None:
+    from daimon.core.pricing import MODEL_PRICING
+
+    assert MODEL_PRICING.get("claude-nonexistent-20251001") is None
+    assert MODEL_PRICING.get("claude-haiku-4-5-2025") is None, (
+        "only an 8-digit date suffix falls back"
+    )
