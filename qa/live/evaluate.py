@@ -42,10 +42,19 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 raise Pending("CLI readback returned no evidence")
             patterns = assertion.expect_all_of or []
             if isinstance(patterns, str):
-                decoded = cast(JsonValue, json.loads(patterns))
+                try:
+                    decoded = cast(JsonValue, json.loads(patterns))
+                except ValueError as exc:
+                    raise Pending("CLI expect_all_of is not a JSON string list") from exc
                 if not isinstance(decoded, list) or not all(isinstance(p, str) for p in decoded):
-                    raise ValueError("expect_all_of must resolve to a JSON string list")
+                    raise Pending("CLI expect_all_of must resolve to a JSON string list")
                 patterns = cast(list[str], decoded)
+            try:
+                for pattern in [assertion.expect, assertion.expect_absent, *patterns]:
+                    if isinstance(pattern, str):
+                        re.compile(pattern)
+            except re.error as exc:
+                raise Pending("CLI expectation resolved to an invalid regex") from exc
             passed = (
                 (
                     not isinstance(assertion.expect, str)
