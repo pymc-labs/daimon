@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
+from typing import cast
+
+from pydantic import JsonValue
 
 from qa.live.errors import exception_evidence
 from qa.live.schema import Assertion
@@ -32,6 +36,28 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
             from qa.live.http_probe import check_http
 
             passed, reason = check_http(assertion)
+        elif kind == "cli_check":
+            output = backend.cli_read(assertion.cmd or "")
+            if not output.strip():
+                raise Pending("CLI readback returned no evidence")
+            patterns = assertion.expect_all_of or []
+            if isinstance(patterns, str):
+                decoded = cast(JsonValue, json.loads(patterns))
+                if not isinstance(decoded, list) or not all(isinstance(p, str) for p in decoded):
+                    raise ValueError("expect_all_of must resolve to a JSON string list")
+                patterns = cast(list[str], decoded)
+            passed = (
+                (
+                    not isinstance(assertion.expect, str)
+                    or re.search(assertion.expect, output) is not None
+                )
+                and (
+                    not assertion.expect_absent
+                    or re.search(assertion.expect_absent, output) is None
+                )
+                and all(re.search(pattern, output) is not None for pattern in patterns)
+            )
+            reason = "read-only CLI expectations " + ("matched" if passed else "did not match")
         elif kind == "db_check":
             actual = backend.db_check(assertion.sql or "", turn or (turns[-1] if turns else None))
             passed = actual == assertion.expect

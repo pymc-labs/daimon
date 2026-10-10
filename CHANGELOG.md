@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Account deletion on Discord, Slack, and Teams privacy panels can be paused during an event with `DAIMON_PRIVACY__DELETE_ENABLED=false`; Policy and Export remain available.
+- **QA CLI readback:** Check staging QA agent configuration through a bounded operator hook, with required and forbidden text assertions and no shell execution.
+
 - **QA sessions:** Serialize timer and manual live runs with a shared lock; accept configured hook context and templated catalog fixture arguments.
 
 - **QA observations:** Support channel text checks and bounded unauthenticated HTTP probes; record agent header evidence per turn.
