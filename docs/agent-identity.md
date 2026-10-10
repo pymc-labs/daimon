@@ -103,7 +103,7 @@ default) posts with no override, so it keeps the app's own name and icon.
   back-off early. The first fallback for want of Manage Webhooks logs
   `discord.identity_fallback_no_manage_webhooks` once per guild per process.
 - When identity is on and the bot's server permissions lack Manage Webhooks,
-  `/agent-setup` shows admins one line saying agents answer as Daimon there,
+  `/agent-setup` shows admins one line saying new agent posts may show as Daimon,
   with a re-authorize link that re-adds the bot with its full install
   permissions. When the server grants it, the panel checks the bot's
   effective permission in up to 10 channels: the one the panel was opened in

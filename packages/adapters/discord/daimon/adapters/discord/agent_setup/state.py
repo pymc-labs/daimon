@@ -155,7 +155,7 @@ class PanelState:
     # answers for the caller exactly as a mention would.
     thread_id: str | None = None
     # Re-authorize link shown to an admin when identity is on but the bot lacks
-    # Manage Webhooks, so agents answer as Daimon. None hides the line.
+    # Manage Webhooks, so new agent posts may show as Daimon. None hides the line.
     webhook_fix_url: str | None = None
     # Channels whose overwrites deny Manage Webhooks while the server grants
     # it, for the same admin note. Empty hides the lines.

@@ -171,7 +171,7 @@ def _denial(block: WebhookBlock) -> str:
 
 
 def _webhook_fix_line(state: PanelState) -> str | None:
-    """The admin-only note that agents post as Daimon until webhooks are allowed.
+    """The admin-only note that new agent posts may show as Daimon until webhooks are allowed.
 
     A server without Manage Webhooks gets the re-authorize link. A server that
     grants it gets one line per channel whose overwrites take it back, in one
@@ -179,7 +179,8 @@ def _webhook_fix_line(state: PanelState) -> str | None:
     """
     if state.webhook_fix_url is not None:
         return (
-            "Agents answer as Daimon here because Daimon can't manage webhooks. "
+            "Daimon can't manage webhooks in this server, "
+            "so new agent posts here may show as Daimon. "
             f"Re-authorize Daimon to show each agent's name and face: {state.webhook_fix_url}"
         )
     if not state.webhook_blocks:

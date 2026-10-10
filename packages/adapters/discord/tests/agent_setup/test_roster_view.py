@@ -438,7 +438,7 @@ def test_the_webhook_fix_line_renders_only_when_hydrate_supplied_a_link() -> Non
     text = _text(RosterView(state, runtime=MagicMock(), allowed_user_id=42))
 
     assert (
-        "Agents answer as Daimon here because Daimon can't manage webhooks. "
+        "Daimon can't manage webhooks in this server, so new agent posts here may show as Daimon. "
         "Re-authorize Daimon to show each agent's name and face: "
         "https://discord.com/oauth2/authorize?client_id=1"
     ) in text
