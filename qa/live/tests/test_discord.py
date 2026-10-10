@@ -9,6 +9,7 @@ import pytest
 from pydantic import JsonValue
 
 from qa.live.config import Config, Pricing, Target
+from qa.live.cost import Ledger
 from qa.live.discord import DiscordBackend, fingerprint, load_driver
 from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, utcnow
@@ -443,3 +444,22 @@ def test_progress_reaction_survives_cleanup_in_history(
     assert turn.trigger_reaction_history[0]["reactions"] == [{"emoji": {"name": "👀"}}]
     assert turn.trigger_reaction_history[-1]["reactions"] == []
     assert float(str(turn.trigger_reaction_history[0]["elapsed_s"])) < (turn.done_s or 0)
+
+
+def test_unpriced_model_preserves_larger_rounded_footer_cost(
+    backend: DiscordBackend, monkeypatch: pytest.MonkeyPatch, ledger: Ledger
+) -> None:
+    async def query(sql: str, params: dict[str, object] | None = None) -> JsonValue:
+        return [{"model_ids": ["claude-haiku-4-5-20251001"], "cost_usd": None}]
+
+    monkeypatch.setattr(backend, "_query", query)
+    turn = Turn(1, "trigger", "parent", utcnow(), thread_id="thread")
+    turn.messages = [{"embeds": [{"footer": {"text": "Haiku  12s  $0.500 used  $8.00 left"}}]}]
+    usage = backend.usage(turn)
+    assert usage.models == ["claude-haiku-4-5-20251001"]
+    assert usage.usd == 0.5 and usage.source == "turn_outcomes+footer_rounded"
+    ledger.reserve("rounded", 0.1)
+    ledger.receipt("rounded", [usage], 0.1)
+    receipt = json.loads(ledger.path.read_text())
+    assert receipt["usd"] == 0.5
+    assert receipt["accounting"] == "conservative_estimate" and receipt["actual_usd"] is None

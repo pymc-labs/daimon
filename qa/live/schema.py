@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal, Self, cast
+from typing import Literal, Self, cast, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
@@ -205,6 +205,7 @@ PROPOSED_ASSERTIONS = frozenset(
         "footer_on_last_message",
         "footer_cost_matches_ledger",
         "ledger_debits",
+        "ledger_matches_usage",
         "answers_total",
         "threads_created",
         "message_count",
@@ -262,6 +263,9 @@ class ProposedScenario(ScenarioMetadata):
             if isinstance(kind, str) and kind in PROPOSED_STEPS:
                 features.add(f"step {kind}")
                 continue
+            if isinstance(kind, str) and kind not in get_args(Step.model_fields["do"].annotation):
+                features.add(f"unknown step {kind}")
+                continue
             normalized = dict(step)
             for param in PROPOSED_STEP_PARAMS.intersection(step):
                 features.add(f"step parameter {param}")
@@ -274,6 +278,11 @@ class ProposedScenario(ScenarioMetadata):
             kind = assertion.get("kind")
             if isinstance(kind, str) and kind in PROPOSED_ASSERTIONS:
                 features.add(f"assertion {kind}")
+                continue
+            if isinstance(kind, str) and kind not in get_args(
+                Assertion.model_fields["kind"].annotation
+            ):
+                features.add(f"unknown assertion {kind}")
                 continue
             normalized = dict(assertion)
             for param in PROPOSED_ASSERT_PARAMS.intersection(assertion):

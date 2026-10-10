@@ -588,6 +588,7 @@ class DiscordBackend:
         return result
 
     def usage(self, turn: Turn) -> Usage:
+        footer = self._footer_usage(turn)
         try:
             rows = objects(
                 asyncio.run(
@@ -620,12 +621,20 @@ class DiscordBackend:
                     cache_creation_input_tokens=int(str(row["cache_creation_input_tokens"]))
                     if row.get("cache_creation_input_tokens") is not None
                     else None,
-                    usd=float(str(row["cost_usd"])) if row.get("cost_usd") is not None else None,
-                    source="turn_outcomes",
+                    usd=float(str(row["cost_usd"]))
+                    if row.get("cost_usd") is not None
+                    else footer.usd,
+                    source="turn_outcomes+footer_rounded"
+                    if row.get("cost_usd") is None and footer.usd is not None
+                    else "turn_outcomes",
                     models=[str(m) for m in models] if isinstance(models, list) else [],
                 )
         except Exception:
             pass
+        return footer
+
+    @staticmethod
+    def _footer_usage(turn: Turn) -> Usage:
         # Older deployments retain tokens and price in the footer. Current ones only carry price.
         import re
 
