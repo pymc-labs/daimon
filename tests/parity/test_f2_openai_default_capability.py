@@ -210,8 +210,12 @@ class _HostServedMcp:
         manifest: DefaultManifest,
         gate_url: str,
         mcp: httpx.AsyncClient,
+        secondary: Object | None = None,
     ) -> None:
         self.script, self.manifest, self.gate_url, self.mcp = script, manifest, gate_url, mcp
+        # A native MCP server the provider adds to the stored agent, never bound by Daimon.
+        self.secondary = secondary
+        self.agent_reads = 0
         self.authorizations: list[str] = []
         # (server_label, authorization) for every MCP tool in every session POST.
         self.posted_mcp: list[tuple[str, str | None]] = []
@@ -221,7 +225,16 @@ class _HostServedMcp:
     async def handle(self, request: httpx.Request) -> httpx.Response:
         if (request.method, request.url.path) == ("POST", "/v1/agents/sessions"):
             await self._serve(object_json(json.loads(request.content)))
-        return await self.script.handle(request)
+        response = await self.script.handle(request)
+        if (request.method, request.url.path) != ("GET", "/v1/agents/agent"):
+            return response
+        self.agent_reads += 1
+        # Only the read inside session creation: F1's own retrieve check comes first.
+        if self.secondary is None or self.agent_reads < 2:
+            return response
+        raw = object_json(json.loads(response.content))
+        raw["tools"] = [*list(raw["tools"]), self.secondary]  # type: ignore[arg-type]
+        return httpx.Response(response.status_code, json=raw)
 
     async def _serve(self, body: Object) -> None:
         from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
@@ -275,10 +288,16 @@ class _F2Factory(OpenAIDefaultCapabilityFactory):
     """F1's OpenAI factory with the driver's MCP credential resolver and the real host."""
 
     def __init__(
-        self, manifest: DefaultManifest, gate_url: str, bearer: str, mcp: httpx.AsyncClient
+        self,
+        manifest: DefaultManifest,
+        gate_url: str,
+        bearer: str,
+        mcp: httpx.AsyncClient,
+        secondary: Object | None = None,
     ) -> None:
         super().__init__(manifest, tuple(_native_events(manifest, {})))
         self.gate_url, self.bearer, self.mcp = gate_url, bearer, mcp
+        self.secondary = secondary
         self.served: list[_HostServedMcp] = []
         self.resolutions: list[tuple[Scope, str, str]] = []
 
@@ -289,7 +308,7 @@ class _F2Factory(OpenAIDefaultCapabilityFactory):
 
     def __call__(self, replay: Any = None) -> DefaultCapabilityAdapter:
         script = _ScopedTranscript(self.manifest, self.native_events, replay=replay is not None)
-        served = _HostServedMcp(script, self.manifest, self.gate_url, self.mcp)
+        served = _HostServedMcp(script, self.manifest, self.gate_url, self.mcp, self.secondary)
         sdk = AsyncOpenAI(
             api_key="offline-fixture",
             base_url="https://openai.invalid/v1",
@@ -402,6 +421,61 @@ async def test_f2_fails_when_the_mcp_bearer_is_revoked(tmp_path: Path) -> None:
                 result = await run_default_capability(manifest, f2())
             assert result.status != "pass"
             assert f2.served[0].gate_statuses == [401]
+    finally:
+        await qa.engine.dispose()
+        await cleanup(manifest_path, database_url=database_url)
+
+
+_SENTINEL = "fictional-unbound-secondary-private-value"
+_UNBOUND: dict[str, Object] = {
+    # 9d06f2b's leak: a native authorization copied into the session POST.
+    "authorization": {"authorization": "Bearer " + _SENTINEL},
+    # cb15780's leaks: the credential carried in the destination itself.
+    "url_userinfo": {"server_url": f"https://user:{_SENTINEL}@secondary.example.com/mcp"},
+    "url_query": {"server_url": f"https://secondary.example.com/mcp?token={_SENTINEL}"},
+    "headers": {"headers": {"Authorization": "Bearer " + _SENTINEL}},
+}
+
+
+@pytest.mark.parametrize("carrier", sorted(_UNBOUND))
+async def test_f2_never_copies_an_unbound_mcp_authorization(
+    carrier: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The provider returns the stored agent with an unbound, credential-bearing server."""
+    from daimon.testing.qa_mcp_host import build_host, cleanup, serve
+
+    sentinel = _SENTINEL
+    secondary: Object = {
+        "type": "mcp",
+        "server_label": "secondary",
+        "transport": {
+            "type": "http",
+            "server_url": "https://secondary.example.com/mcp",
+            **_UNBOUND[carrier],
+        },
+    }
+    manifest = _manifest()
+    database_url = _database_url()
+    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
+    manifest_path = qa.manifest.path(tmp_path)
+    caplog.set_level(logging.DEBUG, logger="openai")
+    caplog.set_level(logging.DEBUG, logger="httpx")
+    try:
+        async with serve(qa) as gate_url, httpx.AsyncClient(timeout=30) as mcp:
+            f2 = _F2Factory(manifest, gate_url, qa.bearer.token, mcp, secondary)
+            async with f2:
+                result = await run_default_capability(manifest, f2())
+            assert result.status != "pass"
+            (served,) = f2.served
+            # Refused before the session POST: nothing was posted, the run bearer was
+            # never resolved, and the real host was never called.
+            assert served.posted_mcp == [] and served.authorizations == []
+            assert served.gate_statuses == [] and f2.resolutions == []
+            assert served.agent_reads == 2  # the injection reached session creation
+            assert sentinel not in json.dumps(result.evidence, default=str)
+        assert sentinel not in caplog.text and qa.bearer.token not in caplog.text
+        assert any(r.name.startswith("openai") for r in caplog.records)
+        assert qa.manifest.refused_egress == []
     finally:
         await qa.engine.dispose()
         await cleanup(manifest_path, database_url=database_url)
