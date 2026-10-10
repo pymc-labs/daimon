@@ -20,6 +20,9 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsTextBlock,
 )
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
+    BetaManagedAgentsSpanModelUsage,
+)
 from daimon.adapters.teams import card
 from daimon.adapters.teams import lifecycle as lifecycle_module
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
@@ -162,7 +165,7 @@ _USAGE = UsageTotals(
 
 def _debited(model_id: str, markup: Decimal) -> str | None:
     t = _USAGE
-    usage = lifecycle_module.BetaManagedAgentsSpanModelUsage(
+    usage = BetaManagedAgentsSpanModelUsage(
         input_tokens=t.input_tokens,
         cache_creation_input_tokens=t.cache_creation_input_tokens,
         cache_read_input_tokens=t.cache_read_input_tokens,

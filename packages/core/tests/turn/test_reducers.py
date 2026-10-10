@@ -488,6 +488,43 @@ def test_apply_accumulates_usage_totals_across_two_span_events() -> None:
     ), "two span.model_request_end events must sum each of the 4 stage totals"
 
 
+def test_apply_splits_long_prompt_usage_from_all_request_totals() -> None:
+    state = TurnState()
+    for event_id, input_tokens, write, read, output in (
+        ("short_1", 60_000, 0, 0, 10),
+        ("short_2", 1, 49_999, 50_000, 20),
+        ("long", 1, 50_000, 50_000, 30),
+    ):
+        state = apply(
+            state,
+            BetaManagedAgentsSpanModelRequestEndEvent(
+                id=event_id,
+                type="span.model_request_end",
+                model_request_start_id=f"start_{event_id}",
+                model_usage=ma_model_usage(
+                    input_tokens=input_tokens,
+                    cache_creation_input_tokens=write,
+                    cache_read_input_tokens=read,
+                    output_tokens=output,
+                    speed="standard",
+                ),
+                processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        )
+    assert state.usage_totals == UsageTotals(
+        input_tokens=60_002,
+        cache_creation_input_tokens=99_999,
+        cache_read_input_tokens=100_000,
+        output_tokens=60,
+    )
+    assert state.long_prompt_usage_totals == UsageTotals(
+        input_tokens=1,
+        cache_creation_input_tokens=50_000,
+        cache_read_input_tokens=50_000,
+        output_tokens=30,
+    ), "only the request over 100,000 prompt tokens belongs in the long tier"
+
+
 def test_apply_dedupes_span_model_request_end_leaving_usage_totals_unchanged() -> None:
     state = TurnState()
     event = BetaManagedAgentsSpanModelRequestEndEvent(

@@ -107,7 +107,9 @@ Haiku 5.5 is priced by prompt length: $0.10, $0.50, $0.125 and $0.01 for a
 request whose prompt is up to 100,000 tokens, and $0.50, $2.50, $0.625 and
 $0.05 above that. The prompt counts input, cache reads and cache writes, and
 each request is priced on its own (`ModelRates.long_context`,
-`LONG_CONTEXT_PROMPT_TOKENS`).
+`LONG_CONTEXT_PROMPT_TOKENS`). Turn cards also split the turn's token totals by
+request prompt length before pricing, so a turn spanning both tiers displays
+the sum of its request costs.
 `AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
 `AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
 until the test table and the date move with it, and

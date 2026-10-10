@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Turn cards on Discord, Slack, and Teams now add each Haiku 5.5 request's cost at its own prompt-length rate.
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING without root alerts; failed verdicts still fail and alert.
 - Older live QA configs that omit `dated_snapshots` now inherit the approved backend default when loaded. Explicit conflicting settings still refuse.
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Protocol
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
@@ -34,6 +35,22 @@ class ModelRates:
 # prompt as all its input tokens, cache reads and cache writes included, and
 # prices each request on its own.
 LONG_CONTEXT_PROMPT_TOKENS = 100_000
+
+
+class UsageCounts(Protocol):
+    """Token fields shared by SDK request usage and turn totals."""
+
+    @property
+    def input_tokens(self) -> int: ...
+
+    @property
+    def output_tokens(self) -> int: ...
+
+    @property
+    def cache_creation_input_tokens(self) -> int: ...
+
+    @property
+    def cache_read_input_tokens(self) -> int: ...
 
 
 # Agent models — what an agent's `model` may be set to. List price in USD per
@@ -118,7 +135,8 @@ def cost_of(
 
     Returns None when rates is None (unknown model id). `usage` must be one
     request: the long-context tier depends on that request's prompt length.
-    To price usage summed over many requests, use `cost_of_bucket`.
+    To price usage summed over many requests, use `cost_of_totals` with the
+    long-prompt subset, or `cost_of_bucket` for requests all in one tier.
     """
     prompt_tokens = (
         usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
@@ -127,7 +145,7 @@ def cost_of(
 
 
 def cost_of_bucket(
-    usage: BetaManagedAgentsSpanModelUsage,
+    usage: UsageCounts,
     rates: ModelRates | None,
     *,
     long_prompt: bool,
@@ -147,6 +165,21 @@ def cost_of_bucket(
         + usage.cache_creation_input_tokens * rates.cache_write / 1_000_000
         + usage.cache_read_input_tokens * rates.cache_read / 1_000_000
     )
+
+
+def cost_of_totals(
+    all_usage: UsageCounts,
+    long_usage: UsageCounts,
+    rates: ModelRates | None,
+) -> float | None:
+    """Price turn totals using the long-prompt subset's request tier."""
+    if rates is None:
+        return None
+    all_at_base = cost_of_bucket(all_usage, rates, long_prompt=False)
+    long_at_base = cost_of_bucket(long_usage, rates, long_prompt=False)
+    long_at_tier = cost_of_bucket(long_usage, rates, long_prompt=True)
+    assert all_at_base is not None and long_at_base is not None and long_at_tier is not None
+    return all_at_base - long_at_base + long_at_tier
 
 
 def format_cost(amount: float | None) -> str | None:
