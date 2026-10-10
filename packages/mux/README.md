@@ -523,3 +523,11 @@ refuse before a session write. Omitted authentication keeps the existing request
 shape. See the [OpenAI Agents MCP protocol](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).
 Offline SDK/loopback proofs cover discovery, owned reads and revoked credentials;
 they do not certify live model execution or HTTPS service reachability.
+
+The authenticated OpenAI MCP edge validates every saved native MCP tool before
+any scoped credential resolver runs, including tools absent from the reference
+map and agents with no references. Inline authorization, native credential
+bindings and mixed authentication refuse before session creation. Only a
+resolver value bound to the caller and exact destination enters the ephemeral
+session request; actual SDK DEBUG logs retain its redacted representation.
+Verified anonymous and custom tools preserve their existing request bytes.

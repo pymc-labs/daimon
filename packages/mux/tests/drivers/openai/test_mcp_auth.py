@@ -552,3 +552,145 @@ async def test_cancelled_resolver_cancels_before_session_post() -> None:
                 key="cancel-session",
             )
     assert all(r.url.path != "/v1/agents/sessions" for r in wire.requests)
+
+
+@pytest.mark.parametrize("has_bound_server", [True, False])
+@pytest.mark.parametrize("position", ["first", "last"])
+@pytest.mark.parametrize(
+    "authentication",
+    [
+        "authorization",
+        "headers",
+        "credential_id",
+        "credential_ref",
+        "transport_credential",
+        "environment_origin",
+    ],
+)
+async def test_unbound_secondary_auth_refuses_before_any_resolver_or_session_post(
+    has_bound_server: bool,
+    position: str,
+    authentication: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wire = Wire()
+    sentinel = "fictional-unbound-secondary-private-value"
+    caplog.set_level(logging.DEBUG)
+
+    def malicious_native_agent(request: httpx.Request) -> httpx.Response:
+        response = wire.handle(request)
+        if request.url.path != "/v1/agents/a":
+            return response
+        raw = object_json(response.json())
+        secondary: Object = {
+            "type": "mcp",
+            "server_label": "secondary",
+            "transport": {"type": "http", "server_url": "https://secondary.example.com/mcp"},
+        }
+        transport = object_json(secondary["transport"])
+        if authentication == "authorization":
+            transport["authorization"] = "Bearer " + sentinel
+        elif authentication == "headers":
+            transport["headers"] = {"Authorization": "Bearer " + sentinel}
+        elif authentication == "transport_credential":
+            transport["credential_id"] = sentinel
+        elif authentication == "environment_origin":
+            secondary["connection_origin"] = "environment"
+            secondary["credential_id"] = sentinel
+        else:
+            secondary[authentication] = sentinel
+        secondary["transport"] = transport
+        native = list(objects(raw["tools"]))
+        raw["tools"] = [secondary, *native] if position == "first" else [*native, secondary]
+        return httpx.Response(200, json=raw)
+
+    async with AsyncOpenAI(
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(malicious_native_agent)),
+    ) as sdk:
+        driver = wire.driver(sdk)
+        requested = spec() if has_bound_server else spec(MCPConnection(name="public", url=URL))
+        agent = await driver.agents.create(SCOPE, requested, key="agent")
+        with pytest.raises(ProviderError) as refused:
+            await driver.sessions.create(
+                SCOPE,
+                SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+                key="unbound-session",
+            )
+    assert refused.value.native_code == "malformed_response"
+    assert refused.value.__cause__ is None
+    assert all(request.url.path != "/v1/agents/sessions" for request in wire.requests)
+    assert wire.resolve_calls == []
+    assert sentinel not in caplog.text and wire.secret not in caplog.text
+    assert sentinel not in repr(refused.value) and sentinel not in repr(agent)
+    # The assertion must exercise the SDK's real DEBUG options logging.
+    assert any(
+        record.name.startswith("openai") and record.levelno == logging.DEBUG
+        for record in caplog.records
+    )
+
+
+async def test_each_bound_mcp_server_uses_its_own_scoped_resolver_and_redacts_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wire = Wire()
+    caplog.set_level(logging.DEBUG)
+    second_url = "https://secondary.example.com/mcp"
+    resolved: list[tuple[Scope, str, str]] = []
+    values = {
+        ("host:owned-token", URL): "fictional-first-bound-bearer",
+        ("host:secondary", second_url): "fictional-second-bound-bearer",
+    }
+
+    async def resolve(scope: Scope, ref: str, destination: str) -> str:
+        assert scope == SCOPE
+        resolved.append((scope, ref, destination))
+        return values[(ref, destination)]
+
+    requested = spec().model_copy(
+        update={
+            "mcp_servers": (
+                *(spec().mcp_servers or ()),
+                MCPConnection(name="secondary", url=second_url, credential_ref="host:secondary"),
+            )
+        }
+    )
+    async with AsyncOpenAI(
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, _kind, _id: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            mcp_secrets=resolve,
+        )
+        agent = await driver.agents.create(SCOPE, requested, key="agent")
+        await driver.sessions.create(
+            SCOPE,
+            SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+            key="two-bound-session",
+        )
+    assert resolved == [(SCOPE, ref, url) for ref, url in values]
+    posts = [request for request in wire.requests if request.url.path == "/v1/agents/sessions"]
+    assert len(posts) == 1
+    tools = objects(object_json(object_json(json.loads(posts[0].content))["agent"])["tools"])
+    assert [
+        object_json(tool["transport"])["authorization"] for tool in tools if tool["type"] == "mcp"
+    ] == ["Bearer " + value for value in values.values()]
+    assert all(value not in caplog.text and value not in repr(agent) for value in values.values())
+    assert all(value not in json.dumps(wire.agent) for value in values.values())
+    assert any(
+        "Request options:" in record.getMessage() and "[redacted]" in record.getMessage()
+        for record in caplog.records
+    )
+    assert any(
+        record.name.startswith("openai") and record.levelno == logging.DEBUG
+        for record in caplog.records
+    )

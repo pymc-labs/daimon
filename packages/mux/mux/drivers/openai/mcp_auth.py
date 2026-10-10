@@ -77,7 +77,47 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
     return {KEY: value}
 
 
+def _validate_native_auth(tools: Sequence[Object]) -> None:
+    """Saved provider tools cannot contribute authentication to a session.
+
+    Validate the complete list before resolving the first credential. Only
+    session_tools may add authorization, using the scoped resolver's output.
+    This also applies to anonymous agents with no credential-reference map.
+    """
+    for native in tools:
+        if native.get("type") != "mcp":
+            continue
+        transport = object_json(native["transport"])
+        if (
+            transport.get("authorization") is not None
+            or transport.get("headers")
+            or any(
+                native.get(key) is not None
+                for key in (
+                    "credential_id",
+                    "credential_ref",
+                    "authorization",
+                    "auth",
+                )
+            )
+            or native.get("headers")
+            or any(
+                transport.get(key) is not None
+                for key in (
+                    "credential_id",
+                    "credential_ref",
+                    "auth",
+                )
+            )
+            or native.get("connection_origin") not in (None, "service")
+        ):
+            # Never include the rejected value or provider payload in errors.
+            raise ValueError("native MCP authentication is not host-resolver bound")
+
+
 def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
+    tools = objects(raw.get("tools", []))
+    _validate_native_auth(tools)
     metadata = object_json(raw.get("metadata") or {})
     if KEY not in metadata:
         return ()
@@ -87,7 +127,6 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
     connections = _CONNECTIONS.validate_json(value)
     if not connections or len({c.name for c in connections}) != len(connections):
         raise ValueError("invalid MCP credential references")
-    tools = objects(raw.get("tools", []))
     for connection in connections:
         if connection.credential_ref is None:
             raise ValueError("missing MCP credential reference")
@@ -103,10 +142,6 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
         if (
             transport.get("type") != "http"
             or transport.get("server_url") != expected_transport["server_url"]
-            or transport.get("authorization") is not None
-            or transport.get("headers")
-            or native.get("credential_id") is not None
-            or native.get("connection_origin") not in (None, "service")
             or native.get("allowed_tools") != expected.get("allowed_tools")
             or native.get("required", False) != expected.get("required", False)
         ):
