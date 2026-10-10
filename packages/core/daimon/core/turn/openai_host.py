@@ -46,7 +46,7 @@ from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Authorization
-from mux.drivers.openai.session_controls import SessionControls
+from mux.drivers.openai.session_controls import SessionControls, SessionSpendLimitUnverified
 from mux.drivers.openai.transport import Transport
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
@@ -223,9 +223,25 @@ async def _create(
                 min(120, (request.deadline - request.now()).total_seconds())
             ):
                 native = await backend.sessions.create(request.scope, spec, key=key)
-        except BaseException:
+        except BaseException as error:
+            # Acknowledged control failure can still allocate a billable hosted
+            # environment. Retain exact scoped IDs durably, never resend create.
+            failed_resource = (
+                error.accepted_session if isinstance(error, SessionSpendLimitUnverified) else None
+            )
+            failure = (
+                {"control_failure": error.native_code, "agent": error.accepted_agent.id}
+                if isinstance(error, SessionSpendLimitUnverified)
+                else {}
+            )
             await store.advance_operation(
-                request.scope, key, "outcome_unknown", now=request.now(), fence=lease
+                request.scope,
+                key,
+                "outcome_unknown",
+                now=request.now(),
+                fence=lease,
+                resource=failed_resource,
+                result=failure,
             )
             raise
         await store.advance_operation(

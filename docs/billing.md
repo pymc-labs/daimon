@@ -775,3 +775,11 @@ infrastructure are available, and must not price those counters through an
 Anthropic meter. Today's Discord, Slack and Teams footers still price the legacy
 counters through `MODEL_PRICING`, so foreign enablement is gated on that adapter
 work.
+
+An explicit OpenAI native session spend cap is cumulative in integer USD cents;
+it does not replace the host budget guard or establish an invoice ceiling.
+Native `spend_control.consumed` is nullable and rounded down to whole cents, so
+it cannot certify exact spend or zero usage. Actual model usage, dated prices
+and container/session charges must still be measured separately. Missing or
+changed configured caps refuse before host input, while omitted caps preserve
+existing behavior.

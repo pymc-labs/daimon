@@ -81,6 +81,7 @@ class Wire:
         self.saved_delegation = False
         self.session_delegation = False
         self.expected_spend_limit = 4
+        self.actual_spend_control = {"limit": 4, "consumed": None}
 
     def session(self):
         return {
@@ -93,6 +94,7 @@ class Wire:
             "environment": {"type": "openai_hosted", "id": "native-environment"},
             "metadata": {"mux_tenant": str(TENANT)},
             "status": "idle",
+            "spend_control": self.actual_spend_control,
             "created_at": 0,
         }
 
@@ -1102,3 +1104,62 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
     assert "spend_control" not in body
     assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
     assert body["environment"]["container_size"] == "small"
+
+
+async def test_unverified_spend_cap_preserves_acknowledged_resource_without_retry(composed):
+    from mux.drivers.openai.session_controls import SessionSpendLimitUnverified
+
+    request, wire, store, _, _ = composed
+    wire.actual_spend_control = None
+    with pytest.raises(SessionSpendLimitUnverified) as refused:
+        await prepare_openai(request)
+    assert refused.value.accepted_session.id == SESSION_ID
+    creates = [
+        r for r in wire.requests if r.method == "POST" and r.url.path == "/v1/agents/sessions"
+    ]
+    assert len(creates) == 1 and wire.turns == []
+    key = creates[0].headers["Idempotency-Key"]
+    record = await store.get_operation(SCOPE, key)
+    assert record.operation.status == "outcome_unknown"
+    assert record.operation.resource == refused.value.accepted_session
+    assert dict(record.result) == {
+        "control_failure": "host_spend_limit_unverified",
+        "agent": "native-agent",
+    }
+    with pytest.raises(UncertainSend):
+        await prepare_openai(request)
+    assert len([r for r in wire.requests if r.method == "POST"]) == 1
+
+
+async def test_spend_cap_drift_after_preparation_refuses_before_input(composed):
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.run import run_prepared_turn
+    from daimon.core.turn.termination import TerminationReason
+
+    request, wire, _, _, _ = composed
+    prepared = await prepare_openai(request)
+    wire.actual_spend_control = {"limit": None, "consumed": None}
+
+    async def reseed():
+        raise AssertionError("spend-control refusal must not retry input")
+
+    result = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key="spend-control-drift",
+    )
+    await drain_outcomes()
+    assert result.state.error is not None
+    assert result.state.termination != TerminationReason.COMPLETED
+    assert wire.turns == []
+    assert not any(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests)
