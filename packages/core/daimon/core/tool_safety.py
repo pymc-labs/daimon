@@ -132,6 +132,13 @@ _READ_VERBS: Final[tuple[str, ...]] = (
     "check",
     "preview",
     "download",
+    # Question-and-answer and checking tools: they return an answer and change
+    # nothing ("deepwiki/ask_wiki_question", "eap/eap_verify_answer").
+    "ask",
+    "verify",
+    # A noun, but in a tool name it only ever names a report to read
+    # ("eap/eap_briefing").
+    "briefing",
 )
 
 # Words that make a name a write wherever they appear: a write verb anywhere
@@ -349,9 +356,9 @@ def classify_tool(
 ) -> ToolEffect:
     """Return whether `server_name`'s `tool_name` reads or writes.
 
-    Order: operator override (tool key, then server key); `read_only_hint`;
-    `destructive_hint`; a plainly-read name (`_name_says_read`); otherwise
-    `write`.
+    Order: operator override (tool key, then server key); `read_only_hint`
+    (an explicit False is a write whatever the name says); `destructive_hint`;
+    a plainly-read name (`_name_says_read`); otherwise `write`.
     """
     override = _keyed(policy.effects, server_name=server_name, tool_name=tool_name)
     if override is not None:
@@ -359,7 +366,7 @@ def classify_tool(
     if annotations is not None:
         if annotations.read_only_hint is True:
             return "read"
-        if annotations.destructive_hint is True:
+        if annotations.read_only_hint is False or annotations.destructive_hint is True:
             return "write"
     return "read" if _name_says_read(tool_name) else "write"
 

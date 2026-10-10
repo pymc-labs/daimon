@@ -42,6 +42,11 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
         ("fetch-page", "read"),
         ("getContact", "read"),
         ("find_user", "read"),
+        # Question-and-answer and checking tools carded as writes on 2026-10-09.
+        ("ask_wiki_question", "read"),
+        ("eap_briefing", "read"),
+        ("eap_verify_answer", "read"),
+        ("verifyAnswer", "read"),
         # Plain writes and unknowns.
         ("create_issue", "write"),
         ("update_deal", "write"),
@@ -65,6 +70,10 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
         ("sql_query", "write"),
         ("getOrCreateContact", "write"),
         ("call_get_page", "write"),
+        ("ask_and_post", "write"),
+        ("verify_and_send", "write"),
+        ("run_verify", "write"),
+        ("briefing_publish", "write"),
     ],
 )
 def test_the_tool_name_decides_when_nothing_else_does(tool: str, effect: str) -> None:
@@ -90,6 +99,15 @@ def test_annotations_win_over_the_name() -> None:
         )
         == "write"
     )
+    assert (
+        classify_tool(
+            _ON,
+            server_name="s",
+            tool_name="ask_wiki_question",
+            annotations=ToolAnnotations(read_only_hint=False),
+        )
+        == "write"
+    ), "a server that says its tool is not read-only is believed over a read-sounding name"
 
 
 def test_an_operator_override_wins_and_a_tool_key_beats_its_server_key() -> None:
