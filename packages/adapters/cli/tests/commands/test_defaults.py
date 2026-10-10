@@ -323,6 +323,111 @@ def test_defaults_verify_provider_read_failure_exits_nonzero(
     assert result.exit_code != 0, result.stdout
 
 
+def test_defaults_verify_designated_qa_drift_warns_but_checks_all_tenants(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def seed() -> tuple[uuid.UUID, uuid.UUID]:
+        async with schema_sessionmaker() as s, s.begin():
+            qa = await make_tenant(s, platform="discord", workspace_id="qa-guild")
+            other = await make_tenant(s, platform="discord", workspace_id="other-guild")
+            return qa.id, other.id
+
+    qa_id, other_id = asyncio.run(seed())
+    _install_defaults_runtime(monkeypatch, sessionmaker=schema_sessionmaker)
+    calls: list[uuid.UUID] = []
+    _install_verify_tenant_defaults(
+        monkeypatch,
+        reports={qa_id: _diverged_report(name="qa-library"), other_id: _in_sync_report()},
+        calls=calls,
+    )
+
+    result = _invoke("--warn-tenant", "discord:qa-guild", "--json")
+
+    assert result.exit_code == 0, result.stdout
+    assert set(calls) == {qa_id, other_id}
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    qa = next(t for t in payload["tenants"] if t["external_id"] == "qa-guild")
+    assert qa["status"] == "diverged"
+    assert qa["warning"] is True
+    assert qa["changed"] == [{"kind": "agent", "name": "qa-library"}]
+
+
+@pytest.mark.parametrize("other_report", [_diverged_report(), _unverifiable_report()])
+def test_defaults_verify_designated_qa_does_not_hide_other_failures(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    other_report: ApplyReport,
+) -> None:
+    async def seed() -> tuple[uuid.UUID, uuid.UUID]:
+        async with schema_sessionmaker() as s, s.begin():
+            qa = await make_tenant(s, platform="discord", workspace_id="qa-guild")
+            other = await make_tenant(s, platform="discord", workspace_id="other-guild")
+            return qa.id, other.id
+
+    qa_id, other_id = asyncio.run(seed())
+    _install_defaults_runtime(monkeypatch, sessionmaker=schema_sessionmaker)
+    calls: list[uuid.UUID] = []
+    _install_verify_tenant_defaults(
+        monkeypatch,
+        reports={qa_id: _diverged_report(), other_id: other_report},
+        calls=calls,
+    )
+
+    result = _invoke("--warn-tenant", "discord:qa-guild", "--json")
+
+    assert result.exit_code == 1, result.stdout
+    assert set(calls) == {qa_id, other_id}
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_defaults_verify_designated_qa_unverifiable_warns(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker() as s, s.begin():
+            qa = await make_tenant(s, platform="discord", workspace_id="qa-guild")
+            return qa.id
+
+    qa_id = asyncio.run(seed())
+    _install_defaults_runtime(monkeypatch, sessionmaker=schema_sessionmaker)
+    calls: list[uuid.UUID] = []
+    _install_verify_tenant_defaults(
+        monkeypatch, reports={qa_id: _unverifiable_report()}, calls=calls
+    )
+
+    result = _invoke("--warn-tenant", "discord:qa-guild", "--json")
+
+    assert result.exit_code == 0, result.stdout
+    assert calls == [qa_id]
+    assert json.loads(result.stdout)["tenants"][0]["warning"] is True
+
+
+@pytest.mark.parametrize("selector", ["qa-guild", "discord:missing-guild", "discord:"])
+def test_defaults_verify_invalid_qa_selector_fails_before_provider_reads(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    selector: str,
+) -> None:
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker() as s, s.begin():
+            qa = await make_tenant(s, platform="discord", workspace_id="qa-guild")
+            return qa.id
+
+    qa_id = asyncio.run(seed())
+    _install_defaults_runtime(monkeypatch, sessionmaker=schema_sessionmaker)
+    calls: list[uuid.UUID] = []
+    _install_verify_tenant_defaults(monkeypatch, reports={qa_id: _in_sync_report()}, calls=calls)
+
+    result = _invoke("--warn-tenant", selector)
+
+    assert result.exit_code == 2, result.stdout
+    assert "Invalid --warn-tenant" in result.stdout
+    assert calls == []
+
+
 def test_defaults_verify_json_output_parses_and_carries_classifications(
     schema_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

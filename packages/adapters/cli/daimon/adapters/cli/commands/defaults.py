@@ -113,6 +113,7 @@ class _TenantVerification:
     external_id: str
     status: str
     changed: tuple[dict[str, str], ...]
+    warning: bool = False
 
 
 def _tenant_label(*, platform: str, external_id: str) -> str:
@@ -128,9 +129,13 @@ def _format_verify_table(
             console.print(f"{label}: in sync")
         elif v.status == "diverged":
             names = ", ".join(f"{c['kind']}:{c['name']}" for c in v.changed)
-            console.print(f"{label}: diverged ({names})")
+            suffix = " [warning: designated QA tenant]" if v.warning else ""
+            console.print(f"{label}: diverged ({names}){suffix}")
         else:
-            console.print(f"{label}: unverifiable — could not compare against the shipped spec")
+            suffix = " [warning: designated QA tenant]" if v.warning else ""
+            console.print(
+                f"{label}: unverifiable — could not compare against the shipped spec{suffix}"
+            )
     console.print(
         f"{awaiting_reseed} tenant(s) skipped as awaiting re-seed (pending or failed "
         "provisioning, not a spec divergence)"
@@ -147,11 +152,12 @@ def _format_verify_json(
                 "external_id": v.external_id,
                 "status": v.status,
                 "changed": list(v.changed),
+                "warning": v.warning,
             }
             for v in results
         ],
         "awaiting_reseed": awaiting_reseed,
-        "ok": all(v.status == "in_sync" for v in results),
+        "ok": all(v.status == "in_sync" or v.warning for v in results),
     }
     console.print(json.dumps(payload), soft_wrap=True, highlight=False, markup=False)
 
@@ -163,6 +169,13 @@ def _format_verify_json(
 def defaults_verify_command(
     as_json: Annotated[bool, JSON_OPTION] = False,
     defaults_root: Annotated[Path, typer.Option("--defaults-root")] = Path("defaults"),
+    warn_tenant: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--warn-tenant",
+            help="Warn on this QA tenant's drift or unreadable comparison (platform:external_id).",
+        ),
+    ] = None,
 ) -> None:
     """Walk every ready install and confirm its live resources already match the
     shipped defaults tree, without writing anything.
@@ -171,8 +184,8 @@ def defaults_verify_command(
     result means that tenant's resources already match what would be seeded,
     exactly as a real reconcile would report. Exits nonzero if any tenant has
     drifted from the shipped spec, or if any tenant's comparison could not be
-    made at all (both are treated as a failed verification — an install this
-    command could not vouch for must not read as passing).
+    made at all, except explicitly selected QA tenants whose failures are
+    reported as warnings.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -184,6 +197,7 @@ def defaults_verify_command(
                 console=console,
                 as_json=as_json,
                 defaults_root=defaults_root,
+                warn_tenants=warn_tenant,
             )
 
     run_cli(_with_defaults(), console=console)
@@ -195,9 +209,20 @@ async def defaults_verify(
     console: Console,
     as_json: bool,
     defaults_root: Path,
+    warn_tenants: list[str] | None = None,
 ) -> None:
     public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
     tenants = await list_tenants_by_platform(rt.sessionmaker)
+    ready_tenants = {
+        _tenant_label(platform=t.platform, external_id=t.external_id)
+        for t in tenants
+        if t.archived_at is None and t.platform != "cli" and t.provision_status == "ready"
+    }
+    selected = set(warn_tenants or ())
+    invalid = selected - ready_tenants
+    if invalid:
+        console.print(f"Invalid --warn-tenant (not a ready install): {', '.join(sorted(invalid))}")
+        raise typer.Exit(code=2)
 
     results: list[_TenantVerification] = []
     awaiting_reseed = 0
@@ -229,6 +254,11 @@ async def defaults_verify(
                 external_id=tenant.external_id,
                 status=outcome.status,
                 changed=tuple({"kind": c.kind, "name": c.name} for c in outcome.changed),
+                warning=(
+                    outcome.status != "in_sync"
+                    and _tenant_label(platform=tenant.platform, external_id=tenant.external_id)
+                    in selected
+                ),
             )
         )
 
@@ -237,7 +267,8 @@ async def defaults_verify(
     else:
         _format_verify_table(console, results, awaiting_reseed=awaiting_reseed)
 
-    failing = [v for v in results if v.status != "in_sync"]
+    failing = [v for v in results if v.status != "in_sync" and not v.warning]
+    warnings = sum(v.warning for v in results)
     if not as_json:
         if failing:
             console.print(
@@ -246,8 +277,8 @@ async def defaults_verify(
             )
         else:
             console.print(
-                f"verify: OK — {len(results)} ready tenant(s) in sync, "
-                f"{awaiting_reseed} awaiting re-seed"
+                f"verify: OK — {len(results)} ready tenant(s) checked, "
+                f"{warnings} QA warning(s), {awaiting_reseed} awaiting re-seed"
             )
     if failing:
         raise typer.Exit(code=1)

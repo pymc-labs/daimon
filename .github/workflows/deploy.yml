@@ -471,19 +471,30 @@ jobs:
         # single turn, so its budget scales with install count rather than
         # with one turn's latency. Revisit this budget as installs grow.
         timeout-minutes: 10
+        env:
+          STAGING_QA_TENANT: ${{ vars.STAGING_QA_TENANT }}
         run: |
           # Same failure discipline as the smoke turn step above: no VM-status
           # precheck, no error-suppressing fallback. A deploy whose installs
           # could not be checked against the shipped defaults must fail loudly,
           # not read green — that silent gap is exactly what this step closes.
+          verify_tenant_arg=""
+          if [ "${{ inputs.environment }}" = staging ] && [ -n "$STAGING_QA_TENANT" ]; then
+            # Validate before interpolating into the remote shell command.
+            if [[ ! "$STAGING_QA_TENANT" =~ ^[a-z][a-z0-9_-]*:[A-Za-z0-9_-]+$ ]]; then
+              echo "Invalid STAGING_QA_TENANT selector" >&2
+              exit 2
+            fi
+            verify_tenant_arg="--warn-tenant $STAGING_QA_TENANT"
+          fi
           verify() {
             gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
-              --tunnel-through-iap --command '
+              --tunnel-through-iap --command "
                 export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
                 export DOCKER_CONFIG=/root/.docker
                 cd /etc/daimon
-                sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify
-              '
+                sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify $verify_tenant_arg
+              "
           }
           # The settle floor above covers a typical boot reconcile; one retry a
           # minute later covers a slow one. Real drift fails both attempts.
