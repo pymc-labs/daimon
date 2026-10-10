@@ -2627,6 +2627,7 @@ class GitHubConnectFlow(Base):
     encrypted_invitation_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     encrypted_user_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     github_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

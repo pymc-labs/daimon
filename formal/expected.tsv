@@ -2,6 +2,12 @@
 # dir	spec	config	expected verdict	distinct states (TLC -workers 1)	TLC flags (- = none)	what it pins
 # A violates: row is a deliberately unsafe config: its counterexample is the
 # evidence that the model can still see the bug the safe config rules out.
+# ---- GitHub Connect cancellation ----
+github_connect_cancel	ConnectCancel	ConnectCancelSafe	clean	31	-	cancellation excludes confirmation and rechecks pending revocation after sweep selection
+github_connect_cancel	ConnectCancel	ConnectCancelNoLock	violates:NoConfirmAfterCancel	9	-	pre-fix cancel leaves the flow confirmable
+github_connect_cancel	ConnectCancel	ConnectCancelDropsToken	violates:PendingTokenRetained	28	-	unsafe expiry sweep deletes a token after failed revocation
+github_connect_cancel	ConnectCancel	ConnectCancelStaleSweep	violates:PendingTokenRetained	28	-	old outer DELETE trusts a stale candidate selected before Cancel commits
+github_connect_cancel	ConnectCancel	ConnectCancelSiblingClear	violates:PendingTokenRetained	9	-	unsafe sibling confirmation clears a canceled flow's pending token
 # ---- GitHub request cards ----
 github_request_cards	RequestCards	RequestCardsSafe	clean	568	-	shared GitHub request card thread lock keeps one card and three mentions per hour
 github_request_cards	RequestCards	RequestCardsNoLock	violates:NoDuplicate	334	-	unlocked concurrent retry posts two cards for one request

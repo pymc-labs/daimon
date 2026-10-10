@@ -169,6 +169,7 @@ class Flow(BaseModel):
     encrypted_invitation_token: bytes | None
     encrypted_user_token: bytes | None
     github_user_id: int | None
+    cancelled_at: datetime | None
     expires_at: datetime
 
 
@@ -868,7 +869,7 @@ async def successful_confirmation(
     if not state or (not cookie and not invitation_hash):
         return None
     flow = await session.get(GitHubConnectFlow, digest(state))
-    if flow is None or flow.expires_at <= datetime.now(UTC):
+    if flow is None or flow.cancelled_at is not None or flow.expires_at <= datetime.now(UTC):
         return None
     if not (
         (cookie and flow.cookie_hash == digest(cookie)) or invitation_hash == flow.invitation_hash
@@ -890,7 +891,11 @@ async def create_flow(
     encrypted_invitation_token: bytes | None = None,
 ) -> None:
     await session.execute(
-        delete(GitHubConnectFlow).where(GitHubConnectFlow.expires_at <= datetime.now(UTC))
+        delete(GitHubConnectFlow).where(
+            GitHubConnectFlow.expires_at <= datetime.now(UTC),
+            (GitHubConnectFlow.cancelled_at.is_(None))
+            | (GitHubConnectFlow.encrypted_user_token.is_(None)),
+        )
     )
     session.add(
         GitHubConnectFlow(
@@ -908,10 +913,21 @@ async def create_flow(
 async def delete_expired_flows(session: AsyncSession, *, now: datetime, limit: int = 500) -> int:
     """Remove expired encrypted browser tokens in bounded scheduler batches."""
     expired = (
-        select(GitHubConnectFlow.state_hash).where(GitHubConnectFlow.expires_at <= now).limit(limit)
+        select(GitHubConnectFlow.state_hash)
+        .where(
+            GitHubConnectFlow.expires_at <= now,
+            (GitHubConnectFlow.cancelled_at.is_(None))
+            | (GitHubConnectFlow.encrypted_user_token.is_(None)),
+        )
+        .limit(limit)
     )
     result = await session.execute(
-        delete(GitHubConnectFlow).where(GitHubConnectFlow.state_hash.in_(expired))
+        delete(GitHubConnectFlow).where(
+            GitHubConnectFlow.state_hash.in_(expired),
+            GitHubConnectFlow.expires_at <= now,
+            (GitHubConnectFlow.cancelled_at.is_(None))
+            | (GitHubConnectFlow.encrypted_user_token.is_(None)),
+        )
     )
     return cast(CursorResult[Any], result).rowcount
 
@@ -920,7 +936,12 @@ async def get_flow(session: AsyncSession, *, state: str, cookie: str) -> Flow | 
     if not state or not cookie:
         return None
     row = await session.get(GitHubConnectFlow, digest(state))
-    if row is None or row.cookie_hash != digest(cookie) or row.expires_at <= datetime.now(UTC):
+    if (
+        row is None
+        or row.cookie_hash != digest(cookie)
+        or row.cancelled_at is not None
+        or row.expires_at <= datetime.now(UTC)
+    ):
         return None
     if await get_invitation(session, row.invitation_hash) is None:
         return None
@@ -931,12 +952,40 @@ async def set_user_token(
     session: AsyncSession, *, state: str, encrypted_token: bytes, github_user_id: int
 ) -> bool:
     row = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
-    if row is None or row.expires_at <= datetime.now(UTC) or row.encrypted_user_token is not None:
+    if (
+        row is None
+        or row.cancelled_at is not None
+        or row.expires_at <= datetime.now(UTC)
+        or row.encrypted_user_token is not None
+    ):
         return False
     row.encrypted_user_token = encrypted_token
     row.github_user_id = github_user_id
     await session.flush()
     return True
+
+
+async def cancel_flow(session: AsyncSession, *, state: str, cookie: str) -> Flow | None:
+    """Block confirmation before token revocation, retaining failed work for retry."""
+    if not state or not cookie:
+        return None
+    row = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
+    if row is None or row.cookie_hash != digest(cookie):
+        return None
+    if row.cancelled_at is None:
+        if row.expires_at <= datetime.now(UTC) or row.encrypted_user_token is None:
+            return None
+        row.cancelled_at = datetime.now(UTC)
+        await session.flush()
+    return Flow.model_validate(row)
+
+
+async def finish_cancel_revocation(session: AsyncSession, *, state: str, cookie: str) -> None:
+    """Forget the token only after GitHub confirms revocation."""
+    row = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
+    if row is not None and row.cookie_hash == digest(cookie) and row.cancelled_at is not None:
+        row.encrypted_user_token = None
+        await session.flush()
 
 
 class RepoConfirmation(BaseModel):
@@ -957,7 +1006,12 @@ async def confirm(
 ) -> bool:
     """Consume the invitation and write confirmed rows in the caller's transaction."""
     flow = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
-    if flow is None or flow.cookie_hash != digest(cookie) or flow.expires_at <= datetime.now(UTC):
+    if (
+        flow is None
+        or flow.cookie_hash != digest(cookie)
+        or flow.cancelled_at is not None
+        or flow.expires_at <= datetime.now(UTC)
+    ):
         return False
     invitation = await session.get(
         GitHubConnectInvitation, flow.invitation_hash, with_for_update=True
@@ -1011,7 +1065,10 @@ async def confirm(
         )
     await session.execute(
         update(GitHubConnectFlow)
-        .where(GitHubConnectFlow.invitation_hash == flow.invitation_hash)
+        .where(
+            GitHubConnectFlow.invitation_hash == flow.invitation_hash,
+            GitHubConnectFlow.cancelled_at.is_(None),
+        )
         .values(
             encrypted_verifier=b"",
             encrypted_invitation_token=None,
