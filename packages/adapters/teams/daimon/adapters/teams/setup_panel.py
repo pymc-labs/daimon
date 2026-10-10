@@ -67,6 +67,7 @@ from daimon.core.channel_admins import (
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
+from daimon.core.github_panel import load_grants_panel
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     authorize_coding_token,
@@ -468,12 +469,21 @@ class SetupPanel:
                 is_admin=actor.is_admin,
                 channel_label=None,
             )
+            github_panel = await load_grants_panel(
+                session,
+                tenant_id=actor.tenant_id,
+                agent_id=derive_agent_uuid(
+                    tenant_id=actor.tenant_id, ma_agent_id=match.ma_agent_id
+                ),
+                agent_name=match.name,
+            )
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
         return cards.details_card(
             details,
             here=actor.conversation_id,
             page=page,
             coding_tools=coding_tools,
+            github_panel=github_panel,
             expanded=expanded,
         )
 

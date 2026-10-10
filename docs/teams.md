@@ -422,3 +422,7 @@ different agent posts a notice instead of running. A deployment with
 Group chats, reactions, `/dm` conversations, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
+
+Agent Details shows a read-only GitHub section with one repo per line, the
+working repo (or “No working repo”), and a prompt to ask the agent in the
+setup conversation to change repos.

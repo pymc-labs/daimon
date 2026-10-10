@@ -180,22 +180,15 @@ the Daimon operator to switch it. Existing Slack installations need the
 Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle only; messages still trigger conversation only through `app_mention`. An `app_mention` runs a turn only when the message actually contains `@daimon`, so follow-ups in a thread need the mention too; Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
 Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
-Anyone can run `/github` to see their personal GitHub link. The GitHub home
-lists each agent with its repo count; workspace admins and channel admins see
-**Add repos** beside each agent, which sends them a link for that agent. Each
-agent's Details view has **🐙 GitHub repos**: "<Agent>'s repos", who can use
-them, **Add repos**, **Remove from <Agent>** and **Details** (who added each
-repo, when, and its access). Someone who can't manage the agent is told to ask
-whoever manages it. The ephemeral button opens GitHub to confirm repos. New
-repos appear in a grouped **Connect more repos**
-or **Not now** card when an admin opens GitHub setup after the UTC day closes.
-Installation removals appear as an ephemeral reconnect button when an admin opens setup.
-GitHub request cards use ephemeral replies in their originating thread; no
-GitHub connection or confirmation is sent as a DM. A bare connection confirms
-ephemerally in that channel or thread, while an interrupted task resumes in
-its original thread. Add the
-`/github` command from `docs/slack-app-manifest.yaml` and reinstall the Slack
-app before testing it.
+The GitHub home lists each agent and its repo count without grant controls.
+An agent's **🐙 GitHub repos** section lists its repos one per line, identifies
+its working repo (or says there is none), and says to ask the agent in chat to
+change repos. Connect GitHub remains a browser sign-in link. In the setup
+conversation, ask the agent to connect repos or change its working repo.
+The `/github connect` command can still issue a browser link. GitHub request
+cards use ephemeral replies in their originating thread; connection and
+confirmation are not sent as DMs. Add `/github` from
+`docs/slack-app-manifest.yaml` and reinstall the Slack app before testing it.
 
 Completion notifications can be enabled per tenant with `DAIMON_COMPLETION_PINGS`
 (see [architecture](architecture.md#completion-signals)). Enabled turns post their
