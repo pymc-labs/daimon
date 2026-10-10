@@ -1,0 +1,9 @@
+{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5-20251001",
+  "fixture_id": "F1",
+  "limits": {
+    "input_tokens": 500000,
+    "output_tokens": 32000
+  }
+}

@@ -289,3 +289,22 @@ Native snapshots retain SDK partial-response fields without requiring unused
 agent/session properties. DM archive retains the selected TurnIO/backend
 dispatch. Responder identity keeps its SDK read and untouched response for
 configuration snapshot backfill, including null channel and thread metadata.
+
+### Default capability conformance
+
+The supplementary F1 scenario in `mux.conformance.default_capability` provisions
+the authored Daimon default's eleven skill bundles and immutable pins, mapped
+builtin tools and reserved `daimon-mcp` attachment. One scripted turn loads the
+pinned file-handling skill, invokes two read-only MCP tools, exercises the six
+logical builtin capabilities in a disposable workspace and completes one root.
+`run_default_capability` and `replay_default_capability` are explicit runner
+entry points; the C01–C18 matrix stays unchanged. The initial Anthropic evidence
+is a synthetic SDK/driver turn and a normalized-only tape, not a live certificate.
+
+Adapters declare `builtin_mapping` from logical capabilities to actual ToolSpecs
+(e.g. reads through bash, writes through apply_patch). Incomplete mappings are
+typed PENDING before provider I/O. `atomic_revision_pin=False` provisions without
+a native session revision precondition and adds an explicit capability gap to a
+passing result; immutable skill pins remain mandatory. Replay checks pairings
+and recorded results, while free-form tool arguments remain omitted. See
+`mux/conformance/README.md` for the contract and offline reproduction command.

@@ -262,3 +262,67 @@ Callbacks enforce token bounds across setup/retries/cleanup and return
 precedes callback I/O, settlement precedes export, and failures/cancellation keep
 conservative receipts even when recording is refused. No credentials, SDKs or
 live calls are discovered or scheduled by this harness.
+
+## F1: default capability scenario
+
+This supplementary scenario is separate from the eighteen standard cases. It
+uses the actual `defaults/agents/daimon.yaml` name/system, all eleven skill trees
+and six logical builtin capabilities. Only the probe model is overridden;
+production defaults are unchanged. The reserved `daimon-mcp` server and matching
+MCP toolset are attached explicitly to the disposable agent.
+
+`DefaultManifest` contains eleven `NamedSkill(name, upload)` bundles, the logical
+builtin names, one `MCPConnection` and `skill_to_invoke="file-handling"`.
+`DefaultCapabilityAdapter` takes the driver, scope, probe model, optional
+environment, upstream transport evidence, optional typed pending reason,
+`builtin_mapping` and `atomic_revision_pin`. The mapping maps each of
+`bash/read/edit/grep/glob/write` to its actual `ToolSpec`; several capabilities
+may use the same tool. ToolSpecs are deduplicated before deployment. An omitted
+capability is typed CAPABILITY_UNAVAILABLE PENDING before I/O. A custom mapped
+tool must have host-executed results; a builtin must have agent-executed results.
+
+Transport evidence exposes exact upstream `skill_uploads`, the actual
+`deployed_agent` mapped to a neutral `AgentSpec`, an `agent_spec(agent)` mapper
+for provider readbacks, and an optimization-safe `assert_consumed`. These are
+facts obtained independently from actual upstream requests/readbacks, never a
+verdict inferred from the requested spec. Native settings must retain enabled
+and permission semantics in their mapped ToolSpecs.
+
+The runner creates and retrieves eleven distinct skills, requires immutable
+version pins, checks exact upstream bytes, creates/retrieves the default agent
+and creates one session. With atomic pinning enabled it passes and checks the
+agent revision. Without it, it passes `Revision(local=0)` with no native revision
+and reports the missing atomic pin as a capability gap, without claiming CAS.
+Skill pins are required in both modes.
+
+One scripted turn reads the exact pinned SKILL.md, successfully invokes distinct
+`client_context` and `list_events` on `daimon-mcp`, writes/edits/reads `f1.txt`,
+greps its edited content, globs its basename and runs bash. Checks reject
+failed/unpaired/duplicate calls, wrong routes or servers, missing capabilities,
+altered readback, previews, cross-session/root records, gaps, errors and multiple
+turns. The first running record must name a nonempty root that matches its own
+turn ID before it establishes the stream's root. Loading the pinned instructions
+is the skill invocation; scripted output does not establish model quality.
+Non-null turn IDs seen before running must match the accepted root too; null
+pre-running IDs remain legal. Every subsequent record retains the root check,
+including usage observations.
+
+Use `run_default_capability(manifest, adapter, recorder=recorder)` for a scripted
+turn, then save a complete F1 tape. Replay uses
+`replay_default_capability(path, manifest, factory)` with a fresh fake and
+`DefaultCapabilityReplayEvents(replay)` injected into the driver. It reprovisions
+against the adapter's offline fake and rechecks normalized results, never a stored
+verdict. Logical send/stream metadata are not a native HTTP codec recording.
+Free-form arguments stay omitted; replay does not certify their contents.
+
+The committed Anthropic tape is generated only by the scripted real SDK/driver
+in `packages/mux/tests/test_default_capability_anthropic.py`. To record a fresh
+tape to a NEW path (existing files are refused):
+
+```bash
+uv run python packages/mux/tests/test_default_capability_anthropic.py /tmp/f1-new.json
+uv run pytest packages/mux/tests/test_default_capability_anthropic.py -n 2
+```
+
+No provider call or key is used by these commands. F2 live runs remain separate,
+lead-authorized, budgeted work; no live certification is claimed here.
