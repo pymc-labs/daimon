@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Register the real Anthropic driver with the offline C01–C18 conformance runner using actual SDK wire scripts; report sixteen typed provider/host gaps and withhold certification.
 - Refuse a default-capability turn whose running record omits or mismatches its declared root identity, or whose records name another root before or after running.
 - Route responder-identity reads through scoped native session ports, preserving SDK null metadata and reuse of the observed response for snapshot backfill.
 - Route MCP repository credentials, vault summaries, bundle uploads, hosted charts, hub sessions and skill-version counts through scoped mux resource ports while preserving native request bytes and existing host policy.
