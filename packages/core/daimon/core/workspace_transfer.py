@@ -65,6 +65,7 @@ from daimon.core.checkpoint_prompt import (
     HANDOFF_MAX_BYTES,
     build_checkpoint_prompt,
     checkpoint_head_lines,
+    checkpoint_omitted_files,
     checkpoint_too_large_bytes,
     handoff_filename,
 )
@@ -140,7 +141,7 @@ GapReason = Literal[
     "archive_missing",
 ]
 
-TransferKind = Literal["full", "transcript", "history"]
+TransferKind = Literal["full", "partial", "transcript", "history"]
 
 
 @dataclass(frozen=True)
@@ -550,6 +551,11 @@ async def transfer_workspace(
         )
         unpreserved = (*unpreserved, _COMMITTED_DURING_CHECKPOINT)
 
+    unpreserved = (
+        *unpreserved,
+        *(f"{path} (size limit)" for path in checkpoint_omitted_files(reply)),
+    )
+
     rehosted = await _rehost_bundle(client, sessionmaker, bundle=bundle, now=now)
     if isinstance(rehosted, str):
         return TranscriptOnly(transcript=transcript or "", gap_reason=rehosted)
@@ -591,7 +597,7 @@ def as_prepared_replacement(
     not_carried: tuple[str, ...]
 
     if isinstance(outcome, FullHandoff):
-        transfer_kind = "full"
+        transfer_kind = "partial" if outcome.unpreserved else "full"
         transfer_file_id = outcome.transfer_file_id
         # The successor must be told where MA actually mounts the bundle. The
         # resource is requested at `HANDOFF_MOUNT_PATH`, but every mount path is

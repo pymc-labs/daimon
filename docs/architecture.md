@@ -1281,13 +1281,19 @@ work only into a checkout of the same remote at the recorded commit. When the
 destination mounts a different repository, the successor clones the old remote
 into a separate working checkout before applying its saved commits and patch.
 Any other checkout under the archived roots travels with its working files as
-before. A mounted archive inherited from an earlier move is copied into the
-new bundle even if the old session never unpacked it or wrote another file.
-Untracked and ignored repository files have a combined size cap before packing;
-credential files and reproducible caches stay out. A failed repository capture,
-failed tar, or oversized bundle falls back to the transcript rather than
-claiming a full transfer. The transfer polls only this move's filename and
-requires its size to settle before uploading it.
+before. The archive builder merges inherited files by their original paths with
+current files taking precedence; it never embeds the inherited tar. Older
+repository artifacts that differ from the new capture go under one stable
+content-addressed `prior-repo-state/` directory. The successor extracts outside
+archived roots (`/tmp/daimon-restore`) and restores working files in place, so
+an extraction directory cannot duplicate every payload on the next move.
+Untracked and ignored repository files have a combined size budget; credential
+files and reproducible build/cache directories stay out. Files omitted for size
+are named in HANDOFF.md and emitted as `HANDOFF_OMITTED` markers. The host records
+and announces a `partial` transfer and lists the omissions in successor framing;
+small work still crosses. A failed repository capture, failed archive build, or
+oversized combined bundle falls back to the transcript. The transfer polls only
+this move's filename and requires its size to settle before uploading it.
 
 ## Entry points that are not a chat message
 

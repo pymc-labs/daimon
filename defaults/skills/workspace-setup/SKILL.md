@@ -275,9 +275,13 @@ checkout does not: it is mounted again, and only its unsaved work (uncommitted
 changes, commits on no remote, untracked and ignored task files within the size
 cap) is carried and put back into the same repository at the saved commit. If
 the new workspace mounts another repository, restore into a separate clone of
-the old remote. An `inherited-handoff.tar.gz` in the handoff holds work from an
-earlier move; inspect it too. A failed or oversized capture carries only the
-conversation, and you must say which files are missing. Say this plainly when someone asks where their file went
+the old remote. Inherited files are merged into one archive at their original paths; it never
+contains the previous handoff archive. Inspect `prior-repo-state/` too when
+present: it holds older unsaved repository captures with their own remote and
+HEAD. A file that exceeds the size limit is skipped and named in HANDOFF.md and the
+handoff framing; smaller files still travel, and the transfer is partial. A
+failed capture or oversized combined archive carries only the conversation.
+Say which files are missing. Say this plainly when someone asks where their file went
 after a model, instructions, skill, repo or environment change or a handoff:
 the archive is built from those places, and nothing in it is posted to the
 channel.

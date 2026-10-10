@@ -32,8 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord answers, stopped turns and errors retain their final status when older progress edits complete late, including errors caught outside the turn driver. Repairs preserve text and files without another answer post. Failed turns preserve sealed answer text, and recovered turns take ownership of their card.
 
 - Older live QA configs that omit `dated_snapshots` now inherit the approved backend default when loaded. Explicit conflicting settings still refuse.
-- Workspace replacements preserve dirty nested checkouts, binary repository changes, unpublished commits, ignored task files, and archives inherited from earlier moves. Failed or oversized captures report that files did not transfer; checkpoints remain capped at 90 seconds.
-- Discord answers, stopped turns, and errors retain their final status when an older progress edit completes late, without posting another answer.
+- Workspace replacements preserve dirty nested checkouts, binary changes, unpublished commits and ignored task files. Inherited files are merged without nesting archives, so repeated moves keep bundle size stable. Oversized files are named as omissions while smaller work crosses as a partial transfer; checkpoints remain capped at 90 seconds.
 
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
 - Live QA admits the primary alongside its temporary staging override and accepts exact Haiku 5.5 dated snapshots in deployment evidence and judge replies.
@@ -41,7 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
 - Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress. Unknown catalog kinds mark their scenario PENDING without blocking supported scenarios.
 
-- A workspace move no longer packs the mounted repository checkout into its archive: prod moves spent over two minutes packing a 368 MB checkout and then lost every file. The checkout is mounted again, and its unsaved work (binary patch, commits on no remote, untracked and ignored files) is carried and restored into a checkout of the same remote and commit. The checkpoint turn is capped at 90 s.
 - Rejected or failed MCP and GitHub token forms on Discord, Slack and Teams now show an error with a usable retry button. After 90 seconds the card says it is still saving and will update when finished; long skill imports continue until success or error.
 - A failed attempt to republish a report no longer disconnects the existing report.
 - Slack, Discord and Teams members now see only locally routed responders and agents explicitly allowed in their channel, across setup panels, agent tools, skill reads and routing explanations. Unrouted agents and agents belonging to other channels stay hidden; admin visibility and channel isolation are unchanged.

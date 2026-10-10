@@ -941,3 +941,9 @@ def test_handoff_acknowledged_does_not_double_the_full_stop_when_the_work_ends_a
         "a trailing period in the person's words must not produce '..'"
     )
     assert ".." not in rendered, "no doubled full stop anywhere in the confirmation"
+
+
+def test_partial_summary_does_not_claim_all_working_files_transferred() -> None:
+    text = render_replacement_summary("partial", ["some working files"])
+    assert "some working files came across" in text
+    assert "Not carried: some working files." in text

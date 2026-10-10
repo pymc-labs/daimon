@@ -1015,12 +1015,12 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
     assert "This instruction comes from the daimon host" in user_message, (
         "and the prompt itself follows them in the same message"
     )
-    assert "tar czf" in user_message, "in full, because the system block may not be read"
+    assert "<<'DAIMON_ARCHIVE'" in user_message, "in full, because the system block may not be read"
     instruction = "".join(block["text"] for block in batch[1]["content"] if block["type"] == "text")
     assert instruction.startswith("This instruction comes from the daimon host"), (
         "the same prompt also rides the privileged channel where the model takes one"
     )
-    assert "tar czf" in instruction
+    assert "<<'DAIMON_ARCHIVE'" in instruction
 
 
 async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support(
@@ -1219,3 +1219,41 @@ def test_a_checkpoint_never_holds_the_answer_longer_than_its_own_ceiling() -> No
     assert bounded_checkpoint_deadline(far, now=NOW) == NOW + timedelta(seconds=CHECKPOINT_MAX_S)
     near = NOW + timedelta(seconds=30)
     assert bounded_checkpoint_deadline(near, now=NOW) == near, "an earlier turn deadline wins"
+
+
+async def test_size_omissions_mount_the_small_archive_as_partial_and_name_losses(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(state, old_session, 'HANDOFF_OMITTED "/root/work/large file.bin"')
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+    assert isinstance(outcome, FullHandoff)
+    assert outcome.unpreserved == ("/root/work/large file.bin (size limit)",)
+    prepared = as_prepared_replacement(
+        outcome,
+        destination_model_id="claude-sonnet-5",
+        from_agent_name="analysis-bot",
+        to_agent_name="analysis-bot",
+        requested_work=None,
+    )
+    assert prepared.transfer_kind == "partial"
+    assert prepared.extra_resources[0]["file_id"] == outcome.transfer_file_id
+    assert "/root/work/large file.bin (size limit)" in prepared.system_blocks[0]["text"]
+    assert "none of them came across" not in prepared.system_blocks[0]["text"]

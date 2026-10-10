@@ -199,7 +199,7 @@ class HandoffFraming:
 
 def _framing_text(
     *,
-    transfer_kind: Literal["full", "transcript", "history"],
+    transfer_kind: Literal["full", "partial", "transcript", "history"],
     bundle_mount_path: str | None,
     from_agent_name: str,
     to_agent_name: str,
@@ -209,32 +209,42 @@ def _framing_text(
 ) -> str:
     parts = ["This conversation continues work started in a different workspace."]
 
-    if transfer_kind == "full" and bundle_mount_path is not None:
+    if transfer_kind in {"full", "partial"} and bundle_mount_path is not None:
+        carried_files = (
+            "Some working files were carried over"
+            if transfer_kind == "partial"
+            else "The previous workspace's files were carried over"
+        )
         parts.append(
-            "The previous workspace's files were carried over as an archive mounted at "
+            f"{carried_files} as an archive mounted at "
             f"{bundle_mount_path}. Extract it before anything else:\n\n"
-            f"mkdir -p ~/handoff && tar xzf {bundle_mount_path} -C ~/handoff\n\n"
-            "It was built with `tar -C /`, so paths inside start with `root/` (the previous "
+            f"mkdir -p /tmp/daimon-restore && tar xzf {bundle_mount_path} -C "
+            "/tmp/daimon-restore\n\n"
+            "Archive paths start with `root/` (the previous "
             "home directory), `mnt/session/outputs/` (the files its file tool wrote) and "
             "`tmp/work/` (its scratch directory). Read "
-            "`handoff/root/HANDOFF.md` first: it is the previous responder's own note on the "
+            "`/tmp/daimon-restore/root/HANDOFF.md` first: it is the previous "
+            "responder's own note on the "
             "task, the decisions taken and the working files. Put back what the task still "
-            "needs, in place: `handoff/root/...` under /root/, "
-            "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/, and "
-            "`handoff/tmp/work/...` under /tmp/work/. Anything restored into the outputs "
+            "needs, in place: `/tmp/daimon-restore/root/...` under /root/, "
+            "`/tmp/daimon-restore/mnt/session/outputs/...` under /mnt/session/outputs/, and "
+            "`/tmp/daimon-restore/tmp/work/...` under /tmp/work/. Anything "
+            "restored into the outputs "
             "directory may be delivered to this thread a second time, which is expected.\n\n"
-            "If `handoff/root/inherited-handoff.tar.gz` exists, it holds files from an "
-            "earlier move that may not have been unpacked: extract it into a separate "
-            "directory and read its HANDOFF.md too.\n\n"
-            "If `handoff/root/repo-state/` exists, the mounted repository's checkout was not "
+            "If `/tmp/daimon-restore/root/repo-state/` exists, the mounted "
+            "repository's checkout was not "
             "archived, only its unsaved work. Restore it only into a checkout of the same remote "
             "(`remote.txt`) at the same commit (`head.txt`). If the current repository differs "
             "or is absent, clone the old remote into a separate /root/work checkout (or clone "
             "a self-contained bundle when no remote exists). `git fetch` "
             "`local-commits.bundle` if present, check out the recorded HEAD without overwriting "
             "any destination work, then `git apply --binary "
-            "handoff/root/uncommitted.patch`, then `tar xf files.tar` in the checkout. Otherwise "
-            "restore nothing there and tell the person where that work is saved."
+            "/tmp/daimon-restore/root/uncommitted.patch`, then `tar xf files.tar` "
+            "in the checkout. Otherwise "
+            "restore nothing there and tell the person where that work is saved. "
+            "Also inspect `/tmp/daimon-restore/root/prior-repo-state/*/`: each directory is an "
+            "older capture with its own repo-state and patch; restore it separately by the "
+            "same remote/HEAD rule. Files excluded by size are listed in HANDOFF.md and below."
         )
     elif transfer_kind == "transcript":
         parts.append(
@@ -275,7 +285,7 @@ def _framing_text(
 def render_handoff_framing(
     *,
     model_id: str,
-    transfer_kind: Literal["full", "transcript", "history"],
+    transfer_kind: Literal["full", "partial", "transcript", "history"],
     bundle_mount_path: str | None,
     from_agent_name: str,
     to_agent_name: str,

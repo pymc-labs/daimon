@@ -349,7 +349,7 @@ def test_framing_never_places_the_transcript_in_the_system_blocks() -> None:
 def test_framing_mentions_the_bundle_mount_only_for_a_full_transfer() -> None:
     full = system_text(framing_for("claude-sonnet-5", transfer_kind="full"))
     assert "/daimon-handoff.tar.gz" in full, "a full transfer has an archive to extract"
-    assert "handoff/root/HANDOFF.md" in full, (
+    assert "/tmp/daimon-restore/root/HANDOFF.md" in full, (
         "the tar was built with -C /, so the note is under root/"
     )
 
@@ -454,10 +454,12 @@ def test_framing_tells_the_successor_where_each_half_of_the_archive_goes_back() 
     person asked about stays inside ~/handoff."""
     full = system_text(framing_for("claude-sonnet-5", transfer_kind="full"))
 
-    assert "paths inside start with `root/`" in full, "the home tree keeps its old prefix"
+    assert "Archive paths start with `root/`" in full, "the home tree keeps its old prefix"
     assert "`mnt/session/outputs/`" in full, "and so does the tree the file tool wrote"
-    assert "`handoff/root/...` under /root/" in full, "home files go back to the home directory"
-    assert "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/" in full, (
+    assert "`/tmp/daimon-restore/root/...` under /root/" in full, (
+        "home files go back to the home directory"
+    )
+    assert "`/tmp/daimon-restore/mnt/session/outputs/...` under /mnt/session/outputs/" in full, (
         "and delivered files go back to the outputs directory"
     )
     assert "delivered to this thread a second time, which is expected" in full, (
