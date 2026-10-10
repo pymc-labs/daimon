@@ -123,6 +123,23 @@ def test_all_remaining_discord_step_dispatch(
     assert backend.events[-2:] == ["admin:reset", "delete"]
 
 
+def test_judge_failure_preserves_product_checks_and_cleanup(
+    backend: FakeBackend, ledger: Ledger, pricing: Pricing, scenario: Scenario
+) -> None:
+    class BrokenJudge(FakeJudge):
+        def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]:
+            raise RuntimeError("secret provider response")
+
+    scenario.assertions.append(Assertion(kind="judge", turn=2, rubric="contains APPLE"))
+    result = Executor(backend, BrokenJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING"
+    assert next(c for c in result.checks if c.kind == "text_present").status == "PASS"
+    assert next(c for c in result.checks if c.kind == "judge").status == "PENDING"
+    assert sum(c.kind == "text_absent" for c in result.checks) == 6
+    assert "secret" not in str(result.checks)
+    assert backend.events[-1] == "delete"
+
+
 @pytest.mark.parametrize(
     "step",
     [

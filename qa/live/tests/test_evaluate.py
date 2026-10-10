@@ -62,6 +62,24 @@ def test_unavailable_logs_do_not_prove_absence(
     )
 
 
+def test_judge_execution_error_is_pending_and_redacts_exception(
+    turn: Turn, backend: FakeBackend
+) -> None:
+    class BrokenJudge(FakeJudge):
+        def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]:
+            raise ValueError("secret provider response")
+
+    check = evaluate(
+        Assertion(kind="judge", turn=1, rubric="contains APPLE"),
+        [turn],
+        backend,
+        BrokenJudge(),
+    )
+    assert check.status == "PENDING"
+    assert check.reason == "judge execution unavailable: ValueError"
+    assert check.evidence
+
+
 def test_footer_and_field_regex(turn: Turn, backend: FakeBackend, judge: FakeJudge) -> None:
     turn.messages[0]["embeds"] = [
         {

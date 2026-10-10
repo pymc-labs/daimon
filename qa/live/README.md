@@ -38,9 +38,14 @@ install the driver. Keep installation-specific paths in the private local config
 Edit the local config's `pricing` before approval. The example prices are sample
 values, not measured turn estimates. Include the worst expected Daimon turn cost,
 judge input/output token prices, and a bounded judge input allowance. Judge calls
-always use the Anthropic primary from `models.backends` (`claude-haiku-5-5`), `max_tokens=300`, `temperature=0` and the
+always use the Anthropic primary from `models.backends` (`claude-haiku-5-5`), `max_tokens=300` and the
 Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
+Haiku 5.5 rejects the deprecated `temperature` parameter, so requests omit it.
+Judge request or output errors become PENDING checks, preserve deterministic
+product checks and never alert root by themselves. A completed judge's failed
+verdict still fails and alerts. Server/network errors retain the conservative
+judge reservation when actual usage is unavailable; requests are never retried.
 The one backend map contains Claude `claude-haiku-5-5`, OpenAI `gpt-6-luna`,
 and Gemini `gemini-3.8-flash`. Unknown or expensive replacements refuse.
 The Gemini fallback helper advances to `gemini-flash-latest`, then
