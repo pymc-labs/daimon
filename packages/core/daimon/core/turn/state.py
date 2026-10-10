@@ -89,10 +89,9 @@ def daimon_tool_arguments(block: ToolUseBlock, tool: str) -> Mapping[str, object
 class UsageTotals:
     """Per-turn token totals, folded from `span.model_request_end` events.
 
-    Field names match `BetaManagedAgentsSpanModelUsage` verbatim so a usage
-    payload can be reconstructed 1:1 and priced through `daimon.core.pricing`
-    in the adapter shell. The reducer never prices — it has no model id and
-    no rates; it only accumulates the four cache-split stage totals.
+    Field names match `BetaManagedAgentsSpanModelUsage` verbatim for pricing.
+    The reducer only accumulates the four cache-split stage totals; it has no
+    model id or rates.
     """
 
     input_tokens: int = 0
@@ -137,6 +136,8 @@ class TurnState:
     error: TurnError | None = None
     seen_event_ids: frozenset[str] = field(default_factory=frozenset[str])
     usage_totals: UsageTotals = field(default_factory=UsageTotals)
+    long_prompt_usage_totals: UsageTotals = field(default_factory=UsageTotals)
+    """Subset of usage_totals from requests over the long-context prompt threshold."""
     mcp_failures: tuple[McpServerFailure, ...] = ()
     """Servers that failed this turn, newest status per server name."""
     retrying_error: TurnError | None = None

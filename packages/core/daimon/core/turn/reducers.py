@@ -62,6 +62,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_custom_tool_result_e
     BetaManagedAgentsUserCustomToolResultEvent,
 )
 from daimon.core.errors import TurnError
+from daimon.core.pricing import LONG_CONTEXT_PROMPT_TOKENS
 from daimon.core.turn.state import (
     ContentBlock,
     McpServerFailure,
@@ -126,7 +127,25 @@ def apply(state: TurnState, event: SessionEvent) -> TurnState:
                 cache_read_input_tokens=t.cache_read_input_tokens + u.cache_read_input_tokens,
                 output_tokens=t.output_tokens + u.output_tokens,
             )
-            return dataclasses.replace(state, usage_totals=new_totals, seen_event_ids=seen)
+            long_totals = state.long_prompt_usage_totals
+            if (
+                u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens
+                > LONG_CONTEXT_PROMPT_TOKENS
+            ):
+                long_totals = UsageTotals(
+                    input_tokens=long_totals.input_tokens + u.input_tokens,
+                    cache_creation_input_tokens=long_totals.cache_creation_input_tokens
+                    + u.cache_creation_input_tokens,
+                    cache_read_input_tokens=long_totals.cache_read_input_tokens
+                    + u.cache_read_input_tokens,
+                    output_tokens=long_totals.output_tokens + u.output_tokens,
+                )
+            return dataclasses.replace(
+                state,
+                usage_totals=new_totals,
+                long_prompt_usage_totals=long_totals,
+                seen_event_ids=seen,
+            )
         case _:
             return dataclasses.replace(state, seen_event_ids=seen)
 

@@ -1609,6 +1609,29 @@ class TestTurnSummaryFooter:
 
 
 @pytest.mark.asyncio
+async def test_haiku_footer_adds_cost_of_each_short_request() -> None:
+    lc, _sends, edits = _make_lifecycle(model_id="claude-haiku-5-5")
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    state = TurnState()
+    for event_id in ("short_1", "short_2"):
+        state = apply(
+            state,
+            _span_usage_event(
+                event_id=event_id,
+                input_tokens=60_000,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                output_tokens=0,
+            ),
+        )
+    await lc.on_terminal_success(state)
+    assert f"{GAP}$0.012 used" in _terminal_footer(edits), (
+        "two 60k-token requests must each pay the short-prompt rate"
+    )
+
+
+@pytest.mark.asyncio
 async def test_footer_cost_is_the_debit_with_markup() -> None:
     """`used` is what the tenant is debited, markup included, so it agrees with `left`."""
     sends: list[dict[str, Any]] = []

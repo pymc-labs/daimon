@@ -20,8 +20,10 @@ from daimon.core.pricing import (
     TOOL_MODEL_PRICING,
     ModelRates,
     cost_of,
+    cost_of_totals,
     format_cost,
 )
+from daimon.core.turn.state import UsageTotals
 
 
 def test_cost_of_opus_with_cache_returns_expected_usd() -> None:
@@ -280,3 +282,12 @@ def test_a_model_without_a_long_context_tier_keeps_one_rate() -> None:
 
 def test_haiku_5_5_snapshot_ids_keep_the_long_context_tier() -> None:
     assert MODEL_PRICING["claude-haiku-5-5-20261001"] == MODEL_PRICING["claude-haiku-5-5"]
+
+
+def test_cost_of_totals_prices_each_request_tier() -> None:
+    all_usage = UsageTotals(input_tokens=240_001, output_tokens=3_000)
+    long_usage = UsageTotals(input_tokens=120_001, output_tokens=1_000)
+    cost = cost_of_totals(all_usage, long_usage, MODEL_PRICING["claude-haiku-5-5"])
+    expected = (120_000 * 0.10 + 2_000 * 0.50 + 120_001 * 0.50 + 1_000 * 2.50) / 1_000_000
+    assert cost is not None and abs(cost - expected) < 1e-12
+    assert cost_of_totals(all_usage, long_usage, None) is None
