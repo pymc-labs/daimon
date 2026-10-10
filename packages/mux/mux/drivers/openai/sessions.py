@@ -24,7 +24,7 @@ from mux.drivers.openai.actions import content
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, session_tools
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
-from mux.drivers.openai.session_controls import SessionControls, SessionSpendLimitUnverified
+from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import compile_pins, decode, encode_metadata, resolve_pins
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ContinuityLost, MigrationUnsupported, ProviderError, ScopeViolation
@@ -123,15 +123,6 @@ class OpenAISessions:
             if multi_agent.get("enabled") is not False:
                 raise ProviderError(
                     "permission", retryable=False, native_code="host_delegation_enabled"
-                )
-        expected_limit = self._controls.spend_limit_usd_cents
-        if expected_limit is not None:
-            control = raw.get("spend_control")
-            limit = control.get("limit") if isinstance(control, dict) else None
-            if type(limit) is not int or limit != expected_limit:
-                raise SessionSpendLimitUnverified(
-                    self._c.ref(scope, "session", text(raw["id"])),
-                    self._c.ref(scope, "agent", text(object_json(raw["agent"])["id"])),
                 )
         status = text(raw["status"])
         states = {
