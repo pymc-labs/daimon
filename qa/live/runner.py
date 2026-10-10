@@ -82,6 +82,7 @@ class Executor:
         self.watch_pool: ThreadPoolExecutor | None = None
         self.burst_timeout = backend.fallback_watch_s
         self.burst_workers = 0
+        self.watch_mentions = False
 
     def run(self, scenario: CatalogScenario) -> Result:
         run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
@@ -182,9 +183,19 @@ class Executor:
                 self.context.values["channel_id"] = channel
             try:
                 steps = [*scenario.setup, *scenario.steps]
-                self.burst_workers = sum(len(s.texts) for s in steps if s.do == "burst")
+                self.burst_workers = sum(
+                    len(s.texts) if s.do == "burst" else 1
+                    for s in steps
+                    if s.do in {"burst", "mention", "thread_reply"}
+                )
+                # Only queue scenarios need background observation for ordinary
+                # mentions: a follow-up precedes their first wait_done.
+                first_wait = next(
+                    (i for i, s in enumerate(steps) if s.do == "wait_done"), len(steps)
+                )
+                self.watch_mentions = any(s.do == "thread_reply" for s in steps[:first_wait])
                 for index, step in enumerate(steps):
-                    if step.do == "burst":
+                    if step.do in {"burst", "mention", "thread_reply"}:
                         self.burst_timeout = next(
                             (s.timeout_s for s in steps[index + 1 :] if s.do == "wait_done"),
                             self.backend.fallback_watch_s,
@@ -322,6 +333,13 @@ class Executor:
         result.finalize()
         return result
 
+    def start_watcher(self, turn: Turn) -> None:
+        if self.watch_pool is None:
+            self.watch_pool = ThreadPoolExecutor(max_workers=max(1, self.burst_workers))
+        started = threading.Event()
+        self.watchers[turn.number] = self.watch_pool.submit(self.watch, turn, started)
+        started.wait()
+
     def watch(self, turn: Turn, started: threading.Event) -> None:
         started.set()
         self.collect(turn, self.burst_timeout)
@@ -399,7 +417,21 @@ class Executor:
                 reply_id = str(message["id"])
                 destination = str(message.get("channel_id") or prior.thread_id or prior.channel_id)
             elif kind == "thread_reply":
-                destination = next((t.thread_id for t in reversed(result.turns) if t.thread_id), "")
+                prior = result.turns[-1] if result.turns else None
+                if prior is not None and prior.number in self.watchers:
+                    # Wait only for this turn's live observed thread, never for
+                    # its terminal answer and never substitute a guessed ID.
+                    deadline = time.monotonic() + min(10, self.burst_timeout)
+                    future = self.watchers[prior.number]
+                    while not prior.thread_id and not future.done() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    if not prior.thread_id:
+                        raise Pending("active turn thread was not observed before follow-up")
+                    destination = prior.thread_id
+                else:
+                    destination = next(
+                        (t.thread_id for t in reversed(result.turns) if t.thread_id), ""
+                    )
                 if not destination:
                     raise Pending("thread_reply requires an observed thread")
             if kind == "channel_message" and not step.mention and not step.reply_to:
@@ -425,6 +457,8 @@ class Executor:
                         thread_id=destination if kind == "thread_reply" else None,
                     )
                 )
+                if self.watch_mentions:
+                    self.start_watcher(result.turns[-1])
         elif kind == "burst":
             destination = next(
                 (t.thread_id for t in reversed(result.turns) if t.thread_id), channel
@@ -452,9 +486,7 @@ class Executor:
                     thread_id=destination if destination != channel else None,
                 )
                 result.turns.append(turn)
-                started = threading.Event()
-                self.watchers[turn.number] = self.watch_pool.submit(self.watch, turn, started)
-                started.wait()
+                self.start_watcher(turn)
         elif kind == "wait":
             time.sleep(step.s or 0)
         elif kind == "wait_done":

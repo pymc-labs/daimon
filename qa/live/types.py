@@ -64,6 +64,9 @@ class Turn:
     done_s: float | None = None
     thread_id: str | None = None
     progress_seen_s: float | None = None
+    progress_text_history: list[Message] = field(default_factory=list[Message])
+    progress_first_poll_s: float | None = None
+    progress_observed_until_s: float | None = None
     guild_id: str = "1435062989119295640"
     trigger_reactions: list[Message] = field(default_factory=list[Message])
     trigger_reaction_history: list[Message] = field(default_factory=list[Message])
