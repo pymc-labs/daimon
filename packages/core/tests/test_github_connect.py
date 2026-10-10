@@ -2309,9 +2309,9 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         active_turn=True,
     )
     assert mint.await_count == 2
+    # Only the working repo is mounted; the other repo's token lives in the vault.
     assert {path for _, path, _ in writes if "/resources/" in path} == {
         "/v1/sessions/rotating-session/resources/resource-first",
-        "/v1/sessions/rotating-session/resources/resource-second",
     }
     assert {path for _, path, _ in writes if "/credentials/" in path} == {
         f"/v1/vaults/vault-1/credentials/cred-{name}"

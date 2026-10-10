@@ -94,7 +94,9 @@ async def effective_repo_urls(
     is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
+    mounted_only: bool = False,
 ) -> tuple[str, ...]:
+    """Every repo the agent can reach, or with `mounted_only` just the mounted working repo."""
     urls, _ = await effective_repo_state(
         sessionmaker,
         tenant_id=tenant_id,
@@ -103,6 +105,7 @@ async def effective_repo_urls(
         is_external=is_external,
         config=config,
         fernet=fernet,
+        mounted_only=mounted_only,
     )
     return urls
 
@@ -116,6 +119,7 @@ async def effective_repo_state(
     is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
+    mounted_only: bool = False,
 ) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
     if is_external:
         return (), {}
@@ -135,8 +139,18 @@ async def effective_repo_state(
             fernet=fernet,
             cache=REQUESTER_CACHE,
         )
+    mounted = _mounted_repo_ids(
+        [repo.repo_id for _, repo, _ in rows],
+        working_ids={grant.repo_id for grant, _, _ in rows if grant.is_working_repo},
+    )
     return (
-        tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows)),
+        tuple(
+            sorted(
+                f"https://github.com/{repo.repo_full_name}"
+                for _, repo, _ in rows
+                if not mounted_only or repo.repo_id in mounted
+            )
+        ),
         {repo.repo_id: dict(PERMISSION_PROFILES[profile]) for _, repo, profile in rows},
     )
 

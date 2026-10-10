@@ -343,7 +343,7 @@ async def create_ma_session(
         env_file_id=None,
         # `resolve_clone_token` minted the repo credential inside the
         # `create_session` call above, so "now" is when it was issued.
-        repo_token_issued_at=int(time.time()) if has_repo else None,
+        repo_token_issued_at=int(time.time()) if has_repo or github_mode == "app" else None,
         vault_id=(
             ma_session.vault_ids[-1]
             if github_mode == "app" and ma_session.vault_ids

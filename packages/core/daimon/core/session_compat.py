@@ -214,7 +214,10 @@ def decide_session_compatibility(
         else:
             must_replace = True
 
-    if recorded.github_mode == "app" and recorded.repo_urls:
+    # App tokens live in the vault whether or not a working repo is mounted.
+    if recorded.github_mode == "app" and (
+        recorded.repo_urls or recorded.repo_token_issued_at is not None
+    ):
         issued_at = recorded.repo_token_issued_at
         # Installation tokens are recorded with a conservative 55-minute life.
         # Refresh at 40 minutes, leaving 15 minutes for vault propagation.
