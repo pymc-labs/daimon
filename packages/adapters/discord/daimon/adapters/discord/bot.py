@@ -494,6 +494,20 @@ class _ParticipationBatch:
     timer: asyncio.Task[None] | None = None
 
 
+@dataclass
+class _TurnFailureSurface:
+    """Where a turn that raises shows its error, filled in as the turn opens them.
+
+    ``thread`` is the turn's thread once it exists, so the error lands there and
+    not in the parent channel. ``end_card`` turns the turn's status card into
+    the error while it is still a card, so no Stop button is left spinning; it
+    is cleared once the run returns and the card has become the answer.
+    """
+
+    thread: discord.Thread | None = None
+    end_card: Callable[[str], Awaitable[None]] | None = None
+
+
 # Shared with every adapter that follows threads (see `daimon.core.participation_gates`).
 _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
@@ -2257,6 +2271,7 @@ class DaimonBot(commands.Bot):
         """
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
+        surface = _TurnFailureSurface()
         try:
             # Before admit(): resolving seeded agents/environments can take tens
             # of seconds. Queued mentions already have their own hourglass.
@@ -2273,6 +2288,7 @@ class DaimonBot(commands.Bot):
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
                 unprompted=unprompted,
+                failure_surface=surface,
             )
         except _ThreadOpenFailed as exc:
             # Already answered in the channel; only record it.
@@ -2290,12 +2306,12 @@ class DaimonBot(commands.Bot):
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             )
             log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
-            await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
+            await self._render_turn_error(message, tenant_id, guild_id, rid, exc, surface=surface)
         except Exception as exc:  # mention-turn adapter boundary
             log.exception(
                 "turn.failed.unexpected", error=str(exc), channel_id=str(message.channel.id)
             )
-            await self._render_turn_error(message, tenant_id, guild_id, rid, exc)
+            await self._render_turn_error(message, tenant_id, guild_id, rid, exc, surface=surface)
         finally:
             # One slot per turn: a follow-up drained after this re-enters
             # admission instead of keeping the slot (wait_for_slot).
@@ -2311,11 +2327,25 @@ class DaimonBot(commands.Bot):
         guild_id: str,
         rid: str,
         exc: Exception,
+        *,
+        surface: _TurnFailureSurface | None = None,
     ) -> None:
-        """Sentry-tag + post a rendered error for a turn failure caught in _handle_mention."""
+        """Sentry-tag + post a rendered error for a turn failure caught in _handle_mention.
+
+        The error goes where the turn was: onto its status card while that is
+        still up, else into its thread, and into the mention's channel only when
+        no thread was opened.
+        """
         _capture_turn_error(exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id)
         error_text = render_error(exc, request_id=rid)
-        target = message.channel
+        if surface is not None and surface.end_card is not None:
+            try:
+                await surface.end_card(error_text)
+                return
+            except Exception as card_exc:  # the card is best effort; the post below is not
+                log.warning("turn.error_card_failed", error_type=type(card_exc).__name__)
+        thread = surface.thread if surface is not None else None
+        target: discord.abc.Messageable = thread if thread is not None else message.channel
         transport = DiscordPostTransport(
             self,
             target,
@@ -2982,6 +3012,7 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         unprompted: bool = False,
+        failure_surface: _TurnFailureSurface | None = None,
     ) -> None:
         with observe_turn(
             self.runtime.sessionmaker,
@@ -2997,6 +3028,7 @@ class DaimonBot(commands.Bot):
                 created_thread_ids=created_thread_ids,
                 attachments_override=attachments_override,
                 unprompted=unprompted,
+                failure_surface=failure_surface,
             )
 
     async def _orchestrate_observed(
@@ -3009,6 +3041,7 @@ class DaimonBot(commands.Bot):
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
         unprompted: bool = False,
+        failure_surface: _TurnFailureSurface | None = None,
     ) -> None:
         """Core orchestration logic extracted for clean error boundary.
 
@@ -3024,7 +3057,12 @@ class DaimonBot(commands.Bot):
 
         ``unprompted`` marks the trigger as one nobody @mentioned; it reaches
         the agent as an attribute on the ``<user_query>`` element.
+
+        ``failure_surface``, when provided, receives the turn's thread and a way
+        to end its status card, so an error raised past this point is shown
+        there (see `_render_turn_error`).
         """
+        surface = failure_surface if failure_surface is not None else _TurnFailureSurface()
         # Serialize every turn against the boot snapshot, including a turn
         # that arrives before on_ready, so a marker written by this process
         # cannot be mistaken for an orphan.
@@ -3237,6 +3275,8 @@ class DaimonBot(commands.Bot):
                 acknowledged=not unprompted,
             )
 
+        surface.thread = thread
+
         # --- Wire lifecycle with send/edit callables ---
         # kwargs are forwarded verbatim to discord.py's overloaded send()/edit().
 
@@ -3317,6 +3357,45 @@ class DaimonBot(commands.Bot):
         turn_send = recorder.sender(
             thread, turn_card_intent_id=turn_card_intent.id, transport=transport
         )
+        # Whichever lifecycle renders the turn: dead-session recovery swaps in a
+        # fresh one, and the watermark write and error card must read THAT one.
+        lifecycle_holder: list[DiscordTurnLifecycle] = [lifecycle]
+
+        async def _end_card_with_error(text: str) -> None:
+            """Turn the still-pending card into the error; raises only if nothing showed."""
+            current = lifecycle_holder[0]
+            if current.ended:
+                # The card already became the answer or its own error card:
+                # never overwrite it. The caller posts the error under it.
+                raise RuntimeError("turn card already ended")
+            if current.message_ref is not None:
+                # No replacement post: retiring the intent below is only right
+                # when the card itself now shows the error.
+                await _edit_message(
+                    current.message_ref,
+                    content=text,
+                    embed=None,
+                    view=None,
+                    _allow_replacement=False,
+                )
+            else:
+                await turn_send(text)
+            shown_on = current.message_ref
+            if shown_on is not None and str(shown_on.id) != current.card_message_id:
+                # An earlier edit replaced the card; the original may still show
+                # its Stop button, so its intent stays for recovery.
+                return
+            try:
+                await retire_terminal_turn_card(
+                    self.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=current.card_message_id,
+                    no_post_confirmed=not current.first_post_attempted,
+                )
+            except Exception as exc:  # the error is on screen; recovery retires it later
+                log.warning("turn.error_card_retire_failed", error_type=type(exc).__name__)
+
+        surface.end_card = _end_card_with_error
 
         # Over a cap the turn waits here, behind its ordinary card: the queue
         # is never shown. Stop ends the wait like any turn; the max wait is a
@@ -3650,11 +3729,6 @@ class DaimonBot(commands.Bot):
 
         # --- Run the turn (D-08/D-09/D-10: run_prepared_turn owns the driver
         # call and the one-shot dead-session recovery cycle). ---
-        # lifecycle_holder tracks whichever DiscordTurnLifecycle actually
-        # completed the turn -- recovery_lifecycle rebuilds a fresh one against
-        # the recreated session, and the watermark write below must read
-        # final_message_id off THAT lifecycle, not the pre-recovery one.
-        lifecycle_holder: list[DiscordTurnLifecycle] = [lifecycle]
 
         async def _reseed_user_message() -> str:
             """Full history re-seed for the recreated session (dead-session recovery).
@@ -3807,6 +3881,8 @@ class DaimonBot(commands.Bot):
                     deadline=turn_deadline_at,
                     confirm_write=discord_confirmation_hook(thread),
                 )
+                # The run ended the card itself (answer, or red error card).
+                surface.end_card = None
                 archive_after = await self._archive_requested(origin.id)
         finally:
             # Runs on any exception, not just the happy path: whatever else

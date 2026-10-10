@@ -2100,3 +2100,25 @@ async def test_terminal_failure_keeps_authored_setup_guidance(wrapped: bool) -> 
     assert card.description == copy
     assert "Try again in a minute" not in str(card.to_dict())
     assert "request id" not in str(card.to_dict())
+
+
+async def test_ended_only_once_the_terminal_render_reached_discord() -> None:
+    """`ended` stays False when the terminal edit fails, so the card can still be ended."""
+    lc, _, _ = _make_lifecycle()
+    await lc.on_render(TurnState())
+    assert not lc.ended
+
+    async def failing_edit(ref: Any, **kwargs: Any) -> None:
+        raise discord.HTTPException(types.SimpleNamespace(status=500, reason="x"), "edit failed")  # pyright: ignore[reportArgumentType]
+
+    lc._edit = failing_edit  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(discord.HTTPException):
+        await lc.on_terminal_failure(TurnState(), Exception("boom"))
+    assert not lc.ended, "the pending card is still on screen"
+
+
+async def test_ended_after_a_terminal_render() -> None:
+    lc, _, _ = _make_lifecycle()
+    await lc.on_render(TurnState())
+    await lc.on_terminal_failure(TurnState(), Exception("boom"))
+    assert lc.ended

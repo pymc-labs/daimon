@@ -218,6 +218,9 @@ class DiscordTurnLifecycle:
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
+        # A terminal render reached Discord (or there was by design nothing to
+        # show), so the card is no longer a pending card with a Stop button.
+        self._terminal_shown: bool = False
         self._cancel_view = cancel_view
         self._on_first_post = on_first_post
         self._on_replacement = on_replacement
@@ -432,6 +435,7 @@ class DiscordTurnLifecycle:
             self._card_message_ref = self._message_ref
         else:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
+        self._terminal_shown = True
 
     async def _persist_sealed_responses(self, state: TurnState) -> None:
         """Post sealed answers (text blocks a later tool call made immutable)
@@ -494,6 +498,7 @@ class DiscordTurnLifecycle:
             # "done" state worth keeping (unlike a mention, where the caller
             # watched the tools run); sealed text already posted stays.
             self._terminal = True
+            self._terminal_shown = True
             await self._discard_embed()
             log.info("turn.terminal_success", has_text=False, unprompted=True)
             return
@@ -726,6 +731,7 @@ class DiscordTurnLifecycle:
             # Same rule as an empty answer: an unprompted turn that never
             # spoke does not announce its own failure into the thread.
             self._terminal = True
+            self._terminal_shown = True
             log.warning("turn.terminal_failure", error=str(err), unprompted=True)
             return
         self._apply_usage(state)
@@ -843,6 +849,15 @@ class DiscordTurnLifecycle:
         if self._message_ref is None:
             return None
         return str(self._message_ref.id)
+
+    @property
+    def ended(self) -> bool:
+        """Whether a terminal render (answer, stop or error card) reached Discord.
+
+        False while the card is still the pending card with its Stop button,
+        including when the terminal edit itself failed.
+        """
+        return self._terminal_shown
 
     @property
     def first_post_attempted(self) -> bool:
