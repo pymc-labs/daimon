@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict authenticated OpenAI sessions to one resolver-bound MCP server and closed non-MCP tool types/fields; rebuild admitted tools and refuse unknown variants or credential carriers before resolution or session POST.
 
 - Reject unbound authentication on every native OpenAI MCP tool before credential resolution or session POST, including secondary and anonymous-only servers; verify secret-free actual SDK DEBUG logs.
+- Retain scoped OpenAI/Gemini agent revisions, checked skill bundles and upload ownership in an additive host catalog.
 
 - Execute authored Anthropic catalog replays through the real mux turn driver and fenced journal, feeding authoritative host evidence to the shared outcome oracle while retaining unsupported cells as PENDING.
 - Preserve OpenAI command/MCP tool pairs in the fenced host journal with caller-selected neutral source identities, retaining true provider provenance and unchanged default journal keys.

@@ -558,3 +558,5 @@ configured cap to appear unchanged in native session responses before host
 input. Omitted caps preserve existing behavior. Control failures retain scoped
 acknowledged resource references for exact cleanup, without automatic creation
 retry or an exact-spend claim.
+
+The host may use `daimon.core.stores.neutral_catalog.PostgresNeutralCatalog` for durable alternate-backend agent revisions and retained skill bundles with upload ownership. Its local revision is separate from native revisions: drivers continue to refuse unsupported native mutation. Tenant/account/provider-workspace boundaries and immutable exact-version bundles are enforced in the store; host policy and native calls remain with the resource edge. No mux dependency on this host store is introduced.

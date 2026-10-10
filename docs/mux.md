@@ -1190,3 +1190,8 @@ reuse and before input. Missing or changed configured limits refuse; omission
 preserves existing behavior. If an acknowledged creation fails verification,
 its native session reference remains in the durable creation claim for exact
 owned cleanup, and preparation does not resend it automatically.
+### Alternate resource catalog
+
+The host's `PostgresNeutralCatalog` retains OpenAI/Gemini agent revisions and checked skill bundles within an authorized tenant, account and provider workspace. Agent edits publish a new immutable native agent with a compare-and-swap host revision; historical revisions retain their native references and skill pins. The host revision does not change a provider's native revision. Exact-version bundles preserve their bytes, title and owning agent. Upload ownership is retained with each immutable version; callers commit a checked bundle before attachment.
+
+This store requires additive migration `0079_neutral_catalog`. It supplies storage for explicitly selected alternate resource helpers; callers still perform policy rechecks, native creation and attachment. The default Anthropic resource path uses its existing storage and requests. Downgrading drops only the alternate catalog tables and their retained content. Retained versions store bounded skill archives in Postgres; storage grows with published versions. Account deletion cascades to both catalog tables.

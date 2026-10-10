@@ -3383,3 +3383,49 @@ class AccountingOutbox(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NeutralAgentRevision(Base):
+    """Immutable host revisions for explicitly selected alternate backends."""
+
+    __tablename__ = "neutral_agent_revisions"
+    __table_args__ = (
+        CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_agent_provider"),
+        CheckConstraint("local_revision > 0", name="ck_neutral_agent_revision"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    catalog_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    local_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class NeutralSkillVersion(Base):
+    """Retained checked bundles; native skill versions remain opaque strings."""
+
+    __tablename__ = "neutral_skill_versions"
+    __table_args__ = (
+        CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_skill_provider"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_title: Mapped[str] = mapped_column(Text, nullable=False)
+    preview: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    zip_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
