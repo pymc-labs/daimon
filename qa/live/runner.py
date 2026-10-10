@@ -267,14 +267,16 @@ class Executor:
             # Prefer harness exceptions to a timeout so an unavailable watcher
             # cannot be mistaken for a silent product failure. Preserve every
             # other execution traceback too, not only the first future's error.
-            primary = next((e for e in errors if not isinstance(e, WatchTimeout)), errors[0])
-            for exc in errors:
-                if exc is not primary and not isinstance(exc, Pending):
+            primary_index = next(
+                (i for i, e in enumerate(errors) if not isinstance(e, WatchTimeout)), 0
+            )
+            for index, exc in enumerate(errors):
+                if index != primary_index and not isinstance(exc, Pending):
                     result.errors.append(exception_evidence(exc, "watcher"))
                     result.checks.append(
                         Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
                     )
-            raise primary
+            raise errors[primary_index]
 
     def step(self, step: Step, result: Result, channel: str) -> None:
         if self.context:

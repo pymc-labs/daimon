@@ -276,3 +276,67 @@ def test_alert_command_exception_does_not_halt_or_duplicate(
     alerts.notify(result, tmp_path / "run.json")
     assert len(list((tmp_path / "inbox").glob("*.md"))) == 1
     assert type(error).__name__ in alerts.state_path.read_text()
+
+
+def test_catalog_continues_after_alert_inbox_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    from qa.live import __main__ as cli
+    from qa.live.config import Config, Pricing, Target
+    from qa.live.schema import Scenario
+    from qa.live.tests.conftest import FakeBackend, FakeJudge
+
+    config = Config(
+        pricing=Pricing(per_turn_usd=0.01, judge_input_per_million=1, judge_output_per_million=5),
+        staging=Target(enabled=True),
+    )
+    scenarios = [
+        Scenario.model_validate(
+            {
+                "id": f"QA-D1-TEST{i}",
+                "title": "offline",
+                "friction": [],
+                "sources": [],
+                "set": "A",
+                "surface": "discord",
+                "tier": "full",
+                "priority": "P1",
+                "est_turns": 1,
+                "steps": [{"do": "mention", "text": "APPLE"}, {"do": "wait_done"}],
+                "assert": [{"kind": "text_present", "turn": 1, "pattern": "APPLE"}],
+            }
+        )
+        for i in (1, 2)
+    ]
+
+    class CLIBackend(FakeBackend):
+        target = config.staging
+
+    calls: list[str] = []
+
+    def inbox_unavailable(self: Alerter, result: Result, path: Path) -> None:
+        calls.append(result.scenario)
+        raise OSError("offline inbox unavailable")
+
+    monkeypatch.setattr(cli, "load_catalog", lambda path: scenarios)
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "DiscordBackend", lambda *a, **kw: CLIBackend())
+    monkeypatch.setattr(cli, "HaikuJudge", lambda *a, **kw: FakeJudge())
+    monkeypatch.setattr(Alerter, "notify", inbox_unavailable)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qa",
+            "run",
+            "--go",
+            "--ledger",
+            str(tmp_path / "ledger"),
+            "--results",
+            str(tmp_path / "results"),
+        ],
+    )
+    assert cli.main() == 0
+    assert calls == ["QA-D1-TEST1", "QA-D1-TEST2"]

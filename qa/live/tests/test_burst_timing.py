@@ -136,3 +136,17 @@ def test_anchored_answer_uses_content_and_multiline_without_footer_join(
     assertion.kind = "text_absent"
     assertion.pattern = "(?i)refers to"
     assert evaluate(assertion, [turn], backend, judge).status == "FAIL"
+
+
+def test_every_failed_burst_watcher_retains_its_traceback(
+    backend: FakeBackend, judge: FakeJudge, ledger: Ledger, pricing: Pricing, scenario: Scenario
+) -> None:
+    backend.error = ValueError("offline harness bug")
+    scenario.tier = "full"
+    scenario.est_turns = 3
+    scenario.steps = [Step(do="burst", texts=["B1", "B2", "B3"]), Step(do="wait_done")]
+    result = Executor(backend, judge, ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING"
+    assert len(result.errors) == 3
+    assert all(e["type"] == "ValueError" and e["frames"] for e in result.errors)
+    assert backend.events[-1] == "delete"
