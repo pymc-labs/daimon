@@ -12,6 +12,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from daimon.core._models import AccountingOutbox, TenantLedger, UsageObservation
+from daimon.core.usage_aggregation import disjoint_observations, replace_observation
+from mux.contracts.usage import UsageObservation as UsageDTO
 from mux.errors import ScopeViolation
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from sqlalchemy import func, select, text
@@ -36,6 +38,42 @@ async def lock_provider_billing(session: AsyncSession, binding_id: str) -> None:
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"daimon.provider_billing\x1f{binding_id}"},
     )
+
+
+async def check_provider_ingest(
+    session: AsyncSession,
+    binding_id: str,
+    observation: UsageDTO,
+    *,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Refuse mutable or overlapping coverage before capture or settlement.
+
+    Pending observations participate too. Lock observation then binding, just
+    like the producer/applier composition; never take a sibling's lock.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"mux.usage\x1f{binding_id}\x1f{observation.id}"},
+    )
+    await lock_provider_billing(session, binding_id)
+    bodies = await session.scalars(
+        select(UsageObservation.applied)
+        .where(
+            UsageObservation.binding_id == binding_id,
+            UsageObservation.tenant_id == tenant_id,
+        )
+        .order_by(UsageObservation.revision)
+    )
+    latest: dict[str, UsageDTO] = {}
+    for body in bodies:
+        prior = AppliedUsage.model_validate(body).observation
+        before = latest.get(prior.id)
+        if before is not None and frozenset(before.covers) != frozenset(prior.covers):
+            raise ValueError("usage corrections must retain their coverage set")
+        latest[prior.id] = prior
+    updated = replace_observation(tuple(latest.values()), observation)
+    disjoint_observations(updated)
 
 
 async def _revision(

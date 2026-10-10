@@ -333,6 +333,139 @@ async def test_covered_aggregate_waits_for_latest_leaf_actual(sessions):
     assert await balance(sessions) == Decimal("-0.001218")
 
 
+@pytest.mark.parametrize("case", ["add-covers", "remove-covers", "overlapping-siblings"])
+async def test_coverage_identity_refusals_keep_one_debit_totals_and_outcome(sessions, case):
+    leaf = observation(id="leaf")
+    aggregate = observation(id="aggregate", grain="session", covers=("leaf",))
+    accepted = [leaf] if case == "add-covers" else [leaf, aggregate]
+    rejected = (
+        observation(id="leaf", revision=2, covers=("absent-child",))
+        if case == "add-covers"
+        else observation(id="aggregate", revision=2, grain="session", covers=())
+        if case == "remove-covers"
+        else observation(id="sibling", grain="session", covers=("leaf",))
+    )
+    totals = UsageTotals()
+    outcome = TurnObservation(sessions, TENANT, "slack", session_id="session")
+    for usage in accepted:
+        assert await record(sessions, usage)
+        totals = totals.add_observation(usage)
+        outcome.note_usage(
+            usage, metered=True, provider_price=price(), infrastructure_usd=Decimal(0)
+        )
+    with pytest.raises(ValueError, match="coverage"):
+        await record(sessions, rejected)
+    with pytest.raises(ValueError, match="coverage"):
+        totals.add_observation(rejected)
+    with pytest.raises(ValueError, match="coverage"):
+        outcome.note_usage(rejected)
+    assert isinstance(totals, ProviderUsageTotals)
+    assert totals.reported_input_tokens == 10 and totals.reported_output_tokens == 100
+    assert len(totals.selected) == 1
+    assert await balance(sessions) == Decimal("-0.001018")
+    async with sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM tenant_ledger")) == 1
+        assert await session.scalar(text("SELECT count(*) FROM usage_events")) == 1
+        assert await session.scalar(text("SELECT count(*) FROM usage_observation")) == len(accepted)
+        assert await session.scalar(
+            text("SELECT count(*) FROM accounting_outbox WHERE applied_at IS NOT NULL")
+        ) == len(accepted)
+    outcome.finish()
+    await drain_outcomes()
+    async with sessions() as session:
+        rows = await list_for_tenant(session, TENANT)
+    assert len(rows) == 1 and rows[0].model_calls == 1
+    assert rows[0].input_tokens == 8 and rows[0].output_tokens == 100
+    assert rows[0].cost_usd == Decimal("0.001018") and rows[0].unpriced_calls == 0
+
+
+async def test_add_covers_cannot_reclassify_two_already_settled_work_units(sessions):
+    # The original review probe has already accepted two independent identities.
+    # Refusing a later reclassification retains those two legitimate debits.
+    assert await record(sessions, observation(id="root"))
+    assert await record(sessions, observation(id="child"))
+    with pytest.raises(ValueError, match="coverage set"):
+        await record(sessions, observation(id="root", revision=2, covers=("child",)))
+    assert await balance(sessions) == Decimal("-0.002036")
+    async with sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM accounting_outbox")) == 2
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+@pytest.mark.parametrize("present", [False, True])
+def test_transitive_sibling_coverage_includes_absent_descendants(provider, present):
+    totals = UsageTotals()
+    if present:
+        totals = totals.add_observation(observation(provider, id="shared"))
+    totals = totals.add_observation(observation(provider, id="a", covers=("shared",)))
+    totals = totals.add_observation(observation(provider, id="left", covers=("a",)))
+    with pytest.raises(ValueError, match="overlapping sibling"):
+        totals.add_observation(observation(provider, id="right", covers=("shared",)))
+
+
+async def test_pending_siblings_cannot_ingest_shared_absent_descendant(sessions):
+    assert not await record(sessions, observation(id="a", covers=("absent",)))
+    with pytest.raises(ValueError, match="overlapping sibling"):
+        await record(sessions, observation(id="b", covers=("absent",)))
+    assert await balance(sessions) == 0
+    async with sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM usage_observation")) == 1
+
+
+async def test_concurrent_sibling_ingests_keep_single_debit(sessions):
+    assert await record(sessions, observation(id="leaf"))
+    results = await asyncio.gather(
+        record(sessions, observation(id="a", covers=("leaf",))),
+        record(sessions, observation(id="b", covers=("leaf",))),
+        return_exceptions=True,
+    )
+    assert sum(result is True for result in results) == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    assert await balance(sessions) == Decimal("-0.001018")
+    async with sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM usage_observation")) == 2
+        assert await session.scalar(text("SELECT count(*) FROM tenant_ledger")) == 1
+
+
+def test_coverage_is_a_fixed_set_and_amount_corrections_remain_allowed():
+    totals = UsageTotals().add_observation(observation(covers=("a", "b")))
+    totals = totals.add_observation(observation(revision=2, output=120, covers=("b", "a")))
+    assert totals.output_tokens == 120
+    with pytest.raises(ValueError, match="coverage set"):
+        totals.add_observation(observation(revision=1, covers=("a",)))
+
+
+async def test_external_producer_cannot_claim_changed_coverage(sessions):
+    assert await record(sessions, observation(id="leaf"))
+    # A mux-only producer cannot bypass the host's check when draining its row.
+    async with sessions() as session, session.begin():
+        row = await mux_state.record_usage(
+            session, "binding", observation(id="leaf", revision=2, covers=("absent",))
+        )
+    assert row is not None
+    with pytest.raises(ValueError, match="coverage set"):
+        async with sessions() as session, session.begin():
+            await accounting_outbox.apply_usage_outbox(
+                session,
+                row,
+                tenant_id=TENANT,
+                platform_user_id="user",
+                pricing=None,
+                channel_id="channel",
+                billing_grain="turn",
+                provider_price=price(),
+                infrastructure_usd=Decimal(0),
+            )
+    assert await balance(sessions) == Decimal("-0.001018")
+    async with sessions() as session:
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM accounting_outbox WHERE applied_at IS NOT NULL")
+            )
+            == 1
+        )
+
+
 async def test_root_model_binding_and_unknown_child_outcomes(sessions):
     outcome = TurnObservation(sessions, TENANT, "slack", session_id="session")
 

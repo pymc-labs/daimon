@@ -93,7 +93,9 @@ async def apply_usage_outbox(
         raise ValueError("accounting requires a caller-owned transaction")
     revisions = await accounting_outbox.load_revisions(session, row, tenant_id=tenant_id)
     if row.observation.session.provider != "anthropic":
-        await accounting_outbox.lock_provider_billing(session, row.binding_id)
+        await accounting_outbox.check_provider_ingest(
+            session, row.binding_id, row.observation, tenant_id=tenant_id
+        )
     observation = revisions.current.observation
     if observation.session.kind != "session":
         raise ValueError("usage requires a session reference")
@@ -207,6 +209,10 @@ async def record_observation_usage(
         return False
     if not session.in_transaction():
         raise ValueError("accounting requires a caller-owned transaction")
+    if observation.session.provider != "anthropic":
+        await accounting_outbox.check_provider_ingest(
+            session, binding_id, observation, tenant_id=tenant_id
+        )
     row = await mux_state.record_usage(session, binding_id, observation)
     if row is None and observation.session.provider != "anthropic":
         row = await accounting_outbox.pending_revision(

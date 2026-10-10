@@ -426,3 +426,8 @@ through its durable accounting outbox; it never constructs an Anthropic meter.
 Consumers bind one billing grain, the authorized session/model, verified dated
 prices and actual infrastructure cost. Unknown actual remains pending. SDK
 display-event deduplication does not suppress higher observation revisions.
+
+Host accounting requires fixed coverage sets across revisions of each alternate
+provider observation ID. It refuses overlapping sibling aggregates at ingest,
+including shared transitive descendants which have not arrived yet. Corrections
+may update amounts within that fixed coverage; dynamic coverage is unsupported.

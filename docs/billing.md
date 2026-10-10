@@ -704,6 +704,12 @@ arguments, output text or error messages are persisted here.
 
 ## Usage measurements
 
+Alternate-provider observation IDs have a fixed coverage set: revisions may
+correct amounts but cannot add or remove covered IDs. Host ingest refuses
+overlapping sibling aggregates, including shared transitive or absent descendants.
+Pending observations participate in this check; invalid coverage cannot claim an
+outbox row. Dynamic coverage reconciliation is unsupported.
+
 Accounting accepts provider-neutral usage observations. Input counts include
 cache reads and writes; billing projects them back into the existing disjoint
 token stages before pricing. Unknown counts remain unknown. Anthropic model
