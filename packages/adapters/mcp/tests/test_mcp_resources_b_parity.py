@@ -168,10 +168,23 @@ CREDENTIAL_BODY: dict[str, Any] = {
 
 
 @pytest.mark.parametrize("stop", ["last", "next", "empty-cursor", "empty-next"])
-async def test_named_vault_walk_keeps_lazy_sdk_pages_and_exact_name_filter(stop: str) -> None:
-    other: dict[str, Any] = {**VAULT_BODY, "id": "other", "display_name": "other-account"}
+@pytest.mark.parametrize("partial", [False, True])
+async def test_named_vault_walk_keeps_lazy_sdk_pages_and_exact_name_filter(
+    stop: str, partial: bool
+) -> None:
+    body = (
+        {
+            "id": "vault",
+            "display_name": VAULT_NAME,
+            "created_at": VAULT_BODY["created_at"],
+            "metadata": None,
+        }
+        if partial
+        else VAULT_BODY
+    )
+    other: dict[str, Any] = {**body, "id": "other", "display_name": "other-account"}
     page: dict[str, Any] = {
-        "data": [] if stop == "empty-cursor" else [other, VAULT_BODY],
+        "data": [] if stop == "empty-cursor" else [other, body],
         "next_page": "next"
         if stop in {"next", "empty-cursor"}
         else ""
@@ -180,7 +193,7 @@ async def test_named_vault_walk_keeps_lazy_sdk_pages_and_exact_name_filter(stop:
     }
     replies: list[tuple[str, str, int, dict[str, Any]]] = [("GET", "/v1/vaults", 200, page)]
     if stop == "next":
-        replies.append(("GET", "/v1/vaults", 200, {"data": [VAULT_BODY], "next_page": None}))
+        replies.append(("GET", "/v1/vaults", 200, {"data": [body], "next_page": None}))
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
         expected = [v async for v in before.beta.vaults.list() if v.display_name == VAULT_NAME]
@@ -194,6 +207,18 @@ async def test_named_vault_walk_keeps_lazy_sdk_pages_and_exact_name_filter(stop:
     "body",
     [
         CREDENTIAL_BODY,
+        {"id": "credential", "vault_id": "vault", "type": "credential"},
+        {
+            "id": "credential",
+            "vault_id": "vault",
+            "type": "credential",
+            "auth": None,
+            "metadata": None,
+            "display_name": None,
+            "created_at": None,
+            "updated_at": None,
+            "archived_at": None,
+        },
         {
             "id": "credential",
             "vault_id": "vault",
@@ -230,7 +255,21 @@ async def test_native_credential_walk_preserves_the_consumed_summary_without_unu
     same(old, new)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        CREDENTIAL_BODY,
+        {
+            "id": "credential",
+            "vault_id": "vault",
+            "type": "credential",
+            "auth": None,
+            "metadata": None,
+        },
+    ],
+)
 async def test_public_vault_summary_keeps_oldest_matching_vault_and_legacy_url(
+    body: dict[str, Any],
     host_guards: list[Scope],
 ) -> None:
     newer: dict[str, Any] = {**VAULT_BODY, "id": "newer", "created_at": "2026-09-01T00:00:00Z"}
@@ -242,7 +281,7 @@ async def test_public_vault_summary_keeps_oldest_matching_vault_and_legacy_url(
             "GET",
             "/v1/vaults/vault/credentials",
             200,
-            {"data": [CREDENTIAL_BODY], "next_page": None},
+            {"data": [body], "next_page": None},
         ),
     ]
     old, new = script(replies), script(replies)
@@ -425,7 +464,15 @@ async def test_public_clear_binding_keeps_vault_delete_before_database_clear(
     same(old, new)
 
 
+@pytest.mark.parametrize(
+    "row",
+    [
+        {},
+        {"version": None, "name": None, "description": None, "created_at": None, "skill_id": None},
+    ],
+)
 async def test_public_skill_version_count_keeps_partial_rows_and_sdk_stop_rules(
+    row: dict[str, Any],
     host_guards: list[Scope],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -445,7 +492,7 @@ async def test_public_skill_version_count_keeps_partial_rows_and_sdk_stop_rules(
             "GET",
             "/v1/skills/skill/versions",
             200,
-            {"data": [{"version": "1"}, {}], "next_page": "next"},
+            {"data": [{"version": "1"}, row], "next_page": "next"},
         ),
         ("GET", "/v1/skills/skill/versions", 200, {"data": [], "next_page": "unused"}),
     ]
@@ -463,10 +510,21 @@ async def test_public_skill_version_count_keeps_partial_rows_and_sdk_stop_rules(
     same(old, new)
 
 
+@pytest.mark.parametrize(
+    "null_location",
+    [
+        {},
+        {"daimon_channel": None},
+        {"daimon_thread": None},
+        {"daimon_channel": None, "daimon_thread": None},
+    ],
+)
 async def test_public_hub_session_list_keeps_account_and_legacy_filters(
+    null_location: dict[str, None],
     host_guards: list[Scope],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    own_body = {**BODY, "metadata": {**BODY["metadata"], **null_location}}
     legacy = ma_session(id="legacy", agent=AGENT, metadata={})
     excluded = ma_session(id="excluded", agent=AGENT, metadata={"daimon_account": "other"})
     monkeypatch.setattr(hub, "admin_readable_legacy_sessions", AsyncMock(return_value={"legacy"}))
@@ -481,7 +539,11 @@ async def test_public_hub_session_list_keeps_account_and_legacy_filters(
             "/v1/sessions",
             200,
             {
-                "data": [BODY, legacy.model_dump(mode="json"), excluded.model_dump(mode="json")],
+                "data": [
+                    own_body,
+                    legacy.model_dump(mode="json"),
+                    excluded.model_dump(mode="json"),
+                ],
                 "next_page": None,
             },
         )
@@ -514,7 +576,17 @@ def multipart_request(request: Any) -> dict[str, object]:
 
 @pytest.mark.parametrize(
     "reply",
-    [{"id": "file"}, {"id": "file", "filename": "bundle.tar.gz", "mime_type": "application/gzip"}],
+    [
+        {"id": "file"},
+        {"id": "file", "filename": "bundle.tar.gz", "mime_type": "application/gzip"},
+        {
+            "id": "file",
+            "filename": None,
+            "mime_type": None,
+            "created_at": None,
+            "scope": {"type": "session", "id": None},
+        },
+    ],
 )
 async def test_public_bundle_upload_keeps_stream_multipart_digest_and_retention(
     reply: dict[str, Any],
@@ -576,7 +648,11 @@ async def test_public_bundle_upload_keeps_stream_multipart_digest_and_retention(
     assert archive in raw
 
 
+@pytest.mark.parametrize(
+    "unused", [{}, {"scope": None}, {"scope": {"type": "session", "id": None}, "mime_type": None}]
+)
 async def test_public_chart_delivery_keeps_files_beta_queries_and_download_bytes(
+    unused: dict[str, Any],
     host_guards: list[Scope],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -589,6 +665,7 @@ async def test_public_chart_delivery_keeps_files_beta_queries_and_download_bytes
                 "filename": "chart.png",
                 "size_bytes": len(content),
                 "created_at": clock.isoformat(),
+                **unused,
             }
         ],
         "has_more": False,
