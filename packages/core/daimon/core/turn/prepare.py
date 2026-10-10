@@ -128,6 +128,7 @@ class ContinuityOutcome:
 NOTICEABLE_REPLACEMENT_REASONS: frozenset[ChangeReason] = frozenset({"agent_identity", "model"})
 
 _LOST_BY_TRANSFER: dict[TransferKind | None, tuple[str, ...]] = {
+    "partial": ("some working files",),
     "transcript": ("working files",),
     "history": ("working files", "earlier conversation"),
 }

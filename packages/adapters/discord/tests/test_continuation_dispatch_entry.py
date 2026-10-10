@@ -35,7 +35,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.accounts import get_account, set_role
-from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuationRow
+from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuationRow, TransferKind
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import (
     get_continuation,
@@ -326,7 +326,9 @@ def _make_continuation_row(
     )
 
 
-def _make_prepared_turn(*, account_id: uuid.UUID) -> PreparedTurn:
+def _make_prepared_turn(
+    *, account_id: uuid.UUID, transfer_kind: TransferKind = "none"
+) -> PreparedTurn:
     from daimon.core.turn.admission import Admission
 
     async def _noop_recorder(*, event: object) -> None:
@@ -350,7 +352,7 @@ def _make_prepared_turn(*, account_id: uuid.UUID) -> PreparedTurn:
         reused=True,
         session_account_id=account_id,
         _record=_noop_recorder,
-        continuity=ContinuityOutcome(state="continued", transfer_kind="none"),
+        continuity=ContinuityOutcome(state="continued", transfer_kind=transfer_kind),
     )
 
 
@@ -375,6 +377,7 @@ async def _run_continuation(
     guild: MagicMock | None = None,
     prior_role: Role | None = None,
     target_ma_agent_id: str = "ag_test",
+    transfer_kind: TransferKind = "none",
 ) -> tuple[str, uuid.UUID]:
     """Run one continuation turn; return its `user_message` and the tenant id.
 
@@ -427,7 +430,7 @@ async def _run_continuation(
         )
         resolve_agent.return_value = "ag_test"
         resolve_env.return_value = "env_test"
-        bind.return_value = _make_prepared_turn(account_id=account.id)
+        bind.return_value = _make_prepared_turn(account_id=account.id, transfer_kind=transfer_kind)
         run_turn.return_value = RunOutcome(
             state=TurnState(),
             ma_session_id="sess_test",
@@ -471,6 +474,20 @@ async def test_continuation_turn_omits_handoff_notice_for_private_input(
     assert '"handoff"' in handoff_controls, (
         f"a task handoff must still carry the one-time notice, got {handoff_controls}"
     )
+
+
+async def test_partial_handoff_notice_says_files_transferred(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    controls, _ = await _run_continuation(
+        db_session_factory,
+        workspace_id="710000060",
+        reason="task_handoff",
+        transfer_kind="partial",
+    )
+    assert '"workspace": "transferred"' in controls
+    assert "some working files" in controls
+    assert '"workspace": "history_only"' not in controls
 
 
 @pytest.mark.parametrize("reason", ["task_handoff", "private_input_applied"])

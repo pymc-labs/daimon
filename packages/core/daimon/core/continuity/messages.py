@@ -61,7 +61,7 @@ ChangeKind = Literal[
     "environment",
 ]
 ChangeAvailability = Literal["saved", "ready_now", "next_message", "preparation_failed"]
-TransferKind = Literal["full", "transcript", "history"]
+TransferKind = Literal["full", "partial", "transcript", "history"]
 UnsavedWorkChoice = Literal["copy", "leave"]
 
 #: Words that never belong in reader-3 or reader-2 copy (case-insensitive
@@ -572,6 +572,8 @@ def render_replacement_summary(transfer_kind: TransferKind, lost: Sequence[str])
     """
     if transfer_kind == "full":
         base = "Your conversation, decisions and working files came across."
+    elif transfer_kind == "partial":
+        base = "Your conversation and some working files came across."
     elif transfer_kind == "transcript":
         base = "Your working files from before could not be carried over."
     else:

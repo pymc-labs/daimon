@@ -1306,6 +1306,7 @@ async def test_bind_session_raises_session_busy_when_a_handoff_lands_mid_turn(
         (("agent_identity",), "full", True),
         (("skills", "model"), "full", True),
         # Anything lost is always said, whatever the reason.
+        (("skills",), "partial", True),
         (("skills",), "transcript", True),
         (("repo_set",), "history", True),
     ],

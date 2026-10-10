@@ -137,6 +137,8 @@ def build_handoff_notice(
     not_carried: tuple[str, ...] = ("working files", "earlier conversation")
     if transfer_kind == "full":
         workspace, not_carried = "transferred", ()
+    elif transfer_kind == "partial":
+        workspace, not_carried = "transferred", ("some working files",)
     elif transfer_kind == "transcript":
         workspace, not_carried = "transcript_only", ("working files",)
     return HandoffNotice(

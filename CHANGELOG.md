@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live QA preserves PENDING streaks and records the sanitized judge exception type/status in run notes.
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING with consecutive-unavailability alerts; failed verdicts still fail and alert.
 - Older live QA configs that omit `dated_snapshots` now inherit the approved backend default when loaded. Explicit conflicting settings still refuse.
+- Workspace replacements preserve dirty nested checkouts, binary changes, unpublished commits and ignored task files. Inherited files are merged without nesting archives; restored repository work supersedes prior captures, with at most one unresolved capture within the size budget. Oversized files and dropped prior captures are named as omissions while smaller work crosses as a partial transfer. Discord handoff notices recognize those carried files. Choosing to leave unsaved changes behind retains the existing notice. Checkpoints remain capped at 90 seconds.
 
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
 - Live QA admits the primary alongside its temporary staging override and accepts exact Haiku 5.5 dated snapshots in deployment evidence and judge replies.

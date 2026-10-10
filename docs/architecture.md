@@ -1272,6 +1272,40 @@ old session itself from this thread (`authorize(READ_SESSION)`); otherwise the
 new session starts with nothing. A target its rules refuse here is refused by
 admission before any of this runs.
 
+The workspace transfer (`daimon.core.workspace_transfer`) spends one checkpoint
+turn on the old session, capped at `CHECKPOINT_MAX_S` (90 s) whatever the turn's
+own deadline; one that runs out falls back to the transcript and says the files
+did not come across. The checkpoint archives `$HOME`, `/tmp/work` and the outputs
+directory (`daimon.core.checkpoint_prompt`). The mounted repository's checkout is
+never archived, since Managed Agents mounts it again: its unsaved work is saved
+under `$HOME/repo-state/` instead -- a `git diff --binary` patch, a bundle of the
+commits on no remote, and a tar of its untracked and ignored files (minus
+`node_modules`, `.venv`, `__pycache__`, `.cache`). The successor restores that
+work only into a checkout of the same remote at the recorded commit and branch,
+creating a branch for a saved detached HEAD. Empty patches are skipped. When the
+destination mounts a different repository, the successor clones the old remote
+into a separate working checkout before applying its saved commits and patch.
+Any other checkout under the archived roots travels with its working files as
+before. The archive builder merges inherited files by their original paths with
+current files taking precedence; it never embeds the inherited tar. Older
+repository captures superseded by the current work are discarded. At most one
+unresolved prior capture remains under `prior-repo-state/`, within the remaining
+size budget; a prior capture dropped for that budget is named as an omission.
+Inherited archives are decompressed once before merging, so member ordering
+does not cause repeated gzip seeks. The successor extracts outside
+archived roots (`/tmp/daimon-restore`) and restores working files in place, so
+an extraction directory cannot duplicate every payload on the next move.
+Repository capture artifacts stay there rather than being copied into /root.
+Untracked and ignored repository files have a combined size budget; credential
+files and reproducible build/cache directories stay out. Files omitted for size
+are named in HANDOFF.md and emitted as `HANDOFF_OMITTED` markers. The host records
+and announces a `partial` transfer and lists the omissions in successor framing;
+small work still crosses. A person's explicit choice to leave unsaved work behind
+keeps the existing full transfer notice with that choice in the not-carried list.
+A failed repository capture, failed archive build, or
+oversized combined bundle falls back to the transcript. The transfer polls only
+this move's filename and requires its size to settle before uploading it.
+
 ## Entry points that are not a chat message
 
 - **Agent setup picture controls** show the current agent picture in Details.

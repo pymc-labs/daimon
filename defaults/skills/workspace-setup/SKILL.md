@@ -270,8 +270,21 @@ A move to a new workspace carries working files across as an archive the old
 workspace builds for itself, so where a file was written decides whether it
 survives. Keep working files in `/root/work`, and put only files the person
 should receive in `/mnt/session/outputs` (daimon attaches those to the reply on
-Discord, Slack and Teams 1:1 chats); both travel, and so does the working repo
-checkout. Say this plainly when someone asks where their file went
+Discord, Slack and Teams 1:1 chats); both travel. The mounted working repo's
+checkout does not: it is mounted again, and only its unsaved work (uncommitted
+changes, commits on no remote, untracked and ignored task files within the size
+cap) is carried and put back into the same repository at the saved commit. If
+the new workspace mounts another repository, restore into a separate clone of
+the old remote. Inherited files are merged into one archive at their original paths; it never
+contains the previous handoff archive. Inspect `prior-repo-state/` too when
+present: it holds at most one unresolved prior capture within the remaining size
+budget. New captures supersede restored work; older captures dropped for size are
+named as omissions. Extract outside the archived roots and keep capture artifacts
+there. Restore repository work at the saved commit on the saved branch, creating
+a branch for a saved detached HEAD; skip an empty patch. A file that exceeds the size limit is skipped and named in HANDOFF.md and the
+handoff framing; smaller files still travel, and the transfer is partial. A
+failed capture or oversized combined archive carries only the conversation.
+Say which files are missing. Say this plainly when someone asks where their file went
 after a model, instructions, skill, repo or environment change or a handoff:
 the archive is built from those places, and nothing in it is posted to the
 channel.

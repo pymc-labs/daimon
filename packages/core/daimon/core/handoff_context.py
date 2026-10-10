@@ -60,11 +60,11 @@ def supports_system_message(model_id: str) -> bool:
 def is_worth_checkpointing(events: Sequence[BetaManagedAgentsSessionEvent]) -> bool:
     """True when the old session produced work worth spending a billed turn on.
 
-    A session that never answered has nothing to hand over: the user's own
-    message is already being replayed into the successor.
+    Messages or tool use can leave working files, including before an answer.
+    The caller also checks inherited resources before skipping a checkpoint.
     """
 
-    return any(event.type == "agent.message" for event in events)
+    return any(event.type == "agent.message" or event.type.endswith("tool_use") for event in events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +199,7 @@ class HandoffFraming:
 
 def _framing_text(
     *,
-    transfer_kind: Literal["full", "transcript", "history"],
+    transfer_kind: Literal["full", "partial", "transcript", "history"],
     bundle_mount_path: str | None,
     from_agent_name: str,
     to_agent_name: str,
@@ -209,21 +209,40 @@ def _framing_text(
 ) -> str:
     parts = ["This conversation continues work started in a different workspace."]
 
-    if transfer_kind == "full" and bundle_mount_path is not None:
+    if transfer_kind in {"full", "partial"} and bundle_mount_path is not None:
+        carried_files = (
+            "Some working files were carried over"
+            if transfer_kind == "partial"
+            else "The previous workspace's files were carried over"
+        )
         parts.append(
-            "The previous workspace's files were carried over as an archive mounted at "
+            f"{carried_files} as an archive mounted at "
             f"{bundle_mount_path}. Extract it before anything else:\n\n"
-            f"mkdir -p ~/handoff && tar xzf {bundle_mount_path} -C ~/handoff\n\n"
-            "It was built with `tar -C /`, so paths inside start with `root/` (the previous "
-            "home directory), `mnt/session/outputs/` (the files its file tool wrote) and "
-            "`tmp/work/` (its scratch directory). Read "
-            "`handoff/root/HANDOFF.md` first: it is the previous responder's own note on the "
-            "task, the decisions taken and the working files. Put back what the task still "
-            "needs, in place: `handoff/root/...` under /root/, "
-            "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/, and "
-            "`handoff/tmp/work/...` under /tmp/work/. Anything restored "
-            "into the outputs directory may be delivered to this thread a second time, which "
-            "is expected and not a problem."
+            f"mkdir -p /tmp/daimon-restore && tar xzf {bundle_mount_path} -C "
+            "/tmp/daimon-restore\n\n"
+            "Archive paths start with `root/`, `mnt/session/outputs/` and `tmp/work/`. Read "
+            "`/tmp/daimon-restore/root/HANDOFF.md` for task decisions and files. Restore needed "
+            "working files: `/tmp/daimon-restore/root/...` under /root/, "
+            "`/tmp/daimon-restore/mnt/session/outputs/...` under /mnt/session/outputs/, and "
+            "`/tmp/daimon-restore/tmp/work/...` under /tmp/work/. Anything "
+            "Keep `repo-state/`, `prior-repo-state/`, `uncommitted.patch` and `untracked.txt` "
+            "in /tmp/daimon-restore; never copy these capture artifacts into /root. Files "
+            "restored into the outputs "
+            "directory may be delivered to this thread a second time, which is expected.\n\n"
+            "If `/tmp/daimon-restore/root/repo-state/` exists, the mounted "
+            "repository's unsaved work was captured. Restore only into the same remote "
+            "(`remote.txt`) at `head.txt`. For another or absent repository, clone the old "
+            "remote separately under /root/work (or its self-contained bundle without a "
+            "remote). `git fetch local-commits.bundle` if present. Preserve destination work. "
+            "Check out `branch.txt` at `head.txt`, creating the branch when needed. For a saved "
+            "HEAD branch, create handoff-restored. Keep that branch checked out. Only if "
+            "the patch is non-empty, `git apply --binary "
+            "/tmp/daimon-restore/root/uncommitted.patch`, then `tar xf files.tar` "
+            "in the checkout. Otherwise "
+            "restore nothing there and tell the person where that work is saved. "
+            "Also inspect `/tmp/daimon-restore/root/prior-repo-state/*/`: each directory is an "
+            "prior capture with its own repo-state and patch; restore it separately by the "
+            "same remote/HEAD rule. Files excluded by size are listed in HANDOFF.md and below."
         )
     elif transfer_kind == "transcript":
         parts.append(
@@ -264,7 +283,7 @@ def _framing_text(
 def render_handoff_framing(
     *,
     model_id: str,
-    transfer_kind: Literal["full", "transcript", "history"],
+    transfer_kind: Literal["full", "partial", "transcript", "history"],
     bundle_mount_path: str | None,
     from_agent_name: str,
     to_agent_name: str,
