@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def claim_message(
-    session: AsyncSession, *, tenant_id: UUID, channel_id: str, message_id: str, owner_key: int
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    channel_id: str,
+    message_id: str,
+    owner_key: int,
+    resume_owned: bool = False,
 ) -> bool:
     """Claim once, or reclaim an unhandled receipt whose process has exited.
 
@@ -53,8 +59,12 @@ async def claim_message(
         )
         .with_for_update()
     )
-    if row is None or row.handled or row.owner_key == owner_key:
+    if row is None or row.handled:
         return False
+    if row.owner_key == owner_key:
+        # Only the local queue handoff uses this; gateway/replay duplicates
+        # never resume a pending input that is already owned here.
+        return resume_owned
     if await owner_is_alive(session, row.owner_key):
         return False
     row.owner_key = owner_key

@@ -80,5 +80,5 @@ async def test_a_mention_that_arrives_during_the_archive_is_handled_after_it() -
     await bot._archive_when_idle(thread)  # pyright: ignore[reportPrivateUsage]
     await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
-    bot.on_message.assert_awaited_once_with(mention)
+    bot.on_message.assert_awaited_once_with(mention, resume_admitted=True)
     assert _THREAD not in bot._pending, "the queue is handed back, not kept"  # pyright: ignore[reportPrivateUsage]

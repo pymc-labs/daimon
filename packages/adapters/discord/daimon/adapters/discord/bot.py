@@ -582,6 +582,9 @@ class DaimonBot(commands.Bot):
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
         self._startup_replay_started = False
+        # Inputs already finished by their card-intent transaction need no
+        # cleanup DB await while the completed turn still owns its thread.
+        self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
         self._orphan_sweep_lock = asyncio.Lock()
         self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
@@ -705,7 +708,7 @@ class DaimonBot(commands.Bot):
             # Resumes a continuation deferred behind the claim, like any release.
             self._release_thread(thread.id)
             for queued in self._pending.pop(thread.id, []):
-                self._spawn(self.on_message(queued))
+                self._spawn(self.on_message(queued, resume_admitted=True))
 
     def _schedule_output_sweep(
         self,
@@ -1880,7 +1883,13 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
         )
 
-    async def on_message(self, message: discord.Message, *, startup_replay: bool = False) -> None:
+    async def on_message(
+        self,
+        message: discord.Message,
+        *,
+        startup_replay: bool = False,
+        resume_admitted: bool = False,
+    ) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
         discord_settings = self.runtime.settings.discord
@@ -2039,6 +2048,7 @@ class DaimonBot(commands.Bot):
                     channel_id=str(message.channel.id),
                     message_id=str(message.id),
                     owner_key=self.runtime.owner_key,
+                    resume_owned=resume_admitted,
                 )
                 await session.commit()
             if not claimed:
@@ -2185,13 +2195,18 @@ class DaimonBot(commands.Bot):
     async def _finish_admitted_messages(
         self, tenant_id: uuid.UUID, message_ids: tuple[str, ...]
     ) -> None:
+        committed = self._committed_message_ids.intersection(message_ids)
+        self._committed_message_ids.difference_update(message_ids)
+        pending = tuple(message_id for message_id in message_ids if message_id not in committed)
+        if not pending:
+            return
         # Cancellation before the durable card intent must leave the input
         # pending for the next process. Posted intents already mark it handled.
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             return
         async with self.runtime.sessionmaker() as session:
-            await finish_messages(session, tenant_id=tenant_id, message_ids=message_ids)
+            await finish_messages(session, tenant_id=tenant_id, message_ids=pending)
             await session.commit()
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
@@ -3376,6 +3391,7 @@ class DaimonBot(commands.Bot):
             make_lifecycle=_make_lifecycle,
             owner_key=self.runtime.owner_key,
         )
+        self._committed_message_ids.update(admitted_message_ids or (str(message.id),))
         self._track_live_turn_card(turn_card_intent.id)
         turn_send = recorder.sender(
             thread, turn_card_intent_id=turn_card_intent.id, transport=transport

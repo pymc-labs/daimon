@@ -2404,6 +2404,32 @@ async def test_cancelled_input_before_first_card_remains_replayable(
     restarted._handle_mention.assert_awaited_once()
 
 
+async def test_archive_queue_handoff_resumes_its_pending_admission_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+
+    guild_id = "801000104"
+    await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
+    )
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._handle_mention = AsyncMock()
+    message = _make_thread_message_for_bot(guild_id=int(guild_id))
+    message.id = 55557
+    message.webhook_id = None
+    message.reference = None
+    bot._processing.add(message.channel.id)
+    await bot.on_message(message)
+    bot._handle_mention.assert_not_awaited()
+    bot._processing.discard(message.channel.id)
+    queued = bot._pending.pop(message.channel.id)
+    assert queued == [message]
+    await bot.on_message(queued[0], resume_admitted=True)
+    await bot.on_message(queued[0], resume_admitted=True)
+    bot._handle_mention.assert_awaited_once()
+
+
 async def test_startup_scan_replays_unseen_addressed_messages_through_live_gates(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
