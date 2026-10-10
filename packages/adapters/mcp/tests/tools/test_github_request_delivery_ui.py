@@ -37,9 +37,9 @@ def test_request_card_has_state_edge_fields_and_separate_actions() -> None:
         "section",
         "divider",
         "actions",
-        "context",
     ]
     assert "repo that isn't connected yet" in str(blocks)
+    assert "not connected yet)" not in str(blocks)
 
 
 def test_personal_link_is_private_on_discord_and_keeps_its_label() -> None:
@@ -169,7 +169,7 @@ async def test_request_card_stays_at_origin_without_dm(
 @pytest.mark.parametrize(
     ("card_text", "names_repos", "expected"),
     [
-        ("GitHub access pending. An admin has been asked.", False, "GitHub access pending"),
+        ("An admin has been asked to allow GitHub access.", False, "An admin has been asked"),
         ("✓ Linked as @person", False, "✓ Linked as @person"),
         ("Admin unavailable. Ask an admin to open /github.", False, "Admin unavailable"),
         ("Let Bot use private/repo?", True, "GitHub request"),

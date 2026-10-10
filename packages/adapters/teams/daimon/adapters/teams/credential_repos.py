@@ -80,7 +80,7 @@ async def attach_imported_skills(
         return SkillAttach(note="That agent no longer exists.", attached=False, agent_name=None)
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         # Admins included: an attach never stamps the reconciler's spec hash.
-        note = f"`{agent.name}` is a built-in agent. Fork it and add them to the fork."
+        note = f"{agent.name} is a built-in agent.\n\nAsk me to make a copy and add them there."
         return SkillAttach(note=note, attached=False, agent_name=agent.name)
     new_skills: list[BetaManagedAgentsSkillParams] = [
         {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids

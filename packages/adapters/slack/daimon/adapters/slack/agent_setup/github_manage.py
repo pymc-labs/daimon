@@ -216,7 +216,6 @@ def build_view(meta: PanelMetadata, repos: list[AuthorizedRepo]) -> dict[str, An
                 ],
             }
         )
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return finish_modal(
         title="Connected repos",
         blocks=blocks,

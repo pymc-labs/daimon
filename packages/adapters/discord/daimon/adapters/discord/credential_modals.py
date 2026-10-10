@@ -1312,7 +1312,7 @@ class SkillRepoModal(discord.ui.Modal):
         if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
             # Admins included: an attach never stamps the reconciler's spec
             # hash, so the seeded agent would drift for good.
-            return f"`{agent.name}` is a built-in agent. Fork it and add them to the fork."
+            return f"{agent.name} is a built-in agent.\n\nAsk me to make a copy and add them there."
         new_skills: list[BetaManagedAgentsSkillParams] = [
             {"type": "custom", "skill_id": skill_id} for skill_id in skill_ids
         ]

@@ -215,7 +215,6 @@ def build_view(
             }
         )
         blocks.append({"type": "actions", "elements": [_button(ACTION_BACK, "◀ Back")]})
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return finish_modal(
         title="Add repos",
         blocks=blocks,
