@@ -202,6 +202,17 @@ skill_sync	BindingIdentity	BindingIdentityNameSubstitution	violates:NoWrongAgent
 skill_sync	BindingIdentity	BindingIdentityTitleRace	violates:NoAmbiguousTitleWrite	13	-	residual: same-name B is present when A's shared-name title is written; collision risk only
 skill_sync	RetryDeadline	RetryDeadline	clean	6	-	provider not-before time dominates ordinary queue backoff before a retry claim
 # ---- Discord webhook posting and card recovery ----
+discord_card_lifecycle	CardLifecycle	CardPre655	violates:TerminalStable	23	-	pre-#655 terminal edit can be overwritten by an older progress request
+discord_card_lifecycle	CardLifecycle	Card655	violates:TerminalStable	23	-	#655 permits an older edit to land after terminal delivery
+discord_card_lifecycle	CardLifecycle	Card655Replacement	violates:NoStaleReplacement	32	-	#655 late missing-card replacement leaves another Working card
+discord_card_lifecycle	CardLifecycle	Card655Handover	violates:RepairScheduled	61	-	#655 loses repair ownership across dead-session handover
+discord_card_lifecycle	CardLifecycle	CardQueue	clean	142	-	per-message queue orders active-process writes; excludes process death
+discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:TerminalStable	58	-	process death leaves an on-wire request able to overtake boot retirement
+discord_card_lifecycle	CardLifecycle	CardQueueOrphanDrop	violates:NoWorkingAfterRetirement	20	-	boot cannot edit an orphaned card when its webhook token is unavailable
+discord_card_lifecycle	CardHandover	CardHandoverSafe	clean	1564	-	prior sequencer repairs reviewed in-process handover interleavings
+discord_card_lifecycle	CardHandover	CardHandoverUnsafe	violates:NoStaleReplacement	171	-	rejected design leaves a late replacement visible
+discord_card_lifecycle	CardHandover	CardHandoverSuccessorUnsafe	violates:SettledCards	154	-	rejected design ignores successor progress edits
+discord_card_lifecycle	CardHandover	CardHandoverGateUnsafe	violates:RepairQueuedWhenNeeded	379	-	rejected design loses repair when stale replacement drains last
 discord_webhooks	WebhookLoad	LoadSafe	clean	1475	-	three requests per turn, one hook, two turns, retry-after and three-window bound
 discord_webhooks	WebhookLoad	LoadCreateSafe	clean	4	-	a creation 429 with 66-second retry uses bot fallback within the two-second posting bound
 discord_webhooks	WebhookLoad	LoadCreateWaitUnsafe	violates:BoundedPosting	38	-	waiting on a creation 429 delays the first post by 66 seconds
