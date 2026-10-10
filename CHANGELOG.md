@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Live QA now shares one approved cheap-model map across the judge and pre/post-turn guards, with a temporary staging-only Haiku 4.5 exception and HTTP-503-only Gemini fallback selection.
+- QA catalog validation now refuses unknown kinds in hourly canaries while preserving isolated PENDING entries for other tiers.
 
 ### Added
 

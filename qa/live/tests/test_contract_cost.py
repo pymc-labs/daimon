@@ -248,6 +248,7 @@ def test_unknown_kind_only_makes_its_scenario_pending(
     values = scenario.model_dump(by_alias=True)
     (tmp_path / "supported.yaml").write_text(yaml.safe_dump(values))
     values["id"] = "QA-FUTURE"
+    values["tier"] = "full"
     values[section].append({"do" if section == "steps" else "kind": "future_kind", "future_arg": 2})
     (tmp_path / "future.yaml").write_text(yaml.safe_dump(values))
     entries = load_catalog(tmp_path)
@@ -269,3 +270,29 @@ def test_approved_ledger_kind_is_typed_pending(tmp_path: Path, scenario: Scenari
     entry = load_catalog(tmp_path)[0]
     assert isinstance(entry, ProposedScenario)
     assert "assertion ledger_matches_usage" in entry.unsupported
+
+
+@pytest.mark.parametrize("section", ["setup", "steps", "assert", "teardown"])
+def test_canary_unknown_kind_fails_catalog_validation(
+    section: str, tmp_path: Path, scenario: Scenario
+) -> None:
+    import yaml
+
+    values = scenario.model_dump(by_alias=True)
+    values[section].append({"kind" if section == "assert" else "do": "typo_kind"})
+    (tmp_path / "canary.yaml").write_text(yaml.safe_dump(values))
+    with pytest.raises(ValueError, match="unknown .* kind in canary: typo_kind"):
+        load_catalog(tmp_path)
+
+
+def test_canary_approved_unimplemented_kind_remains_pending(
+    tmp_path: Path, scenario: Scenario
+) -> None:
+    import yaml
+
+    from qa.live.schema import ProposedScenario
+
+    values = scenario.model_dump(by_alias=True)
+    values["assert"].append({"kind": "ledger_matches_usage", "turn": 1, "tol_pct": 2})
+    (tmp_path / "canary.yaml").write_text(yaml.safe_dump(values))
+    assert isinstance(load_catalog(tmp_path)[0], ProposedScenario)
