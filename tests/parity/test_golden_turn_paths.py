@@ -175,6 +175,20 @@ def test_actual_mock_recorder_omits_only_control_kwargs(monkeypatch: pytest.Monk
     }
 
 
+@pytest.mark.parametrize("lease_count", (0, 1, 3))
+def test_actual_oracle_isolates_neutral_state_uuid_defaults(
+    monkeypatch: pytest.MonkeyPatch, lease_count: int
+) -> None:
+    monkeypatch.setitem(
+        RUNNER.SCENARIOS,
+        "uuid_probe",
+        "tests/golden/test_turn_path_instrumentation.py::"
+        f"test_lease_inserts_preserve_host_uuid_sequence[{lease_count}]",
+    )
+    # Child assertions exercise mapped defaults and real Postgres lease inserts.
+    RUNNER.replay("uuid_probe")
+
+
 @pytest.mark.parametrize("available", (False, True))
 def test_cli_both_covers_every_scenario_and_labels_pending_mux(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], available: bool
