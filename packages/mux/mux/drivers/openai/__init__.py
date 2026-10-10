@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ports import Artifacts, ManagedAgents, Models, Skills, Steering, Vaults
+from mux.contracts.ports import Artifacts, Events, ManagedAgents, Models, Skills, Steering, Vaults
 from mux.contracts.profile import Profile
 from mux.drivers.openai._common import Authorization, Context
 from mux.drivers.openai.agents import OpenAIAgents
@@ -45,6 +45,7 @@ class OpenAIDriver:
         models: Models | None = None,
         vaults: Vaults | None = None,
         secrets: SecretResolver | None = None,
+        events: Events | None = None,
     ) -> None:
         profiles = {p.profile_id: p for p in (PERSISTENT_WORKSPACE, CONVERSATION_ONLY)}
         if profile_id not in profiles:
@@ -54,15 +55,17 @@ class OpenAIDriver:
         self.agents = OpenAIAgents(context)
         self.environments = OpenAIEnvironments(context)
         self.sessions = OpenAISessions(context, binding_lookup)
-        self.events = OpenAIEvents(context, self.sessions, journal)
+        self.events: Events = (
+            events if events is not None else OpenAIEvents(context, self.sessions, journal)
+        )
         self.usage = OpenAIUsage(context, usage_revisions)
         self._artifacts = artifacts if artifacts is not None else OpenAIArtifacts(context)
         self._skills = skills if skills is not None else OpenAISkills(context)
         self._models = models
         vaults = vaults if vaults is not None else OpenAIVaults(context, secrets)
-        self._extensions: dict[tuple[type[object], str, int], object] = {
-            (Steering, "openai.steer", 1): self.events,
-        }
+        self._extensions: dict[tuple[type[object], str, int], object] = {}
+        if events is None:
+            self._extensions[Steering, "openai.steer", 1] = self.events
         self._extensions[Vaults, "openai.vaults", 1] = vaults
 
     def _required[T](self, implementation: T | None, name: str) -> T:

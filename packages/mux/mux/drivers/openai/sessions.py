@@ -23,7 +23,7 @@ from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
-from mux.drivers.openai.skill_bindings import KEY, compile_pins, decode, encode, resolve_pins
+from mux.drivers.openai.skill_bindings import compile_pins, decode, encode_metadata, resolve_pins
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ContinuityLost, MigrationUnsupported, ProviderError, ScopeViolation
 
@@ -197,7 +197,7 @@ class OpenAISessions:
             "mux_config_revision": str(spec.config_revision),
         }
         if resolved is not None:
-            metadata[KEY] = encode(resolved, self._c)
+            metadata.update(encode_metadata(resolved, self._c))
         body: Object = {"agent_id": spec.agent.id, "environment": environment, "metadata": metadata}
         if vaults is not None:
             body["vault_ids"] = [value for value in vaults]
@@ -207,7 +207,9 @@ class OpenAISessions:
             body["input"] = [
                 {"role": "user", "content": content(initial.content, self._c.profile_id)}
             ]
-        return await self._decode(scope, await self._c.call("POST", "/agents/sessions", body=body))
+        return await self._decode(
+            scope, await self._c.call("POST", "/agents/sessions", body=body, key=key)
+        )
 
     @owned
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:

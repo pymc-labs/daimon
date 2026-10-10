@@ -150,7 +150,8 @@ supporting bytes. Noncanonical, duplicate or nested-manifest paths refuse before
 upload. Separate display titles and external catalogue/digest pins refuse rather
 than silently changing the manifest. Versions are concrete positive integers;
 mutable `latest` is refused. Agents have no native skills field: neutral skill
-intent is stored in reserved `mux_skill_pins` metadata, bounded at 512 characters.
+intent is stored in reserved `mux_skill_pins` metadata, with each value bounded at
+512 characters. Larger pin lists use the count/digest and chunk scheme below.
 Session creation resolves default versions once and sends documented hosted
 `environment.skills` references. Retrieved installed versions must match the
 stored concrete pins; missing/changed pins raise `ContinuityLost`.
@@ -278,3 +279,54 @@ pricing or complete C01–C18 certificate is claimed.
 
 Run `uv run --all-packages --all-extras pytest packages/mux/tests/drivers/openai/test_conformance.py`
 and `uv run --all-packages --all-extras python -O -m pytest packages/mux/tests/drivers/openai/test_conformance.py`.
+
+## F1 default-capability adapter
+
+`OpenAIDefaultCapabilityFactory` is an explicit offline adapter for the shared F1
+scenario. It uploads the actual eleven authored default skill bundles through
+#584's multipart path, installs their immutable versions in one hosted session,
+and independently decodes upstream uploads and deployed agent configuration.
+The adapter declares `atomic_revision_pin=False`: its successful result reports
+that the session was provisioned unpinned and makes no atomic revision/CAS claim.
+
+The declared logical-to-native capability mapping sends all six default builtins
+through the hosted **Bash** capability: bash/read/grep/glob use Bash commands;
+write/edit use distinct Bash invocations of the hosted `apply_patch` command.
+These are not six native `agent.tools` names. The adapter requires the observed
+hosted environment and retains the native `command_execution` item identity,
+command, successful exit status, output and agent executor.
+[Agents architecture](https://developers.openai.com/api/docs/guides/agents-api/architecture)
+documents hosted Bash/apply-patch; the
+[Agents item reference](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/subresources/turns/subresources/items/methods/list)
+defines command execution and MCP history items. Responses API patch shapes are
+not used.
+
+The reserved `daimon-mcp` connection uses the documented credential-free remote
+HTTP transport in `agent.tools`. Its endpoint must be reachable from OpenAI's
+service network; localhost is not a service-reachable deployment. Authentication
+requires the existing scoped vault/session credential path, not a secret in a
+saved agent. Credential references and additional MCP policy settings remain
+explicitly refused by this agent port.
+[MCP connections](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp)
+describes service/environment origins and session/vault authentication.
+
+Completed `mcp_call` and `command_execution` items produce separate, paired mux
+invocations/results with distinct stable item identities, native provenance and
+turn identity. Running items remain previews, child items remain thread events,
+and failed/incomplete calls or nonzero/unknown command exit codes produce error
+results. Provider error bodies are not copied into normalized result payloads.
+History refresh, pagination and SSE use the same batch codec.
+
+Larger skill lists use reserved, integrity-checked metadata chunks, each at most
+512 characters, with at most eight chunks plus one count/digest marker. Legacy
+single-value pins remain readable and keep their original encoding. Missing,
+extra or changed chunks refuse instead of losing skill intent; user metadata
+cannot overwrite the reserved namespace.
+
+`tests/conformance/recordings/openai/F1-scripted.json` is **scripted offline
+evidence**, not a live certificate. A fresh replay reprovisions all resources
+through the pinned SDK fake and consumes every normalized operation batch. Tool
+arguments use the recorder's fixed omission sentinel, so replay does not certify
+argument contents, native HTTP bodies or model quality. The recorder/audit is
+unchanged. Live execution requires a separate lead GO and `gpt-6-luna` only;
+production defaults are unchanged.

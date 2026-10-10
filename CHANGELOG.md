@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add replay-first OpenAI F1 default-capability evidence, paired native command/MCP records, and integrity-checked metadata chunks for eleven skill pins.
+
 - Route remaining CLI, Discord memory and scheduler session operations through scoped backend ports; preserve raw operator session inspection, ignored fork-create replies and authorization for opt-in CLI mux turns.
 
 ### Changed

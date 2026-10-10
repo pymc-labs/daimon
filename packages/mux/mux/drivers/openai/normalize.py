@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -127,6 +128,109 @@ class EventNormalizer:
 
     def terminal(self, turn_id: str) -> bool:
         return turn_id in self._terminals
+
+    def normalize_batch(self, raw: Object, *, reconciled: bool = False) -> tuple[Event, ...]:
+        """MCP and command items contain both invocation and execution result.
+
+        Keep its native provenance while giving each neutral record its own
+        stable item identity. A running item is only a preview, and child items
+        retain their thread event rather than becoming root tool evidence.
+        """
+        item = object_json(raw.get("item") or {})
+        combined = raw.get("type") in (
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.done",
+        ) and item.get("type") in ("mcp_call", "command_execution")
+        if combined:
+            item_turn = text(item["turn_id"])
+            turn = object_json(raw.get("turn") or {})
+            outer_turn = turn.get("id") or raw.get("turn_id")
+            if outer_turn is not None and outer_turn != item_turn:
+                raise ValueError("item belongs to another turn")
+            raw = {**raw, "turn_id": item_turn}
+            if item.get("status") not in ("in_progress", "completed", "failed", "incomplete"):
+                raise ValueError("invalid tool status")
+        event = self.normalize(raw, reconciled=reconciled)
+        if event is None:
+            return ()
+        if not combined or event.thread_id is not None:
+            return (event,)
+        mcp = item["type"] == "mcp_call"
+        if not mcp:
+            text(item["command"])
+            if item["cwd"] is not None and not isinstance(item["cwd"], str):
+                raise ValueError("invalid command directory")
+            exit_code = item["exit_code"]
+            if exit_code is not None and (
+                isinstance(exit_code, bool) or not isinstance(exit_code, int)
+            ):
+                raise ValueError("invalid command exit code")
+        arguments = item["arguments"] if mcp else {"command": item["command"], "cwd": item["cwd"]}
+        if isinstance(arguments, str):
+            arguments = object_json(json.loads(arguments))
+        use = ToolUsePayload(
+            call_id=text(item["id"]),
+            tool_name=text(item["name"]) if mcp else "bash",
+            input=object_json(arguments),
+            executor="mcp" if mcp else "agent",
+            mcp_server=text(item["server_label"]) if mcp else None,
+        )
+        invocation = Event.model_validate(
+            {
+                **event.model_dump(),
+                "id": event.id + ":use",
+                "item_id": text(item["id"]) + ":use",
+                "type": "agent.tool_use",
+                "payload": object_json(use.model_dump(mode="json")),
+            }
+        )
+        if event.authority == "preview":
+            return (invocation,)
+        output = item["output"]
+        content = (
+            ()
+            if output is None
+            else (
+                TextPart(
+                    text=output if isinstance(output, str) else json.dumps(output, sort_keys=True)
+                ),
+            )
+        )
+        result = ToolResultPayload(
+            call_id=use.call_id,
+            content=content,
+            is_error=(mcp and item["error"] is not None)
+            or item["status"] != "completed"
+            or (not mcp and item.get("exit_code") != 0)
+            or (mcp and isinstance(output, dict) and output.get("isError") is True),
+        )
+        completed = Event.model_validate(
+            {
+                **event.model_dump(),
+                "id": event.id + ":result",
+                "item_id": text(item["id"]) + ":result",
+                "sequence": self.sequence,
+                "type": "agent.tool_result",
+                "payload": object_json(result.model_dump(mode="json")),
+            }
+        )
+        self.sequence += 1
+        return (invocation, completed)
+
+    def saved_item_batch(self, item: Object) -> tuple[Event, ...]:
+        if item.get("type") not in ("mcp_call", "command_execution"):
+            event = self.saved_item(item)
+            return (event,) if event is not None else ()
+        return self.normalize_batch(
+            {
+                "type": "agent.session.turn.item.done",
+                "event_id": "openai:item:" + text(item["id"]),
+                "session_id": self.session_id,
+                "turn_id": item.get("turn_id"),
+                "item": item,
+            },
+            reconciled=True,
+        )
 
     def normalize(self, raw: Object, *, reconciled: bool = False) -> Event | None:
         kind = text(raw["type"])
