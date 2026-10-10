@@ -74,6 +74,8 @@ class TurnDeps:
     backend: ManagedAgents | None = None
     backend_session_ref: Callable[[str, Scope], ResourceRef] | None = None
     turn_path: Literal["legacy", "mux"] | None = None
+    # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
+    channel_backends: bool = False
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
@@ -114,6 +116,9 @@ def build_turn_deps(
         anthropic=anthropic,
         messages=anthropic,
         turn_path=turn_settings.path if isinstance(turn_settings, TurnSettings) else None,
+        channel_backends=(
+            turn_settings.channel_backends if isinstance(turn_settings, TurnSettings) else False
+        ),
         sessionmaker=sessionmaker,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,

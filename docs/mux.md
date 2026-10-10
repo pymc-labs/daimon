@@ -91,6 +91,25 @@ when it supports all nine.
   that cannot be metered is never admitted.
 - The profile must be the one the config selects, for the same backend.
 
+### Channel backends in Daimon
+
+Daimon keeps a channel's configuration as its chain of revisions in
+`channel_config_revision`; the newest applies.
+`daimon.core.channel_backend.set_channel_backend` records a new revision
+when the configuration changes, and `clear_channel_backend` returns the
+channel to the default. Both refuse a selection that does not hold
+together (`InvalidConfig`).
+
+Admission reads it only when `DAIMON_TURN__CHANNEL_BACKENDS` is on; it is
+off by default, and then nothing is read. With it on, a channel nobody
+configured has no revision and admits exactly as before. A configured
+channel is checked after the config cascade and before any provider call:
+its profile must meet the configuration (`admit` above), and this release
+must be able to run it, which today means `anthropic.managed_agents` with
+the agent's own model and per-caller threads. Anything else is refused as
+`backend_unsupported`, recorded as `admission_denied` in the turn outcome,
+never run on Anthropic in its place.
+
 ## Ports
 
 `ManagedAgents` groups the eight ports (`agents`, `environments`, `sessions`,

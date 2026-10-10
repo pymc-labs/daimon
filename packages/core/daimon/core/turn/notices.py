@@ -271,6 +271,10 @@ _REFUSALS: dict[AdmissionDenialReason, str] = {
         "them. {Admin} must set the channel's agent."
     ),
     "writers_none": "This channel's rule lets nobody write in it, so the agent can't answer.",
+    "backend_unsupported": (
+        "This channel is set to an agent backend this deployment can't run yet. "
+        "{Admin} can change or clear the channel's backend."
+    ),
     # Only Teams marks people from another organisation (shared channels).
     "external_participant": (
         "People from another organisation can use this agent only in a channel kept to its "

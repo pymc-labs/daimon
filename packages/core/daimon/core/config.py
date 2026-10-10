@@ -1158,6 +1158,17 @@ class TurnSettings(BaseModel):
         ),
     )
 
+    channel_backends: bool = Field(
+        default=False,
+        description=(
+            "Read each channel's backend configuration at admission. Off by default: "
+            "no channel's configuration is read and every turn runs as before. On: a "
+            "channel with no backend configuration is unchanged; a configured one is "
+            "checked against its profile and refused (backend_unsupported) if the "
+            "profile cannot meet it or this release cannot run it yet."
+        ),
+    )
+
     @field_validator("path", mode="before")
     @classmethod
     def _empty_path_is_legacy(cls, value: object) -> object:
