@@ -166,7 +166,8 @@ def _webhook_fix_line(state: PanelState) -> str | None:
 
     A server without Manage Webhooks gets the re-authorize link. A server that
     grants it gets one line per channel whose overwrites take it back, in one
-    text block so the note costs one component however many channels it names.
+    text block so the note costs one component however many channels it names,
+    with a blank line between lines: they are never stacked.
     """
     if state.webhook_fix_url is not None:
         return (
@@ -183,7 +184,7 @@ def _webhook_fix_line(state: PanelState) -> str | None:
     hidden = len(state.webhook_blocks) - _WEBHOOK_BLOCK_LINES
     if hidden > 0:
         lines.append(f"And {hidden} more channel{'s' if hidden > 1 else ''} like these.")
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def _status_line(row: RosterRow) -> str:
