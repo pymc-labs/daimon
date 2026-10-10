@@ -69,33 +69,47 @@ async def _server_wide_row(
 @dataclass(frozen=True)
 class AgentRepoSummary:
     pairs: int
-    """Active repo connections that belong to one agent, counted per repo and agent."""
+    """Repo and agent pairs: each repo an agent can use, counted once per agent."""
     agents: int
     by_agent: dict[uuid.UUID, tuple[str, ...]]
-    """Each agent's own repos, by full name."""
+    """Every repo each agent can use by full name: its own and its server-wide grants."""
 
 
 async def agent_repo_summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> AgentRepoSummary:
-    """The repos connected for one agent each, for the server admins' overview."""
-    rows = await session.execute(
-        select(TenantGitHubRepo.scope_agent_id, TenantGitHubRepo.repo_full_name)
-        .where(
+    """The repos each agent can use, for the server admins' overview."""
+    by_agent: dict[uuid.UUID, set[str]] = {}
+    own = await session.execute(
+        select(TenantGitHubRepo.scope_agent_id, TenantGitHubRepo.repo_full_name).where(
             TenantGitHubRepo.tenant_id == tenant_id,
             TenantGitHubRepo.scope_agent_id.is_not(None),
             TenantGitHubRepo.status == "active",
         )
-        .order_by(TenantGitHubRepo.repo_full_name)
     )
-    by_agent: dict[uuid.UUID, list[str]] = {}
-    pairs = 0
-    for agent_id, full_name in rows:
+    for agent_id, full_name in own:
         assert agent_id is not None
-        by_agent.setdefault(agent_id, []).append(full_name)
-        pairs += 1
+        by_agent.setdefault(agent_id, set()).add(full_name)
+    shared = await session.execute(
+        select(AgentGitHubGrant.agent_id, TenantGitHubRepo.repo_full_name)
+        .join(
+            TenantGitHubRepo,
+            (TenantGitHubRepo.tenant_id == AgentGitHubGrant.tenant_id)
+            & (TenantGitHubRepo.repo_id == AgentGitHubGrant.repo_id)
+            & TenantGitHubRepo.scope_agent_id.is_(None),
+        )
+        .where(
+            AgentGitHubGrant.tenant_id == tenant_id,
+            TenantGitHubRepo.status == "active",
+            ~_has_own_row(AgentGitHubGrant),
+        )
+    )
+    for agent_id, full_name in shared:
+        by_agent.setdefault(agent_id, set()).add(full_name)
     return AgentRepoSummary(
-        pairs=pairs,
+        pairs=sum(len(names) for names in by_agent.values()),
         agents=len(by_agent),
-        by_agent={agent_id: tuple(names) for agent_id, names in by_agent.items()},
+        by_agent={
+            agent_id: tuple(sorted(names, key=str.casefold)) for agent_id, names in by_agent.items()
+        },
     )
 
 
