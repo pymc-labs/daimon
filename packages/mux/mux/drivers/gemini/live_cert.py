@@ -38,6 +38,7 @@ from mux.state.memory import MemoryStateStore
 
 GEMINI_CAP = Decimal("30")
 GEMINI_STOP = Decimal("24")
+SHARED_SPEND_PATH = Path("/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md")
 KEY_PATH = Path.home() / ".config/daimon-nc/gemini.env"
 SCOPE = Scope(
     tenant_id="gemini-cert",
@@ -72,6 +73,13 @@ def validate_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
         raise BudgetRefused("Gemini probe requires the approved $30 line and $24 stop")
     if settings.model not in budget.models:
         raise BudgetRefused("explicit Gemini model needs reviewed prices before live admission")
+    return config
+
+
+def validate_shared_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
+    config = validate_budget(path, settings)
+    if config.ledger_path.resolve() != SHARED_SPEND_PATH:
+        raise BudgetRefused("live Gemini probes require the approved N9 shared spend ledger")
     return config
 
 
@@ -385,6 +393,10 @@ async def run_sdk_smoke(
     key: str,
     mock: bool,
 ) -> ProbeRun:
+    if not mock:
+        validate_shared_budget(guard.config_path, settings)
+        if guard.spend_path.resolve() != SHARED_SPEND_PATH:
+            raise BudgetRefused("live Gemini probes require the approved N9 shared spend ledger")
     # The SDK stays private to this driver. Vertex/environment routing is
     # explicitly disabled; a mock command never reads a provider credential.
     import httpx
@@ -482,7 +494,7 @@ async def run_prepared(
     if live:
         if budget_path is None:
             raise BudgetRefused("live probes require the reviewed budget config")
-        config = validate_budget(budget_path, settings)
+        config = validate_shared_budget(budget_path, settings)
         guard = BudgetGuard(budget_path, config.ledger_path)
         key = read_key()
     else:

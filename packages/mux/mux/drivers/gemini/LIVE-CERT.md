@@ -26,7 +26,9 @@ key, Vertex routing or environment endpoint override is used. The API endpoint
 is the Gemini API. Never place a key in command arguments or a report.
 
 `live-budget.example.json` pins the existing N9 shared ledger and the $30 Gemini
-allocation. The N9 guard refuses reservations exceeding the 80% threshold ($24),
+allocation. Live preparation and the SDK entry reject any other ledger path
+before key loading or client creation; private ledgers are allowed only for
+MockTransport runs. The N9 guard refuses reservations exceeding the 80% threshold ($24),
 persists reservations before I/O and retains uncertain/failed spend. The model
 price table is intentionally empty: the lead must add reviewed per-million-token
 input/cached-input/cache-write-input/output rates. Missing prices refuse before

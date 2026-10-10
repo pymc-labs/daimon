@@ -254,3 +254,81 @@ async def test_wrong_saved_smoke_reply_is_not_a_success(tmp_path: Path) -> None:
         await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"))
     tape = Tape.model_validate_json((tmp_path / "smoke.json").read_text())
     assert not tape.complete
+
+
+@pytest.mark.asyncio
+async def test_live_preparation_rejects_a_private_ledger_before_key_or_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mux.drivers.gemini.live_cert as cert
+
+    private = tmp_path / "private"
+    private.mkdir()
+    guard = budget(private)
+    output = tmp_path / "output"
+    output.mkdir()
+    original_ledger = guard.spend_path.read_bytes()
+
+    def forbidden_key() -> str:
+        raise AssertionError("private ledger reached key loading")
+
+    async def forbidden_dispatch(*args: object, **kwargs: object) -> None:
+        raise AssertionError("private ledger reached SDK dispatch")
+
+    monkeypatch.setattr(cert, "read_key", forbidden_key)
+    monkeypatch.setattr(cert, "run_sdk_smoke", forbidden_dispatch)
+    with pytest.raises(BudgetRefused, match="N9 shared spend ledger"):
+        await run_prepared(
+            output, SmokeSettings(model="fixture"), live=True, budget_path=guard.config_path
+        )
+    assert guard.spend_path.read_bytes() == original_ledger
+    assert list(output.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_live_sdk_entry_rejects_a_private_ledger_before_client_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+    from mux.drivers.gemini.live_cert import run_sdk_smoke
+
+    guard = budget(tmp_path)
+
+    def forbidden_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("private ledger reached HTTP client creation")
+
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden_client)
+    with pytest.raises(BudgetRefused, match="N9 shared spend ledger"):
+        await run_sdk_smoke(
+            guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"), key="fake", mock=False
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_shared_ledger_gate_reaches_key_loading_without_ledger_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mux.drivers.gemini.live_cert as cert
+
+    guard = budget(tmp_path)
+    value = json.loads(guard.config_path.read_text())
+    value["ledger_path"] = str(cert.SHARED_SPEND_PATH)
+    config = tmp_path / "approved-path-budget.json"
+    write_report(config, value)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    class KeyRequired(Exception):
+        pass
+
+    def stop_at_key() -> str:
+        raise KeyRequired
+
+    def no_ledger_io(*args: object, **kwargs: object) -> None:
+        raise AssertionError("preparation accessed the shared ledger before key loading")
+
+    monkeypatch.setattr(cert, "read_key", stop_at_key)
+    monkeypatch.setattr(BudgetGuard, "reserve", no_ledger_io)
+    with pytest.raises(KeyRequired):
+        await run_prepared(output, SmokeSettings(model="fixture"), live=True, budget_path=config)
+    assert list(output.iterdir()) == []
