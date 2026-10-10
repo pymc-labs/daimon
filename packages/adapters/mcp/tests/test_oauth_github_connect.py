@@ -996,9 +996,12 @@ async def test_channel_admin_completes_connect_for_their_agent(
         state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
         await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
         picker = await browser.get("/oauth/github/confirm", params={"state": state})
-        assert "Add repos to Bot" in picker.text
-        assert "Anyone who talks to Bot can ask it to read them." in picker.text
-        assert ("Needs write" in picker.text) is needs_write
+        assert "Bot&#x27;s repos" in picker.text
+        assert "Current repos" in picker.text
+        assert "Save changes" in picker.text
+        fields = dict(
+            re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', picker.text)
+        )
         if not still_channel_admin:
             async with sessionmaker.begin() as session:
                 await delete_channel_admins(
@@ -1008,9 +1011,15 @@ async def test_channel_admin_completes_connect_for_their_agent(
                     channel_id="team-a",
                 )
         done = await browser.post(
-            "/oauth/github/confirm", data={"state": state, "repo": "101", "access": "read"}
+            "/oauth/github/confirm",
+            data={
+                **{key: html.unescape(value) for key, value in fields.items()},
+                "repo": "101",
+                "access": "read",
+                "working": "keep",
+            },
         )
-    assert looked_up == [agent_id]
+    assert looked_up == [agent_id, agent_id]
     async with sessionmaker() as session:
         own = await github_access.list_authorized_repos(
             session, tenant_id=tenant_id, agent_id=agent_id
@@ -1019,7 +1028,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
     assert shared == []
     if still_channel_admin:
         assert done.status_code == 200
-        assert "Added 1 repo to Bot." in done.text
+        assert "Bot&#x27;s repos saved" in done.text
         # Read only was chosen; a repo the agent needs to change is added with write.
         assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
             (101, agent_id, "write" if needs_write else "read")
@@ -1027,3 +1036,297 @@ async def test_channel_admin_completes_connect_for_their_agent(
     else:
         assert "Added" not in done.text
         assert own == []
+
+
+@pytest.mark.asyncio
+async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.scope import DeploymentDefault
+
+    sessionmaker = committing_sessionmaker
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_editor")
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=tenant_id, workspace_id="editor-workspace")
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await set_role(session, account_id, Role.ADMIN)
+        await make_platform_principal(
+            session, platform="discord", external_id="editor", tenant=tenant, account=account
+        )
+
+    admin_ids = {101, 102, 103}
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "user-token"})
+        if path == "/applications/client/token":
+            return httpx.Response(204)
+        if path == "/user":
+            return httpx.Response(200, json={"id": 17})
+        if path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "installations": [
+                        {
+                            "id": 77,
+                            "account": {"id": 55, "login": "editor", "type": "User"},
+                            "repository_selection": "selected",
+                        }
+                    ]
+                },
+            )
+        if path == "/user/installations/77/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "repositories": [
+                        {
+                            "id": repo_id,
+                            "owner": {"id": 55},
+                            "full_name": f"editor/repo-{repo_id}",
+                            "permissions": {"admin": repo_id in admin_ids},
+                        }
+                        for repo_id in (101, 102, 103)
+                    ]
+                },
+            )
+        if path == "/app/installations/77":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 77,
+                    "account": {"id": 55, "login": "editor", "type": "User"},
+                    "repository_selection": "selected",
+                    "suspended_at": None,
+                },
+            )
+        raise AssertionError(path)
+
+    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+        return SimpleNamespace(name="Editor", metadata={})
+
+    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    key = Fernet.generate_key().decode()
+    connect, callback, setup, confirm = build_oauth_github_routes(
+        settings=_settings(key),
+        sessionmaker=sessionmaker,
+        fernet=build_multifernet((key,)),
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        deployment_default=DeploymentDefault(),
+        anthropic=object(),  # type: ignore[arg-type]
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/callback", callback),
+            Route("/oauth/github/setup", setup),
+            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
+        ]
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as browser:
+
+        async def page(*, operator: bool = False) -> tuple[str, dict[str, str], str]:
+            async with sessionmaker.begin() as session:
+                invitation = await github_connect.mint_invitation(
+                    session,
+                    tenant_id=tenant_id,
+                    requester_account_id=account_id,
+                    requester_label="Admin",
+                    requester_platform_user_id="editor",
+                    agent_id=agent_id,
+                    agent_name="Editor",
+                    agent_ma_id=None if operator else "ag_editor",
+                    agent_manager_verified=True,
+                    operator_issued=operator,
+                    origin_platform="discord",
+                )
+            start = await browser.get(f"/oauth/github/connect/{invitation}")
+            state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+            assert (
+                await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
+            ).status_code == 307
+            rendered = await browser.get("/oauth/github/confirm", params={"state": state})
+            assert rendered.status_code == 200
+            hidden = {
+                name: html.unescape(value)
+                for name, value in re.findall(
+                    r'<input type="hidden" name="([^"]+)" value="([^"]*)">', rendered.text
+                )
+            }
+            return state, hidden, rendered.text
+
+        async def save(hidden: dict[str, str], **choices: object) -> httpx.Response:
+            return await browser.post(
+                "/oauth/github/confirm",
+                data={**hidden, "access": "read", "working": "keep", **choices},
+            )
+
+        state, hidden, rendered = await page()
+        assert "No repos yet" in rendered
+        assert (await save(hidden)).status_code == 200  # No-op keeps the invitation.
+        added = await save(hidden, repo=["101", "102"])
+        assert added.status_code == 200
+        assert "editor/repo-101" in added.text and "editor/repo-102" in added.text
+        replay = await save(hidden, repo=["101", "102"])
+        assert replay.status_code == 200 and "editor/repo-101" in replay.text
+
+        state, hidden, rendered = await page()
+        assert "Current repos" in rendered and "Read only" in rendered
+        working = await save(hidden, working="101")
+        assert working.status_code == 200 and "working repo" in working.text
+
+        admin_ids.clear()
+        _state, _hidden, unavailable = await page()
+        assert "editor/repo-101" in unavailable and "editor/repo-102" in unavailable
+        assert "GitHub admin access required to edit" in unavailable
+        assert "Manage GitHub App installation" in unavailable
+        admin_ids.update({101, 102, 103})
+
+        state, hidden, rendered = await page()
+        admin_ids.remove(102)
+        denied = await save(hidden, remove="102")
+        assert denied.status_code == 403
+        admin_ids.add(102)
+        removed = await save(hidden, remove="102")
+        assert removed.status_code == 200
+        assert "repo-102" not in removed.text
+
+        state, hidden, rendered = await page()
+        mixed = await save(hidden, repo="103", remove="101", working="103")
+        assert mixed.status_code == 200
+        assert "repo-101" not in mixed.text and "working repo" in mixed.text
+
+        state, hidden, rendered = await page()
+        cleared = await save(hidden, working="clear")
+        assert cleared.status_code == 200 and "working repo" not in cleared.text
+
+        state, hidden, rendered = await page()
+        async with sessionmaker.begin() as session:
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=103,
+                baseline_access="read",
+                ceiling_access="read",
+                granted_by_account_id=account_id,
+            )
+        stale = await save(hidden, remove="103")
+        assert stale.status_code == 409
+        async with sessionmaker() as session:
+            status, _ = await github_connect.invitation_status(session, hidden["invitation"])
+            assert status == "active"
+            grants = await github_access.list_agent_repos(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+            assert [repo.repo_id for repo in grants] == [103]
+
+        state, hidden, rendered = await page()
+        original_set_working = github_access.set_working_repo
+
+        async def reject_working(*_args: object, **_kwargs: object) -> None:
+            raise ValueError("forced rollback")
+
+        monkeypatch.setattr(github_access, "set_working_repo", reject_working)
+        rolled_back = await save(hidden, repo="102", working="102")
+        assert rolled_back.status_code == 400
+        monkeypatch.setattr(github_access, "set_working_repo", original_set_working)
+        async with sessionmaker() as session:
+            status, _ = await github_connect.invitation_status(session, hidden["invitation"])
+            grants = await github_access.list_agent_repos(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        assert status == "active"
+        assert [repo.repo_id for repo in grants] == [103]
+
+        # A chat write between the display read and signature read must not
+        # sign a newer state than the page displayed.
+        original_list = oauth_github.list_agent_repos
+        injected = False
+        reads = 0
+
+        async def list_then_chat_write(
+            session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+        ) -> list[github_access.AgentRepo]:
+            nonlocal injected, reads
+            rows = await original_list(session, tenant_id=tenant_id, agent_id=agent_id)
+            reads += 1
+            if reads == 2:
+                injected = True
+                async with sessionmaker.begin() as writer:
+                    await github_access.stage_grant(
+                        writer,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        repo_id=103,
+                        baseline_access="read",
+                        ceiling_access="read",
+                        granted_by_account_id=account_id,
+                    )
+            return rows
+
+        monkeypatch.setattr(oauth_github, "list_agent_repos", list_then_chat_write)
+        state, hidden, rendered = await page()
+        monkeypatch.setattr(oauth_github, "list_agent_repos", original_list)
+        assert injected and "repo-103" in rendered
+        assert (await save(hidden, remove="103")).status_code == 409
+
+        _state, hidden, _rendered = await page()
+        async with sessionmaker() as session:
+            before = len(
+                [
+                    event
+                    for event in await list_events(session, tenant_id=tenant_id)
+                    if event.reason == "agent repos saved"
+                ]
+            )
+        first, second = await asyncio.gather(save(hidden, remove="103"), save(hidden, remove="103"))
+        assert sorted((first.status_code, second.status_code)) in ([200, 200], [200, 409])
+        async with sessionmaker() as session:
+            after = len(
+                [
+                    event
+                    for event in await list_events(session, tenant_id=tenant_id)
+                    if event.reason == "agent repos saved"
+                ]
+            )
+            grants = await github_access.list_agent_repos(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        assert after == before + 1
+        assert grants == []
+
+        # CLI operator links omit agent_ma_id; they remain restricted to a
+        # current tenant admin and still open this editor.
+        _state, hidden, rendered = await page(operator=True)
+        assert "Editor&#x27;s repos" in rendered
+        assert (await save(hidden, repo="101")).status_code == 200
+
+        async with sessionmaker.begin() as session:
+            operator_token = await github_connect.mint_invitation(
+                session,
+                tenant_id=tenant_id,
+                requester_account_id=account_id,
+                requester_label="Admin",
+                requester_platform_user_id="editor",
+                agent_id=agent_id,
+                agent_name="Editor",
+                operator_issued=True,
+            )
+            await set_role(session, account_id, Role.USER)
+        start = await browser.get(f"/oauth/github/connect/{operator_token}")
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
+        denied_operator = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert denied_operator.status_code == 403

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -1247,6 +1248,54 @@ class RepoConfirmation(BaseModel):
     max_access: Literal["read", "write"]
 
 
+class StaleAgentReposError(ValueError):
+    """The agent's grants changed after the browser page was rendered."""
+
+
+async def agent_repo_snapshot(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, lock: bool = False
+) -> str:
+    """Canonical grant snapshot for the one-shot editor.
+
+    A save locks grant and authorization rows before comparing. Callers also
+    run the save in SERIALIZABLE isolation to detect an insert into an empty set.
+    """
+    query = (
+        select(AgentGitHubGrant)
+        .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+        .order_by(AgentGitHubGrant.repo_id)
+    )
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    grants = list(await session.scalars(query))
+    values: list[tuple[Any, ...]] = []
+    for grant in grants:
+        repo = await github_access.repo_for_agent(
+            session,
+            tenant_id=tenant_id,
+            repo_id=grant.repo_id,
+            agent_id=agent_id,
+            for_update=lock,
+        )
+        if lock and repo is not None:
+            await session.refresh(repo)
+        values.append(
+            (
+                grant.repo_id,
+                grant.version,
+                grant.baseline_access,
+                grant.ceiling_access,
+                grant.staged,
+                grant.is_working_repo,
+                grant.mount_path,
+                None if repo is None else repo.version,
+                None if repo is None else repo.status,
+                None if repo is None else repo.repo_full_name,
+            )
+        )
+    return json.dumps(values, separators=(",", ":"))
+
+
 async def confirm(
     session: AsyncSession,
     *,
@@ -1255,6 +1304,7 @@ async def confirm(
     github_user_id: int,
     repos: list[RepoConfirmation],
     requester_manages_agent: bool = False,
+    expected_agent_snapshot: str | None = None,
 ) -> bool:
     """Consume the invitation and write confirmed rows in the caller's transaction.
 
@@ -1285,6 +1335,17 @@ async def confirm(
     assert account is not None
     if account.role != "admin" and not requester_manages_agent:
         return False
+    if expected_agent_snapshot is not None:
+        if invitation.agent_id is None:
+            return False
+        current = await agent_repo_snapshot(
+            session,
+            tenant_id=invitation.tenant_id,
+            agent_id=invitation.agent_id,
+            lock=True,
+        )
+        if current != expected_agent_snapshot:
+            raise StaleAgentReposError("The agent's repos changed. Reload and try again.")
     if len({repo.repo_id for repo in repos}) != len(repos):
         return False
     now = datetime.now(UTC)
