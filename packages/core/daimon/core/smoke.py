@@ -17,9 +17,9 @@ pass/fail assertion sensitive to VM/Cloud-SQL clock skew. This is a clock
 read, not a domain query, so it does not touch `daimon.core._models`.
 
 A smoke turn passes only its agent/environment IDs, prompt, usage recorder,
-tenant ID, and the per-session `SMOKE_MODEL` override to
+database session factory, tenant ID, and the per-session `SMOKE_MODEL` override to
 `headless_runner.run_turn`. Every other optional keyword (vault/MCP settings,
-the caller account ID, per-agent UUID, database session factory, crypto key,
+the caller account ID, per-agent UUID, crypto key,
 and GitHub credentials) keeps its default. The model override changes this
 session only; reconciliation leaves the smoke agent's default model alone.
 A smoke turn never touches vault, MCP, or GitHub code paths; it only proves
