@@ -10,7 +10,11 @@ from secrets import randbits
 
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from asyncpg import InternalClientError  # pyright: ignore[reportMissingTypeStubs]
+from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
+    InterfaceError,
+    InternalClientError,
+    PostgresError,
+)
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
@@ -43,7 +47,16 @@ async def hold_worker_owner(
     retry_delay_s: float = 1,
 ) -> AsyncIterator[None]:
     """Reconnect on transient failure; signal graceful drain only after 90 s."""
-    failures = (SQLAlchemyError, InternalClientError, TimeoutError)
+    # asyncpg connection establishment can raise raw socket errors rather
+    # than SQLAlchemyError (for example ECONNREFUSED during a DB restart).
+    failures = (
+        SQLAlchemyError,
+        InterfaceError,
+        InternalClientError,
+        PostgresError,
+        OSError,
+        TimeoutError,
+    )
 
     async def acquire() -> AsyncConnection:
         candidate = await engine.connect()

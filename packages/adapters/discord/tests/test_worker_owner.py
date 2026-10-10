@@ -4,12 +4,13 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from asyncpg import CannotConnectNowError
 from daimon.adapters.discord.runtime import hold_worker_owner
 from daimon.core.stores.worker_ownership import owner_is_alive
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker
 
 
 async def test_transient_owner_connection_loss_does_not_cancel_worker(
@@ -17,10 +18,21 @@ async def test_transient_owner_connection_loss_does_not_cancel_worker(
 ) -> None:
     entered, stopped, ownership_lost = asyncio.Event(), asyncio.Event(), asyncio.Event()
     owner_key = 718211
+    owner_engine = MagicMock(spec=AsyncEngine)
+    attempts = 0
+
+    def connect() -> AsyncConnection:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise ConnectionRefusedError("database restarting")
+        return db_nullpool_engine.connect()
+
+    owner_engine.connect.side_effect = connect
 
     async def worker() -> None:
         async with hold_worker_owner(
-            db_nullpool_engine,
+            owner_engine,
             owner_key=owner_key,
             ownership_lost=ownership_lost,
             probe_interval_s=0.01,
@@ -53,6 +65,7 @@ async def test_transient_owner_connection_loss_does_not_cancel_worker(
                 await asyncio.sleep(0.01)
         assert not task.done(), "a transient DB failure must not cancel the adapter"
         assert not ownership_lost.is_set()
+        assert attempts >= 3, "a refused reconnect must retry before reacquiring the same key"
         stopped.set()
         await asyncio.wait_for(task, timeout=5)
         async with factory() as session:
@@ -62,9 +75,13 @@ async def test_transient_owner_connection_loss_does_not_cancel_worker(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize(
+    "reconnect_error", [SQLAlchemyError, ConnectionRefusedError, CannotConnectNowError]
+)
 async def test_sustained_owner_loss_retries_then_drains_without_cancellation(
     db_nullpool_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
+    reconnect_error: type[Exception],
 ) -> None:
     from daimon.adapters.discord.__main__ import drain_on_owner_loss
 
@@ -86,7 +103,7 @@ async def test_sustained_owner_loss_retries_then_drains_without_cancellation(
             # adapter's task survives every failure, including window exhaustion.
             execute = AsyncMock(side_effect=TimeoutError)
             monkeypatch.setattr("sqlalchemy.ext.asyncio.AsyncConnection.execute", execute)
-            reconnect = MagicMock(side_effect=SQLAlchemyError("offline"))
+            reconnect = MagicMock(side_effect=reconnect_error("offline"))
             monkeypatch.setattr(AsyncEngine, "connect", reconnect)
             await asyncio.wait_for(stopped.wait(), timeout=5)
             await watcher
