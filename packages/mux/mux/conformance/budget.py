@@ -420,6 +420,10 @@ class BudgetConfig(ProbeModel):
         frozenset()
     )
 
+    approved_latch_recoveries: frozenset[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]] = (
+        frozenset()
+    )
+
     @model_validator(mode="after")
     def total(self) -> BudgetConfig:
         if not self.ledger_path.is_absolute():
@@ -504,6 +508,21 @@ class Reconciliation(ProbeModel):
         return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
 
 
+class LatchRecovery(ProbeModel):
+    """Lead-chosen conservative hold; never a billable actual or settlement."""
+
+    operation: Literal["LATCH-RECOVERY"] = "LATCH-RECOVERY"
+    ledger_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    previous_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    held_usd: Money
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+
+
 class SpendReceipt(ProbeModel):
     version: Literal[1, 2] = 1
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
@@ -520,6 +539,7 @@ class SpendReceipt(ProbeModel):
         "blocked",
         "overrun",
         "reconciled",
+        "latch_recovered",
     ]
     tokens: TokenUsage | None = None
     reserved_usd: Money
@@ -537,6 +557,7 @@ class SpendReceipt(ProbeModel):
     token_usd: Money | None = None
     container_usd: Money | None = None
     reconcile: Reconciliation | None = None
+    latch_recovery: LatchRecovery | None = None
     reason: Literal[
         "admitted",
         "settled",
@@ -547,6 +568,7 @@ class SpendReceipt(ProbeModel):
         "overrun",
         "fixture_exists",
         "reconciled",
+        "latch_recovery",
     ]
 
     @model_validator(mode="after")
@@ -554,7 +576,13 @@ class SpendReceipt(ProbeModel):
         # An overrun latches admission independently of its current billable total.
         if self.status == "overrun":
             object.__setattr__(self, "admission_blocked", True)
-        if self.overrun_evidence is not None and not self.admission_blocked:
+        if (
+            self.overrun_evidence is not None
+            and not self.admission_blocked
+            and not (
+                self.latch_recovery is not None and self.status in ("latch_recovered", "reconciled")
+            )
+        ):
             raise ValueError("overrun evidence must retain the admission latch")
         # Legacy rows remain byte-for-byte untouched and never gain an actual claim.
         if self.held_usd is None:
@@ -581,6 +609,19 @@ class SpendReceipt(ProbeModel):
                 raise ValueError("fully settled spend must be actual")
         elif self.accounting_status == "actual" or self.held_usd != self.cost_estimate_usd:
             raise ValueError("unverified spend must remain separately held")
+        if self.status == "latch_recovered":
+            if (
+                self.latch_recovery is None
+                or self.admission_blocked
+                or self.actual_usd is not None
+                or self.accounting_status != "estimated_unverified"
+                or self.reason != "latch_recovery"
+                or self.held_usd != self.latch_recovery.held_usd
+                or self.held_usd is None
+                or self.held_usd < self.reserved_usd
+            ):
+                raise ValueError("latch recovery requires an unverified conservative hold")
+            return self
         if self.status == "reconciled":
             if (
                 self.reconcile is None
@@ -817,7 +858,11 @@ class BudgetGuard:
                 if receipt.status == "blocked":
                     continue
                 previous = runs.get(receipt.run_id)
-                if previous is not None and previous.admission_blocked:
+                if (
+                    previous is not None
+                    and previous.admission_blocked
+                    and receipt.status != "latch_recovered"
+                ):
                     if "admission_blocked" not in receipt.model_fields_set:
                         # Old rows have no independent latch field. Carry the
                         # proven history in memory without rewriting their bytes.
@@ -827,10 +872,36 @@ class BudgetGuard:
                 if previous is None:
                     if receipt.status != "reserved":
                         raise BudgetLedgerError("spend receipt has no reservation")
+                elif receipt.status == "latch_recovered":
+                    approval = receipt.latch_recovery
+                    if approval is None:
+                        raise BudgetLedgerError("missing latch recovery approval")
+                    BudgetGuard._check_latch_recovery(previous, approval, binding.ledger_id)
+                    preserved = (
+                        "provider",
+                        "model",
+                        "fixture_id",
+                        "reserved_usd",
+                        "tokens",
+                        "price",
+                        "limits",
+                        "container_allowance",
+                        "session_prices",
+                        "actual_evidence",
+                        "overrun_evidence",
+                        "token_usd",
+                        "container_usd",
+                        "reconcile",
+                    )
+                    if any(getattr(receipt, name) != getattr(previous, name) for name in preserved):
+                        raise BudgetLedgerError(
+                            "latch recovery cannot change known accounting evidence"
+                        )
                 elif receipt.status == "reconciled":
                     approval = receipt.reconcile
                     if (
-                        previous.status in ("blocked", "reconciled")
+                        receipt.latch_recovery != previous.latch_recovery
+                        or previous.status in ("blocked", "reconciled")
                         or previous.actual_usd is not None
                         and not previous.held_usd
                         or previous.actual_usd is not None
@@ -1016,7 +1087,11 @@ class BudgetGuard:
     def receipt_digest(receipt: SpendReceipt) -> str:
         # Hash the schema actually present on disk. Adding read-time defaults or
         # inheriting an admission latch must not invalidate a pre-upgrade signature.
-        absent = {"overrun_evidence", "admission_blocked"} - receipt.model_fields_set
+        absent = {
+            "overrun_evidence",
+            "admission_blocked",
+            "latch_recovery",
+        } - receipt.model_fields_set
         return hashlib.sha256(receipt.model_dump_json(exclude=absent).encode()).hexdigest()
 
     @staticmethod
@@ -1434,6 +1509,94 @@ class BudgetGuard:
                     "token_usd": proposal.token_usd,
                     "container_usd": proposal.container_usd,
                     "reconcile": proposal,
+                }
+            )
+            self._append(file, receipt, checkpoint, checkpoint.opening_spend, lock)
+            return receipt
+
+    @staticmethod
+    def _latch_recovery_floor(current: SpendReceipt) -> Decimal:
+        """Reservation and every known spend bound survive an operator recovery."""
+        floor = max(current.reserved_usd, current.held_usd or Decimal(0))
+        if current.tokens is not None and current.price is not None:
+            floor = max(
+                floor,
+                current.price.reserve(
+                    TokenLimits(input_tokens=0, output_tokens=0), usage=current.tokens
+                ),
+            )
+        proof = current.overrun_evidence or current.actual_evidence
+        if proof is not None:
+            floor = max(floor, BudgetGuard._union_floor(current, proof, current.actual_evidence))
+        return floor
+
+    @staticmethod
+    def _check_latch_recovery(
+        current: SpendReceipt, proposal: LatchRecovery, ledger_id: str
+    ) -> None:
+        if (
+            current.status != "overrun"
+            or not current.admission_blocked
+            or current.actual_usd is not None
+        ):
+            raise BudgetLedgerError("latch recovery requires a latched run with incomplete actuals")
+        if (
+            proposal.run_id != current.run_id
+            or proposal.ledger_id != ledger_id
+            or proposal.previous_sha256 != BudgetGuard.receipt_digest(current)
+        ):
+            raise BudgetLedgerError("latch recovery is foreign or stale")
+        if proposal.held_usd < BudgetGuard._latch_recovery_floor(current):
+            raise BudgetLedgerError("latch recovery hold is below reservation or proven spend")
+
+    def propose_latch_recovery(
+        self, run_id: str, *, held_usd: Decimal, evidence_sha256: str
+    ) -> LatchRecovery:
+        """Read-only proposal; lead reviews the evidence and pins the exact digest."""
+        with self._locked() as (_file, _lock, checkpoint, runs, _config):
+            current = runs.get(run_id)
+            if current is None:
+                raise BudgetLedgerError("latch recovery requires an existing run")
+            proposal = LatchRecovery(
+                ledger_id=checkpoint.binding.ledger_id,
+                run_id=run_id,
+                previous_sha256=self.receipt_digest(current),
+                evidence_sha256=evidence_sha256,
+                held_usd=held_usd,
+            )
+            self._check_latch_recovery(current, proposal, checkpoint.binding.ledger_id)
+            return proposal
+
+    def recover_latch(self, proposal: LatchRecovery) -> SpendReceipt:
+        """Append a lead-signed LATCH-RECOVERY, retaining unknown actuals and evidence.
+
+        Only incomplete latched runs qualify. This fences a later settlement by
+        the old worker; it never invents or removes settled dollars. The chosen
+        hold cannot be below the reservation, current hold or any proven bound.
+        Other provider latches and normal budget caps still govern admission.
+        RECONCILE remains the separate path for verified billable actuals.
+        """
+        proposal = LatchRecovery.model_validate(proposal.model_dump())
+        with self._locked() as (file, lock, checkpoint, runs, config):
+            if proposal.digest not in config.approved_latch_recoveries:
+                raise BudgetRefused("latch recovery needs the lead-signed proposal digest")
+            current = runs.get(proposal.run_id)
+            if current is None:
+                raise BudgetLedgerError("latch recovery requires an existing run")
+            self._check_latch_recovery(current, proposal, checkpoint.binding.ledger_id)
+            receipt = SpendReceipt.model_validate(
+                {
+                    **current.model_dump(),
+                    "version": 2,
+                    "timestamp": datetime.now(UTC),
+                    "status": "latch_recovered",
+                    "reason": "latch_recovery",
+                    "accounting_status": "estimated_unverified",
+                    "actual_usd": None,
+                    "held_usd": proposal.held_usd,
+                    "cost_estimate_usd": proposal.held_usd,
+                    "admission_blocked": False,
+                    "latch_recovery": proposal,
                 }
             )
             self._append(file, receipt, checkpoint, checkpoint.opening_spend, lock)

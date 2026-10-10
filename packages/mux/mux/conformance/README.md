@@ -452,3 +452,22 @@ lead approval is needed for every immutable proposal. Unknown historical usage
 must be obtained or remain `estimated_unverified`; no synthetic zero is applied.
 Upgrade all ledger consumers before the first version-2 receipt; old pinned
 guards intentionally refuse its schema. Never reset the shared ledger.
+
+
+For an incomplete overrun only, `guard.propose_latch_recovery(run_id,
+held_usd=Decimal("1.00"), evidence_sha256=...)` creates a read-only
+`LatchRecovery` proposal. The lead reviews the evidence and pins its exact
+digest in the trusted config's `approved_latch_recoveries` list.
+`guard.recover_latch(proposal)` appends a `latch_recovered` receipt tagged
+`LATCH-RECOVERY`, with the explicit conservative hold, `actual_usd=None` and
+`accounting_status="estimated_unverified"`. It preserves all known counters,
+usage/proof snapshots, pinned prices, runtime evidence and the reservation.
+Only this run's admission latch clears; other latches and budget caps still
+apply. A hold below the reservation, existing hold or identity-union proven
+spend is refused, even if signed. Changed, foreign, stale, unsigned and repeated
+proposals refuse without appending. The append fences later worker settlement.
+The operator must finish or abandon that worker before recovery. RECONCILE
+remains the separate signed operation for evidence-backed actual spend; a
+recovery neither claims actual nor deletes history. Pre-upgrade rows and signed
+reconciliation digests remain readable unchanged. Canonical config/ledger
+changes are operator actions after the exact digest is signed.

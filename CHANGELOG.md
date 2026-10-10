@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
+
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.
 
