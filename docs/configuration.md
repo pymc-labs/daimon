@@ -1263,9 +1263,10 @@ pauses the same interval between passes.
 
 Run the headless usage sweep (usage backfill for MCP start_turn sessions). Off by
 default: the current sweep lists every session in the shared Managed Agents workspace
-and drains its request rate limit. While off, headless MCP turns are not metered;
-turning it back on backfills them, since recording is idempotent and the startup pass
-reads every stamped session still in the workspace.
+and drains its request rate limit. While off, headless MCP turns are not metered and
+usage a live adapter missed is not recovered; turning it back on backfills them, since
+recording is idempotent and the startup pass reads every stamped session still in the
+workspace.
 
 ### `DAIMON_SCHEDULER__MAX_AGE_S`
 

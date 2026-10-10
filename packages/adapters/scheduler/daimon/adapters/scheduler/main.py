@@ -1018,6 +1018,14 @@ async def _repeat_until_stopped(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
+async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None]]) -> None:
+    """One usage pass for `--once`, honouring the same switch as the loop."""
+    if not enabled:
+        log.warning("scheduler.usage_sweep.disabled")
+        return
+    await sweep()
+
+
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
@@ -1163,8 +1171,11 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(
-                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            await _usage_sweep_once(
+                enabled=scheduler_settings.usage_sweep_enabled,
+                sweep=lambda: _sweep_headless_usage(
+                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
+                ),
             )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)

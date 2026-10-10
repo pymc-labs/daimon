@@ -135,7 +135,9 @@ Each tick, 30 seconds apart by default:
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
 
-The [usage sweep](billing.md#the-tables) runs on its own loop with the same
+The [usage sweep](billing.md#the-tables), when switched on
+(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`, off by default; `--once` honours the
+same switch), runs on its own loop with the same
 pause between passes, so a long pass no longer blocks claims. Shutdown cancels a
 pass in flight; the next process starts a full pass.
 
