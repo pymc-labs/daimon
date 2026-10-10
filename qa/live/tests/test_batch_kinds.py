@@ -86,11 +86,73 @@ def test_running_edits_are_distinct_and_exclude_terminal_edits() -> None:
     }
     turn.card_history = [edit, edit, {**edit, "edited_timestamp": "later", "phase": "terminal"}]
     assertion = Assertion(kind="card_edits_min", turn=1, minimum=2, during="running")
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+    turn.card_history = [
+        {
+            **edit,
+            "observed_at": (turn.started_at + timedelta(seconds=i)).isoformat(),
+            "message": {"id": "card", "edited_timestamp": "original"},
+        }
+        for i in range(3)
+    ]
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
     turn.settled = False
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
-    turn.card_history.append({**edit, "edited_timestamp": "next"})
+    turn.card_history.extend(
+        {
+            **edit,
+            "observed_at": (turn.started_at + timedelta(seconds=i)).isoformat(),
+            "message": {"id": "card", "edited_timestamp": str(i)},
+        }
+        for i in (3, 4)
+    )
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+
+
+@pytest.mark.parametrize("samples", [0, 1, 2])
+def test_edit_minimum_never_fails_on_missing_or_insufficient_capture(samples: int) -> None:
+    turn = observed(1, "card")
+    turn.card_history = [
+        {
+            "message_id": "card",
+            "phase": "running",
+            "observed_at": utcnow().isoformat(),
+            "message": {"id": "card"},
+        }
+        for _ in range(samples)
+    ]
+    check = Assertion(kind="card_edits_min", turn=1, minimum=3, during="running")
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+
+
+def test_adequately_sampled_frozen_card_fails_edit_minimum() -> None:
+    turn = observed(1, "card")
+    turn.card_history = [
+        {
+            "message_id": "card",
+            "phase": "running",
+            "observed_at": (turn.started_at + timedelta(seconds=i * 10)).isoformat(),
+            "message": {"id": "card", "embeds": [{"footer": {"text": "Working · 0s"}}]},
+        }
+        for i in range(5)
+    ]
+    check = Assertion(kind="card_edits_min", turn=1, minimum=3, during="running")
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+
+
+def test_footer_changes_count_even_when_discord_edit_timestamp_is_missing() -> None:
+    turn = observed(1, "card")
+    turn.card_history = [
+        {
+            "message_id": "card",
+            "phase": "running",
+            "observed_at": (turn.started_at + timedelta(seconds=i * 10)).isoformat(),
+            "message": {"id": "card", "embeds": [{"footer": {"text": f"Working · {i * 10}s"}}]},
+        }
+        for i in range(4)
+    ]
+    check = Assertion(kind="card_edits_min", turn=1, minimum=3, during="running")
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "PASS"
 
 
 def test_chunk_gap_uses_answer_edit_instead_of_progress_card_creation() -> None:

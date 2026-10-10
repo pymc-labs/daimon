@@ -149,6 +149,11 @@ latency, thread location/reuse, observed progress, blank messages, parent-channe
 posts, silent drops, regex presence and
 absence over content and all embed text, settled cards, reactions, attachment
 counts/uniqueness, scoped logs, read-only SQL, and the fixed Haiku judge.
+Running cards are fetched directly on every poll. Result `card_history` retains
+each immutable message snapshot, including its footer/timer, edit timestamp,
+and observation time, even when the card never changes. `card_edits_min` requires
+at least `max(2, minimum + 1)` running snapshots before judging the edit count;
+missing or sparse history is PENDING. Terminal edits do not count.
 The approved filtered attachment counts (`name_pattern`) and timed reaction
 observations remain PENDING until the FULL stage implements their semantics.
 The approved global regex assertions are appended to every executed turn: no
