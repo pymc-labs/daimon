@@ -23,11 +23,15 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_skill_owners
+from daimon.adapters.mcp.tools._rule_view import CallerView, load_caller_view, load_skill_owners
 from daimon.adapters.mcp.tools.agents import (
     _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.adapters.mcp.tools.setup_target import (
+    get_chat_origin,
+    origin_channel_id,
+    resolve_setup_agent,
+)
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
     find_attach_mount_collision,
@@ -422,9 +426,26 @@ async def _sync_impl(
     )
 
 
-async def _hidden(runtime: McpRuntime, auth: AuthIdentity, skill: SkillListResponse) -> bool:
+async def _skill_view(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> CallerView:
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    return await load_caller_view(
+        runtime,
+        auth,
+        location_channel_id=origin_channel_id(origin),
+        location_thread_id=origin.thread_id if origin is not None else None,
+    )
+
+
+async def _hidden(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    skill: SkillListResponse,
+    origin_context_id: str | None = None,
+) -> bool:
     """Whether `skill` belongs, or may belong, to an agent across an isolated channel's line."""
-    caller = await load_caller_view(runtime, auth)
+    caller = await _skill_view(runtime, auth, origin_context_id)
     owners = await load_skill_owners(runtime, caller, auth.tenant_id)
     body = strip_tenant_prefix(tenant_id=auth.tenant_id, display_title=skill.display_title or "")
     return caller.hides_skill(owners, skill_id=skill.id, body=body or "")
@@ -433,9 +454,10 @@ async def _hidden(runtime: McpRuntime, auth: AuthIdentity, skill: SkillListRespo
 async def _list_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
+    origin_context_id: str | None = None,
 ) -> list[SkillInfo]:
     rows, _truncated = await list_skills_lenient(runtime.client)
-    caller = await load_caller_view(runtime, auth)
+    caller = await _skill_view(runtime, auth, origin_context_id)
     owners = await load_skill_owners(runtime, caller, auth.tenant_id)
     result: list[SkillInfo] = []
     for row in rows:
@@ -458,10 +480,11 @@ async def _get_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     name: str,
+    origin_context_id: str | None = None,
 ) -> SkillDetail:
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
-    if skill is None or await _hidden(runtime, auth, skill):
+    if skill is None or await _hidden(runtime, auth, skill, origin_context_id):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     version_count = 0
     async for _ in runtime.client.beta.skills.versions.list(skill.id):
@@ -522,14 +545,20 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         )
 
     @mcp.tool
-    async def list_skills(ctx: Context) -> list[SkillInfo]:  # pyright: ignore[reportUnusedFunction]
-        """List all custom skills."""
-        return await _list_impl(runtime, await _auth(ctx))
+    async def list_skills(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, origin_context_id: str | None = None
+    ) -> list[SkillInfo]:
+        """List visible custom skills. Pass turn_controls.origin_context_id so member
+        reads include skills belonging to this conversation's local responders."""
+        return await _list_impl(runtime, await _auth(ctx), origin_context_id)
 
     @mcp.tool
-    async def get_skill(ctx: Context, name: str) -> SkillDetail:  # pyright: ignore[reportUnusedFunction]
-        """Look up a skill by name. Returns detail including version count."""
-        return await _get_impl(runtime, await _auth(ctx), name)
+    async def get_skill(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, name: str, origin_context_id: str | None = None
+    ) -> SkillDetail:
+        """Look up a visible skill by name, including version count. Pass
+        turn_controls.origin_context_id for skills of local responders."""
+        return await _get_impl(runtime, await _auth(ctx), name, origin_context_id)
 
     @mcp.tool(tags={"admin"})
     async def delete_skill(ctx: Context, name: str) -> None:  # pyright: ignore[reportUnusedFunction]

@@ -304,7 +304,12 @@ async def load_panel_hidden_environment_names(
 ) -> frozenset[str]:
     """What a panel reader at `channel_id` doesn't see; a server admin sees every name."""
     viewer = await load_rule_viewer(
-        session, client, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+        session,
+        client,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        is_admin=is_admin,
+        default=default,
     )
     return await load_hidden_environment_names(
         session, tenant_id=tenant_id, viewer=viewer, default=default

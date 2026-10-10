@@ -112,7 +112,10 @@ async def _live(db_factory: async_sessionmaker[AsyncSession]) -> list[ThreadAgen
 async def test_setup_lists_every_agent_with_the_panel_actions(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake) as (service, _):
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
+        service,
+        _,
+    ):
         await _say(service, "setup")
 
     card = json.dumps(teams_api_fake.activity_requests[-1].body)
@@ -124,6 +127,14 @@ async def test_setup_lists_every_agent_with_the_panel_actions(
 async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=CONVERSATION_ID),
+            tenant_id=TENANT,
+            agent_name="analyst",
+            mode="agent",
+        )
     async with _running(db_session_factory, teams_api_fake) as (service, _):
         details = await post_activity(service, _click("details", agent="analyst"))
         routing = await post_activity(service, _click("routing"))
@@ -263,7 +274,8 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     [created] = [a for a in state.agents.values() if a["name"] == "scout"]
     assert "Scout leads" in str(created["system"])
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
-    assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel lands on Details"
+    assert not edits, "an unrouted agent is hidden from the member panel"
+    assert "An admin can make it answer" in good["task"]["value"]
     assert queued == [(TENANT, "scout")], "the new agent's face renders when it is created"
 
 

@@ -33,7 +33,11 @@ from daimon.adapters.mcp.tools.reachability import (
     require_bindable_as_channel_default,
     require_channel_admin,
 )
-from daimon.adapters.mcp.tools.setup_target import resolve_setup_agent
+from daimon.adapters.mcp.tools.setup_target import (
+    get_chat_origin,
+    origin_channel_id,
+    resolve_setup_agent,
+)
 from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -262,7 +266,7 @@ def _thread_explanation(binding: ThreadAgentBindingRow) -> str:
         )
     return (
         f"{binding.responder_name} answers in this setup thread; configuring "
-        f"{binding.configuration_target_name or 'an agent not yet selected'}."
+        f"{binding.configuration_target_name or 'no visible configuration target'}."
     )
 
 
@@ -282,11 +286,27 @@ def _visible(caller: CallerView, agent_name: str | None) -> str | None:
     return agent_name if agent_name is not None and caller.sees(agent_name) else None
 
 
+def _visible_binding(caller: CallerView, binding: ThreadAgentBindingRow) -> ThreadAgentBindingRow:
+    if (
+        binding.configuration_target_name is not None
+        and not caller.sees(binding.configuration_target_name)
+    ) or (
+        caller.is_active
+        and binding.configuration_target_name is None
+        and binding.configuration_target_ma_agent_id is not None
+    ):
+        return binding.model_copy(
+            update={"configuration_target_name": None, "configuration_target_ma_agent_id": None}
+        )
+    return binding
+
+
 async def _explain_agent_resolution_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     channel_id: str,
     thread_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> AgentResolutionExplanation:
     """Resolve the cascade for one channel and report every tier's contribution.
 
@@ -299,7 +319,21 @@ async def _explain_agent_resolution_impl(
     the caller is refused, and agents the caller can't see are left out.
     """
     tenant_id: uuid.UUID = auth.tenant_id
-    caller = await load_caller_view(runtime, auth)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    caller = await load_caller_view(
+        runtime,
+        auth,
+        location_channel_id=origin_channel_id(origin),
+        location_thread_id=origin.thread_id if origin is not None else None,
+    )
+    if caller.restrict_to_location and (
+        channel_id != caller.location_channel_id
+        or (thread_id is not None and (origin is None or thread_id != origin.thread_id))
+    ):
+        raise ToolError(
+            "Routing details are available only for this conversation's verified channel/thread. "
+            "Pass turn_controls.origin_context_id or use a channel-bound key."
+        )
     if caller.home_place(channel_id) != caller.inside_channel_id:
         raise ToolError(_ACROSS_LINE_MSG.format(place=f"channel '{channel_id}'"))
 
@@ -320,6 +354,13 @@ async def _explain_agent_resolution_impl(
                     thread_id=thread_id,
                 )
                 if binding is not None and binding.deleted:
+                    if caller.restrict_to_location:
+                        raise ToolError(
+                            "This conversation was deleted. Continue in a new conversation."
+                        )
+                    if not caller.sees(binding.responder_name):
+                        raise ToolError(_ACROSS_LINE_MSG.format(place=f"thread '{thread_id}'"))
+                    binding = _visible_binding(caller, binding)
                     target = (
                         f"{binding.configuration_target_name} "
                         f"({binding.configuration_target_ma_agent_id})"
@@ -342,8 +383,10 @@ async def _explain_agent_resolution_impl(
                     )
             if binding is not None and not caller.sees(binding.responder_name):
                 raise ToolError(_ACROSS_LINE_MSG.format(place=f"thread '{thread_id}'"))
+            if binding is not None:
+                binding = _visible_binding(caller, binding)
             recent = [
-                row
+                _visible_binding(caller, row)
                 for row in await list_active_bindings(
                     session,
                     tenant_id=tenant_id,
@@ -352,6 +395,10 @@ async def _explain_agent_resolution_impl(
                     limit=10,
                 )
                 if caller.sees(row.responder_name)
+                and (
+                    not caller.restrict_to_location
+                    or (origin is not None and row.thread_id == origin.thread_id)
+                )
             ]
 
     channel_cfg = channel_row if isinstance(channel_row, ChannelConfigRow) else None
@@ -365,7 +412,9 @@ async def _explain_agent_resolution_impl(
         if binding
         else _visible(caller, resolved.agent_name),
         winning_tier="thread" if binding else resolved.agent_name_tier,
-        channel_default=channel_cfg.agent_name if channel_cfg is not None else None,
+        channel_default=_visible(
+            caller, channel_cfg.agent_name if channel_cfg is not None else None
+        ),
         tenant_default=_visible(caller, tenant_cfg.agent_name if tenant_cfg is not None else None),
         deployment_default=_visible(caller, runtime.deployment_default.agent_name),
         effective_environment_name=resolved.environment_name,
@@ -465,6 +514,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str,
         thread_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> AgentResolutionExplanation:
         """Who answers in this channel, for example #growth? Report who answers, the
         environment it runs in, and which routing tier decided each.
@@ -479,8 +529,9 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         answers that seems wrong for the channel, or before changing a default —
         the tier that currently wins is the tier worth changing.
 
-        Not admin-gated: this is a read of routing any member can already infer
-        from a reply's footer.
+        Members must pass turn_controls.origin_context_id and use its channel/thread;
+        channel-bound keys can read their own channel. Hidden agents and configuration
+        targets are omitted. Admins retain their routing view within channel isolation.
 
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -493,5 +544,5 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         will agree with it.
         """
         return await _explain_agent_resolution_impl(
-            runtime, await _auth(ctx), channel_id, thread_id
+            runtime, await _auth(ctx), channel_id, thread_id, origin_context_id
         )

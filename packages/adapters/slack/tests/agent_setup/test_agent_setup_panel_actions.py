@@ -289,6 +289,11 @@ async def test_command_renders_agents_view_with_answering_agent_first(
     channel is what the caller is asking about, so it goes above it.
     """
     tenant_id, fernet_key = await _seed_team(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={_OTHER_AGENT: (_CHANNEL_ID,)}),
+    )
     await db_session.commit()
     await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_ANSWERING_AGENT)
 
@@ -329,6 +334,7 @@ async def test_command_marks_only_the_agent_no_tier_routes_to_as_unrouted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ "Not answering in any channel yet" is about the install, not about here.
 
@@ -338,6 +344,9 @@ async def test_command_marks_only_the_agent_no_tier_routes_to_as_unrouted(
     """
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
+    from daimon.adapters.slack.agent_setup import actions as actions_module
+
+    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=True))
     await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_ANSWERING_AGENT)
     async with db_session_factory() as session, session.begin():
         await set_fields(
@@ -397,6 +406,7 @@ async def test_page_action_calls_views_update_with_view_id_and_hash_never_push(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Paging re-renders the view it was clicked on; it never grows the stack.
 
@@ -405,6 +415,9 @@ async def test_page_action_calls_views_update_with_view_id_and_hash_never_push(
     """
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
+    from daimon.adapters.slack.agent_setup import actions as actions_module
+
+    monkeypatch.setattr(actions_module, "resolve_is_admin", AsyncMock(return_value=True))
 
     agents = [
         _agent_payload(tenant_id=tenant_id, name=f"agent-{index:03d}", agent_id=f"agent_{index}")
@@ -499,6 +512,7 @@ async def test_details_action_pushes_once_and_carries_agent_in_metadata(
     """Details is a push, and the pushed view names its own target."""
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
+    await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
 
     runtime = _build_runtime(
         fernet_key,
@@ -535,6 +549,7 @@ async def test_routing_action_pushes_from_root_and_details_view_has_no_routing_a
     """
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
+    await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
 
     runtime = _build_runtime(
         fernet_key,
@@ -589,6 +604,7 @@ async def test_expand_keys_updates_details_in_place(
     """Show all keys re-renders Details where it stands, expansion recorded."""
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
+    await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
 
     runtime = _build_runtime(
         fernet_key,
@@ -626,6 +642,7 @@ async def test_expanding_connections_updates_details_without_growing_the_stack(
 ) -> None:
     tenant_id, fernet_key = await _seed_team(db_session)
     await db_session.commit()
+    await _mark_tenant_default(db_session_factory, tenant_id=tenant_id, agent_name=_OTHER_AGENT)
     runtime = _build_runtime(
         fernet_key,
         db_session_factory,

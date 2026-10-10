@@ -2499,8 +2499,9 @@
         answers that seems wrong for the channel, or before changing a default —
         the tier that currently wins is the tier worth changing.
         <blank line>
-        Not admin-gated: this is a read of routing any member can already infer
-        from a reply's footer.
+        Members must pass turn_controls.origin_context_id and use its channel/thread;
+        channel-bound keys can read their own channel. Hidden agents and configuration
+        targets are omitted. Admins retain their routing view within channel isolation.
         <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -2517,6 +2518,17 @@
         'properties': dict({
           'channel_id': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'thread_id': dict({
             'anyOf': list([
@@ -2877,12 +2889,26 @@
       }),
     }),
     'get_skill': dict({
-      'description': 'Look up a skill by name. Returns detail including version count.',
+      'description': '''
+        Look up a visible skill by name, including version count. Pass
+        turn_controls.origin_context_id for skills of local responders.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -3159,9 +3185,13 @@
     }),
     'list_agents': dict({
       'description': '''
-        List agents in the tenant pool, including each agent's attached
-        ``mcp_servers`` and ``skills``. ``page`` is reserved for future pagination.
-        Pass this turn's ``origin_context_id`` so its channel counts.
+        List agents visible here, including their attached ``mcp_servers`` and ``skills``.
+        <blank line>
+        Members see the channel/thread responders and agents explicitly allowed
+        to run here; unrouted agents and other channels' agents are hidden.
+        Pass this turn's ``origin_context_id`` to verify its location. Without
+        a verified location a member cannot list unrestricted agents. Admins
+        retain their existing visibility. ``page`` is reserved for pagination.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3549,10 +3579,24 @@
       }),
     }),
     'list_skills': dict({
-      'description': 'List all custom skills.',
+      'description': '''
+        List visible custom skills. Pass turn_controls.origin_context_id so member
+        reads include skills belonging to this conversation's local responders.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'type': 'object',
       }),

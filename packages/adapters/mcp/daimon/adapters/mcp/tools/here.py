@@ -8,7 +8,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._rule_view import load_caller_view
+from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -99,7 +99,7 @@ async def _where_am_i_impl(
     channel_id = channel_id or token_channel_id(auth)
     if channel_id is None:
         raise ToolError("The current channel is unknown; pass its parent channel id.")
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     if caller.home_place(channel_id) != caller.inside_channel_id:
         raise ToolError("That channel is outside this conversation's home.")
     category_id: str | None = None

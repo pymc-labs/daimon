@@ -80,9 +80,9 @@ async def load_panel_roster(
     """The tenant's agents, answering-here first, for the Agents view.
 
     `channel_id` is None only where the caller has no channel — a DM, or a
-    payload that carried none. The roster still lists every agent; nothing is
-    marked as answering here, because there is no here. A non-admin sees only
-    their side of every isolated channel's line.
+    payload that carried none. Nothing is marked as answering here without a
+    location. A non-admin sees only agents allowed to run at that location,
+    including their side of every isolated channel's line.
     """
     return await load_roster(
         session,
@@ -93,7 +93,14 @@ async def load_panel_roster(
         thread_id=thread_id,
         default=default,
         viewer=await load_rule_viewer(
-            session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+            session,
+            anthropic,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            is_admin=is_admin,
+            platform="slack",
+            default=default,
+            thread_id=thread_id,
         ),
     )
 
@@ -156,7 +163,13 @@ async def load_panel_answering_map(
         platform="slack",
         default=default,
         viewer=await load_rule_viewer(
-            session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+            session,
+            anthropic,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            is_admin=is_admin,
+            platform="slack",
+            default=default,
         ),
     )
 

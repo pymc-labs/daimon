@@ -323,17 +323,12 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
     assert view.page is None, f"{driver.param_id}: three agents need no pager"
 
 
-async def test_roster_shows_a_member_and_an_admin_identical_controls(
+async def test_roster_shows_a_member_and_an_admin_local_responders_and_admins_the_full_roster(
     driver: PlatformDriver,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Entering a conversation about a change is not the change.
-
-    Hiding the roster from members made them ask an admin what the bot even
-    does, so role changes the voice of the routing sentence on Details and
-    nothing on this screen.
-    """
+    """Members see local responders; admins retain the tenant roster."""
     router, tenant_id, (workspace_id, channel_id, user_id) = await _seed_three_agent_roster(
         driver, db_session, db_session_factory
     )
@@ -356,19 +351,11 @@ async def test_roster_shows_a_member_and_an_admin_identical_controls(
         is_admin=True,
     )
 
-    assert admin_view.lines == member_view.lines, (
-        f"{driver.param_id}: the roster reads the same for both roles"
-    )
-    if driver.param_id in ("discord", "slack"):
-        assert admin_view.action_labels == (
-            *member_view.action_labels[:-1],
-            "GitHub",
-            member_view.action_labels[-1],
-        ), f"{driver.param_id}: only admins see GitHub on the roster"
-    else:
-        assert admin_view.action_labels == member_view.action_labels, (
-            f"{driver.param_id}: the roster offers both roles the same controls"
-        )
+    assert _ANSWERING in member_view.body
+    assert _UNROUTED not in member_view.body and "daimon" not in member_view.body
+    assert _ANSWERING in admin_view.body and _UNROUTED in admin_view.body
+    assert "New agent" in member_view.action_labels
+    assert "Who answers where" in member_view.action_labels
 
 
 async def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action(
@@ -439,7 +426,7 @@ async def test_details_of_an_unrouted_agent_states_the_routing_request(
     )
 
 
-async def test_details_of_an_unrouted_agent_asks_a_member_to_find_an_admin(
+async def test_member_roster_does_not_offer_unrouted_agent_details(
     driver: PlatformDriver,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -450,20 +437,8 @@ async def test_details_of_an_unrouted_agent_asks_a_member_to_find_an_admin(
         tenant_id,
         (workspace_id, channel_id, user_id),
     ) = await _open_three_agent_roster(driver, db_session, db_session_factory, is_admin=False)
-    details = await driver.click_panel_action(
-        sessionmaker=db_session_factory,
-        router=router,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        channel_id=channel_id,
-        user_id=user_id,
-        action="details",
-        agent_name=_UNROUTED,
-    )
-
-    assert details.says(_unrouted_note(driver, _UNROUTED, is_admin=False)), (
-        f"{driver.param_id}: a member is told who can make the change instead"
-    )
+    assert _UNROUTED not in _roster.body
+    assert _ANSWERING in _roster.body
 
 
 async def test_details_reads_the_same_sections_in_the_same_order_on_both_platforms(

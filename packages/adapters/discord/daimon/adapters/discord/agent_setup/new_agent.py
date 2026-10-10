@@ -187,6 +187,14 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             agent = next(
                 (row for row in roster.rows if row.ma_agent_id == created.anthropic_id), None
             )
+            if agent is None and not self.state.is_admin:
+                await interaction.followup.send(
+                    f"**{new_name}** was created. Not answering in any channel yet. "
+                    "An admin can make it answer in this channel; "
+                    "it will then appear in setup here.",
+                    ephemeral=True,
+                )
+                return
             if agent is None and viewer is not None and viewer.inside_channel_id is not None:
                 raise UserFacingError(
                     "The agent was created. This channel is kept to its own agents, so it "

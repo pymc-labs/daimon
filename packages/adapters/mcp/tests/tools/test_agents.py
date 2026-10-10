@@ -184,7 +184,7 @@ async def test_get_agent_admits_novel_skill_type_through_fastmcp(
     claims = {
         "sub": str(uuid.uuid4()),
         "tenant_id": str(tenant_id),
-        "role": "user",
+        "role": "admin",
         "client_id": "test",
     }
 
@@ -455,10 +455,16 @@ async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_p
 async def test_get_agent_impl_withholds_system_prompt_from_non_admin(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = uuid.uuid4()
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="a")
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "secret prompt")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        agent_id=uuid.uuid4(),
+        bound_channel_id="C_READ",
+    )
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 

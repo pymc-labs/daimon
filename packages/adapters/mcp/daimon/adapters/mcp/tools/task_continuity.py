@@ -26,7 +26,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._rule_view import load_caller_view
+from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action, build_agent_ref
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
@@ -133,7 +133,7 @@ async def _hand_off_task_impl(
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     # A thread under an isolated channel hands off only to that channel's own
     # agents; anywhere else, never to them.
-    caller = await load_caller_view(
+    caller = await load_isolation_view(
         runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
     )
     destination = next((agent for agent in agents if agent.id == agent_id), None)

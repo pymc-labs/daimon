@@ -16,7 +16,7 @@ from daimon.adapters.teams import add_skill, setup_card
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.scope import TenantScopeRef
+from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
@@ -115,12 +115,16 @@ async def _running(
     skills: _Skills,
     *,
     admin: bool = False,
+    local_helper: bool = False,
 ) -> AsyncIterator[TeamsHttpService]:
     ma = build_fake_anthropic(
         combine_handlers(skills.handle, _versioned(make_fake_ma_handler(_state())))
     )
     runtime = build_teams_runtime(
-        db_factory, anthropic=ma, teams=teams_settings(admins=(AAD_OBJECT_ID,) if admin else ())
+        db_factory,
+        anthropic=ma,
+        teams=teams_settings(admins=(AAD_OBJECT_ID,) if admin else ()),
+        deployment_default=DeploymentDefault(agent_name="helper" if local_helper else "daimon"),
     )
     async with running_service(runtime, fake) as service:
         yield service
@@ -147,7 +151,9 @@ def _submit_data(form: dict[str, Any]) -> dict[str, Any]:
 async def test_details_offers_add_skill_only_on_an_agent_that_can_take_one(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake, _Skills()) as service:
+    async with _running(
+        db_session_factory, teams_api_fake, _Skills(), local_helper=True
+    ) as service:
         helper = await post_activity(
             service, make_card_action("agent_setup", "details", agent="helper")
         )

@@ -70,7 +70,7 @@ def _runtime(client: AsyncAnthropic, session_factory: Any) -> McpRuntime:
         session_factory=session_factory,
         client=client,  # type: ignore[arg-type]
         settings=settings,
-        deployment_default=DeploymentDefault(environment_name="test-env"),
+        deployment_default=DeploymentDefault(agent_name="test-agent", environment_name="test-env"),
     )
 
 

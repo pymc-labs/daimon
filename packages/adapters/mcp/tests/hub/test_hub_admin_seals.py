@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -26,6 +27,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.rule_views import routine_origin
+from daimon.core.scope import DeploymentDefault
 from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
@@ -115,6 +117,12 @@ class _Hub:
             lambda _r, m: httpx.Response(200, json=self.sessions[m.group(1)]),
         )
         runtime = _runtime(build_fake_anthropic(router.dispatch), self.sessionmaker)
+        runtime = replace(
+            runtime,
+            deployment_default=DeploymentDefault(
+                agent_name="acme-project", environment_name="test-env"
+            ),
+        )
         hub_tenant = HubTenant(
             tenant_id=self.tenant_id,
             account_id=self.account_id,

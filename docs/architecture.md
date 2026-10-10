@@ -487,6 +487,14 @@ is: the policy is read on every call, and an agent with a rule is refused
 before any session is created or message sent. Only the operator's internal
 tokens, which carry no platform user, bypass it.
 
+Agent discovery uses the effective routing at the caller's verified location.
+A member's setup panel and MCP agent lookups show the channel and current thread
+responders, plus agents whose explicit rules allow that channel. Unrouted agents
+and shadowed workspace or deployment defaults are hidden. Aliases and channels
+kept to their own agents remain enforced. A missing or unverified location cannot
+expose unrestricted agents. In the hub, members see the effective workspace
+responder; stored workspace and channel admin exemptions remain unchanged.
+
 Cross-agent separation is complete only for agents with a rule: an agent
 without one still answers wherever the cascade sends it, so give every client
 project agent a rule. Beyond the rule, whatever an agent can reach (its repo,

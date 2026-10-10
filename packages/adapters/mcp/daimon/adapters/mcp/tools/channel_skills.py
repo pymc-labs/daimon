@@ -19,7 +19,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._rule_view import load_caller_view
+from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.authz import Action
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
@@ -67,7 +67,7 @@ async def _shown(
     runtime: McpRuntime, auth: AuthIdentity, target: str, rows: Sequence[ChannelSkillRow]
 ) -> ChannelSkillsResult:
     """The result, leaving out uploads of agents an isolated channel hides from the caller."""
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     seen = [
         row for row in rows if row.owner_agent_name is None or caller.sees(row.owner_agent_name)
     ]

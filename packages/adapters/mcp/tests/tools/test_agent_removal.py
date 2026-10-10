@@ -762,6 +762,13 @@ async def test_list_agent_keys_impl_returns_sorted_key_names_only(
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
     async with db_session_factory() as session, session.begin():
         await make_tenant(session, platform="discord", id=tenant_id)
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            agent_name="demo",
+            mode="agent",
+        )
         await put_agent_file(
             session,
             tenant_id=tenant_id,
@@ -788,7 +795,12 @@ async def test_list_agent_keys_impl_returns_sorted_key_names_only(
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        bound_channel_id="C_KEYS",
+        agent_id=agent_uuid,
     )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
@@ -799,13 +811,18 @@ async def test_list_agent_keys_impl_returns_sorted_key_names_only(
 async def test_list_agent_keys_impl_returns_empty_list_when_none_set(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = uuid.uuid4()
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="demo")
     client = _agent_only_router(
         tenant_id=tenant_id, agent_name="demo", agent_id="ag_empty", account_id=uuid.uuid4()
     )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        bound_channel_id="C_KEYS",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_empty"),
     )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
@@ -842,6 +859,13 @@ async def test_list_agent_keys_impl_never_returns_a_stored_value(
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
     async with db_session_factory() as session, session.begin():
         await make_tenant(session, platform="discord", id=tenant_id)
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            agent_name="demo",
+            mode="agent",
+        )
         await put_agent_file(
             session,
             tenant_id=tenant_id,
@@ -852,7 +876,12 @@ async def test_list_agent_keys_impl_never_returns_a_stored_value(
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        bound_channel_id="C_KEYS",
+        agent_id=agent_uuid,
     )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
@@ -872,11 +901,18 @@ async def test_list_agent_keys_impl_callable_by_non_admin_on_default_agent(
         tenant_id=tenant_id, agent_name="scoped-agent", agent_id="ag_scoped", account_id=account_id
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        bound_channel_id="C_KEYS",
+        agent_id=uuid.uuid4(),
+    )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="scoped-agent"
     )
-    assert result == [], "the listing is not reachability-gated, even on a default agent"
+    assert result == [], "a member can list keys of the responder at its verified location"
 
 
 async def test_remove_agent_key_impl_removes_existing_key(
@@ -908,7 +944,10 @@ async def test_remove_agent_key_impl_removes_existing_key(
     assert result.agent_name == "demo"
     assert result.key == "API_KEY"
 
-    remaining = await _list_agent_keys_impl(runtime, auth, agent_name="demo")
+    admin = AuthIdentity(
+        account_id=auth.account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    remaining = await _list_agent_keys_impl(runtime, admin, agent_name="demo")
     assert remaining == [], "a follow-up listing must no longer contain the removed key"
 
 
@@ -1125,7 +1164,10 @@ async def test_remove_agent_key_impl_isolates_between_agents_in_same_tenant(
     result = await _remove_agent_key_impl(runtime, auth, agent_name="agent-a", key="SHARED")
     assert result.removed is True
 
-    remaining = await _list_agent_keys_impl(runtime, auth, agent_name="agent-b")
+    admin = AuthIdentity(
+        account_id=auth.account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    remaining = await _list_agent_keys_impl(runtime, admin, agent_name="agent-b")
     assert remaining == ["SHARED"], "removing from agent-a must not affect agent-b's SHARED key"
 
 
