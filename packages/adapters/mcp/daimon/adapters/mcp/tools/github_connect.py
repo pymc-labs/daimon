@@ -51,7 +51,6 @@ from daimon.core.stores.github_connect import (
     revoke_invitation,
     set_invitation_encrypted_token,
 )
-from daimon.core.stores.github_grant_proposals import consume, propose
 from daimon.core.stores.security_audit import append_event
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -236,42 +235,7 @@ async def _github_connect_impl(
             requested_repo = repo_name.strip()
             if requested_repo.count("/") != 1 or any(c.isspace() for c in requested_repo):
                 raise ToolError("Name one repo as owner/repo.")
-            question = (
-                f"Give {agent.name} "
-                f"{'read and change' if required_ability == 'write' else 'read'} "
-                f"access to {requested_repo}?"
-            )
-            if not confirmed:
-                await propose(
-                    session,
-                    tenant_id=auth.tenant_id,
-                    account_id=auth.account_id,
-                    platform_user_id=auth.platform_user_id,
-                    platform=auth.platform,
-                    thread_id=origin.thread_id,
-                    agent_id=agent_id,
-                    repo_name=requested_repo,
-                    ability=required_ability,
-                    origin_id=origin.id,
-                )
-                return ConnectResult(status="proposed", message=question)
-            if not await consume(
-                session,
-                tenant_id=auth.tenant_id,
-                account_id=auth.account_id,
-                platform_user_id=auth.platform_user_id,
-                platform=auth.platform,
-                thread_id=origin.thread_id,
-                agent_id=agent_id,
-                repo_name=requested_repo,
-                ability=required_ability,
-                origin_id=origin.id,
-                origin_created_at=origin.created_at,
-            ):
-                return ConnectResult(
-                    status="proposed",
-                    message=f"Please confirm in a new message: {question}",
-                )
+            # A clear ask is enough (Derick, 2026-10-10): no separate "say yes" turn.
             mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=agent_id)
             can_activate = mode == "app" or not await has_saved_github_state(
                 session, tenant_id=auth.tenant_id, agent_id=agent_id
@@ -341,7 +305,11 @@ async def _github_connect_impl(
                             )
                         return ConnectResult(
                             status="granted",
-                            message=f"{agent.name} has {ability} access to {repo.repo_full_name}.",
+                            message=(
+                                f"{agent.name} can now "
+                                f"{'read and change' if ability == 'write' else 'read'} "
+                                f"{repo.repo_full_name}. To undo, ask me to remove it."
+                            ),
                         )
         intent_id: uuid.UUID | None = None
         token: str | None = None
@@ -428,11 +396,17 @@ async def _github_connect_impl(
             status="delivery_failed",
             message="I couldn't show the GitHub connection button. Try again.",
         )
+    say = (
+        f"I can't see {repo_name.strip()} yet. Tap Connect GitHub and tick it."
+        if repo_name
+        else "Tap Connect GitHub to choose the repos I can use."
+    )
     return ConnectResult(
         status="sent",
         message=(
-            "The Connect GitHub button is posted and speaks for itself. "
-            "Don't announce or describe it; reply nothing more about it."
+            "The Connect GitHub button is posted. Nothing is connected yet: the person "
+            f"still has to tick repos and save on the page. Reply with only this line: "
+            f"{say} Never say done, connected, pending or a tool name."
         ),
     )
 
@@ -460,14 +434,14 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
-        For 'give this agent access to owner/repo', first call with repo_name and
-        confirmed=false. Ask the returned question in the thread. Only after
-        that person answers yes in a later turn, call again with confirmed=true.
-        Use write only if asked. A connected repo is granted
+        For a clear 'give this agent access to owner/repo', call with repo_name
+        right away; don't ask for a yes first. Ask only if the repo or agent is
+        unclear. Use write only if asked. confirmed is ignored. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
-        The posted button speaks for itself: do not announce or describe it.
+        After it posts, nothing is connected until the person saves on the page:
+        reply only with the line the result gives; never say done or connected.
         """
         return await _github_connect_impl(
             runtime,

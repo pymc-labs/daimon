@@ -52,7 +52,10 @@ def section_text(agent_name: str, panel: GrantsPanel, *, page: int = 0) -> str:
     if not live:
         lines.append("No repos")
     lines.append(f"Working repo: {panel.working_repo}" if panel.working_repo else "No working repo")
-    lines.append(f"To change repos, ask {agent_name} in chat.")
+    lines.append(
+        f"Open Connect GitHub to add or remove repos and choose a working repo, or ask "
+        f"{agent_name} in chat."
+    )
     return "\n".join(lines)
 
 

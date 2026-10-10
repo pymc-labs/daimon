@@ -28,7 +28,10 @@ def build_view(
         if panel.working_repo
         else "No working repo"
     )
-    lines.append(f"To change repos, ask {escape_mrkdwn(name)} in chat.")
+    lines.append(
+        "Open Connect GitHub to add or remove repos and choose a working repo, or ask "
+        f"{escape_mrkdwn(name)} in chat."
+    )
     actions: list[dict[str, Any]] = []
     if connect_url is not None:
         actions.append(

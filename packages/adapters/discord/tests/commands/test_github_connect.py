@@ -74,7 +74,10 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     kwargs = interaction.followup.send.await_args.kwargs
     assert kwargs["ephemeral"] is True
     assert interaction.followup.send.await_args.args == ()
-    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
+    assert (
+        kwargs["embed"].description
+        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+    )
     button = kwargs["view"].children[0]
     assert button.label == "Connect GitHub"
     assert button.emoji.name == "🔗"

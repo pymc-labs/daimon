@@ -1,10 +1,10 @@
-"""Conversational removal is scoped to the agent and the requester's later yes."""
+"""Conversational removal acts immediately and is scoped to one agent."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,7 +27,6 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_grant_proposals import resolve
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy import text
@@ -35,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
-async def test_remove_repo_requires_later_same_requester_yes_and_is_agent_scoped(
+async def test_remove_repo_acts_immediately_and_is_agent_scoped(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,7 +115,7 @@ async def test_remove_repo_requires_later_same_requester_yes_and_is_agent_scoped
         )
     origin = SimpleNamespace(
         id=uuid.uuid4(),
-        created_at=datetime.now(UTC) - timedelta(seconds=1),
+        created_at=datetime.now(UTC),
         configuration_target_name="Agent",
         configuration_target_ma_agent_id="ma_agent",
         responder_name="Daimon",
@@ -160,47 +159,15 @@ async def test_remove_repo_requires_later_same_requester_yes_and_is_agent_scoped
         platform_user_id="channel-admin",
         is_admin=False,
     )
-    assert (await call(channel_auth)).status == "proposed"
     agent.metadata["daimon_managed"] = "true"
     with pytest.raises(ToolError, match="Ask a server admin"):
         await call(channel_auth)
     agent.metadata.clear()
-    proposal = await call()
-    assert proposal.message == "Remove owner/repo from Agent?"
-    assert (await call(confirmed=True)).status == "proposed"  # same turn
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=1)
-    assert (
-        await call(replace(auth, account_id=other.id, platform_user_id="other"), confirmed=True)
-    ).status == "proposed"
-    assert (await call(confirmed=True)).status == "proposed"  # no human yes
-    async with committing_sessionmaker.begin() as session:
-        await session.execute(
-            text(
-                "UPDATE github_grant_proposals SET expires_at = now() - interval '1 second' "
-                "WHERE requester_account_id = :account"
-            ),
-            {"account": admin.id},
-        )
-    assert (await call(confirmed=True)).status == "proposed"  # expired
-    await call()  # a fresh proposal
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=2)
-    async with committing_sessionmaker.begin() as session:
-        await resolve(
-            session,
-            origin=SimpleNamespace(
-                tenant_id=tenant.id,
-                account_id=admin.id,
-                platform="discord",
-                thread_id="thread",
-                id=origin.id,
-                created_at=origin.created_at,
-            ),  # type: ignore[arg-type]
-            message_text="yes",
-        )
     removed = await call(confirmed=True)
     assert removed.status == "removed"
+    assert removed.message == (
+        "Removed owner/repo from Agent. To undo, ask me to add it back or use Connect GitHub."
+    )
     desired_token_urls, desired_mounted_urls = await effective_repo_url_sets(
         committing_sessionmaker,
         tenant_id=tenant.id,
@@ -245,6 +212,16 @@ async def test_remove_repo_requires_later_same_requester_yes_and_is_agent_scoped
         assert (
             await github_access.list_agent_grants(session, tenant_id=tenant.id, agent_id=agent_id)
             == []
+        )
+        assert (
+            await session.scalar(
+                text(
+                    "SELECT count(*) FROM agent_github_grants "
+                    "WHERE tenant_id = :tenant AND agent_id = :agent AND is_working_repo"
+                ),
+                {"tenant": tenant.id, "agent": agent_id},
+            )
+            == 0
         )
         assert (
             len(

@@ -27,7 +27,7 @@ def test_connect_embed_variants(variant: Literal["A", "B", "B_NO_FOOTER"]) -> No
     assert payload["title"] == "Connect GitHub"
     assert payload["thumbnail"]["url"] == "https://mcp.test/web/github-mark.png"
     assert payload["color"] == 0x0C1F40
-    assert payload["description"].startswith("Pick repos ResearchBot can use.")
+    assert payload["description"].startswith("Nothing is connected yet.")
     assert ("Default access: Read and write" in payload["description"]) == (variant != "A")
     assert ("footer" in payload) == (variant == "B")
     assert " · " not in str(payload)
@@ -42,4 +42,6 @@ def test_connect_embed_escapes_agent_name_markdown() -> None:
         public_base_url="https://mcp.test",
     )
     embed = connect_embed(card)
-    assert embed.description == discord.utils.escape_markdown(f"Pick repos {name} can use.")
+    assert embed.description == discord.utils.escape_markdown(
+        "Nothing is connected yet.\n\n" + f"Tap the button and tick the repos {name} can use."
+    )

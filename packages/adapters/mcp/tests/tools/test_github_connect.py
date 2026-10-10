@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -31,7 +30,6 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_grant_proposals import resolve as resolve_grant_proposal
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -40,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
-async def test_confirmed_connected_repo_is_granted_in_chat(
+async def test_connected_repo_is_granted_immediately_in_chat(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -108,51 +106,11 @@ async def test_confirmed_connected_repo_is_granted_in_chat(
         platform_user_id="admin",
         is_admin=True,
     )
-    proposed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+    result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo"
     )
-    assert proposed.status == "proposed"
-    assert proposed.message == "Give Agent read access to owner/repo?"
-    same_turn = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo", confirmed=True
-    )
-    assert same_turn.status == "proposed"
-    async with committing_sessionmaker.begin() as session:
-        other_account = await make_account(session, tenant=tenant)
-        await set_role(session, other_account.id, Role.ADMIN)
-    other = replace(auth, account_id=other_account.id, platform_user_id="other")
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=1)
-    other_turn = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, other, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo", confirmed=True
-    )
-    assert other_turn.status == "proposed"
-    no_human_yes = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo", confirmed=True
-    )
-    assert no_human_yes.status == "proposed"
-    async with committing_sessionmaker.begin() as session:
-        await resolve_grant_proposal(
-            session,
-            origin=SimpleNamespace(
-                tenant_id=tenant.id,
-                account_id=account.id,
-                platform="discord",
-                thread_id="thread",
-                id=origin.id,
-                created_at=origin.created_at,
-            ),
-            message_text="yes",
-        )  # type: ignore[arg-type]
-    result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/repo",
-        confirmed=True,
-    )
     assert result.status == "granted"
-    assert result.message == "Agent has read access to owner/repo."
+    assert result.message == "Agent can now read owner/repo. To undo, ask me to remove it."
     delivery.assert_not_awaited()
     async with committing_sessionmaker() as session:
         assert (
@@ -167,29 +125,6 @@ async def test_confirmed_connected_repo_is_granted_in_chat(
             "read",
             False,
         )
-    write_proposal = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/repo",
-        required_ability="write",
-    )
-    assert write_proposal.message == "Give Agent read and change access to owner/repo?"
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=1)
-    async with committing_sessionmaker.begin() as session:
-        await resolve_grant_proposal(
-            session,
-            origin=SimpleNamespace(
-                tenant_id=tenant.id,
-                account_id=account.id,
-                platform="discord",
-                thread_id="thread",
-                id=origin.id,
-                created_at=origin.created_at,
-            ),
-            message_text="yes",
-        )  # type: ignore[arg-type]
     write = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,
         auth,
@@ -199,37 +134,24 @@ async def test_confirmed_connected_repo_is_granted_in_chat(
         confirmed=True,
     )
     assert write.status == "granted"
+    assert (
+        write.message == "Agent can now read and change owner/repo. To undo, ask me to remove it."
+    )
     async with committing_sessionmaker() as session:
         [grant] = await github_access.list_agent_grants(
             session, tenant_id=tenant.id, agent_id=agent_id
         )
         assert grant.ceiling_access == "write"
-    expired_proposal = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/missing",
-    )
-    assert expired_proposal.status == "proposed"
-    async with committing_sessionmaker.begin() as session:
-        await session.execute(
-            text(
-                "UPDATE github_grant_proposals SET expires_at = now() - interval '1 second' "
-                "WHERE repo_name = 'owner/missing' AND requester_account_id = :account"
-            ),
-            {"account": auth.account_id},
-        )
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=1)
     missing = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,
         auth,
         origin_context_id=str(uuid.uuid4()),
         repo_name="owner/missing",
-        confirmed=True,
     )
-    assert missing.status == "proposed"
-    delivery.assert_not_awaited()
+    assert missing.status == "sent"
+    assert "Nothing is connected yet" in missing.message
+    assert "I can't see owner/missing yet. Tap Connect GitHub and tick it." in missing.message
+    delivery.assert_awaited_once()
     other_agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ma_other")
     async with committing_sessionmaker.begin() as session:
         channel_account = await make_account(session, tenant=tenant)
@@ -273,30 +195,8 @@ async def test_confirmed_connected_repo_is_granted_in_chat(
         external_id="workspace",
         platform_user_id="channel-admin",
     )
-    await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, channel_auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/foreign"
-    )
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=1)
-    async with committing_sessionmaker.begin() as session:
-        await resolve_grant_proposal(
-            session,
-            origin=SimpleNamespace(
-                tenant_id=tenant.id,
-                account_id=channel_account.id,
-                platform="discord",
-                thread_id="thread",
-                id=origin.id,
-                created_at=origin.created_at,
-            ),
-            message_text="yes",
-        )  # type: ignore[arg-type]
     foreign = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        channel_auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/foreign",
-        confirmed=True,
+        runtime, channel_auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/foreign"
     )
     assert foreign.status == "sent"
     async with committing_sessionmaker() as session:
@@ -350,7 +250,10 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     kwargs = thread.send.await_args.kwargs
     assert thread.send.await_args.args == ()
     assert kwargs["embed"].to_dict()["author"]["name"] == "ResearchBot"
-    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
+    assert (
+        kwargs["embed"].description
+        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+    )
     assert kwargs["embed"].to_dict()["color"] == 0x0C1F40
     item = kwargs["view"].children[0]
     assert item.custom_id == f"gh_connect:456:{uuid.UUID(int=1).hex}"
@@ -554,13 +457,14 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         runtime, channel_admin_auth, origin_context_id=str(uuid.uuid4())
     )
     assert own.status == "sent"
-    allowed_proposal = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+    allowed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,
         channel_admin_auth,
         origin_context_id=str(uuid.uuid4()),
         repo_name="owner/repo",
     )
-    assert allowed_proposal.status == "proposed"
+    assert allowed.status == "sent"
+    assert "Nothing is connected yet" in allowed.message
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(
             session,
@@ -569,21 +473,6 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
                 {"agent_rules": {"ConnectedBot": {"runs_in": ["other-channel"]}}}
             ),
         )
-    origin.id = uuid.uuid4()
-    origin.created_at = datetime.now(UTC) + timedelta(seconds=1)
-    async with committing_sessionmaker.begin() as session:
-        await resolve_grant_proposal(
-            session,
-            origin=SimpleNamespace(
-                tenant_id=tenant.id,
-                account_id=channel_admin.id,
-                platform="discord",
-                thread_id="thread",
-                id=origin.id,
-                created_at=origin.created_at,
-            ),
-            message_text="yes",
-        )  # type: ignore[arg-type]
     other_channel = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,
         channel_admin_auth,

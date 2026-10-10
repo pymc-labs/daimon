@@ -74,7 +74,10 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
     kwargs = interaction.followup.send.await_args.kwargs
     assert kwargs["ephemeral"] is True
     assert interaction.followup.send.await_args.args == ()
-    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
+    assert (
+        kwargs["embed"].description
+        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+    )
     assert kwargs["embed"].to_dict()["author"]["name"] == "Daimon"
     assert kwargs["view"].children[0].url == (
         "https://mcp.test/oauth/github/connect/private-link-token"

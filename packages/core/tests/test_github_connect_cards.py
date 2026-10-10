@@ -26,7 +26,11 @@ def test_names_on_connect_card(name: str, shown: str | None) -> None:
         public_base_url="https://mcp.test",
     )
     assert card.author_name == (shown or "This agent")
-    assert card.description == f"Pick repos {shown or 'this agent'} can use."
+    assert (
+        card.description
+        == "Nothing is connected yet.\n\n"
+        + f"Tap the button and tick the repos {shown or 'this agent'} can use."
+    )
     if shown is None:
         assert name not in json.dumps(
             cards.connect_button_blocks("https://mcp.test/secret", card=card)
@@ -83,4 +87,8 @@ def test_card_clips_long_agent_name() -> None:
         public_base_url="https://mcp.test",
     )
     assert card.author_name == name[:80]
-    assert card.description == f"Pick repos {name[:80]} can use."
+    assert (
+        card.description
+        == "Nothing is connected yet.\n\n"
+        + f"Tap the button and tick the repos {name[:80]} can use."
+    )

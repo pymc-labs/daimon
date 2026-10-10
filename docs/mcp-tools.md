@@ -218,7 +218,7 @@ Remove one repository from one agent after confirmation in chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `remove_repo` | Discord callers, Slack callers | Remove owner/repo from this agent only, after the requester confirms in a later turn. |
+| `remove_repo` | Discord callers, Slack callers | Remove owner/repo from this agent only. |
 
 ## `github_requests`
 

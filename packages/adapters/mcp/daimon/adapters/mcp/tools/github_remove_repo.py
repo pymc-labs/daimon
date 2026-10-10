@@ -21,7 +21,6 @@ from daimon.core.stores.github_access import (
     remove_agent_repo,
     repo_id_for_agent_removal,
 )
-from daimon.core.stores.github_grant_proposals import consume, propose
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -67,7 +66,6 @@ async def remove_repo_impl(
     if requested.count("/") != 1 or any(c.isspace() for c in requested):
         raise ToolError("Name one repo as owner/repo.")
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
-    question = f"Remove {requested} from {agent.name}?"
     async with runtime.session_factory.begin() as session:
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
@@ -98,36 +96,7 @@ async def remove_repo_impl(
         )
         if repo_id is None:
             raise ToolError("That repo is not on this agent's list.")
-        if not confirmed:
-            await propose(
-                session,
-                tenant_id=auth.tenant_id,
-                account_id=auth.account_id,
-                platform_user_id=auth.platform_user_id,
-                platform=auth.platform,
-                thread_id=origin.thread_id,
-                agent_id=agent_id,
-                repo_name=requested,
-                ability="remove",
-                origin_id=origin.id,
-            )
-            return RemoveRepoResult(status="proposed", message=question)
-        if not await consume(
-            session,
-            tenant_id=auth.tenant_id,
-            account_id=auth.account_id,
-            platform_user_id=auth.platform_user_id,
-            platform=auth.platform,
-            thread_id=origin.thread_id,
-            agent_id=agent_id,
-            repo_name=requested,
-            ability="remove",
-            origin_id=origin.id,
-            origin_created_at=origin.created_at,
-        ):
-            return RemoveRepoResult(
-                status="proposed", message=f"Please confirm in a new message: {question}"
-            )
+        # A clear ask is enough (Derick, 2026-10-10): no separate "say yes" turn.
         removed = await remove_agent_repo(
             session,
             tenant_id=auth.tenant_id,
@@ -137,7 +106,13 @@ async def remove_repo_impl(
         )
         if not removed:
             raise ToolError("That repo is no longer on this agent's list.")
-    return RemoveRepoResult(status="removed", message=f"Removed {requested} from {agent.name}.")
+    return RemoveRepoResult(
+        status="removed",
+        message=(
+            f"Removed {requested} from {agent.name}. "
+            "To undo, ask me to add it back or use Connect GitHub."
+        ),
+    )
 
 
 def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -150,10 +125,11 @@ def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         expected_ma_agent_id: str | None = None,
         confirmed: bool = False,
     ) -> RemoveRepoResult:
-        """Remove owner/repo from this agent only, after the requester confirms in a later turn.
+        """Remove owner/repo from this agent only.
 
-        Ask the returned question in plain words. Call again with confirmed=true
-        only after the same person says yes in this thread. If it was the working
+        A clear ask is enough: call it right away and reply with the returned
+        line. Ask only if the repo or agent is unclear. confirmed is ignored.
+        The Connect GitHub page also adds and removes repos. If it was the working
         repo, the working repo is cleared. Other agents keep their access.
         Pass the current turn origin and selected agent identity.
         """

@@ -3026,14 +3026,14 @@
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
-        For 'give this agent access to owner/repo', first call with repo_name and
-        confirmed=false. Ask the returned question in the thread. Only after
-        that person answers yes in a later turn, call again with confirmed=true.
-        Use write only if asked. A connected repo is granted
+        For a clear 'give this agent access to owner/repo', call with repo_name
+        right away; don't ask for a yes first. Ask only if the repo or agent is
+        unclear. Use write only if asked. confirmed is ignored. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
-        The posted button speaks for itself: do not announce or describe it.
+        After it posts, nothing is connected until the person saves on the page:
+        reply only with the line the result gives; never say done or connected.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4265,10 +4265,11 @@
     }),
     'remove_repo': dict({
       'description': '''
-        Remove owner/repo from this agent only, after the requester confirms in a later turn.
+        Remove owner/repo from this agent only.
         <blank line>
-        Ask the returned question in plain words. Call again with confirmed=true
-        only after the same person says yes in this thread. If it was the working
+        A clear ask is enough: call it right away and reply with the returned
+        line. Ask only if the repo or agent is unclear. confirmed is ignored.
+        The Connect GitHub page also adds and removes repos. If it was the working
         repo, the working repo is cleared. Other agents keep their access.
         Pass the current turn origin and selected agent identity.
       ''',
@@ -5641,7 +5642,8 @@
       'description': '''
         Choose the one repo in this agent's filesystem, or pass 'none' to clear it.
         <blank line>
-        Ask once in plain words during agent setup. Use an owner/repo already on
+        A clear ask is enough: set it right away and reply with the returned
+        line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one by name when
         asked. Only a server admin or an admin for this non-managed agent's
         channels may change this setting. Pass the current turn origin and the

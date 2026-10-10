@@ -240,7 +240,10 @@ def details_card(
             if github_panel.working_repo
             else "No working repo"
         )
-        lines.append(f"To change repos, ask {details.name} in chat.")
+        lines.append(
+            "Open Connect GitHub to add or remove repos and choose a working repo, or ask "
+            f"{details.name} in chat."
+        )
         body.append(_text("\n".join(lines)))
     body += _detail_lists(details, page=page, expanded=expanded)
     actions: list[Action] = []

@@ -17,7 +17,11 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
         assert "by token" in body
     assert "set_working_repo" in setup
     assert "remove_repo" in setup
-    assert "remove_repo" in prompt
+    assert "A clear ask to add, remove or set the working repo is enough" in prompt
+    assert "The Connect GitHub page shows all of this agent's repos:" in prompt
+    assert "The Connect GitHub page shows all of this agent's repos:" in setup
+    assert "then select Save" in prompt
+    assert "In chat, make one change on a clear ask" in CREDENTIAL_GUIDANCE_BLOCK
     assert "none" in setup
     assert "GH_TOKEN_*" in cli_auth
     assert "Other repos granted to this agent" in cli_auth
