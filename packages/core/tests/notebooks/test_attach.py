@@ -297,8 +297,25 @@ async def test_attach_namespaces_by_principal() -> None:
     assert captured_paths[0] != captured_paths[1], "host URL path must differ between principals"
 
 
-async def test_attach_mints_random_slug_when_slug_none() -> None:
-    """slug=None mints a fresh 22-char random slug via _resolve_slug."""
+@pytest.mark.parametrize(
+    ("token", "expected_slug"),
+    [
+        ("A" * 22, "A" * 22),
+        ("-" + "A" * 21, "x-" + "A" * 21),
+    ],
+    ids=["ordinary-token", "leading-dash-token"],
+)
+async def test_attach_mints_random_slug_when_slug_none(
+    monkeypatch: pytest.MonkeyPatch, token: str, expected_slug: str
+) -> None:
+    """slug=None normalizes random URL-safe tokens before using them in the path."""
+    requested_bytes: list[int] = []
+
+    def token_urlsafe(nbytes: int) -> str:
+        requested_bytes.append(nbytes)
+        return token
+
+    monkeypatch.setattr("daimon.core.notebooks.publish.secrets.token_urlsafe", token_urlsafe)
     captured_paths: list[str] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -329,12 +346,12 @@ async def test_attach_mints_random_slug_when_slug_none() -> None:
             client=client,
         )
 
+    assert 16 in requested_bytes, "the slug keeps its 128-bit random source"
     assert isinstance(result["slug"], str)
-    assert re.fullmatch(r"[A-Za-z0-9_-]{22}", result["slug"]), (
-        f"slug should be 22 URL-safe chars when slug=None, got: {result['slug']!r}"
-    )
-    assert re.search(r"/admin/notebooks/[A-Za-z0-9_-]{22}/data/x\.csv$", captured_paths[0]), (
-        f"host URL path mismatch: {captured_paths[0]!r}"
+    assert result["slug"] == expected_slug, "slug uses the expected normalization"
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", result["slug"]), "slug is URL-safe"
+    assert captured_paths == [f"/admin/notebooks/{expected_slug}/data/x.csv"], (
+        f"host URL path must use the returned slug, got {captured_paths!r}"
     )
 
 
