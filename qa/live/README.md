@@ -274,3 +274,5 @@ Production prerequisites and the separate approval are in [PROD-CANARY.md](PROD-
 The handoff inbox file is the durable alert channel. Dedupe advances as soon as that file is written; tsend exit/status is retained there and in alert state. A busy composer (exit 1) is delivered-pending and does not halt a full pass or cause duplicate notices.
 
 Unmentioned channel-history seeds are recorded in `seed_messages`, without watching, model billing, or consuming a turn number. Assertions number actual agent turns; unmentioned replies to bot messages still count as turns.
+
+`http_check` supports unauthenticated GET status, MIME type and body-absence assertions. HTTP-only headless scenarios create no Discord channel or billed turn. GETs have a 15 s timeout and a bounded response body; unavailable contexts or truncated absence evidence stay PENDING.

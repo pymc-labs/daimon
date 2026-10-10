@@ -103,6 +103,8 @@ class Executor:
                         context.substitute(assertion.model_dump(mode="json", by_alias=True))
                     )
                     result.checks.append(evaluate(resolved, [], self.backend, self.judge))
+            except Pending as exc:
+                result.checks.append(Check("execution", "PENDING", str(exc)))
             except Exception as exc:
                 result.errors.append(exception_evidence(exc, "http_check"))
                 result.checks.append(
