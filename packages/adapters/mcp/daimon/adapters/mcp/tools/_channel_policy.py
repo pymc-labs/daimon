@@ -24,11 +24,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
-from daimon.adapters.mcp.tools._session_gate import session_asks_first
+from daimon.adapters.mcp.tools._session_gate import CardGap, session_card_gap
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
@@ -57,6 +58,8 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin, list_active_origins
 from fastmcp.exceptions import ToolError
+
+_log = structlog.get_logger(__name__)
 
 _WRITERS_NONE_MSG = (
     "this channel's rule sets writers to none: daimon does not post there. "
@@ -284,7 +287,7 @@ async def require_publishable(
     """Publishing a report, notebook or attachment puts content behind a link
     whoever holds it opens. An agent with a rule, or one in a channel kept to its
     own agents, publishes only once the requester approved this very call on a
-    card (`authorize(PUBLISH)`, `session_asks_first`): never from an agent key or
+    card (`authorize(PUBLISH)`, `session_card_gap`): never from an agent key or
     a run nobody watches. While a channel is kept to its own agents, a chat turn
     naming no verified origin is refused, as for create_agent."""
     origin = (
@@ -293,8 +296,12 @@ async def require_publishable(
         else await get_verified_origin(runtime, auth, origin_context_id)
     )
 
+    gap: CardGap | None = None
+
     async def approved() -> bool:
-        return await session_asks_first(runtime, auth, origin, tool_name=tool_name)
+        nonlocal gap
+        gap = await session_card_gap(runtime, auth, origin, tool_name=tool_name)
+        return gap is None
 
     refusal = await _held_refusal(
         runtime,
@@ -305,6 +312,15 @@ async def require_publishable(
     )
     nothing = "Nothing was published."
     if refusal == "needs_approval":
+        # MA runs a call held on a card only once it was approved, so a refusal
+        # here may follow an Approve: say which proof of the card was missing.
+        _log.warning(
+            "publish_gate.needs_approval",
+            tool=tool_name,
+            card_gap=gap,
+            origin_named=origin_context_id is not None,
+            agent_key=auth.agent_id is not None,
+        )
         raise ToolError(
             "this agent publishes only once the requester presses Approve on a card, and "
             "this call had none: it runs without a person, it named no origin_context_id, "

@@ -287,7 +287,7 @@ async def test_a_channel_admin_changes_only_a_local_agent_that_is_theirs(
         "an unpinned agent someone else made stays a server admin's once a member binds it"
     )
     await default_of_a("bound", by_admin=True)
-    assert await outcome("bound", "ag_bound") == "allow", "a server admin's assignment counts"
+    assert await outcome("bound", "ag_bound") == "needs_admin", "a default alone is not a rule"
 
     await default_of_a("made", by_admin=False)
     await record_creation_channel(
@@ -297,7 +297,7 @@ async def test_a_channel_admin_changes_only_a_local_agent_that_is_theirs(
         platform="discord",
         channel_id="a",
     )
-    assert await outcome("made", "ag_made") == "allow", "one made for their channel is theirs"
+    assert await outcome("made", "ag_made") == "needs_admin", "creation alone is not a rule"
     assert await outcome("made", "ag_slack") == "needs_admin", "the record is per agent id"
     await record_creation_channel(
         db_session,
@@ -1085,6 +1085,32 @@ async def test_a_member_may_not_edit_an_agent_only_an_admins_routine_runs(
         assert await outcome(operation, "u9", "solo", admin=True) == "allow", (
             f"{operation}: an admin still may"
         )
-        assert await outcome(operation, "u7", "mine") == "allow", (
-            f"{operation}: a member's own routine does not hold back their own agent"
+        assert await outcome(operation, "u7", "mine") == "needs_admin", (
+            f"{operation}: an own routine does not establish mutation ownership"
         )
+
+
+async def test_rule_bound_agent_without_a_default_still_belongs_to_its_channel_admin(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await _grant(db_session, tenant.id, "a", "u1")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"draft": ("a",)}),
+    )
+    facts = await load_target_facts(
+        db_session,
+        "agent_spec_edit",
+        tenant_id=tenant.id,
+        platform="discord",
+        agent_names=("draft",),
+        ma_agent_id="ag_draft",
+        default=DEFAULT,
+        caller=ChannelAdminCaller(platform_user_id="u1"),
+        is_daimon_managed=False,
+    )
+    assert not facts.is_reachable_in_tenant
+    assert facts.is_local_to_caller_channels and facts.is_held_by_caller
+    assert decide_operation("agent_spec_edit", is_admin=False, target=facts) == "allow"

@@ -152,6 +152,7 @@ def _ma_agent(
     managed: bool = False,
     account_id: uuid.UUID | None = None,
     mcp_servers: tuple[dict[str, object], ...] = (),
+    tools: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     metadata = {
         MA_METADATA_KEY_TENANT: str(tenant_id),
@@ -167,6 +168,7 @@ def _ma_agent(
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata=metadata,
         mcp_servers=mcp_servers,
+        tools=tools,
     )
     return agent.model_dump(mode="json")
 
@@ -478,7 +480,7 @@ async def test_request_mcp_token_creates_row_and_posts_button(
         [_ma_agent(agent_id="ag_mcp", name="daimon", tenant_id=tenant.id)]
     )
     runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=True)
     await make_account(db_session, tenant=tenant, id=auth.account_id)
     await db_session.commit()
     async with committing_sessionmaker.begin() as session:
@@ -533,7 +535,7 @@ async def test_request_mcp_oauth_creates_an_oauth_row_and_posts_the_connect_card
         [_ma_agent(agent_id="ag_mcp", name="daimon", tenant_id=tenant.id)]
     )
     runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=True)
     await make_account(db_session, tenant=tenant, id=auth.account_id)
     await db_session.commit()
     async with committing_sessionmaker.begin() as session:
@@ -1575,7 +1577,7 @@ async def test_request_agent_key_records_replaces_updated_at_for_an_existing_key
     # No deployment default and no config rows: "private-bot" answers nowhere,
     # so a member may replace its own key without an admin.
     runtime = _runtime(committing_sessionmaker, client=client)
-    auth = _auth_identity(tenant_id=tenant.id)
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=True)
     await make_account(db_session, tenant=tenant, id=auth.account_id)
     await db_session.commit()
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_replace")
@@ -1793,12 +1795,12 @@ async def test_request_skill_repo_token_refuses_a_member_on_a_shared_agent(
     assert posted == {}, "a refused request must post no card"
 
 
-async def test_request_skill_repo_token_allows_a_member_on_an_agent_that_answers_nowhere(
+async def test_request_skill_repo_token_refuses_a_member_on_an_agent_that_answers_nowhere(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member's own unbound agent is theirs to extend, so the card is posted."""
+    """An unbound agent has no verified channel ownership, so no card is posted."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
     client = _ma_client_with_agents(
@@ -1812,21 +1814,21 @@ async def test_request_skill_repo_token_allows_a_member_on_an_agent_that_answers
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9403", posted=posted)
 
-    result = await _request_skill_repo_token_impl(
-        runtime,
-        auth,
-        origin_context_id=str(origin_id),
-        expected_ma_agent_id="ag_mine",
-        agent_name="mine",
-        repo_url="https://github.com/example/skills",
-        branch="main",
-        path="",
-        purpose="importing my skills",
-        channel_id="222",
-    )
-
-    assert result.kind == "skill_repo", "the skill-repo request is minted"
-    assert await _row_count(db_session) == 1, "exactly one request row is created"
+    with pytest.raises(ToolError, match="admin"):
+        await _request_skill_repo_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_mine",
+            agent_name="mine",
+            repo_url="https://github.com/example/skills",
+            branch="main",
+            path="",
+            purpose="importing my skills",
+            channel_id="222",
+        )
+    assert await _row_count(db_session) == 0
+    assert posted == {}
 
 
 async def test_pending_task_is_sanitized_and_bounded(
@@ -2481,6 +2483,7 @@ async def test_request_skill_repo_token_on_teams_posts_a_card(
     runtime, auth, origin_id, requests = await _teams_setup(
         committing_sessionmaker, db_session, owner=uuid.uuid4()
     )
+    auth = dataclasses.replace(auth, is_admin=True, role=Role.ADMIN)
     result = await _request_skill_repo_token_impl(
         runtime,
         auth,
@@ -2662,7 +2665,7 @@ async def test_request_mcp_token_refuses_overwriting_the_shared_token_for_a_url(
     [(True, True, "linear"), (False, False, "linear"), (False, True, "notion")],
     ids=["admin-on-shared", "member-on-private-draft", "member-new-name"],
 )
-async def test_request_mcp_token_still_allows_admins_drafts_and_new_names(
+async def test_request_mcp_token_requires_ownership_even_for_drafts_and_new_names(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -2694,17 +2697,25 @@ async def test_request_mcp_token_still_allows_admins_drafts_and_new_names(
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9403", posted=posted)
 
-    result = await _request_mcp_token_impl(
-        runtime,
-        auth,
-        origin_context_id=str(origin_id),
-        expected_ma_agent_id="ag_shared",
-        agent_name="daimon",
-        server_name=server_name,
-        url="https://mcp.example.com/mcp",
-        channel_id="222",
-    )
-    assert result.message_id == "9403"
+    async def request():
+        return await _request_mcp_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            server_name=server_name,
+            url="https://mcp.example.com/mcp",
+            channel_id="222",
+        )
+
+    if is_admin:
+        result = await request()
+        assert result.message_id == "9403"
+    else:
+        with pytest.raises(ToolError, match="admin"):
+            await request()
+        assert posted == {} and await _row_count(db_session) == 0
 
 
 async def test_request_agent_key_treats_an_alias_of_a_held_key_as_a_replacement(
@@ -2919,11 +2930,13 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
             runtime, auth, repo_url="https://github.com/acme/repo", purpose="code", **common
         )
 
+    if not is_admin and tool in ("mcp_token", "mcp_oauth", "skill_repo_token"):
+        allowed = False
     if allowed:
         await request()
         assert await _row_count(db_session) == 1
     else:
-        with pytest.raises(ToolError, match="rule runs it only in certain channels"):
+        with pytest.raises(ToolError, match="rule runs it only in certain channels|admin"):
             await request()
         assert await _row_count(db_session) == 0, "a refused request posts no card"
 
@@ -3028,6 +3041,16 @@ async def test_an_external_caller_may_sign_in_only_to_a_server_the_agent_has(
         name="daimon",
         tenant_id=tenant.id,
         mcp_servers=(server,) if attached else (),
+        tools=(
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "notion",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            },
+        )
+        if attached
+        else (),
     )
     runtime = _runtime(committing_sessionmaker, client=_ma_client_with_agents([agent]))
     auth = _auth_identity(tenant_id=tenant.id, is_external=True)

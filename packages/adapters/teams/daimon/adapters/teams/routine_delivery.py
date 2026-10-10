@@ -21,11 +21,13 @@ from collections.abc import Awaitable, Callable, Mapping
 
 import httpx
 import structlog
+from daimon.adapters.teams.card import TEAMS_LIMIT
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     clear_creator,
@@ -63,7 +65,11 @@ def make_teams_routine_poster(
             member = await teams.member(target.channel_id, creator) if target else None
             if member is None:
                 return DeliveryOutcome(status="skipped", note=reason)
-            await teams.post(await teams.open_chat(member), render_fallback_dm(row, reason))
+            chat = await teams.open_chat(member)
+            for chunk in split_fenced(
+                render_fallback_dm(row, reason), TEAMS_LIMIT, word_boundary=True
+            ):
+                await teams.post(chat, chunk)
         except TEAMS_SEND_ERRORS as err:
             log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=type(err).__name__)
             return DeliveryOutcome(status="skipped", note=reason)
@@ -106,7 +112,8 @@ def make_teams_routine_poster(
             )
             return await fallback("creator_cannot_post")
         try:
-            await teams.post(teams_thread_id(target), render_fallback_post(row))
+            for chunk in split_fenced(render_fallback_post(row), TEAMS_LIMIT, word_boundary=True):
+                await teams.post(teams_thread_id(target), chunk)
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (400, 403, 404):
                 return await fallback("destination_unavailable")

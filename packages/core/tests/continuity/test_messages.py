@@ -405,15 +405,14 @@ def test_render_replacement_summary_full_with_nothing_lost() -> None:
 
 def test_render_replacement_summary_transcript_with_nothing_lost() -> None:
     assert render_replacement_summary("transcript", []) == (
-        "Your conversation and decisions came across; the working files could not be "
-        "saved from the old workspace."
-    ), "transcript transfer explains why the working files are missing"
+        "Your working files from before could not be carried over."
+    ), "a transcript transfer says briefly what was lost"
 
 
 def test_render_replacement_summary_history_with_nothing_lost() -> None:
     assert render_replacement_summary("history", []) == (
-        "Only what was posted here came across."
-    ), "history transfer is the narrowest summary"
+        "Your working files and earlier conversation could not be carried over."
+    ), "a history transfer says briefly what was lost"
 
 
 def test_render_replacement_summary_appends_not_carried_line_when_lost_is_nonempty() -> None:
@@ -424,7 +423,8 @@ def test_render_replacement_summary_appends_not_carried_line_when_lost_is_nonemp
 
 def test_render_replacement_summary_joins_multiple_lost_items_with_commas() -> None:
     assert render_replacement_summary("history", ["memory", "keys"]) == (
-        "Only what was posted here came across.\nNot carried: memory, keys."
+        "Your working files and earlier conversation could not be carried over.\n"
+        "Not carried: memory, keys."
     ), "multiple lost items should be comma-joined on the 'Not carried' line"
 
 

@@ -35,6 +35,7 @@ from daimon.adapters.scheduler.main import (
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
+    _usage_sweep_once,  # pyright: ignore[reportPrivateUsage]  # --once usage pass
     _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
 )
 from daimon.core.billing import BillingConfig
@@ -2208,7 +2209,7 @@ async def test_fire_does_not_invite_a_post_into_a_destination_protected_since(
 
     trigger = str(seen["trigger_message"])
     assert "do not post there" in trigger
-    assert "posts the end of your final reply there" not in trigger
+    assert "posts your full final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster still routes it (DM fallback)"
 
 
@@ -2245,7 +2246,7 @@ async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
 
     trigger = str(seen["trigger_message"])
     assert "Do not post to the destination yourself" in trigger
-    assert "posts the end of your final reply there" not in trigger
+    assert "posts your full final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster resolves placement and delivers"
 
 
@@ -2265,7 +2266,7 @@ async def test_fire_still_invites_a_post_when_nothing_relevant_is_protected(
         policy=TenantAccessPolicy(protected_channel_ids=("999",)),
     )
 
-    assert "posts the end of your final reply there" in str(seen["trigger_message"])
+    assert "posts your full final reply there" in str(seen["trigger_message"])
 
 
 async def test_settle_promo_credit_grants_a_due_timed_code(
@@ -2490,3 +2491,34 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     else:
         assert after.last_error is None and len(ran) == 1
     await client.close()
+
+
+async def test_run_loops_without_a_usage_sweep_runs_ticks_alone() -> None:
+    """With the sweep switched off, ticks still run and stop cleanly."""
+    stop = asyncio.Event()
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async with asyncio.timeout(5):
+        await _run_loops(tick=tick, usage_sweep=None, interval_s=0.01, stop_event=stop)
+
+    assert ticks == 3, f"ticks run without a usage sweep, got {ticks}"
+
+
+@pytest.mark.parametrize(("enabled", "expected"), [(False, 0), (True, 1)])
+async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) -> None:
+    """`--once` runs the usage pass only when the sweep is switched on."""
+    calls = 0
+
+    async def sweep() -> None:
+        nonlocal calls
+        calls += 1
+
+    await _usage_sweep_once(enabled=enabled, sweep=sweep)
+
+    assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"

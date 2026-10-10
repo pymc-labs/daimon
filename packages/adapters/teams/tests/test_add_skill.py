@@ -31,6 +31,7 @@ from daimon.testing.ma import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
+    AAD_OBJECT_ID,
     ENTRA_TENANT_ID,
     TeamsApiFake,
     build_teams_runtime,
@@ -109,12 +110,18 @@ def _versioned(
 
 @asynccontextmanager
 async def _running(
-    db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake, skills: _Skills
+    db_factory: async_sessionmaker[AsyncSession],
+    fake: TeamsApiFake,
+    skills: _Skills,
+    *,
+    admin: bool = False,
 ) -> AsyncIterator[TeamsHttpService]:
     ma = build_fake_anthropic(
         combine_handlers(skills.handle, _versioned(make_fake_ma_handler(_state())))
     )
-    runtime = build_teams_runtime(db_factory, anthropic=ma, teams=teams_settings())
+    runtime = build_teams_runtime(
+        db_factory, anthropic=ma, teams=teams_settings(admins=(AAD_OBJECT_ID,) if admin else ())
+    )
     async with running_service(runtime, fake) as service:
         yield service
 
@@ -155,7 +162,7 @@ async def test_a_paste_is_previewed_then_added_as_the_agents_own_and_details_ref
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     skills = _Skills()
-    async with _running(db_session_factory, teams_api_fake, skills) as service:
+    async with _running(db_session_factory, teams_api_fake, skills, admin=True) as service:
         opened = _form(await _dialog(service, "fetch", agent="helper"))
         preview = _form(await _dialog(service, "submit", agent="helper", skill=SKILL_MD))
         changed = _form(
@@ -192,7 +199,7 @@ async def test_an_invalid_paste_comes_back_with_the_reason_and_adds_nothing(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     skills = _Skills()
-    async with _running(db_session_factory, teams_api_fake, skills) as service:
+    async with _running(db_session_factory, teams_api_fake, skills, admin=True) as service:
         again = _form(await _dialog(service, "submit", agent="helper", skill="no frontmatter"))
     assert "hash" not in _submit_data(again), "nothing to confirm yet"
     assert "no frontmatter" in json.dumps(again), "the paste is kept to fix"
@@ -202,7 +209,7 @@ async def test_an_invalid_paste_comes_back_with_the_reason_and_adds_nothing(
 async def test_a_built_in_agent_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake, _Skills()) as service:
+    async with _running(db_session_factory, teams_api_fake, _Skills(), admin=True) as service:
         opened = await _dialog(service, "fetch", agent="daimon")
     assert opened["task"]["value"] == add_skill.BUILT_IN
 

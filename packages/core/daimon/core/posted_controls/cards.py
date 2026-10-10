@@ -35,7 +35,11 @@ from datetime import datetime
 from typing import Final, Literal, Self, cast
 
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.credential_requests import build_custom_id, split_skill_repo_target
+from daimon.core.credential_requests import (
+    build_custom_id,
+    mcp_permission_message,
+    split_skill_repo_target,
+)
 from daimon.core.env_file import env_shadow_phrase
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.stores.domain import CredentialRequestRow
@@ -77,6 +81,7 @@ CardKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo"]
 RefusalReason = Literal[
     "admin_required",
     "replacement_admin_required",
+    "mcp_permission_required",
     "env_file_invalid",
     #: Nothing was saved because the thing being configured is gone or
     #: misconfigured — the agent no longer resolves, or the request row lost
@@ -357,6 +362,12 @@ def _refusal_content(
     refusal_lines: Sequence[str],
     replaces: str | None = None,
 ) -> tuple[str, ...]:
+    if refusal == "mcp_permission_required":
+        return (
+            f"🛡️ {target} was not connected to {agent_name}.",
+            mcp_permission_message(agent_name),
+            "Nothing was saved.",
+        )
     if refusal == "admin_required":
         return (
             f"🛡️ {agent_name}'s working repo was not changed.",

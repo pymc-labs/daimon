@@ -352,7 +352,7 @@ async def test_detach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
         )
 
 
-async def test_detach_mcp_server_impl_allows_non_admin_when_agent_unreachable(
+async def test_detach_mcp_server_impl_refuses_non_admin_when_agent_unreachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -365,13 +365,14 @@ async def test_detach_mcp_server_impl_allows_non_admin_when_agent_unreachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    await _detach_mcp_server_impl(
-        _runtime(client, session_factory=db_session_factory),
-        auth,
-        agent_name="unscoped-agent",
-        server_name="ctx7",
-    )
-    assert captured.get("mcp_servers") == [], "an unreachable agent's detach is not gated"
+    with pytest.raises(ToolError, match="admin"):
+        await _detach_mcp_server_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="unscoped-agent",
+            server_name="ctx7",
+        )
+    assert captured == {}, "refusal precedes the agent update"
 
 
 async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
@@ -616,7 +617,7 @@ async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(
         )
 
 
-async def test_remove_skill_impl_allows_non_admin_when_agent_unreachable(
+async def test_remove_skill_impl_refuses_non_admin_when_agent_unreachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     account_id = uuid.uuid4()
@@ -629,13 +630,14 @@ async def test_remove_skill_impl_allows_non_admin_when_agent_unreachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    await _remove_skill_impl(
-        _runtime(client, session_factory=db_session_factory),
-        auth,
-        agent_name="unscoped-agent",
-        skill_id="skill_x",
-    )
-    assert captured.get("skills") == [], "an unreachable agent's skill removal is not gated"
+    with pytest.raises(ToolError, match="admin"):
+        await _remove_skill_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="unscoped-agent",
+            skill_id="skill_x",
+        )
+    assert captured == {}, "refusal precedes the agent update"
 
 
 async def test_remove_skill_impl_refuses_a_built_in_agent_even_for_an_admin(
@@ -898,7 +900,7 @@ async def test_remove_agent_key_impl_removes_existing_key(
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     runtime = _runtime(client, session_factory=db_session_factory)
     result = await _remove_agent_key_impl(runtime, auth, agent_name="demo", key="API_KEY")
@@ -919,7 +921,7 @@ async def test_remove_agent_key_impl_is_idempotent_when_key_absent(
     )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -1017,7 +1019,7 @@ async def test_remove_agent_key_impl_allows_admin_on_default_agent(
     )
 
 
-async def test_remove_agent_key_impl_allows_non_admin_when_agent_unreachable(
+async def test_remove_agent_key_impl_refuses_non_admin_when_agent_unreachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """An agent nobody has scoped has a blast radius of one agent, so its owner
@@ -1042,13 +1044,13 @@ async def test_remove_agent_key_impl_allows_non_admin_when_agent_unreachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    result = await _remove_agent_key_impl(
-        _runtime(client, session_factory=db_session_factory),
-        auth,
-        agent_name="unscoped-agent",
-        key="MY_KEY",
-    )
-    assert result.removed is True, "an unreachable agent's key removal is not gated"
+    with pytest.raises(ToolError, match="admin"):
+        await _remove_agent_key_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            agent_name="unscoped-agent",
+            key="MY_KEY",
+        )
 
 
 async def test_remove_agent_key_impl_succeeds_against_seeded_agent_with_no_daimon_account(
@@ -1072,7 +1074,7 @@ async def test_remove_agent_key_impl_succeeds_against_seeded_agent_with_no_daimo
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -1117,7 +1119,7 @@ async def test_remove_agent_key_impl_isolates_between_agents_in_same_tenant(
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
     runtime = _runtime(client, session_factory=db_session_factory)
     result = await _remove_agent_key_impl(runtime, auth, agent_name="agent-a", key="SHARED")

@@ -543,6 +543,9 @@ async def _mark_card_interrupted(
             await message.edit(embed=embed, view=None)
         return True
     except (discord.HTTPException, discord.ClientException) as err:
+        if isinstance(err, discord.HTTPException) and err.code == 10008:
+            log.info("turn.card_intent_message_missing", intent_id=str(intent_id))
+            return True
         if is_definite_recovery_failure(err):
             raise UnrecoverableTurnCardError(str(err), {message.id}) from err
         log.warning(

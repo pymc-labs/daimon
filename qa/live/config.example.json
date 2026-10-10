@@ -1,0 +1,64 @@
+{
+  "driver_path": "/home/clsandoval/.config/daimon-qa/qa.py",
+  "model": "claude-haiku-4-5-20251001",
+  "pricing": {
+    "per_turn_usd": 0.05,
+    "judge_input_per_million": 1.0,
+    "judge_output_per_million": 5.0,
+    "judge_input_token_limit": 12000
+  },
+  "staging": {
+    "guild_id": "1435062989119295640",
+    "category_id": "1435062989119295641",
+    "daimon_id": "1530628070405308456",
+    "qa_user_ids": [
+      "1533049261032341668"
+    ],
+    "project": "pymc-daimon-staging",
+    "enabled": false,
+    "guild_allowlist": [],
+    "database_env": "DAIMON_QA_STAGING_DATABASE_URL",
+    "context": {},
+    "warm_url": "https://staging-daimon-mcp-251774259661.us-east4.run.app/readyz",
+    "model_probe": [],
+    "qa_agent_name": null
+  },
+  "prod": {
+    "guild_id": "1435062989119295640",
+    "category_id": "1435062989119295641",
+    "daimon_id": "1530628070405308456",
+    "qa_user_ids": [
+      "1533049261032341668"
+    ],
+    "project": "pymc-daimon",
+    "enabled": false,
+    "guild_allowlist": [],
+    "database_env": "DAIMON_QA_PROD_DATABASE_URL",
+    "context": {},
+    "warm_url": "",
+    "model_probe": [],
+    "qa_agent_name": null
+  },
+  "alerts": {
+    "inbox": "/home/clsandoval/cs/root-opus-handoff-20260923/inbox",
+    "command": [
+      "/home/clsandoval/cs/root-opus-handoff-20260923/tsend.sh",
+      "%618"
+    ],
+    "cooldown_s": 21600,
+    "pending_threshold": 3
+  },
+  "admin_hooks": {},
+  "poll_interval_s": 4,
+  "settle_s": 6,
+  "fallback_watch_s": 180,
+  "log_ingestion_delay_s": 45,
+  "delete_retry_s": 2,
+  "orphan_after_s": 3600,
+  "schedule": {
+    "staging_canary_interval_s": 3600,
+    "prod_canary_interval_s": 3600,
+    "catalog_runs_per_day": 1,
+    "catalog_budget_usd": 2
+  }
+}

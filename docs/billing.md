@@ -191,7 +191,8 @@ Two boundaries of the design worth stating plainly:
   so queued turns do not widen the bound. An MCP `start_turn` session is
   worse. Its spend
   reaches the ledger only when the scheduler's usage sweep next reads the
-  session: up to two sweep passes plus one tick interval later.
+  session: up to two sweep passes plus one tick interval later, and not at
+  all while the sweep is switched off (its default, see "The sweep" below).
   Until then the gate reads a balance that leaves out earlier headless turns,
   and MCP turns have no concurrency cap. The overdraft is therefore bounded
   by what a tenant can start between two sweeps, not by N concurrent turns.
@@ -463,7 +464,21 @@ beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 
-**The sweep.** An MCP `start_turn` creates a session and sends a message but
+**The sweep.** The sweep is **off by default**
+(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false`): the current implementation
+lists every session in the Managed Agents workspace and reads their events,
+which drained the workspace request rate limit and stalled turn admission.
+While it is off, three things pause: usage from MCP `start_turn` sessions
+(and other headless sessions with no live recorder) is not debited; usage a
+live adapter missed (a crashed adapter, an interrupted turn) is not
+recovered; and absorbed spend for exempt sessions is not logged. Turning it
+back on replays what was missed, because recording is idempotent and the
+startup pass reads every stamped session, but only for sessions and events
+still present in the workspace. A scoped replacement that reads only recently
+active sessions is planned; until it ships, the rest of this section
+describes the sweep when it is switched on.
+
+An MCP `start_turn` creates a session and sends a message but
 never drives the stream, so the inline hook never fires for it.
 `packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
 scheduler loop, pausing the tick interval between passes, it lists Managed

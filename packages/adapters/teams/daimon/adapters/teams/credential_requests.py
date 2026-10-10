@@ -47,7 +47,11 @@ from daimon.core.agent_reach import load_target_facts
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
-from daimon.core.credential_requests import availability_for_request, split_skill_repo_target
+from daimon.core.credential_requests import (
+    CredentialRequestOutcome,
+    availability_for_request,
+    split_skill_repo_target,
+)
 from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
@@ -939,7 +943,13 @@ class TeamsCredentialRequests:
         service_url: str | None,
     ) -> None:
         """Close a spent request that wrote nothing; no work resumes on it."""
-        outcome = "token_rejected" if reason == "token_rejected" else "write_failed"
+        outcome: CredentialRequestOutcome = (
+            "token_rejected"
+            if reason == "token_rejected"
+            else "policy_refused"
+            if reason == "mcp_permission_required"
+            else "write_failed"
+        )
         async with self._runtime.sessionmaker.begin() as session:
             await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
         await self._edit(row, "refused", service_url, reason=reason)
@@ -1010,7 +1020,11 @@ class TeamsCredentialRequests:
                 return await self._refuse(consumed, "target_unavailable", service_url)
             if connect.refused:
                 attempt.retry_allowed = False
-                return await self._refuse(consumed, "replacement_admin_required", service_url)
+                return await self._refuse(
+                    consumed,
+                    "replacement_admin_required" if connect.replaces else "mcp_permission_required",
+                    service_url,
+                )
             log.info("teams.credential.mcp", mcp_server_url=url)
             probe = self._runtime.mcp_token_probe
             if await is_token_rejected(probe, mcp_server_url=url, token=secret):

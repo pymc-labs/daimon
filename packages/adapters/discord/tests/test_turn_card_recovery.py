@@ -1033,3 +1033,16 @@ async def test_unprompted_terminal_without_post_retires_prepared_intent(
         expected_message_id=None,
         allow_prepared_without_message=True,
     ), "a known no-post terminal can retire its prepared row"
+
+
+async def test_card_deleted_between_fetch_and_interrupt_is_already_reconciled(monkeypatch):
+    message = _fetched_message(123, _TURN_ID)
+    edit = AsyncMock(
+        side_effect=discord.NotFound(
+            MagicMock(status=404, reason="Not Found"),
+            {"code": 10008, "message": "Unknown Message"},
+        )
+    )
+    monkeypatch.setattr(discord.Message, "edit", edit)
+    assert await turn_card_recovery._mark_card_interrupted(message, intent_id=_TURN_ID)
+    edit.assert_awaited_once()

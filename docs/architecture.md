@@ -15,10 +15,12 @@ setting; [self-hosting.md](self-hosting.md) has the deployment.
 Discord, Slack, scheduler and MCP emit `runtime.health` every 30 seconds with
 Anthropic response attempts, database pool use, event loop lag and active turns.
 The Discord process also reports Discord 429 retries by route and longest retry wait.
-An opening Discord mention gets no reply in the parent channel while its thread
-opens. If naming and creation take over three seconds, the mention gets a ⌛
-reaction, removed once the thread exists. A thread that cannot be opened gets
-one plain reply under the mention.
+A Discord mention gets a best-effort 👀 reaction before turn admission resolves
+its agent and environment. The reaction clears when the turn completes, fails
+or is cancelled. A queued follow-up uses ⌛ instead, cleared after its batch
+settles. An opening mention gets no reply in the parent channel while its thread
+opens, and its existing acknowledgment covers naming and creation. A thread
+that cannot be opened gets one plain reply under the mention.
 
 Credential cards on Discord, Slack and Teams remove their form button while
 saving an MCP or GitHub token. A rejected token or failed save records an
@@ -219,6 +221,11 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+A Discord Unknown Message (10008) while editing a turn card posts a fresh
+message if the answer has not arrived yet. Once an answer is delivered, a
+stale edit is logged and ignored. Stop still interrupts the turn when its
+card has been deleted; restart recovery treats a card deleted between its
+lookup and edit as already resolved. Other edit failures still propagate.
 Restart recovery keeps a card intent active when a pending card cannot be
 edited. It does not post a replacement status card, because the original
 button could remain. A definite missing-webhook, missing-token, permission or
@@ -241,6 +248,17 @@ cap and channel budget checks, then the metered classifier. A `respond`
 verdict runs an ordinary turn through `admit()` as the burst's newest author,
 with every notice withheld. Teams also counts a quote of the bot's message as
 a mention.
+
+With `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=true` (off by default), a person's
+first unmentioned reply in a thread the bot opened, in a thread that isn't
+followed, gets a 🔔 reaction and no turn: only a mention continues the
+conversation. The hint shows once per thread per
+`DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H` (in memory, so a restart
+allows one more), never on a reply that mentions someone else, never to any
+bot, and never where the channel's protection state forbids posting. Every
+Discord thread turn carries a `<delivery>` element telling the agent what
+starts a turn and that other threads are separate sessions, so it does not
+tell someone an earlier message never reached it.
 
 Discord, Slack and Teams limit simultaneous chat turns per tenant, and Discord
 also has an optional process-wide limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`,
@@ -855,6 +873,11 @@ per-hook cost contract:
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
 
+Stop also opens its SSE subscription before sending `user.interrupt`, so an
+immediate idle acknowledgement is observed. The interrupt and acknowledgement
+wait are bounded by the same 120-second timeout; the subscription closes when
+the wait finishes or fails.
+
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It delivers each file before deleting its MA
@@ -1454,8 +1477,9 @@ creates leave the token stable; unrelated and OAuth credentials are preserved.
 The core driver calls an optional `on_acknowledgment` lifecycle hook with
 `accepted` after the initial event send and `done` after successful answer
 delivery. Missing hooks are no-ops; reaction failures are bounded and do not
-fail the turn. Opted-in Discord and Slack tenants react with eyes, then a check
-mark on success. Unprompted Discord turns stay silent; failures and cancellation
+fail the turn. Discord and Slack acknowledge admitted mentions with eyes; queued Discord
+follow-ups use an hourglass. These markers clear on every terminal path.
+Opted-in tenants also get a check mark on success. Unprompted Discord turns stay silent; failures and cancellation
 do not get a completion marker. Continuations without a trigger message skip
 reactions.
 
@@ -1467,7 +1491,9 @@ An unprompted Discord turn cancelled before it has an answer stays silent.
 Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
-entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
+entries keep the existing in-place answer. Discord adds eyes before admission;
+Slack adds eyes at admission. Both clear eyes independently of completion pings.
+Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with
 an @mention in a channel), then sets its card to "Done."; bots cannot
 react there.

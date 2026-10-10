@@ -253,7 +253,7 @@ class SlackTurnLifecycle:
         self._revealed_first_blocks: list[dict[str, Any]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
-        # Admission already adds eyes; only opted-in completion replaces it.
+        # Admission adds eyes; terminal hooks clear them for every tenant.
         if not self._notify_on_completion or phase == "accepted":
             return
         if self._trigger_ts is None or self.final_ts is None:
@@ -263,7 +263,11 @@ class SlackTurnLifecycle:
             timestamp=self._trigger_ts,
             name="white_check_mark",
         )
-        if phase == "done":
+
+    async def _clear_acknowledgment(self) -> None:
+        if self._trigger_ts is None:
+            return
+        with contextlib.suppress(*_SLACK_SEND_ERRORS):
             await self._client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
                 timestamp=self._trigger_ts,
@@ -738,6 +742,7 @@ class SlackTurnLifecycle:
             if not surface_replaced:
                 await self._repair_terminal_flush(repair_notice)
         finally:
+            await self._clear_acknowledgment()
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
             if self._pending_registered and self._deregister_pending is not None:
@@ -847,6 +852,7 @@ class SlackTurnLifecycle:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
             await self._repair_terminal_flush("Something went wrong.\nMention me to try again.")
         finally:
+            await self._clear_acknowledgment()
             if self._status_ts is not None:
                 self._deregister(self._status_ts)
             if self._pending_registered and self._deregister_pending is not None:

@@ -344,8 +344,8 @@ async def test_member_default_agent_edit_refuses_with_admin_handoff(
         },
     )
     text = _result_text(called)
-    assert "research-bot" in text and "admin" in text and "forking" in text, (
-        f"handoff must preserve target and non-gated alternative: {text}"
+    assert "research-bot" in text and "admin" in text and "channel-restricted" in text, (
+        f"handoff must preserve the target and the channel ownership requirement: {text}"
     )
     assert "/agent-setup" not in text and "DAIMON_" not in text, (
         "refusal must not disclose deployment internals"
@@ -465,7 +465,7 @@ async def test_member_can_request_new_key_on_managed_agent(
     )
 
 
-async def test_member_can_request_mcp_token_on_managed_default_agent(
+async def test_member_cannot_attach_mcp_through_token_request_on_managed_default_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     key = SecretStr(Fernet.generate_key().decode())
@@ -570,24 +570,5 @@ async def test_member_can_request_mcp_token_on_managed_default_agent(
             },
         )
         text = _result_text(called)
-        assert "123.456" in text and "Example Research MCP" in text, (
-            f"member enrollment must actually post: {text}"
-        )
-        payload = slack.requests[("POST", URL("https://slack.com/api/chat.postMessage"))][0].kwargs[
-            "json"
-        ]
-    token = next(block for block in payload["blocks"] if block["type"] == "actions")["elements"][0][
-        "value"
-    ]
-    async with committing_sessionmaker() as session:
-        row = await peek_credential_request(session, token=token)
-    assert row is not None and row.target == "Example Research MCP", (
-        "posted token must identify a persisted request"
-    )
-    assert row.tenant_id == tenant.id and row.requester_platform_user_id == "U_TEST", (
-        "request must stay tenant- and requester-bound"
-    )
-    assert row.kind == "mcp" and row.mcp_server_url == "https://mcp.example.com/research", (
-        "private enrollment must persist the requested MCP endpoint for token submission"
-    )
-    assert row.account_id == account.id, "the request must belong to the member who asked"
+        assert "admin" in text and "Nothing changed" in text, text
+        assert ("POST", URL("https://slack.com/api/chat.postMessage")) not in slack.requests

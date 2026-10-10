@@ -23,33 +23,48 @@ def _fence_state(text: str) -> tuple[bool, str]:
     return is_open, lang
 
 
-def _find_split(window: str) -> int:
+def _find_split(window: str, *, word_boundary: bool = False) -> int:
     """Prefer a paragraph break, then a line break, else cut at the window's end."""
     for separator in ("\n\n", "\n"):
         pos = window.rfind(separator)
-        if pos != -1:
-            return pos
+        if pos != -1 and (not word_boundary or pos >= len(window) // 2):
+            return pos + len(separator) if word_boundary else pos
+    if word_boundary:
+        spaces = list(re.finditer(r"[ \t]+", window))
+        if spaces:
+            return spaces[-1].end()
     return len(window)
 
 
-def split_fenced(text: str, limit: int, *, blockquote: bool = False) -> list[str]:
+def split_fenced(
+    text: str, limit: int, *, blockquote: bool = False, word_boundary: bool = False
+) -> list[str]:
     """Split `text` into chunks of at most `limit` chars, repairing code fences.
 
     `blockquote` prefixes the injected fence markers with `> ` for an answer
-    quoted line by line.
+    quoted line by line. ``word_boundary`` prefers whitespace cuts and reserves
+    room for repaired fences, so routine messages stay within the platform limit.
     """
+    if word_boundary and limit < 16:
+        raise ValueError("word-boundary splitting needs a limit of at least 16")
     if len(text) <= limit:
         return [text]
     quote = "> " if blockquote else ""
     chunks: list[str] = []
     remaining, reopen = text, ""
-    while len(remaining) > limit:
-        cut = _find_split(remaining[:limit]) or limit
+    while len(remaining) + (len(reopen) if word_boundary else 0) > limit:
+        # Routine digests keep words together and reserve space for fence repair.
+        budget = limit - len(reopen) - len(f"\n{quote}```") if word_boundary else limit
+        cut = _find_split(remaining[:budget], word_boundary=word_boundary) or budget
         piece = reopen + remaining[:cut]
-        remaining = remaining[cut:].lstrip("\n")
+        remaining = remaining[cut:] if word_boundary else remaining[cut:].lstrip("\n")
         is_open, lang = _fence_state(piece)
-        chunks.append(f"{piece}\n{quote}```" if is_open else piece)
+        separator = "" if word_boundary and piece.endswith("\n") else "\n"
+        chunks.append(f"{piece}{separator}{quote}```" if is_open else piece)
         reopen = f"{quote}```{lang}\n" if is_open else ""
+        if word_boundary and len(reopen) + 4 >= limit:
+            # A long language label is optional in a synthetic reopening fence.
+            reopen = f"{quote}```\n"
     if remaining:
         chunks.append(reopen + remaining)
     return chunks

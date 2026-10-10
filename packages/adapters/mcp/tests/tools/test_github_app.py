@@ -63,6 +63,7 @@ patch_discord_http = _tools_conftest.patch_discord_http
 
 _VIEW_CHANNEL = 1 << 10
 _SEND_MESSAGES = 1 << 11
+_SEND_MESSAGES_IN_THREADS = 1 << 38
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +282,61 @@ async def test_post_app_install_link_posts_link_button_with_no_custom_id(
     assert "custom_id" not in button, (
         "a link button must carry no custom_id — nothing dispatches this button"
     )
+
+
+async def test_app_install_button_checks_private_membership_but_allows_public_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    thread_type = 12
+    posts: list[str] = []
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "222":
+                return _text_channel_payload()
+            return {
+                "id": "999",
+                "parent_id": "222",
+                "owner_id": "1",
+                "name": "install-thread",
+                "type": thread_type,
+                "message_count": 1,
+                "member_count": 1,
+                "thread_metadata": {
+                    "archived": False,
+                    "auto_archive_duration": 1440,
+                    "archive_timestamp": "2026-05-09T00:00:00+00:00",
+                },
+                "guild_id": "111",
+            }
+        if route.path == "/channels/{channel_id}/thread-members/{user_id}":
+            raise discord.NotFound(MagicMock(status=404), {"message": "Unknown Member"})
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            posts.append(str(route.channel_id))
+            return _message_payload(message_id="9302", channel_id="999")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    runtime = _runtime(session_factory=db_session_factory)
+    with pytest.raises(ToolError, match="missing view_channel permission"):
+        await _post_app_install_link_impl(
+            runtime, _auth_identity(), channel_id="999", purpose="repo"
+        )
+    assert posts == []
+
+    thread_type = 11
+    result = await _post_app_install_link_impl(
+        runtime, _auth_identity(), channel_id="999", purpose="repo"
+    )
+    assert result.message_id == "9302"
+    assert posts == ["999"]
 
 
 # ---------------------------------------------------------------------------

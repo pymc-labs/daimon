@@ -28,9 +28,12 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
+import structlog
 from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 
 import discord
+
+log = structlog.get_logger()
 
 
 class GuardedView(discord.ui.View):
@@ -93,4 +96,9 @@ class CancelView(GuardedView):
     ) -> None:
         self._cancel.set()
         self._finalize()
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException as err:
+            if err.code != 10008:
+                raise
+            log.info("turn.cancel_message_missing")

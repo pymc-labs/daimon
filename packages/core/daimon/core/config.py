@@ -388,6 +388,26 @@ class DiscordSettings(BaseModel):
             "finishes; a failed creation is answered with a visible error reply."
         ),
     )
+    unmentioned_reply_hint: bool = Field(
+        default=False,
+        description=(
+            "React with 🔔 to a person's reply that does not @mention the bot in a thread the "
+            "bot opened, as a hint that only mentions start a turn. The message itself is "
+            "never answered. At most once per thread per unmentioned_reply_hint_cooldown_h, "
+            "never on a message that mentions someone else, never to any bot, never where the "
+            "agent may not post, and never while the thread is followed (thread "
+            "participation on). Off by default: the cooldown is kept in memory, so each "
+            "restart allows one more hint per thread."
+        ),
+    )
+    unmentioned_reply_hint_cooldown_h: float = Field(
+        default=24.0,
+        gt=0,
+        description=(
+            "Hours before the unmentioned-reply hint may be shown again in the same thread. "
+            "Kept in memory, so a restart allows one more."
+        ),
+    )
     max_concurrent_turns_per_tenant: int = Field(
         default=3,
         description=(
@@ -1330,7 +1350,9 @@ class Settings(BaseSettings):
         default_factory=dict[uuid.UUID, bool],
         description=(
             "Per-tenant completion notification policy, keyed by tenant UUID. "
-            "True enables accepted/done reactions and posts the final answer as a fresh reply "
+            "Discord and Slack acknowledge mentions independently of this setting and clear "
+            "the acknowledgment when the turn settles. True adds a success check mark and "
+            "posts the final answer as a fresh reply "
             "mentioning only the requester "
             "on Discord and Slack. On Teams it closes the status card and posts the answer "
             "fresh, mentioning the requester in channels (Teams bots cannot react). "

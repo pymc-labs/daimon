@@ -37,13 +37,6 @@ agent than the turn's responder; it does not hold the tool on `always_ask`;
 MA could not be read."""
 
 
-async def session_asks_first(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None, *, tool_name: str
-) -> bool:
-    """Whether this call comes from a chat turn whose session waits for the person's Approve."""
-    return await session_card_gap(runtime, auth, origin, tool_name=tool_name) is None
-
-
 async def session_card_gap(
     runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None, *, tool_name: str
 ) -> CardGap | None:

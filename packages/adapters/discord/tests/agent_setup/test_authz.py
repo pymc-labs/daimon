@@ -11,10 +11,12 @@ from daimon.adapters.discord.agent_setup.authz import (
 )
 from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
@@ -117,7 +119,7 @@ async def test_admin_passes_without_touching_the_database() -> None:
     interaction.followup.send.assert_not_called()
 
 
-async def test_non_admin_unreachable_agent_passes(
+async def test_non_admin_unreachable_agent_refuses(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     guild_id = 222001
@@ -129,8 +131,8 @@ async def test_non_admin_unreachable_agent_passes(
 
     refused = await refuse_if_reachable_and_not_admin(interaction, runtime=runtime, entry=entry)
 
-    assert refused is False, "an agent nobody has scoped must not be refused for a non-admin"
-    interaction.response.send_message.assert_not_called()
+    assert refused is True, "unreachable does not establish ownership"
+    interaction.response.send_message.assert_called_once()
     interaction.followup.send.assert_not_called()
 
 
@@ -293,11 +295,8 @@ async def test_shared_gate_non_admin_passes_on_an_unreachable_non_system_agent(
 
     refused = await refuse_if_shared_and_not_admin(interaction, runtime=runtime, entry=entry)
 
-    assert refused is False, (
-        "an agent that is neither seeded nor currently resolved by anything is "
-        "the member's own to attach a repo to"
-    )
-    interaction.response.send_message.assert_not_called()
+    assert refused is True, "unreachable does not establish ownership"
+    interaction.response.send_message.assert_called_once()
     interaction.followup.send.assert_not_called()
 
 
@@ -350,6 +349,12 @@ async def test_both_gates_let_a_channel_admin_edit_an_agent_local_to_their_chann
             role_ids=[],
             user_ids=["2"],
             actor_account_id=None,
+        )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_channel_pins={"local-bot": ("500",)}),
         )
     runtime = _runtime(
         sessionmaker=db_session_factory,

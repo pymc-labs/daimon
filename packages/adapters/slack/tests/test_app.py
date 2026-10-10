@@ -58,6 +58,7 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.turn.posture import Billed, BillingPosture
+from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing import ma_agent, ma_model_usage, ma_session, ma_session_agent
 from pydantic import SecretStr
@@ -1007,8 +1008,9 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
             for method, url in fake_slack_web_client.mock.requests
             if "reactions." in str(url)
         ]
-        assert len(reactions) == 1
+        assert len(reactions) == 2
         assert "reactions.add" in reactions[0] and "name=eyes" in reactions[0]
+        assert "reactions.remove" in reactions[1] and "name=eyes" in reactions[1]
 
         return state
 
@@ -1263,7 +1265,7 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
         mapping_id=None,
         watermark=None,
         reused=False,
-        continuity=SimpleNamespace(state="continued", transfer_kind=None),
+        continuity=ContinuityOutcome(),
     )
 
     @asynccontextmanager

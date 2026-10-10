@@ -646,6 +646,7 @@ async def test_skill_repo_submission_writes_the_skill_credential_not_the_working
     NOWHERE else: somebody offering a token so an agent can read skills out of
     a repo has not asked for that repo to become the agent's checkout, and the
     card they clicked said the working repo does not change."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     monkeypatch.setattr(
         credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
     )
@@ -940,6 +941,9 @@ async def test_skill_repo_submission_passes_seeded_names_and_admin_status_to_the
 
     await _submit_skill_repo(runtime, token)
 
+    if not is_admin:
+        sync.assert_not_awaited()
+        return
     assert sync.call_args.kwargs["seeded_skill_names"] == frozenset({"eda"})
     assert sync.call_args.kwargs["is_admin"] is is_admin
 
@@ -952,6 +956,7 @@ async def test_skill_repo_submission_puts_a_refused_import_on_the_card(
     fake_slack_web_client: Any,
 ) -> None:
     """A refusal is not a success: nothing attaches, and the card says why."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     monkeypatch.setattr(
         credential_submissions_mod, "pat_can_access_repo", AsyncMock(return_value=True)
     )
@@ -999,6 +1004,7 @@ async def test_skill_repo_failure_receipt_reflects_confirmed_token_storage(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, fernet_key = await _seed_team(db_session)
     live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
 
@@ -1300,6 +1306,7 @@ async def test_stale_replacement_leaves_the_stored_value_alone_and_renders_super
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, fernet_key = await _seed_team(db_session)
     live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
@@ -1634,6 +1641,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     fake_slack_web_client: Any,
 ) -> None:
     """The card is the receipt (both would say the same thing twice)."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, attach_fails=False)
 
     assert ("POST", _EPHEMERAL_URL) not in fake_slack_web_client.mock.requests, (
@@ -1660,6 +1668,7 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
     failure: str,
 ) -> None:
     """Same door check as Discord: a 401/403 from the server stores nothing."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     import dataclasses
 
     from daimon.core import credential_submit
@@ -1911,6 +1920,7 @@ async def test_mcp_attach_failure_publishes_no_token(
 ) -> None:
     """The attach comes before the token is published: when it fails, nothing is
     stored, no other session can mirror anything, and no work resumes."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, attach_fails=True)
 
     async with db_session_factory() as session:
@@ -1934,6 +1944,7 @@ async def test_mcp_vault_write_failure_after_the_attach_renders_partial(
     """The submitter's own vault copy is written last; when it fails the server is
     attached and the shared token published, so the card is partial and no work
     resumes."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, token = await _run_mcp_submission(db_session, db_session_factory, vault_fails=True)
 
     async with db_session_factory() as session:
@@ -1953,6 +1964,7 @@ async def test_mcp_agent_gone_before_the_attach_saves_nothing(
 ) -> None:
     """The agent did not survive the form: the attach comes first, so nothing is
     stored anywhere, and the card says so."""
+    _override_users_info_admin(fake_slack_web_client.mock)
     tenant_id, token = await _run_mcp_submission(
         db_session, db_session_factory, agent_gone_after_write=True
     )
@@ -2556,3 +2568,15 @@ async def test_env_submission_decides_a_late_pin_inside_the_consume(
     assert rows == [], "nothing is saved"
     assert row is not None and row.used_at is None, "the refused form was not spent"
     assert PIN_WRITE_REFUSAL in _ephemeral_texts(fake_slack_web_client)
+
+
+async def test_member_mcp_token_submission_cannot_attach_to_an_unbound_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write = AsyncMock()
+    monkeypatch.setattr(credential_submissions_mod, "connect_mcp_server_with_token", write)
+    await _run_mcp_submission(db_session, db_session_factory)
+    write.assert_not_awaited()

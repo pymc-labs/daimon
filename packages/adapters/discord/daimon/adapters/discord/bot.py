@@ -30,7 +30,12 @@ from daimon.adapters.discord.context import (
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
-from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
+from daimon.adapters.discord.gating import (
+    HintCooldown,
+    is_participation_candidate,
+    is_unmentioned_reply_hint_candidate,
+    should_process_message,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
@@ -221,6 +226,7 @@ async def _open_thread_with_notice(
     opening: Coroutine[Any, Any, discord.Thread],
     *,
     after_s: float,
+    acknowledged: bool = False,
 ) -> discord.Thread:
     """Keep an opening mention visibly acknowledged while naming or Discord creation waits.
 
@@ -236,11 +242,12 @@ async def _open_thread_with_notice(
                 return await asyncio.wait_for(asyncio.shield(task), timeout=after_s)
         except TimeoutError:
             pass
-        try:
-            await message.add_reaction(THREAD_OPENING_REACTION)
-            reacted = True
-        except discord.HTTPException as exc:
-            log.warning("discord.thread_open_notice_failed", error=str(exc))
+        if not acknowledged:
+            try:
+                await message.add_reaction(THREAD_OPENING_REACTION)
+                reacted = True
+            except discord.HTTPException as exc:
+                log.warning("discord.thread_open_notice_failed", error=str(exc))
         return await task
     finally:
         if not task.done():
@@ -491,6 +498,10 @@ class _ParticipationBatch:
 _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 
+#: The reaction on an unmentioned reply in a thread daimon opened: only a
+#: mention starts a turn. A reaction, not a message, so the hint stays quiet.
+UNMENTIONED_REPLY_HINT_EMOJI: Final[str] = "🔔"
+
 
 async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
     """The requester's live guild role and role ids, for a turn with no message to read.
@@ -525,6 +536,7 @@ class DaimonBot(commands.Bot):
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
         self._pending: dict[int, list[discord.Message]] = {}
+        self._queued_reactions: set[int] = set()
         # Continuation dispatches skipped because the thread was processing,
         # keyed by thread id: re-run when the thread is released (see
         # `_release_thread`). Last writer wins; a dispatch reads every pending
@@ -550,6 +562,12 @@ class DaimonBot(commands.Bot):
         # Built on first use, not here: it needs `self.user`, which the gateway
         # only supplies once the bot is ready.
         self._participant: ThreadParticipant | None = None
+        # Unmentioned-reply hint: thread id -> when it was last shown there.
+        self._unmentioned_hint_cooldown = HintCooldown(
+            runtime.settings.discord.unmentioned_reply_hint_cooldown_h * 3600
+            if runtime.settings.discord is not None
+            else 1.0
+        )
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
@@ -1744,6 +1762,73 @@ class DaimonBot(commands.Bot):
                 self._release_thread(thread_id)
                 self._pending.pop(thread_id, None)
 
+    async def _maybe_hint_unmentioned_reply(
+        self, message: discord.Message, *, bot_mentioned: bool
+    ) -> None:
+        """React once to a person's unmentioned reply in a thread daimon opened.
+
+        Such a reply starts no turn, by design. Without a sign, people read the
+        silence as daimon ignoring them and re-mention it in the channel, which
+        opens a sibling thread with none of this one's context. The reaction
+        says "mention me to continue" without a message: once per thread per
+        cooldown, not while the thread is followed, where the reply may still
+        be answered unprompted, and not where the agent may not post. Best
+        effort: a failure is logged only, and never shows the hint.
+        """
+        discord_settings = self.runtime.settings.discord
+        if discord_settings is None or self.user is None or message.guild is None:
+            return
+        thread = message.channel
+        if not isinstance(thread, discord.Thread):
+            return
+        if not is_unmentioned_reply_hint_candidate(
+            enabled=discord_settings.unmentioned_reply_hint,
+            author_is_bot=message.author.bot,
+            author_is_webhook=isinstance(message.webhook_id, int),
+            bot_mentioned=bot_mentioned,
+            in_bot_owned_thread=thread.owner_id == self.user.id,
+            mentions_someone_else=(
+                message.mention_everyone
+                or bool(message.role_mentions)
+                or any(user.id != self.user.id for user in message.mentions)
+            ),
+            is_plain_message=message.type
+            in (discord.MessageType.default, discord.MessageType.reply),
+        ):
+            return
+        thread_id = thread.id
+        if thread_id in self._processing or thread_id in self._participation_pending:
+            return  # a turn is running or deciding here; this message may yet be read
+        now = asyncio.get_running_loop().time()
+        if not self._unmentioned_hint_cooldown.claim(thread_id, now=now):
+            return
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+        try:
+            responder = self._thread_participant(
+                bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
+            )
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if resolved.mode is ParticipationMode.ON:
+                self._unmentioned_hint_cooldown.release(thread_id)
+                return
+            # A reaction is a post: where the agent may not write (or that
+            # can't be established), it stays silent like every other notice.
+            post_state = await _channel_protection_state(
+                self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+            )
+            if not post_state.may_post:
+                self._unmentioned_hint_cooldown.release(thread_id)
+                return
+            await message.add_reaction(UNMENTIONED_REPLY_HINT_EMOJI)
+        except Exception as exc:  # cosmetic hint: never surfaces, never retries
+            log.warning(
+                "unmentioned_reply_hint.failed",
+                thread_id=str(thread_id),
+                err_type=type(exc).__name__,
+            )
+            return
+        log.info("unmentioned_reply_hint.shown", thread_id=str(thread_id))
+
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Remember the clicker's name for /billing; the command tree handles the rest."""
         remember_guild_user(
@@ -1849,6 +1934,7 @@ class DaimonBot(commands.Bot):
                 guild_id=str(message.guild.id) if message.guild else None,
             ):
                 await self._maybe_participate(message)
+            await self._maybe_hint_unmentioned_reply(message, bot_mentioned=bot_mentioned)
             return
         assert message.guild is not None
         guild = message.guild
@@ -2017,7 +2103,7 @@ class DaimonBot(commands.Bot):
                         # thread branch below has.
                         for created_id in created_thread_ids:
                             self._release_thread(created_id)
-                            self._pending.pop(created_id, None)
+                            await self._clear_queued_reactions(self._pending.pop(created_id, []))
                     return
 
                 thread_id = message.channel.id
@@ -2027,7 +2113,7 @@ class DaimonBot(commands.Bot):
                     await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
                 finally:
                     self._release_thread(thread_id)
-                    self._pending.pop(thread_id, None)
+                    await self._clear_queued_reactions(self._pending.pop(thread_id, []))
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
         except Exception as exc:  # on_message event-handler boundary
@@ -2047,6 +2133,7 @@ class DaimonBot(commands.Bot):
         retry) is logged and swallowed rather than dropping the queued message
         into the prologue error path.
         """
+        self._queued_reactions.add(id(message))
         self._thread_queue.enqueue(thread_id, message)
         try:
             await message.add_reaction("⌛")
@@ -2057,6 +2144,23 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread_id),
                 err_type=type(exc).__name__,
             )
+        finally:
+            # The drain can finish while add_reaction is still in flight.
+            if id(message) not in self._queued_reactions:
+                await self._remove_mention_reaction(message, "⌛")
+
+    async def _remove_mention_reaction(self, message: discord.Message, emoji: str) -> None:
+        if message.guild is None or self.user is None:
+            return
+        try:
+            await message.remove_reaction(emoji, self.user)
+        except Exception as exc:
+            log.warning("mention.reaction_clear_failed", emoji=emoji, err_type=type(exc).__name__)
+
+    async def _clear_queued_reactions(self, messages: list[discord.Message]) -> None:
+        for message in messages:
+            self._queued_reactions.discard(id(message))
+            await self._remove_mention_reaction(message, "⌛")
 
     async def _handle_prologue_failure(
         self,
@@ -2092,20 +2196,32 @@ class DaimonBot(commands.Bot):
     async def _drain_pending_mentions(
         self, thread_id: int, guild_id: str, tenant_id: uuid.UUID
     ) -> None:
-        async def run(messages: list[discord.Message]) -> None:
-            await self._handle_mention(
-                messages[0],
-                guild_id,
-                tenant_id,
-                content_override=_compose_queued_content(messages),
-                attachments_override=[a for m in messages for a in m.attachments],
-            )
+        draining: dict[int, discord.Message] = {}
 
-        await self._thread_queue.drain(
-            thread_id,
-            compose=lambda queued: group_by_author(queued, lambda m: m.author.id),
-            run=run,
-        )
+        def compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
+            draining.update((id(message), message) for message in queued)
+            return group_by_author(queued, lambda m: m.author.id)
+
+        async def run(messages: list[discord.Message]) -> None:
+            try:
+                await self._handle_mention(
+                    messages[0],
+                    guild_id,
+                    tenant_id,
+                    content_override=_compose_queued_content(messages),
+                    attachments_override=[a for m in messages for a in m.attachments],
+                )
+            finally:
+                await self._clear_queued_reactions(messages)
+                for message in messages:
+                    draining.pop(id(message), None)
+
+        try:
+            await self._thread_queue.drain(thread_id, compose=compose, run=run)
+        finally:
+            # A cancelled/escaping author turn can leave the rest of its popped
+            # batch unrun. Those messages must not retain a queue marker either.
+            await self._clear_queued_reactions(list(draining.values()))
 
     async def _handle_mention(
         self,
@@ -2142,6 +2258,13 @@ class DaimonBot(commands.Bot):
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
         try:
+            # Before admit(): resolving seeded agents/environments can take tens
+            # of seconds. Queued mentions already have their own hourglass.
+            if not unprompted and content_override is None:
+                try:
+                    await message.add_reaction("👀")
+                except Exception as exc:
+                    log.warning("mention.reaction_failed", err_type=type(exc).__name__)
             await self._orchestrate(
                 message,
                 guild_id,
@@ -2178,6 +2301,8 @@ class DaimonBot(commands.Bot):
             # admission instead of keeping the slot (wait_for_slot).
             release_turn_slot()
             structlog.contextvars.unbind_contextvars("rid")
+            if not unprompted and content_override is None:
+                await self._remove_mention_reaction(message, "👀")
 
     async def _render_turn_error(
         self,
@@ -3109,6 +3234,7 @@ class DaimonBot(commands.Bot):
                 message,
                 _open_thread(),
                 after_s=discord_settings.thread_open_notice_after_s,
+                acknowledged=not unprompted,
             )
 
         # --- Wire lifecycle with send/edit callables ---
@@ -3162,6 +3288,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
+                acknowledgment_managed=True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
@@ -3207,7 +3334,7 @@ class DaimonBot(commands.Bot):
                 "queue_full": TENANT_CAP_NOTICE,
             }[slot]
             if lifecycle.message_ref is not None:
-                await _edit_message(lifecycle.message_ref, content=ended, embed=None, view=None)
+                await lifecycle.edit_card(content=ended, embed=None, view=None)
             else:
                 await turn_send(ended)
             await retire_terminal_turn_card(
@@ -3281,9 +3408,7 @@ class DaimonBot(commands.Bot):
             if request_id_line:
                 handoff_embed.set_footer(text=f"rid: {request_id_line.rstrip('`')}")
             if lifecycle.message_ref is not None:
-                await _edit_message(
-                    lifecycle.message_ref, content=None, embed=handoff_embed, view=view
-                )
+                await lifecycle.edit_card(content=None, embed=handoff_embed, view=view)
             else:
                 await turn_send(embed=handoff_embed, view=view)
             await retire_terminal_turn_card(
@@ -3299,9 +3424,7 @@ class DaimonBot(commands.Bot):
             # here either; the copy says what was preserved and asks for a retry.
             failure_text = render_preparation_failed(agent.name)
             if lifecycle.message_ref is not None:
-                await _edit_message(
-                    lifecycle.message_ref, content=failure_text, embed=None, view=None
-                )
+                await lifecycle.edit_card(content=failure_text, embed=None, view=None)
             else:
                 await turn_send(failure_text)
             await retire_terminal_turn_card(
@@ -3326,7 +3449,7 @@ class DaimonBot(commands.Bot):
                 else render_current_work_must_finish(agent.name, handoff=True)
             )
             if lifecycle.message_ref is not None:
-                await _edit_message(lifecycle.message_ref, content=busy_text, embed=None, view=None)
+                await lifecycle.edit_card(content=busy_text, embed=None, view=None)
             else:
                 await turn_send(busy_text)
             await retire_terminal_turn_card(
@@ -3353,7 +3476,7 @@ class DaimonBot(commands.Bot):
         # posted after the turn instead, once the outcome is known.
         replacement_summary: str | None = None
         if (
-            prepared.continuity.state == "replaced"
+            prepared.continuity.announces_replacement()
             and prepared.continuity.transfer_kind is not None
         ):
             # Not a separate message: the answer is an in-place edit of the
@@ -3595,6 +3718,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
+                acknowledgment_managed=True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=turn_send,
                 edit=_edit_message,

@@ -443,7 +443,9 @@ async def test_replaced_makes_the_replacement_summary_the_answers_first_paragrap
 
     event = _event(channel=channel, thread_ts=thread_ts, user="U_REPLACED")
 
-    prepared = _prepared_turn(continuity=ContinuityOutcome(state="replaced", transfer_kind="full"))
+    prepared = _prepared_turn(
+        continuity=ContinuityOutcome(state="replaced", applied=("model",), transfer_kind="full")
+    )
 
     with (
         patch(
