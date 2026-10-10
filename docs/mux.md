@@ -1215,3 +1215,137 @@ Discord consumes neutral message snapshots and ordered previews through an optio
 Slack also consumes root neutral snapshots and ordered previews through the optional local tap. Authoritative snapshots replace draft fragments; terminal output comes from host state. Existing status-card replacement, Cancel routing, generic confirmation controls, and Anthropic pricing remain unchanged. An unverified alternate-provider cost is omitted.
 
 Teams renders root neutral snapshots and ordered previews locally, retaining its debounce, unprompted silence and existing terminal card retirement. Host state owns final answers. Alternate-provider observations and missing observations bypass Anthropic display meters, so unknown cost is omitted; the native Anthropic path is unchanged.
+
+
+OpenAI G1 no longer requires the optional native `spend_control` setting. The
+2026-10-10 Agents reference documents `spend_control.limit` as positive whole USD
+cents with no higher stated minimum, but our guarded project probe rejected the
+field with HTTP 400 and `param=spend_control`. G1 live tooling omits the field and
+uses the canonical host budget guard plus bounded turn counts and whole-turn
+deadlines. Those host limits do not create a provider token ceiling or an exact
+bill: missing final usage/container evidence remains held and unverified. Explicit
+native spend controls remain available to driver callers with verified support.
+
+Explicit channel backend configuration resolves runtime dependencies separately
+for each admitted turn. Native preparation and execution use the same resolved
+runtime and authorized scope; runtime lookup does not cache one channel's native
+plan for another channel or configuration revision. Default Anthropic channels
+do not construct provider runtimes. An explicitly selected provider whose
+deployment constructor is absent is refused before provider transport access.
+
+### OpenAI deployment runtime
+
+Install the `daimon-mux[openai]` extra in deployments that explicitly enable
+OpenAI channels. The default application dependency remains unchanged.
+
+The application resolves `openai.persistent_workspace` per admitted turn when
+`DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` are explicitly
+enabled. Injected runtimes remain supported. Without an injection, export
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE` in the application's process environment
+pointing to an operator-owned JSON file. Its entries authorize provisioned native
+resources for one exact tenant, account, channel and backend configuration digest:
+
+```json
+[
+  {
+    "profile": "openai.persistent_workspace",
+    "tenant_id": "<tenant UUID>",
+    "platform": "slack",
+    "channel_id": "<channel ID>",
+    "account_id": "<authorized account UUID>",
+    "config_digest": "<admitted ConfigRevision.digest>",
+    "project": "<actual OpenAI project ID>",
+    "agent_id": "<provisioned OpenAI agent ID>",
+    "environment_id": "<provisioned OpenAI environment template ID>",
+    "api_key_env": "OPENAI_CHANNEL_KEY",
+    "skill_ids": []
+  }
+]
+```
+
+Export the referenced key variable through the deployment's secret mechanism.
+The manifest contains environment variable names, never credentials; unknown
+fields, ambiguous matches, stale configuration digests and missing resources
+refuse. `skill_ids` grants only explicitly named native skills used by the saved
+agent. The selected plan pins real native resources to the authorized account and
+project; admission's Anthropic agent/environment IDs are never reused for OpenAI.
+An optional positive integer `spend_limit_usd_cents` is passed through the
+provider's public session controls only when an operator supplies it for a
+verified project. Omission uses the provider fix's unset control; its native
+representation belongs to the OpenAI driver. The host fixes `gpt-6-luna`,
+small containers and disabled delegation.
+
+Unconfigured channels and the default Anthropic path read neither the manifest
+nor any provider key and construct no foreign client. G1 rechecks policy before
+the selected transport reads its key. Missing credentials refuse; another
+provider's entry is never used as a fallback. Native SDK request and stream
+lifetimes belong to the driver. Journal and usage revisions use the persisted
+host binding/lease, with unknown prices and container costs left pending for
+reconciliation. Gemini deployment construction follows in a separate delta.
+
+Configured OpenAI runtimes refuse `OPENAI_CUSTOM_HEADERS` before constructing
+a client, including changes introduced after runtime preparation. This prevents
+ambient header injection from replacing the selected channel key or project;
+the refusal never includes header contents.
+
+### Gemini deployment runtime
+
+Install `daimon-mux[gemini]` only for deployments selecting
+`gemini.inline_reuse` with `gemini-3.8-flash`. Enable the same explicit mux and
+channel-backend flags used for OpenAI. `DAIMON_TURN__PROVIDER_RUNTIME_FILE` may
+contain both providers; selection requires the exact admitted profile, tenant,
+platform, channel, account and configuration digest.
+
+A Gemini entry uses the common selector fields plus:
+
+```json
+{
+  "profile": "gemini.inline_reuse",
+  "tenant_id": "<tenant UUID>",
+  "platform": "slack",
+  "channel_id": "<channel ID>",
+  "account_id": "<authorized account UUID>",
+  "config_digest": "<admitted ConfigRevision.digest>",
+  "project": "<actual Gemini project associated with this key>",
+  "api_key_env": "GEMINI_CHANNEL_KEY",
+  "agent_name": "configured-agent",
+  "system": "<explicit native system instruction>",
+  "tools": [],
+  "environment": {"name": "inline-workspace"},
+  "records_path": "/var/lib/daimon/gemini-records.sqlite",
+  "holds_path": "/var/lib/daimon/gemini-holds.sqlite",
+  "hold_usd": "0.05",
+  "cap_usd": "0.25"
+}
+```
+
+`tools` is required: `[]` sends an explicitly empty native list. Omitted/null
+tools refuse before key access. Search, URL context, execution or custom tools
+run only when an operator explicitly lists a supported `ToolSpec`. The separate
+Gemini explicit-tools product also protects older requests; it is required
+before live deployment. Unsupported workspace/MCP/confirmation policies refuse.
+Anthropic admission agent/environment IDs never become Gemini identities.
+
+Provision the parent directories and persistent local volumes before enabling
+the channel. SQLite commits the complete driver record transaction and
+serializes workers sharing the same database; all workers for a provider
+account must share the paths. Account data is partitioned by authorized tenant,
+account and project. The two paths must be absolute and distinct, so a durable
+hold can commit before native dispatch without deadlocking a record transaction.
+These files are created only when the configured provider uses them; no store,
+manifest or provider key is read on the default path. Newly created files are
+private to the process owner. Multi-host storage requires a separate adapter.
+
+Each Flash attempt first persists an explicit operator hold, then retains its
+accepted/refused/unknown receipt. Holds are estimates, not actual spend. They
+remain reserved until an accounting reconciler supplies verified provider and
+infrastructure actuals; this slice never treats a refusal as a free call or
+releases an unknown outcome. Exhausting the configured hold cap refuses further
+attempts. The provider usage outbox preserves native usage with unknown prices
+and infrastructure costs pending. Automatic actual settlement/hold release is a
+follow-up; this runtime is not a live certificate or QA parity claim.
+
+Credential discovery happens only in the selected authorized transport factory.
+Private request-owned SDK clients use the explicit key, pinned Google origin,
+`vertexai=False`, no environment proxies and no native mutation retries. Stream
+completion, close, cancellation and close failure dispose the client lifetime.

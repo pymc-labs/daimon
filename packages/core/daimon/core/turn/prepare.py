@@ -41,7 +41,7 @@ from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.config import load_turn_settings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
+from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
@@ -65,6 +65,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -78,6 +79,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
+from daimon.core.turn.runtimes import ScopedTurnRuntimes
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
@@ -149,6 +151,7 @@ class PreparedTurn:
     # existing field values and preparation remain unchanged.
     backend: ManagedAgents | None = None
     session_ref: ResourceRef | None = None
+    runtime: TurnRuntime | None = None
 
 
 @dataclass(frozen=True)
@@ -872,6 +875,14 @@ async def bind_session_impl(
             effective_deadline,
             now,
         )
+        runtimes: ScopedTurnRuntimes | None = None
+        if deps.channel_backends and deps.turn_runtime_factory is not None:
+            provider_deps = replace(
+                deps, state_store=deps.state_store or PostgresStateStore(deps.sessionmaker)
+            )
+            request = replace(request, deps=provider_deps)
+            runtimes = ScopedTurnRuntimes(request, deps.turn_runtime_factory)
+            request = replace(request, deps=replace(provider_deps, turn_runtimes=runtimes))
         try:
             result = await asyncio.wait_for(
                 prepare(request), timeout=remaining_s(effective_deadline, now=now())
@@ -893,6 +904,8 @@ async def bind_session_impl(
             or result.session_account_id != session_account_id
         ):
             raise ScopeViolation("preparation", "provider returned a foreign prepared session")
+        if runtimes is not None:
+            result = replace(result, runtime=runtimes.resolved)
         return result
 
     async def _bind() -> PreparedTurn:

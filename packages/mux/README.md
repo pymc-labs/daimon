@@ -589,3 +589,26 @@ the bearer and removes the isolated schema. Run with a lane-owned local
 scripted, and MCP backing data is synthetic: this is offline composition
 evidence, not live F2 certification. It opens no tunnel and reads no provider
 key. Live Anthropic F2 still needs a disposable key and separate lead GO.
+
+The host can register a deployment constructor through
+`daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
+receives `ProviderPreparationRequest` only when the selected provider preparer
+looks up its runtime for an explicit admitted channel revision. It must return
+the provider's public runtime with authorized native resources and durable state;
+missing deployment constructors fail closed. `PreparedTurn.runtime` retains the
+resolved dependencies for execution. No mux driver discovers host credentials.
+
+Application deployment wiring can construct the public OpenAI runtime from an
+operator manifest selected by the admitted tenant/account/channel/configuration
+digest. Credential environment references are revealed only after preparation's
+policy recheck; SDK construction remains private to the OpenAI driver. Default
+channels do not inspect the manifest or provider credentials. Durable host
+journal/usage adapters are used; unknown accounting stays pending.
+
+Gemini application deployment uses an explicitly admitted manifest plan with a
+required tools list (including `[]`), authorized native system/environment
+specs and a deferred key reference. The host supplies complete durable SQLite
+record transactions and separately committed attempt holds; the private driver
+owns configured request/stream clients without ambient routing. Unknown actual
+costs remain pending and holds stay reserved until reconciliation. No Gemini
+runtime, manifest or credential is discovered for an unconfigured channel.

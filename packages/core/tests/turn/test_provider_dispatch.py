@@ -20,6 +20,7 @@ from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.turn import io as io_module
 from daimon.core.turn import prepare as preparation
+from daimon.core.turn import runtimes as runtime_module
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -542,4 +543,220 @@ async def test_injected_backend_cannot_bypass_default_channel_admission(
         default = replace(admission(), backend_revision=None)
         with pytest.raises(ScopeViolation, match="admitted profile"):
             _turn_port_kwargs(deps, default, SESSION.id, tenant_id=TENANT)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("lookup", [True, False])
+@pytest.mark.parametrize("injected", [True, False])
+async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    lookup: bool,
+    injected: bool,
+) -> None:
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
+    from daimon.core.turn.deps import build_turn_deps
+    from pydantic import PostgresDsn, SecretStr
+
+    runtime = TurnRuntime(lambda config, scope: (config, scope), object(), object())
+    requests: list[ProviderPreparationRequest] = []
+
+    def factory(request: ProviderPreparationRequest) -> TurnRuntime:
+        requests.append(request)
+        assert request.admission.backend_revision == REVISION
+        assert request.scope == SCOPE
+        assert request.deps.state_store is not None
+        return runtime
+
+    async def hook(request: ProviderPreparationRequest) -> PreparedTurn:
+        if lookup:
+            assert request.deps.turn_runtimes.get(PROFILE) is runtime
+            assert request.deps.turn_runtimes.get(PROFILE) is runtime
+            assert request.deps.turn_runtimes.get("gemini.inline_reuse") is None
+        return prepared(request)
+
+    monkeypatch.setitem(runtime_module._RUNTIME_FACTORIES, PROFILE, factory)
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, PROFILE, hook)
+    # An isolated prefix and no .env file keep this validated offline config
+    # separate from deployment credentials.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    monkeypatch.setitem(Settings.model_config, "env_prefix", "N4_OFFLINE_UNUSED_")
+    settings = Settings(
+        anthropic=AnthropicSettings(api_key=SecretStr("offline")),
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
+        turn=TurnSettings(path="mux", channel_backends=True),
+    )
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        deps = build_turn_deps(
+            settings,
+            client,
+            db_session_factory,
+            deployment_default=DeploymentDefault(),
+            resolver_cache=new_resolver_cache(),
+            billing_config=None,
+        )
+        assert not requests and not deps.turn_runtimes
+        if injected:
+            deps = replace(deps, turn_runtimes={PROFILE: runtime})
+        result = await bind_session_impl(
+            deps,
+            admission(),
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="user",
+            thread_id="thread",
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+        assert len(requests) == int(lookup and not injected)
+        assert result.runtime is (runtime if lookup or injected else None)
+        assert dict(deps.turn_runtimes) == ({PROFILE: runtime} if injected else {})
+        kwargs = _turn_port_kwargs(
+            deps,
+            result.admission,
+            result.ma_session_id,
+            tenant_id=TENANT,
+            provider_session=result.session_ref,
+            provider_runtime=result.runtime,
+        )
+        backend_request = kwargs.get("backend_request")
+        assert backend_request is not None and backend_request.runtime is result.runtime
+    assert not transport.requests
+
+
+async def test_missing_runtime_constructor_refuses_without_provider_or_key_access(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def hook(request: ProviderPreparationRequest) -> PreparedTurn:
+        request.deps.turn_runtimes.get(PROFILE)
+        raise AssertionError("an absent deployment must refuse")
+
+    monkeypatch.setattr(runtime_module, "_RUNTIME_FACTORIES", {})
+    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, PROFILE, hook)
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        deps = replace(
+            deps_for(client, db_session_factory),
+            channel_backends=True,
+            turn_runtime_factory=runtime_module.build_channel_runtime,
+        )
+        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+            await bind_session_impl(
+                deps,
+                admission(),
+                tenant_id=TENANT,
+                platform="slack",
+                external_user_id="user",
+                thread_id="thread",
+                session_account_id=ACCOUNT,
+                reuse_existing=True,
+            )
+    assert not transport.requests
+
+
+@pytest.mark.parametrize(
+    "invalid", ["no-config", "anthropic", "disabled", "legacy", "tenant", "model"]
+)
+async def test_channel_runtime_refuses_invalid_admission_before_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    invalid: str,
+) -> None:
+    def forbidden(request: ProviderPreparationRequest) -> TurnRuntime:
+        raise AssertionError("invalid admission reached runtime/credential construction")
+
+    monkeypatch.setitem(runtime_module._RUNTIME_FACTORIES, PROFILE, forbidden)
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        deps = replace(deps_for(client, db_session_factory), channel_backends=True)
+        selected = admission()
+        scope = SCOPE
+        if invalid == "no-config":
+            selected = replace(selected, backend_revision=None)
+        elif invalid == "anthropic":
+            selected = replace(
+                selected,
+                backend_revision=ConfigRevision.create(
+                    REVISION.channel, 1, resolve_default(BackendConfig())
+                ),
+            )
+        elif invalid == "disabled":
+            deps = replace(deps, channel_backends=False)
+        elif invalid == "legacy":
+            deps = replace(deps, turn_path="legacy")
+        elif invalid == "tenant":
+            scope = SCOPE.model_copy(update={"tenant_id": "foreign"})
+        else:
+            selected = replace(
+                selected, backend_revision=REVISION.model_copy(update={"model": None})
+            )
+        request = ProviderPreparationRequest(
+            deps,
+            selected,
+            scope,
+            TENANT,
+            "slack",
+            "user",
+            "thread",
+            ACCOUNT,
+            True,
+            preparation.DEFAULT_MA_CAPABILITIES,
+            None,
+            NOW,
+            lambda: NOW,
+        )
+        with pytest.raises((AdmissionDenied, ScopeViolation)):
+            runtime_module.build_channel_runtime(request)
+    assert not transport.requests
+
+
+async def test_scoped_runtime_lookup_never_shares_a_profile_between_channel_revisions(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    seen: list[ProviderPreparationRequest] = []
+    constructed: list[TurnRuntime] = []
+
+    def factory(request: ProviderPreparationRequest) -> TurnRuntime:
+        seen.append(request)
+        runtime = TurnRuntime(lambda config, scope: (config, scope), object(), object())
+        constructed.append(runtime)
+        return runtime
+
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        deps = deps_for(client, db_session_factory)
+        lookups: list[runtime_module.ScopedTurnRuntimes] = []
+        for revision in (REVISION, REVISION.model_copy(update={"local": 2, "digest": "second"})):
+            selected = replace(admission(), backend_revision=revision)
+            request = ProviderPreparationRequest(
+                deps,
+                selected,
+                SCOPE,
+                TENANT,
+                "slack",
+                "user",
+                "thread",
+                ACCOUNT,
+                True,
+                preparation.DEFAULT_MA_CAPABILITIES,
+                None,
+                NOW,
+                lambda: NOW,
+            )
+            lookup = runtime_module.ScopedTurnRuntimes(request, factory)
+            assert lookup.resolved is None and list(lookup) == [PROFILE]
+            assert len(lookup) == 1 and lookup.get("gemini.inline_reuse") is None
+            lookups.append(lookup)
+        assert not seen and not constructed
+        first, second = (lookup.get(PROFILE) for lookup in lookups)
+        assert first is constructed[0] and second is constructed[1] and first is not second
+        assert [
+            request.admission.backend_revision.local
+            for request in seen
+            if request.admission.backend_revision
+        ] == [1, 2]
+        assert lookups[0].get(PROFILE) is first and lookups[1].get(PROFILE) is second
+        assert len(seen) == 2 and not deps.turn_runtimes
     assert not transport.requests
