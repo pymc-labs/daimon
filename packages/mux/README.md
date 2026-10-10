@@ -312,3 +312,11 @@ dispatch. Responder identity uses `anthropic.session_reads@1` with the authorize
 row's tenant/account scope, retaining the SDK response for configuration snapshot
 backfill, including null channel and thread metadata, without binding projection
 or an additional read.
+
+OpenAI's supplementary F1 adapter provisions the eleven authored default skills,
+declares their logical builtin mapping to hosted Bash (write/edit via separate
+`apply_patch` commands), and attaches `daimon-mcp` through remote HTTP MCP. Native
+command/MCP items normalize into paired tool records. The checked-in F1 tape is
+scripted offline evidence with fresh provisioning on replay; it makes no live,
+model-quality, tool-argument or atomic agent revision-pin claim. See the OpenAI
+driver README for the explicit mapping and supported boundaries.

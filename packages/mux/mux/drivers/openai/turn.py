@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -59,6 +60,7 @@ class _NormalizedStream(AsyncIterator[Event]):
         self._source, self._previews = source, previews
         self._iterator = source.__aiter__()
         self._normalizer = EventNormalizer(session.id)
+        self._pending: deque[Event] = deque()
         self._closed = False
 
     def __aiter__(self) -> _NormalizedStream:
@@ -69,10 +71,14 @@ class _NormalizedStream(AsyncIterator[Event]):
             raise StopAsyncIteration
         try:
             while True:
+                if self._pending:
+                    return self._pending.popleft()
                 raw = await self._iterator.__anext__()
-                event = self._normalizer.normalize(raw)
-                if event is not None and (self._previews or event.authority != "preview"):
-                    return event
+                self._pending.extend(
+                    event
+                    for event in self._normalizer.normalize_batch(raw)
+                    if self._previews or event.authority != "preview"
+                )
         except (ValueError, KeyError, TypeError):
             await self.aclose()
             raise ProviderError(
@@ -86,6 +92,7 @@ class _NormalizedStream(AsyncIterator[Event]):
     async def aclose(self) -> None:
         if not self._closed:
             self._closed = True
+            self._pending.clear()
             await close(self._source)
 
 
@@ -286,13 +293,13 @@ class OpenAIEvents:
                 if event is not None:
                     events.append(event)
             for item in final_items(items):
-                event = normalizer.saved_item(item)
-                if event is not None:
-                    events.append(event)
+                events.extend(normalizer.saved_item_batch(item))
             for raw in buffered:
-                event = normalizer.normalize(raw)
-                if event is not None and event.authority != "preview":
-                    events.append(event)
+                events.extend(
+                    event
+                    for event in normalizer.normalize_batch(raw)
+                    if event.authority != "preview"
+                )
             gap = "missed_native_events"
             snapshot_id = uuid4().hex
             for id_, kind, payload, authority in (
@@ -383,12 +390,19 @@ class OpenAIEvents:
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
         self._c.check(scope, session, "session")
         previous = await self._journal.read(session) or ()
-        normalizer = EventNormalizer(session.id, prior=previous)
-        values = [normalizer.saved_turn(turn) for turn in await self._pages(session, "turns")]
-        values.extend(
-            normalizer.saved_item(item) for item in final_items(await self._pages(session, "items"))
-        )
-        saved = merge_history(previous, [event for event in values if event is not None])
+        try:
+            normalizer = EventNormalizer(session.id, prior=previous)
+            values = [normalizer.saved_turn(turn) for turn in await self._pages(session, "turns")]
+            values.extend(
+                event
+                for item in final_items(await self._pages(session, "items"))
+                for event in normalizer.saved_item_batch(item)
+            )
+            saved = merge_history(previous, [event for event in values if event is not None])
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_snapshot"
+            ) from None
         await self._journal.replace(session, saved)
         ordered = saved[::-1] if page.order == "desc" else saved
         start = 0

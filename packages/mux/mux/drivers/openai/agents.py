@@ -24,7 +24,7 @@ from mux.drivers.openai._common import (
     text,
     timestamp,
 )
-from mux.drivers.openai.skill_bindings import KEY, decode, encode, verify_pins
+from mux.drivers.openai.skill_bindings import decode, encode_metadata, reserved, verify_pins
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ScopeViolation
 
@@ -39,13 +39,16 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
         body["instructions"] = spec.system
     if spec.metadata is not None:
         body["metadata"] = dict(spec.metadata)
-    if spec.metadata is not None and KEY in spec.metadata:
+    if spec.metadata is not None and any(reserved(key) for key in spec.metadata):
         raise context.unsupported("reserved_skill_metadata")
     if spec.skills is not None:
         body["metadata"] = {
             **object_json(body.get("metadata") or {}),
-            KEY: encode(spec.skills, context),
+            **encode_metadata(spec.skills, context),
         }
+    if len(object_json(body.get("metadata") or {})) > 15:
+        # Leave one native metadata slot for the tenant ownership marker.
+        raise context.unsupported("agent_metadata_size")
     tools: list[JsonValue] = []
     for tool in spec.tools or ():
         if tool.permission != "auto":
@@ -65,6 +68,17 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
             "programmatic_tool_calling",
         ):
             tools.append({"type": tool.name})
+        elif tool.kind == "builtin" and tool.name == "bash":
+            # Bash is a hosted-harness capability, not an agent.tools entry.
+            # F1 declares their Bash/apply-patch mapping and verifies the actual
+            # session has a hosted environment. Conversation-only cannot bind it.
+            if context.profile_id != "openai.persistent_workspace":
+                raise context.unsupported("hosted_builtin_tools")
+        elif tool.kind == "mcp_toolset" and any(
+            server.name == tool.name for server in spec.mcp_servers or ()
+        ):
+            # The connection below is the provider's toolset configuration.
+            continue
         else:
             raise context.unsupported("agent_tool")
     for mcp in spec.mcp_servers or ():
@@ -139,7 +153,7 @@ class OpenAIAgents:
             **object_json(body.get("metadata") or {}),
             "mux_tenant": scope.tenant_id,
         }
-        return self._decode(scope, await self._c.call("POST", "/agents", body=body))
+        return self._decode(scope, await self._c.call("POST", "/agents", body=body, key=key))
 
     @owned
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
