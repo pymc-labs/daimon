@@ -1,8 +1,10 @@
 """Explicitly constructed Gemini inline-reuse driver; never a resolved default."""
 
+from collections.abc import Callable
+
 from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
+from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import Models
 from mux.contracts.profile import Profile
 from mux.contracts.usage import UsageObservation
@@ -53,11 +55,18 @@ class GeminiManagedAgents:
         storage: Storage,
         state_store: StateStore,
         account_scope_id: str,
+        model_for_interaction: Callable[[str], ModelRef | None] | None = None,
     ) -> None:
         self.agents = GeminiAgents(transport, storage, account_scope_id)
         self.environments = GeminiEnvironments(transport, storage, account_scope_id)
         self.sessions = GeminiSessions(transport, storage, account_scope_id)
-        self.events = GeminiEvents(transport, storage, account_scope_id, state_store=state_store)
+        self.events = GeminiEvents(
+            transport,
+            storage,
+            account_scope_id,
+            state_store=state_store,
+            model_for_interaction=model_for_interaction,
+        )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
         self.skills = GeminiSkills(transport, storage, account_scope_id)

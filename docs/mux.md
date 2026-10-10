@@ -1142,3 +1142,22 @@ uses the canonical host budget guard plus bounded turn counts and whole-turn
 deadlines. Those host limits do not create a provider token ceiling or an exact
 bill: missing final usage/container evidence remains held and unverified. Explicit
 native spend controls remain available to driver callers with verified support.
+Gemini host turns use explicit channel configuration naming `gemini.inline_reuse`
+and `gemini-3.8-flash`. A provider runtime supplies a revision-pinned neutral
+agent/environment deployment, transactional driver records, the state journal,
+a private transport factory and neutral accounting. The codec owns lazy stream
+closure, reads authoritative saved interaction records for recovery, waits for
+provider stop evidence on cancellation and bills cumulative interaction usage.
+A lost or expired inline workspace surfaces a continuity error. Unconfigured
+channel resolution retains its existing Anthropic digest. Shared ownership,
+authenticated remote MCP and full default-capability deployment are follow-ups;
+unsupported policies are refused explicitly. Offline proofs certify this host
+slice; paid host-thread certification is a separate unit. Failed current roots
+produce provider errors after durable recording; SDK-only replay of an externally
+cancelled root retains its interrupted outcome. User-requested cancellation also
+retains the independently observed interrupted outcome.
+Gemini admission requires the configured Flash primary and caller-private mode.
+Missing runtime dependencies or unsupported deployment policies return the visible
+`backend_unsupported` refusal before transport construction. Journal source
+identities include the interaction identity, preserving later turns and function
+continuations in a reused session.

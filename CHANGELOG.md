@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepared mux recovery can publish native journal snapshots atomically under its admitted lease.
 - Run explicitly configured OpenAI persistent-workspace turns through native preparation, fenced claims/journal, root-isolated display/replay/cancellation, origin approvals and provider usage accounting. Require injected authorized native resources and Luna controls; preserve the unconfigured Anthropic path.
 - Preserve failed and recovered-cancelled OpenAI roots in final host outcomes; refuse missing native runtime and restricted preparation with a typed host admission error before native I/O, and limit this host slice to verified delegation-disabled sessions.
+- Add the explicitly configured Gemini inline-reuse host codec with lazy owned streams, fenced replay/cancel and neutral interaction usage; keep live host certification and MCP authentication separate.
+- Preserve every Gemini interaction's messages, usage and required actions in reused-session journals; visibly refuse missing runtimes, non-primary models and unsupported host policies before dispatch.
 
 - Add explicit OpenAI Agents hosted container-size and integer-cent session spend controls; refresh the driver contract audit against official documentation fetched on 2026-10-10.
 - Alias opaque Gemini probe identities before recording and settle the latest interaction usage revision, including export failures.

@@ -658,6 +658,15 @@ def _anthropic_turn_codec(request: TurnCodecRequest) -> TurnIO:
 register_turn_codec("anthropic.managed_agents", _anthropic_turn_codec)
 
 
+def _gemini_turn_codec(request: TurnCodecRequest) -> TurnIO:
+    from daimon.core.turn.gemini import compose_gemini_codec
+
+    return compose_gemini_codec(request)
+
+
+register_turn_codec("gemini.inline_reuse", _gemini_turn_codec)
+
+
 def turn_io(
     client: anthropic.AsyncAnthropic,
     session_id: str,

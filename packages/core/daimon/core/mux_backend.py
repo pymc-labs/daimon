@@ -111,6 +111,15 @@ def _anthropic_turn_backend(request: TurnBackendRequest) -> TurnBackend:
 register_turn_backend("anthropic.managed_agents", _anthropic_turn_backend)
 
 
+def _gemini_turn_backend(request: TurnBackendRequest) -> TurnBackend:
+    from daimon.core.turn.gemini import compose_gemini_backend
+
+    return compose_gemini_backend(request)
+
+
+register_turn_backend("gemini.inline_reuse", _gemini_turn_backend)
+
+
 def turn_backend(request: TurnBackendRequest) -> TurnBackend:
     """Compose exactly the admitted profile, or fail before any provider I/O."""
     if request.config is not None and (
