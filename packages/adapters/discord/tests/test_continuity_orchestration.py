@@ -776,7 +776,7 @@ async def test_replaced_falls_back_to_its_own_message_when_no_answer_is_revealed
     message = _make_thread_message(guild_id=int(guild_id))
     mapping_id = uuid.uuid4()
     prepared = _make_prepared_turn(
-        continuity=ContinuityOutcome(state="replaced", transfer_kind="full"),
+        continuity=ContinuityOutcome(state="replaced", applied=("model",), transfer_kind="full"),
         account_id=uuid.uuid4(),
         mapping_id=mapping_id,
     )

@@ -1128,7 +1128,7 @@ class TeamsApp:
             return
 
         summary: str | None = None
-        if prepared.continuity.state == "replaced" and prepared.continuity.transfer_kind:
+        if prepared.continuity.announces_replacement() and prepared.continuity.transfer_kind:
             summary = render_replacement_summary(prepared.continuity.transfer_kind, lost=[])
             lifecycle.answer_prefix = summary
         if prepared.mapping_id is not None and lifecycle.message_id is not None:

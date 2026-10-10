@@ -41,6 +41,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.turn.admission import AdmissionGrant
+from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.untrusted import UNTRUSTED_NOTE
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -403,7 +404,7 @@ async def _first_turn(
         mapping_id=None,
         watermark=None,
         reused=False,
-        continuity=SimpleNamespace(state="continued", transfer_kind=None),
+        continuity=ContinuityOutcome(),
     )
 
     @asynccontextmanager
