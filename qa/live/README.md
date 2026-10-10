@@ -354,3 +354,22 @@ Transport/crash signatures (connection refusal/reset, timeouts, DNS, TLS/SSL, 5x
 tracebacks and unhandled exceptions) are rejected before the declared refusal regex.
 Expected patterns must not match empty output. CLI args must be command strings;
 tenant-credit tokens are refused even behind wrappers or global options.
+
+`footer_cost_matches_ledger {turn, tol_usd}` and `ledger_matches_usage {turn, tol_pct}`
+require complete, read-only staging billing evidence. The settled turn's exact
+`usage_refs` identify per-request usage rows and ledger debit idempotency keys;
+foreign, missing or duplicate rows remain PENDING. The footer check parses only
+embed footer `$X used`, separately from `$X left`, and applies the declared
+absolute tolerance. `<$0.001` is an interval, never a rounded scalar.
+
+`staging.billing_probe` is a read-only argv hook receiving `{env: staging,
+guild_id, read_only: true}` on stdin. It returns JSON `{guild_id, markup, source}`
+from the deployed billing configuration; missing provenance is PENDING. Expected
+ledger spend is independently calculated with Decimal from each request's token
+counts, the QA `billing_rates` map and that markup. The default Haiku 5.5 rates
+come from driver `hack/GO-pricing-check.md` (official pricing verified 2026-10-10):
+input/write/read/output per million are 0.10/0.125/0.01/0.50 up to 100,000 prompt
+tokens and 0.50/0.625/0.05/2.50 above that, selected per request. Unknown models or
+missing independent prices remain PENDING; Daimon's own cost/price table isn't
+used as the expected value. Raw request, debit, markup and rate evidence is saved
+under each turn's `billing`. No billing writes are performed.

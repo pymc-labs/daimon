@@ -264,11 +264,11 @@ def test_approved_ledger_kind_is_typed_pending(tmp_path: Path, scenario: Scenari
     from qa.live.schema import ProposedScenario
 
     values = scenario.model_dump(by_alias=True)
-    values["assert"] = [{"kind": "ledger_matches_usage", "turn": 1, "tol_pct": 2}]
+    values["assert"] = [{"kind": "ledger_debits", "channel": "default", "count": 1}]
     (tmp_path / "ledger.yaml").write_text(yaml.safe_dump(values))
     entry = load_catalog(tmp_path)[0]
     assert isinstance(entry, ProposedScenario)
-    assert "assertion ledger_matches_usage" in entry.unsupported
+    assert "assertion ledger_debits" in entry.unsupported
 
 
 @pytest.mark.parametrize("section", ["setup", "steps", "assert", "teardown"])
@@ -292,7 +292,7 @@ def test_canary_approved_unimplemented_kind_remains_pending(
     from qa.live.schema import ProposedScenario
 
     values = scenario.model_dump(by_alias=True)
-    values["assert"].append({"kind": "ledger_matches_usage", "turn": 1, "tol_pct": 2})
+    values["assert"].append({"kind": "ledger_debits", "channel": "default", "count": 1})
     (tmp_path / "canary.yaml").write_text(yaml.safe_dump(values))
     assert isinstance(load_catalog(tmp_path)[0], ProposedScenario)
 

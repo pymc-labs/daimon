@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from qa.live.billing import BillingEvidence
 
 from pydantic import JsonValue
 
@@ -70,6 +73,7 @@ class Turn:
     messages: list[Message] = field(default_factory=list[Message])
     card_history: list[Message] = field(default_factory=list[Message])
     baseline_message_ids: list[str] = field(default_factory=list[str])
+    billing: Message = field(default_factory=dict[str, JsonValue])
     agent_subtext_headers: list[Message] = field(default_factory=list[Message])
     channel_history: list[Message] = field(default_factory=list[Message])
     parent_messages: list[Message] = field(default_factory=list[Message])
@@ -135,6 +139,7 @@ class Backend(Protocol):
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]: ...
     def db_check(self, sql: str, turn: Turn | None = None) -> JsonValue: ...
     def usage(self, turn: Turn) -> Usage: ...
+    def billing_evidence(self, turn: Turn) -> BillingEvidence: ...
     def thread_name(self, turn: Turn) -> str: ...
     def channel_messages(self, turn: Turn) -> list[Message]: ...
     def current_messages(self, turn: Turn) -> list[Message]: ...
