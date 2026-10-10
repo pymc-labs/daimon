@@ -1161,3 +1161,4 @@ Missing runtime dependencies or unsupported deployment policies return the visib
 `backend_unsupported` refusal before transport construction. Journal source
 identities include the interaction identity, preserving later turns and function
 continuations in a reused session.
+Gemini always sends an explicit `tools` list compiled from the agent configuration; an omitted neutral tool list becomes `[]`. The SDK boundary also makes older stored requests explicit. This prevents Gemini from silently enabling its default search and URL tools. Continuations and selected 503 fallback sends retain the same reviewed tools. See [Gemini supported tools](https://ai.google.dev/gemini-api/docs/antigravity-agent#supported-tools).

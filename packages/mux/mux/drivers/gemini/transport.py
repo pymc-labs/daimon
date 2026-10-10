@@ -125,13 +125,21 @@ class SDKTransport:
         return await provider_call(self._files.download(file=f"files/environment-{environment_id}"))
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
+        # Omission enables provider defaults, including billable web tools.
+        # Keep older saved requests explicit as well as freshly compiled agents.
+        bounded = dict(request)
+        bounded.setdefault("tools", [])
+        if not isinstance(bounded["tools"], list):
+            raise ProviderError(
+                "invalid_request", retryable=False, native_code="explicit_tools_required"
+            )
         response = await provider_call(
             self._interactions.create(
                 agent=string(request["agent"]),
                 input=[],
                 background=True,
                 store=True,
-                extra_body=dict(request),
+                extra_body=bounded,
                 extra_headers={"Api-Revision": API_REVISION},
             )
         )

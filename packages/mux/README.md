@@ -504,3 +504,4 @@ Unsupported runtime/model/policy selections return the host's typed
 `backend_unsupported` refusal. Native journal source identities are scoped to
 the interaction, so reused-session turns and function continuations remain
 distinct without changing neutral event IDs or ordering domains.
+Gemini interactions always serialize configured tools explicitly, using `[]` when none are configured. This includes reused sessions and fallback creates; provider default search and URL tools are never enabled by omission.

@@ -8,8 +8,9 @@ import httpx
 import pytest
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
-from mux.drivers.gemini.transport import SDKTransport, close_iterator
+from mux.drivers.gemini.transport import Object, SDKTransport, close_iterator
 from mux.errors import ProviderError
+from pydantic import JsonValue
 
 
 @pytest.mark.asyncio
@@ -52,6 +53,7 @@ async def test_sdk_submits_documented_antigravity_extra_body_and_reads_steps() -
         )
         assert response["id"] == "i1" and response["steps"] == []
         posted = json.loads(captured[0].content)
+        assert posted["tools"] == []
         assert posted["agent_config"]["type"] == "antigravity"
         assert posted["input"][0]["text"] == "hello"
         assert captured[0].headers["Api-Revision"] == "2026-05-20"
@@ -209,4 +211,74 @@ async def test_sdk_interrupted_snapshot_body_is_typed_and_connection_is_closed()
         assert exc.value.category == "transient_network"
         assert "SECRET" not in str(exc.value) and exc.value.__cause__ is None
         assert len(calls) == 1 and body.closed
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+async def test_every_create_wire_body_has_exact_tools_on_continuation_and_fallback(
+    configured: bool,
+) -> None:
+    captured: list[httpx.Request] = []
+    tools = [{"type": "code_execution"}] if configured else []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if len(captured) == 2:
+            return httpx.Response(503, json={"error": {"code": 503, "message": "overloaded"}})
+        return httpx.Response(200, json={"id": "next", "status": "completed", "steps": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        source = SDKTransport(client)
+        base: Object = {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {"type": "antigravity", "model": "gemini-3.8-flash"},
+            "input": [{"type": "text", "text": "hello"}],
+            "environment": "remote",
+        }
+        if configured:
+            base["tools"] = [{"type": "code_execution"}]
+        await source.create(base)
+        continuation: Object = {**base, "previous_interaction_id": "next", "environment": "e1"}
+        with pytest.raises(ProviderError, match="overloaded"):
+            await source.create(continuation)
+        # A caller's explicitly selected 503 fallback traverses the same SDK boundary.
+        await source.create(
+            {
+                **continuation,
+                "agent_config": {"type": "antigravity", "model": "gemini-flash-latest"},
+            }
+        )
+        posted = [json.loads(request.content) for request in captured]
+        assert len(posted) == 3  # No hidden SDK retry.
+        assert [body["tools"] for body in posted] == [tools, tools, tools]
+        assert [body.get("previous_interaction_id") for body in posted] == [None, "next", "next"]
+        assert posted[-1]["agent_config"]["model"] == "gemini-flash-latest"
+        assert ("tools" in base) == configured  # The caller's stored request is not mutated.
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize("tools", [None, "defaults", {"type": "google_search"}])
+async def test_non_list_tools_are_refused_before_native_io(tools: JsonValue) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"id": "unexpected", "status": "completed"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture", http_options=HttpOptions(httpx_async_client=http)
+        )
+        with pytest.raises(ProviderError) as error:
+            await SDKTransport(client).create(
+                {"agent": "antigravity-preview-05-2026", "tools": tools}
+            )
+        assert error.value.native_code == "explicit_tools_required"
+        assert captured == []
         await client.aio.aclose()
