@@ -150,8 +150,13 @@ async def replay_channels(
                 DiscordMessageAdmission.tenant_id == tenant_id,
                 DiscordMessageAdmission.channel_id == channel_id,
                 DiscordMessageAdmission.created_at >= cutoff,
+                DiscordMessageAdmission.message_id.op("~")("^[0-9]+$"),
             )
-            .order_by(DiscordMessageAdmission.created_at)
+            # Snowflakes are positive decimal IDs; length then text is their
+            # numeric order without assuming gateway claim order or bigint size.
+            .order_by(
+                func.length(DiscordMessageAdmission.message_id), DiscordMessageAdmission.message_id
+            )
             .limit(1)
         )
         if oldest_receipt is not None and oldest_receipt.isdecimal():

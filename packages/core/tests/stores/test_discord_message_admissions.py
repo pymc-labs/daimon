@@ -95,6 +95,11 @@ async def test_replay_channels_are_bounded_and_include_a_pending_message_before_
         ma_session_id="sesn_test",
     )
     await update_watermark(db_session, id=row.id, watermark_message_id="300")
+    # A later message can be claimed first by another gateway worker. Claim
+    # order must not hide the earlier pending input behind the answer watermark.
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="400", owner_key=11
+    )
     assert await claim_message(
         db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
     )
