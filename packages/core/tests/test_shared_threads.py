@@ -22,6 +22,9 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+    BetaManagedAgentsSpanModelRequestEndEvent,
+)
 from daimon.core._models import AgentGitHubMode
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.channel_backend import (
@@ -44,7 +47,7 @@ from daimon.core.shared_threads import (
 )
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores import mux_state
+from daimon.core.stores import mux_state, tenant_ledger, usage_events
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
@@ -64,7 +67,7 @@ from daimon.testing.ma import (
     make_fake_memory_store_handler,
     resolved_agent_env_router,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from mux.contracts.config import BackendConfig, CapabilityRequirement, ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
@@ -308,6 +311,70 @@ async def test_c01_two_callers_share_one_workspace_with_their_own_attribution(
     assert binding is not None
     assert binding.native_refs["session"] == first.ma_session_id
     assert (binding.legacy_account_id, binding.config_revision) == (None, revision.local)
+
+
+async def test_c01_each_writer_is_charged_for_their_own_turns_in_a_shared_session(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Shared session, separate charges: every usage row names the person whose
+    turn spent it, and every debit is that turn's own ledger row."""
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    agent, env = await _app_agent(db_session, tenant)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Fake())
+    alices = await _bind(deps, tenant, _admission(alice.id, agent, env, revision), user="alice")
+    bobs = await _bind(deps, tenant, _admission(bob.id, agent, env, revision), user="bob")
+    assert alices.ma_session_id == bobs.ma_session_id
+
+    spent = {"alice": (10, 20), "bob": (300, 400)}
+    for prepared, user in ((alices, "alice"), (bobs, "bob")):
+        tokens_in, tokens_out = spent[user]
+        await prepared._record(  # pyright: ignore[reportPrivateUsage]
+            event=BetaManagedAgentsSpanModelRequestEndEvent(
+                id=f"evt_{user}",
+                is_error=False,
+                model_request_start_id=f"start_{user}",
+                model_usage=ma_model_usage(input_tokens=tokens_in, output_tokens=tokens_out),
+                processed_at=datetime.now(UTC),
+                type="span.model_request_end",
+            )
+        )
+    # A replayed event is not charged twice.
+    await alices._record(  # pyright: ignore[reportPrivateUsage]
+        event=BetaManagedAgentsSpanModelRequestEndEvent(
+            id="evt_alice",
+            is_error=False,
+            model_request_start_id="start_alice",
+            model_usage=ma_model_usage(input_tokens=10, output_tokens=20),
+            processed_at=datetime.now(UTC),
+            type="span.model_request_end",
+        )
+    )
+
+    async with db_session_factory() as s:
+        events = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
+        ledger = await tenant_ledger.list_for_tenant(s, tenant_id=tenant.id)
+        per_user = {
+            user: await usage_events.list_for_tenant(s, tenant_id=tenant.id, platform_user_id=user)
+            for user in spent
+        }
+    shared_session = alices.ma_session_id
+    assert {(e.platform_user_id, e.input_tokens, e.output_tokens) for e in events} == {
+        ("alice", 10, 20),
+        ("bob", 300, 400),
+    }
+    assert {e.managed_session_id for e in events} == {shared_session}
+    assert [len(per_user["alice"]), len(per_user["bob"])] == [1, 1]
+    debits = sorted(row.idempotency_key for row in ledger if row.delta_usd < 0)
+    assert debits == [f"turn:{shared_session}:evt_alice", f"turn:{shared_session}:evt_bob"]
+    by_key = {row.idempotency_key: row.delta_usd for row in ledger}
+    # Bob spent more, so his debit is the larger one: each writer's own cost.
+    assert by_key[f"turn:{shared_session}:evt_bob"] < by_key[f"turn:{shared_session}:evt_alice"]
 
 
 async def test_a_shared_thread_needs_an_app_mode_agent(
