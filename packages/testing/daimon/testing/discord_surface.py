@@ -31,6 +31,8 @@ _MESSAGE_IDS = itertools.count(
     discord.utils.time_snowflake(datetime(2026, 10, 10, tzinfo=UTC)), 1_000_000
 )
 
+_UPLOAD_IDS = itertools.count(discord.utils.time_snowflake(datetime(2026, 10, 11, tzinfo=UTC)))
+
 
 class SurfaceModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
@@ -181,16 +183,16 @@ class OfflineDiscordGateway:
         result = cast(dict[str, Any], json.loads(json.dumps(request)))
         if len(result.get("content") or "") > 2000:
             raise ValueError("Discord content exceeds 2000 characters")
-        for file in params.files or ():
-            key = f"offline://attachment/{self._next_id}/{file.filename}"
+        for index, file in enumerate(params.files or ()):
+            upload_id = next(_UPLOAD_IDS)
+            key = f"offline://attachment/{upload_id}/{file.filename}"
             self._file_bytes[key] = file.fp.read()
             # Preserve by-reference attachments; replace uploaded file placeholders.
             attachments = result.setdefault("attachments", [])
-            index = list(params.files or ()).index(file)
             for item in attachments:
                 if item.get("id") == index:
                     item.update(
-                        id=self._next_id + index + 1,
+                        id=upload_id,
                         filename=file.filename,
                         size=len(self._file_bytes[key]),
                         url=key,

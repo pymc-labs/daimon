@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -334,3 +335,35 @@ async def test_two_terminals_cannot_claim_complete_capture() -> None:
 
     capture = await h.run(invoke)
     assert not capture.post_capture_complete and not capture.text_capture_complete
+
+
+async def test_same_name_uploads_keep_distinct_bytes_within_one_send_and_later_edits() -> None:
+    h = harness()
+    message = await h.transport.send(
+        files=[
+            discord.File(io.BytesIO(b"first"), filename="same.txt"),
+            discord.File(io.BytesIO(b"second"), filename="same.txt"),
+        ]
+    )
+    first, second = message.attachments
+    assert first.url != second.url and first.id != second.id
+    assert await first.read() == b"first" and await second.read() == b"second"
+    edited = await h.transport.edit(
+        message,
+        attachments=[first, second, discord.File(io.BytesIO(b"third"), filename="same.txt")],
+    )
+    assert edited is not None
+    third = edited.attachments[-1]
+    edited_again = await h.transport.edit(
+        edited,
+        attachments=[*edited.attachments, discord.File(io.BytesIO(b"fourth"), filename="same.txt")],
+    )
+    assert edited_again is not None
+    assert len({a.url for a in edited_again.attachments}) == 4
+    assert [await a.read() for a in edited_again.attachments] == [
+        b"first",
+        b"second",
+        b"third",
+        b"fourth",
+    ]
+    assert await first.read() == b"first" and await third.read() == b"third"
