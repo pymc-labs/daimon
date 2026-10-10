@@ -345,8 +345,11 @@ async def db_engine(db_schema: str) -> AsyncIterator[AsyncEngine]:
     try:
         yield engine
     finally:
-        await _drop_schema(engine, db_schema)
-        await engine.dispose()
+        try:
+            await _drain_background_tasks()
+            await _drop_schema(engine, db_schema)
+        finally:
+            await engine.dispose()
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -402,16 +405,18 @@ async def db_clean(
 
 
 async def _drain_background_tasks() -> None:
-    """Await the turn outcomes, budget notices and name writes a test left running.
+    """Finish a test's background database work before closing or wiping it.
 
-    They write through the test's sessionmaker, so they must finish before its
-    connection is rolled back and returned: one still running then breaks the
-    connection for every later test in the worker. The names this process
-    remembers writing are forgotten too, since the wipe deletes them.
+    Face rendering uses a separate engine connection. Cancellation must finish
+    its transaction rollback before any schema DDL. Other tasks write through
+    the test's sessionmaker and must finish before its connection is returned.
+    Forget cached names because the next wipe deletes them.
     """
+    from daimon.core.agent_identity import cancel_and_wait_pending_agent_faces
     from daimon.core.channel_budget_notice import drain_budget_notices
     from daimon.core.turn.outcomes import drain_outcomes
 
+    await cancel_and_wait_pending_agent_faces()
     await drain_outcomes()
     await drain_budget_notices()
     await platform_names.settle()
@@ -431,6 +436,7 @@ async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
                 try:
                     yield session
                 finally:
+                    await _drain_background_tasks()
                     await session.close()
                     await conn.rollback()
         finally:
