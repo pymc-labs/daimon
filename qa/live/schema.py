@@ -89,8 +89,11 @@ class Assertion(Contract):
         "fences_balanced",
         "footer_on_last_message",
         "thread_name",
+        "channel_text_present",
+        "channel_text_absent",
     ]
     turn: int | None = Field(default=None, ge=1)
+    since_turn: int | None = Field(default=None, ge=1)
     maximum: float | None = Field(default=None, alias="max", ge=0)
     minimum: int = Field(default=0, alias="min", ge=0)
     as_turn: int | None = Field(default=None, ge=1)
@@ -115,7 +118,11 @@ class Assertion(Contract):
 
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
-        if self.kind not in {"db_check", "interrupt_within_s"} and self.turn is None:
+        if (
+            self.kind not in {"db_check", "interrupt_within_s"}
+            and self.turn is None
+            and self.since_turn is None
+        ):
             raise ValueError(f"{self.kind} requires turn")
         if (
             self.kind in {"reply_within_s", "done_within_s", "no_silent_drop", "interrupt_within_s"}
@@ -123,7 +130,9 @@ class Assertion(Contract):
         ):
             raise ValueError(f"{self.kind} requires max")
         for prefix, field in (("text_", self.pattern), ("log_", self.event)):
-            if self.kind.startswith(prefix) and not field:
+            if (
+                self.kind.startswith(prefix) or self.kind.startswith("channel_" + prefix)
+            ) and not field:
                 raise ValueError(f"{self.kind} requires {prefix} argument")
         if self.kind == "same_thread" and self.as_turn is None:
             raise ValueError("same_thread requires as_turn")
@@ -225,8 +234,6 @@ PROPOSED_ASSERTIONS = frozenset(
         "chunks_gap_max_s",
         "component_present",
         "card_text_now",
-        "channel_text_present",
-        "channel_text_absent",
         "cli_check",
         "http_check",
         "any_of",

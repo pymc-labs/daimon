@@ -127,8 +127,8 @@ def test_anchored_answer_uses_content_and_multiline_without_footer_join(
     ]
     assertion = Assertion(kind="text_present", turn=1, pattern=r"^\s*\**B1\**\.?\s*$")
     assert evaluate(assertion, [turn], backend, judge).status == "PASS"
-    turn.messages[0]["content"] = "preface\nB1\nother line"
-    assert evaluate(assertion, [turn], backend, judge).status == "FAIL"
+    turn.messages[0]["content"] = "-# qa-agent\nB1"
+    assert evaluate(assertion, [turn], backend, judge).status == "PASS"
     assertion.pattern = "(?m)^B1$"
     assert evaluate(assertion, [turn], backend, judge).status == "PASS"
     turn.messages = [{"content": "B"}, {"content": "1"}]

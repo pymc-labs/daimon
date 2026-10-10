@@ -7,6 +7,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -439,6 +440,17 @@ class DiscordBackend:
                             "trigger_timestamp": trigger_at.isoformat(),
                             "elapsed_s": visible_s,
                         }
+            header_pattern = r"^-#\s+" + re.escape(self.target.qa_agent_name or "") + r"\s*$"
+            for message in messages:
+                for match in re.finditer(
+                    header_pattern, str(message.get("content") or ""), re.MULTILINE
+                ):
+                    header: Message = {
+                        "message_id": str(message.get("id")),
+                        "line": match[0].strip(),
+                    }
+                    if header not in turn.agent_subtext_headers:
+                        turn.agent_subtext_headers.append(header)
             turn.messages = messages
             turn.parent_messages = [m for m in messages if str(m.get("channel_id")) in self.owned]
             thread_ids = {
@@ -479,6 +491,25 @@ class DiscordBackend:
             time.sleep(min(self.config.poll_interval_s, max(0, deadline - time.monotonic())))
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
+
+    def channel_messages(self, turn: Turn) -> list[Message]:
+        self._owned(turn.channel_id)
+        if not turn.settled or turn.ended_at is None:
+            raise Pending("channel history requires a settled reference turn")
+        rows = self.driver.messages(turn.channel_id, after=None, limit=100)
+        if len(rows) >= 100:
+            raise Pending("channel history exceeds bounded observation")
+        return [
+            row
+            for row in rows
+            if row.get("type", 0) in {0, 19}
+            and (
+                obj(row.get("author")).get("id") == self.target.daimon_id
+                or str(row.get("application_id")) == self.target.daimon_id
+            )
+            and (created := message_created_at(row)) is not None
+            and created > turn.ended_at
+        ]
 
     def react(self, channel: str, message: str, emoji: str) -> None:
         self._owned(channel)

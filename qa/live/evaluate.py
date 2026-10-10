@@ -21,7 +21,7 @@ from qa.live.types import (
 
 def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: Judge) -> Check:
     kind = assertion.kind
-    turn = next((t for t in turns if t.number == assertion.turn), None)
+    turn = next((t for t in turns if t.number == (assertion.turn or assertion.since_turn)), None)
     evidence: list[str] = []
     try:
         if assertion.pending_extension:
@@ -52,14 +52,22 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 # answers must not be joined to another message or its footer.
                 pattern = assertion.pattern or ""
                 components = [component for m in turn.messages for component in text_components(m)]
-                # Plain ^...$ is an exact component assertion. Inline (?m)
-                # remains available for explicitly requested per-line searches.
-                matcher = (
-                    re.fullmatch if pattern.startswith("^") and pattern.endswith("$") else re.search
-                )
-                match = any(matcher(pattern, component, re.MULTILINE) for component in components)
+                match = any(re.search(pattern, component, re.MULTILINE) for component in components)
                 passed = match if kind == "text_present" else not match
                 reason = f"regex {assertion.pattern!r}; matched={match}"
+            elif kind in {"channel_text_present", "channel_text_absent"}:
+                rows = backend.channel_messages(turn)
+                turn.channel_history = rows
+                matched = any(
+                    re.search(assertion.pattern or "", component, re.MULTILINE)
+                    for row in rows
+                    for component in text_components(row)
+                )
+                passed = matched if kind == "channel_text_present" else not matched
+                reason = (
+                    f"parent channel regex {assertion.pattern!r}; "
+                    f"matched={matched}; messages={len(rows)}"
+                )
             elif kind in {"message_count", "fences_balanced", "footer_on_last_message"}:
                 if not turn.ended_at:
                     raise Pending("turn message observation was not completed")

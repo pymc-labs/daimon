@@ -105,6 +105,9 @@ class FakeBackend:
             models=[STAGING_LEGACY_MODEL],
         )
 
+    def channel_messages(self, turn: Turn) -> list[Message]:
+        return self.log_rows
+
     def thread_name(self, turn: Turn) -> str:
         return "Inventory example"
 

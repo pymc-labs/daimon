@@ -66,6 +66,8 @@ class Turn:
     trigger_reactions: list[Message] = field(default_factory=list[Message])
     trigger_reaction_history: list[Message] = field(default_factory=list[Message])
     messages: list[Message] = field(default_factory=list[Message])
+    agent_subtext_headers: list[Message] = field(default_factory=list[Message])
+    channel_history: list[Message] = field(default_factory=list[Message])
     parent_messages: list[Message] = field(default_factory=list[Message])
     verdicts: list[str] = field(default_factory=list[str])
     usage: Usage = field(default_factory=Usage)
@@ -116,6 +118,7 @@ class Backend(Protocol):
     def db_check(self, sql: str, turn: Turn | None = None) -> JsonValue: ...
     def usage(self, turn: Turn) -> Usage: ...
     def thread_name(self, turn: Turn) -> str: ...
+    def channel_messages(self, turn: Turn) -> list[Message]: ...
     def classify(self, message: Message) -> str: ...
 
 
