@@ -1080,3 +1080,9 @@ Provider-native usage frames may carry an actual usage observation without a
 display event. Prepared foreign sessions use their bound native observation
 recorder, preserving nullable measurements and pending accounting. The default
 Anthropic session continues to use its SDK span recorder and existing recovery.
+
+Provider recovery can atomically publish a collected journal snapshot through
+`TurnPersistence.record_many(session, events, cursor=...)`. It uses the active
+binding lease and the same source identity/revision rules as individual records.
+All records, the projection and the supplied cursor commit together; a malformed
+late record leaves the entire batch unchanged.
