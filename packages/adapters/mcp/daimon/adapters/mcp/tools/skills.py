@@ -18,6 +18,7 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.resource_ports import mcp_scope, walk_skill_versions
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
@@ -475,7 +476,7 @@ async def _get_impl(
     if skill is None or await _hidden(runtime, auth, skill):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     version_count = 0
-    async for _ in runtime.client.beta.skills.versions.list(skill.id):
+    async for _ in walk_skill_versions(runtime.client, skill.id, scope=mcp_scope(auth)):
         version_count += 1
     return SkillDetail(
         name=name,

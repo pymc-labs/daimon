@@ -27,8 +27,10 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
+from daimon.adapters.mcp.resource_ports import upload_bundle_file
 from daimon.core import bundle_handle
 from daimon.core.config import McpSettings
+from daimon.core.mux_backend import resource_scope
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from fastmcp.server.auth import AccessToken
@@ -125,8 +127,16 @@ def build_bundles_route(
             if magic != _GZIP_MAGIC:
                 return PlainTextResponse("bundle must be a gzip archive", status_code=415)
 
-            uploaded: FileMetadata = await anthropic.beta.files.upload(
-                file=("bundle.tar.gz", spooled, "application/gzip"),
+            subject = access.claims.get("sub")
+            account_id = subject if isinstance(subject, str) else access.client_id or "service"
+            uploaded: FileMetadata = await upload_bundle_file(
+                anthropic,
+                spooled,
+                scope=resource_scope(
+                    tenant_id=str(tenant_id),
+                    account_id=account_id,
+                    authorization_id="mcp-bundle",
+                ),
             )
 
         now = datetime.now(UTC)

@@ -41,6 +41,7 @@ from daimon.adapters.mcp.hub.identity import (
     HubIdentity,
     _hub_auth,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.resource_ports import mcp_scope, walk_sessions
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
@@ -255,7 +256,9 @@ async def _list_my_sessions_impl(
 ) -> list[SessionInfo]:
     owned: list[BetaManagedAgentsSession] = []
     others: list[BetaManagedAgentsSession] = []
-    async for session in runtime.client.beta.sessions.list(agent_id=str(agent.id)):
+    async for session in walk_sessions(
+        runtime.client, agent_id=str(agent.id), scope=mcp_scope(auth)
+    ):
         (owned if _owned_by(session, auth) else others).append(session)
     legacy = await admin_readable_legacy_sessions(runtime, auth, others)
     owned.extend(s for s in others if s.id in legacy)

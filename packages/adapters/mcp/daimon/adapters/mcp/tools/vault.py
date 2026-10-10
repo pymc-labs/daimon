@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.resource_ports import mcp_scope, walk_named_vaults, walk_vault_credentials
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from fastmcp import Context, FastMCP
@@ -45,13 +46,17 @@ async def _list_credentials_impl(
     if auth.agent_id is None:
         raise ToolError("agent_id missing — token was not minted for an agent session")
     display_name = f"daimon-mcp:{auth.account_id}:{auth.agent_id}"
-    matching = [v async for v in client.beta.vaults.list() if v.display_name == display_name]
+    matching = [
+        v
+        async for v in walk_named_vaults(client, display_name, scope=mcp_scope(auth))
+        if v.display_name == display_name
+    ]
     if not matching:
         raise ToolError(
             "no MCP vault found for this agent — run a session first to bootstrap the vault"
         )
     vault_id = min(matching, key=lambda v: v.created_at).id
-    creds = [c async for c in client.beta.vaults.credentials.list(vault_id=vault_id)]
+    creds = [c async for c in walk_vault_credentials(client, vault_id, scope=mcp_scope(auth))]
     return [VaultCredentialSummary.model_validate(c.model_dump(mode="json")) for c in creds]
 
 

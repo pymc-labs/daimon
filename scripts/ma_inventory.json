@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2124,
+  "files_scanned": 2123,
   "parse_errors": [],
   "calls": [
     {
@@ -498,80 +498,41 @@
       "response_access": []
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/bundles.py",
-      "line": 128,
-      "end": 130,
-      "scope": "handler",
-      "category": "production",
-      "resource": "files.upload",
-      "call": "anthropic.beta.files.upload(file=('bundle.tar.gz', spooled, 'application/gzip'))",
-      "request_keys": [],
-      "response_access": [
-        "uploaded.id"
-      ]
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/hosted_artifacts.py",
-      "line": 167,
-      "end": 171,
-      "scope": "_discover_chart_outputs",
-      "category": "production",
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 665,
+      "end": 667,
+      "scope": "test_chart_scan_cap_stops_the_sdk_paginator_before_another_page",
+      "category": "test",
       "resource": "files.list",
-      "call": "anthropic.beta.files.list(scope_id=session_id, limit=min(_MAX_SCANNED, 1000), betas=['managed-agents-2026-04-01'])",
-      "request_keys": [],
-      "response_access": [
-        "item.created_at",
-        "item.filename",
-        "item.id",
-        "item.size_bytes"
-      ]
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/hosted_artifacts.py",
-      "line": 238,
-      "end": 241,
-      "scope": "_deliver_hosted_charts_impl",
-      "category": "production",
-      "resource": "files.download",
-      "call": "anthropic.beta.files.download(output.file_id, betas=['managed-agents-2026-04-01'])",
-      "request_keys": [],
-      "response_access": [
-        "response.read"
-      ]
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/hub.py",
-      "line": 258,
-      "end": 258,
-      "scope": "_list_my_sessions_impl",
-      "category": "production",
-      "resource": "sessions.list",
-      "call": "runtime.client.beta.sessions.list(agent_id=str(agent.id))",
+      "call": "before.beta.files.list(scope_id='session', limit=1, betas=['managed-agents-2026-04-01'])",
       "request_keys": [],
       "response_access": []
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/self_edit.py",
-      "line": 144,
-      "end": 144,
-      "scope": "_vault_id_for_agent",
-      "category": "production",
-      "resource": "vaults.list",
-      "call": "client.beta.vaults.list()",
-      "request_keys": [],
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 274,
+      "end": 278,
+      "scope": "test_repo_credential_json_keeps_native_key_order_and_partial_id_reply",
+      "category": "test",
+      "resource": "vaults.credentials.create",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', auth={'type': 'static_bearer', 'mcp_server_url': 'https://github.com', 'token': token}, metadata=metadata)",
+      "request_keys": [
+        "mcp_server_url",
+        "token",
+        "type"
+      ],
       "response_access": [
-        "v.created_at",
-        "v.display_name"
+        "expected.id"
       ]
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/self_edit.py",
-      "line": 453,
-      "end": 465,
-      "scope": "_set_repo_binding_impl",
-      "category": "production",
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 337,
+      "end": 349,
+      "scope": "test_public_repo_binding_keeps_vault_write_commit_compensation_and_old_revoke",
+      "category": "test",
       "resource": "vaults.credentials.create",
-      "call": "runtime.client.beta.vaults.credentials.create(vault_id=vault_id, auth={'type': 'static_bearer', 'mcp_server_url': 'https://github.com', 'token': token}, metadata={'service': service, 'agent_id': str(agent_id), 'repo_url': repo_url})",
+      "call": "before.beta.vaults.credentials.create(vault_id='vault', auth={'type': 'static_bearer', 'mcp_server_url': 'https://github.com', 'token': 'offline-pat'}, metadata={'service': 'github', 'agent_id': str(AUTH.agent_id), 'repo_url': 'owner/repo'})",
       "request_keys": [
         "agent_id",
         "mcp_server_url",
@@ -580,62 +541,64 @@
         "token",
         "type"
       ],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 421,
+      "end": 421,
+      "scope": "test_public_clear_binding_keeps_vault_delete_before_database_clear",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete('old', vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 534,
+      "end": 536,
+      "scope": "test_public_bundle_upload_keeps_stream_multipart_digest_and_retention",
+      "category": "test",
+      "resource": "files.upload",
+      "call": "before.beta.files.upload(file=('bundle.tar.gz', io.BytesIO(archive), 'application/gzip'))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 186,
+      "end": 186,
+      "scope": "test_named_vault_walk_keeps_lazy_sdk_pages_and_exact_name_filter",
+      "category": "test",
+      "resource": "vaults.list",
+      "call": "before.beta.vaults.list()",
+      "request_keys": [],
       "response_access": [
-        "new_cred.id"
+        "v.display_name"
       ]
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/self_edit.py",
-      "line": 514,
-      "end": 517,
-      "scope": "_set_repo_binding_impl",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "runtime.client.beta.vaults.credentials.delete(old_ref, vault_id=vault_id)",
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 222,
+      "end": 222,
+      "scope": "test_native_credential_walk_preserves_the_consumed_summary_without_unused_fields",
+      "category": "test",
+      "resource": "vaults.credentials.list",
+      "call": "before.beta.vaults.credentials.list(vault_id='vault')",
       "request_keys": [],
-      "response_access": []
+      "response_access": [
+        "c.model_dump"
+      ]
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/self_edit.py",
-      "line": 616,
-      "end": 619,
-      "scope": "_clear_repo_binding_impl",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "runtime.client.beta.vaults.credentials.delete(existing.ma_secret_ref, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/self_edit.py",
-      "line": 495,
-      "end": 498,
-      "scope": "_set_repo_binding_impl",
-      "category": "production",
-      "resource": "vaults.credentials.delete",
-      "call": "runtime.client.beta.vaults.credentials.delete(new_cred.id, vault_id=vault_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/skills.py",
-      "line": 478,
-      "end": 478,
-      "scope": "_get_impl",
-      "category": "production",
-      "resource": "skills.versions.list",
-      "call": "runtime.client.beta.skills.versions.list(skill.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/vault.py",
-      "line": 48,
-      "end": 48,
-      "scope": "_list_credentials_impl",
-      "category": "production",
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 250,
+      "end": 250,
+      "scope": "test_public_vault_summary_keeps_oldest_matching_vault_and_legacy_url",
+      "category": "test",
       "resource": "vaults.list",
-      "call": "client.beta.vaults.list()",
+      "call": "before.beta.vaults.list()",
       "request_keys": [],
       "response_access": [
         "v.created_at",
@@ -643,17 +606,122 @@
       ]
     },
     {
-      "file": "packages/adapters/mcp/daimon/adapters/mcp/tools/vault.py",
-      "line": 54,
-      "end": 54,
-      "scope": "_list_credentials_impl",
-      "category": "production",
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 254,
+      "end": 254,
+      "scope": "test_public_vault_summary_keeps_oldest_matching_vault_and_legacy_url",
+      "category": "test",
       "resource": "vaults.credentials.list",
-      "call": "client.beta.vaults.credentials.list(vault_id=vault_id)",
+      "call": "before.beta.vaults.credentials.list(vault_id=identity)",
       "request_keys": [],
       "response_access": [
         "c.model_dump"
       ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 336,
+      "end": 336,
+      "scope": "test_public_repo_binding_keeps_vault_write_commit_compensation_and_old_revoke",
+      "category": "test",
+      "resource": "vaults.list",
+      "call": "before.beta.vaults.list()",
+      "request_keys": [],
+      "response_access": [
+        "v.display_name"
+      ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 354,
+      "end": 354,
+      "scope": "test_public_repo_binding_keeps_vault_write_commit_compensation_and_old_revoke",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete(revoked, vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 420,
+      "end": 420,
+      "scope": "test_public_clear_binding_keeps_vault_delete_before_database_clear",
+      "category": "test",
+      "resource": "vaults.list",
+      "call": "before.beta.vaults.list()",
+      "request_keys": [],
+      "response_access": [
+        "v.display_name"
+      ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 491,
+      "end": 491,
+      "scope": "test_public_hub_session_list_keeps_account_and_legacy_filters",
+      "category": "test",
+      "resource": "sessions.list",
+      "call": "before.beta.sessions.list(agent_id='agent')",
+      "request_keys": [],
+      "response_access": [
+        "s.id"
+      ]
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 617,
+      "end": 619,
+      "scope": "test_public_chart_delivery_keeps_files_beta_queries_and_download_bytes",
+      "category": "test",
+      "resource": "files.list",
+      "call": "before.beta.files.list(scope_id='session', limit=200, betas=['managed-agents-2026-04-01'])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 622,
+      "end": 624,
+      "scope": "test_public_chart_delivery_keeps_files_beta_queries_and_download_bytes",
+      "category": "test",
+      "resource": "files.download('file', betas=['managed-agents-2026-04-01'])).read",
+      "call": "(await before.beta.files.download('file', betas=['managed-agents-2026-04-01'])).read()",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 352,
+      "end": 352,
+      "scope": "test_public_repo_binding_keeps_vault_write_commit_compensation_and_old_revoke",
+      "category": "test",
+      "resource": "vaults.credentials.delete",
+      "call": "before.beta.vaults.credentials.delete(revoked, vault_id='vault')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 454,
+      "end": 454,
+      "scope": "test_public_skill_version_count_keeps_partial_rows_and_sdk_stop_rules",
+      "category": "test",
+      "resource": "skills.versions.list",
+      "call": "before.beta.skills.versions.list('skill')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 623,
+      "end": 623,
+      "scope": "test_public_chart_delivery_keeps_files_beta_queries_and_download_bytes",
+      "category": "test",
+      "resource": "files.download",
+      "call": "before.beta.files.download('file', betas=['managed-agents-2026-04-01'])",
+      "request_keys": [],
+      "response_access": []
     },
     {
       "file": "packages/adapters/mcp/tests/test_resource_ports_parity.py",
@@ -5769,8 +5837,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 92,
-      "end": 92,
+      "line": 120,
+      "end": 122,
+      "scope": "walk_session_native",
+      "category": "production",
+      "resource": "files.list",
+      "call": "self._client.beta.files.list(scope_id=session.id, limit=limit, betas=['managed-agents-2026-04-01'])",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 100,
+      "end": 100,
       "scope": "_upload_file",
       "category": "production",
       "resource": "files.upload",
@@ -5780,8 +5859,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 101,
-      "end": 107,
+      "line": 109,
+      "end": 109,
+      "scope": "upload_native",
+      "category": "production",
+      "resource": "files.upload",
+      "call": "self._client.beta.files.upload(file=(filename, body, media_type))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
+      "line": 132,
+      "end": 138,
       "scope": "send",
       "category": "production",
       "resource": "files.upload",
@@ -5791,8 +5881,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 114,
-      "end": 114,
+      "line": 145,
+      "end": 145,
       "scope": "_retrieve_metadata",
       "category": "production",
       "resource": "files.retrieve_metadata",
@@ -5802,8 +5892,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 134,
-      "end": 134,
+      "line": 165,
+      "end": 165,
       "scope": "list",
       "category": "production",
       "resource": "files.list",
@@ -5813,8 +5903,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 144,
-      "end": 144,
+      "line": 175,
+      "end": 175,
       "scope": "download",
       "category": "production",
       "resource": "files.download",
@@ -5824,8 +5914,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/artifacts.py",
-      "line": 158,
-      "end": 158,
+      "line": 189,
+      "end": 189,
       "scope": "delete",
       "category": "production",
       "resource": "files.delete",
@@ -6400,8 +6490,30 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 155,
-      "end": 155,
+      "line": 164,
+      "end": 164,
+      "scope": "walk_named",
+      "category": "production",
+      "resource": "vaults.list",
+      "call": "self._client.beta.vaults.list()",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 174,
+      "end": 174,
+      "scope": "credential_walk_native",
+      "category": "production",
+      "resource": "vaults.credentials.list",
+      "call": "self._client.beta.vaults.credentials.list(vault_id=vault.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
+      "line": 195,
+      "end": 195,
       "scope": "walk",
       "category": "production",
       "resource": "vaults.list",
@@ -6411,8 +6523,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 207,
-      "end": 207,
+      "line": 247,
+      "end": 247,
       "scope": "credential_walk",
       "category": "production",
       "resource": "vaults.credentials.list",
@@ -6422,8 +6534,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 189,
-      "end": 189,
+      "line": 229,
+      "end": 229,
       "scope": "list",
       "category": "production",
       "resource": "vaults.list",
@@ -6433,8 +6545,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 298,
-      "end": 298,
+      "line": 338,
+      "end": 338,
       "scope": "remove",
       "category": "production",
       "resource": "vaults.credentials.delete",
@@ -6444,8 +6556,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 305,
-      "end": 305,
+      "line": 345,
+      "end": 345,
       "scope": "archive",
       "category": "production",
       "resource": "vaults.archive",
@@ -6455,8 +6567,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 165,
-      "end": 165,
+      "line": 205,
+      "end": 205,
       "scope": "create",
       "category": "production",
       "resource": "vaults.create",
@@ -6466,8 +6578,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 235,
-      "end": 237,
+      "line": 275,
+      "end": 277,
       "scope": "_send_credential",
       "category": "production",
       "resource": "vaults.credentials.create",
@@ -6477,8 +6589,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/vaults.py",
-      "line": 255,
-      "end": 257,
+      "line": 295,
+      "end": 297,
       "scope": "update_credential",
       "category": "production",
       "resource": "vaults.credentials.update",
@@ -10362,6 +10474,7 @@
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSession",
+        "BetaManagedAgentsVault",
         "FileMetadata"
       ],
       "category": "production"
@@ -10374,6 +10487,15 @@
         "BetaManagedAgentsEventParams",
         "BetaManagedAgentsSendSessionEvents",
         "BetaManagedAgentsSessionEvent"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/adapters/mcp/daimon/adapters/mcp/resource_ports.py",
+      "line": 16,
+      "module": "anthropic.types.beta.vaults",
+      "names": [
+        "BetaManagedAgentsCredential"
       ],
       "category": "production"
     },
@@ -10851,6 +10973,25 @@
       "module": "anthropic.types.beta.file_metadata",
       "names": [
         "FileMetadata"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 15,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError",
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/adapters/mcp/tests/test_mcp_resources_b_parity.py",
+      "line": 16,
+      "module": "anthropic.types.beta",
+      "names": [
+        "SkillListResponse"
       ],
       "category": "test"
     },
