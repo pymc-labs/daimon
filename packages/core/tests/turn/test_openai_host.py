@@ -1021,3 +1021,64 @@ async def test_final_host_outcome_preserves_observed_root(
     if native_status == "failed" or mode == "replay":
         assert outcome.state.error is not None
         assert len(lifecycle.terminal_failures) == 1
+
+
+@pytest.mark.parametrize("append_mode", ["record", "record_many"])
+async def test_native_command_pair_survives_live_and_recovery_journal(composed, append_mode):
+    from daimon.core.turn.openai_host import driver
+    from daimon.core.turn.openai_io import OpenAITurnIO
+    from mux.drivers.openai.normalize import EventNormalizer
+
+    request, _, store, _, runtime = composed
+    prepared = await prepare_openai(request)
+    binding = await store.get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+            account_id=SCOPE.account_id,
+        )
+    )
+    pairs = EventNormalizer(SESSION_ID).normalize_batch(
+        {
+            "type": "agent.session.turn.item.done",
+            "event_id": "actual-provider-command-event",
+            "session_id": SESSION_ID,
+            "turn_id": "root-pair",
+            "item": {
+                "id": "command-item",
+                "type": "command_execution",
+                "turn_id": "root-pair",
+                "command": "printf fixture",
+                "cwd": "/tmp",
+                "exit_code": 0,
+                "output": "fixture",
+                "status": "completed",
+                "duration_ms": 1,
+            },
+        }
+    )
+    assert [event.type for event in pairs] == ["agent.tool_use", "agent.tool_result"]
+    assert {event.native.event_id for event in pairs} == {"actual-provider-command-event"}
+    assert len({event.id for event in pairs}) == 2
+
+    async def append(active):
+        if append_mode == "record_many":
+            await OpenAIRecoveryJournal().replace(prepared.session_ref, pairs)
+        else:
+            io = OpenAITurnIO(
+                driver(runtime, REVISION, SCOPE, binding),
+                SCOPE,
+                prepared.session_ref,
+                persistence=active,
+                root_turn_id="root-pair",
+            )
+            for event in pairs:
+                await io.accept_record(event)
+
+    for invocation in ("pair-live", "pair-restart"):
+        active = TurnPersistence(store, binding, SCOPE, operation_key=invocation)
+        with active.activate():
+            await active.run(lambda active=active: append(active))
+        saved = await store.read_events(SESSION_ID)
+        assert [event.type for event in saved] == ["agent.tool_use", "agent.tool_result"]
+        assert [event.id for event in saved] == [event.id for event in pairs]
+        assert [event.native for event in saved] == [event.native for event in pairs]

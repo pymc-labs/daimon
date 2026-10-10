@@ -24,6 +24,7 @@ from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.openai_codec import PROFILE, display_batch
+from daimon.core.turn.openai_state import journal_source
 from daimon.core.turn.persistence import UncertainSend
 from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation
 from mux.contracts.events import (
@@ -50,7 +51,9 @@ _BUFFER_BOUND = 1000
 class OpenAIPersistence(Protocol):
     """Structural bridge to N4's journal and claimed-mutation context."""
 
-    async def record(self, session: ResourceRef, event: Event) -> None: ...
+    async def record(
+        self, session: ResourceRef, event: Event, *, source_key: str | None = None
+    ) -> None: ...
     async def stopped(self, key: str, session: ResourceRef) -> None: ...
     async def gap(self, session: ResourceRef) -> None: ...
     async def mutate[T: BaseModel](
@@ -321,7 +324,7 @@ class OpenAITurnIO:
         if event.authority == "preview":
             return []
         self._check_terminal(event)
-        await self._persistence.record(self._session, event)
+        await self._persistence.record(self._session, event, source_key=journal_source(event))
         self._remember(event)
         if self._root is None and event.type != "session.status_terminated":
             if len(self._buffered) >= _BUFFER_BOUND:
@@ -431,7 +434,9 @@ class OpenAITurnIO:
             for value in values:
                 self._check_terminal(value)
             for value in values:
-                await self._persistence.record(self._session, value)
+                await self._persistence.record(
+                    self._session, value, source_key=journal_source(value)
+                )
             current = [
                 value
                 for value in values
@@ -561,7 +566,9 @@ class OpenAITurnIO:
                             ),
                         )
                         self._check_terminal(stopped)
-                        await self._persistence.record(self._session, stopped)
+                        await self._persistence.record(
+                            self._session, stopped, source_key=journal_source(stopped)
+                        )
                         await self._persistence.stopped(receipt.operation_id, self._session)
                         self._terminal = observed.outcome
                         return observed

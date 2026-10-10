@@ -231,9 +231,11 @@ class TurnPersistence:
         )
         return receipt
 
-    async def record(self, session: ResourceRef, event: Event) -> None:
+    async def record(
+        self, session: ResourceRef, event: Event, *, source_key: str | None = None
+    ) -> None:
         self.check_session(self.scope, session)
-        source = event.native.event_id or event.id
+        source = source_key if source_key is not None else event.native.event_id or event.id
         raw_revision = event.payload.get("revision", 1)
         revision = raw_revision if isinstance(raw_revision, int) else 1
         await self.store.append_events(
@@ -245,18 +247,27 @@ class TurnPersistence:
         )
 
     async def record_many(
-        self, session: ResourceRef, events: Sequence[Event], *, cursor: str
+        self,
+        session: ResourceRef,
+        events: Sequence[Event],
+        *,
+        cursor: str,
+        source_key: Callable[[Event], str] | None = None,
     ) -> JournalAppend:
         """Publish a collected snapshot atomically under the active host lease.
 
         The caller supplies its completed-snapshot cursor, including for an
         empty snapshot. Source identities and revisions match record(); all
         entries, projection and cursor commit in one StateStore transaction.
+        A caller may select a derived neutral source identity without altering
+        the event or its provider provenance; omission preserves native identity.
         """
         self.check_session(self.scope, session)
         entries: list[JournalEntry] = []
         for event in events:
-            source = event.native.event_id or event.id
+            source = (
+                source_key(event) if source_key is not None else event.native.event_id or event.id
+            )
             raw_revision = event.payload.get("revision", 1)
             revision = raw_revision if isinstance(raw_revision, int) else 1
             entries.append(JournalEntry(source_key=source, revision=revision, event=event))

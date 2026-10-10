@@ -60,6 +60,13 @@ def checkpoint(
     )
 
 
+def journal_source(event: Event) -> str:
+    """One provider item can yield two records with unchanged native provenance."""
+    if event.type in ("agent.tool_use", "agent.tool_result"):
+        return event.id
+    return event.native.event_id or event.id
+
+
 class OpenAIRecoveryJournal:
     async def read(self, session: ResourceRef) -> tuple[Event, ...] | None:
         rows = await journal(session)
@@ -72,7 +79,7 @@ class OpenAIRecoveryJournal:
             raise ScopeViolation(session.id, "foreign OpenAI recovery snapshot")
         # A4 publishes all completed pages, projection and cursor in ONE commit.
         cursor = events[-1].id if events else ""
-        await active.record_many(session, events, cursor=cursor)
+        await active.record_many(session, events, cursor=cursor, source_key=journal_source)
 
 
 async def invocation_baseline(

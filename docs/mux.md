@@ -1120,3 +1120,9 @@ The driver sends and checks `agent.multi_agent.enabled=false`; enabled saved
 agents, missing verification, and delegation drift on reuse or before input
 refuse. Delegated child accounting is deferred and is not certified by root-only
 usage proofs.
+
+
+OpenAI command/MCP items can normalize into separate tool-use and tool-result
+records sharing one native event. Their host journal keys use each neutral event
+ID for both live append and recovery batch append; provider provenance is retained
+unchanged. Other providers keep the existing native-event journal key by default.

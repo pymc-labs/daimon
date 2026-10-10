@@ -53,7 +53,7 @@ class Persistence:
         assert session == SESSION
         self.gaps += 1
 
-    async def record(self, session, event):
+    async def record(self, session, event, *, source_key=None):
         assert session == SESSION
         if self.refuse_record:
             raise RuntimeError("offline journal unavailable")
