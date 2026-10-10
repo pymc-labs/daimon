@@ -2397,7 +2397,7 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         agent_id=agent_id,
         fernet=fernet,
     )
-    assert len(current.resources) == 2
+    assert len(current.resources) == 1  # the working repo only
     mint.reset_mock(side_effect=True)
     mint.side_effect = ["narrowed-first"]
     writes.clear()
