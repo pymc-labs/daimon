@@ -444,6 +444,7 @@ async def _add_skill_impl(
         )
 
     await recheck(agent)
+    chat_confirms = False
     try:
         no_card = await _no_card_reason(runtime, auth, origin, origin_context_id=origin_context_id)
         if no_card is not None:
@@ -545,9 +546,16 @@ async def _add_skill_impl(
         raise ToolError(str(exc)) from exc
     except anthropic.APIError as exc:
         status = getattr(exc, "status_code", None)
+        # A chat approval was used up above; only a card approval can be retried as is.
+        recovery = (
+            "Ask the person to preview again and reply `yes` to the new preview before "
+            "trying again."
+            if chat_confirms
+            else "Try again later."
+        )
         raise ToolError(
             f"Adding the skill failed upstream{f' (HTTP {status})' if status else ''}; it is "
-            "not attached. Try again later."
+            f"not attached. {recovery}"
         ) from exc
     done = {
         "created": f"Added '{preview.name}' to '{agent_name}'",
