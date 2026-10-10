@@ -155,7 +155,7 @@ async def c05(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
     if not (isinstance(message, AgentMessagePayload)):
         raise ConformanceFailure("C05: message payload must be typed")
     require(
-        message.item_id == "item" and message.content == (TextPart(text="done"),),
+        message.item_id == s.saved_message_item_id and message.content == (TextPart(text="done"),),
         "C05: saved message identity or text was altered",
     )
     require(message.complete, "C05: saved final message must preserve complete content")

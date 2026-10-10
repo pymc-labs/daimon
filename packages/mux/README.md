@@ -223,3 +223,10 @@ evidence and is the profile for an explicitly selected OpenAI backend; a model i
 still required. Existing unconfigured channels resolve to Anthropic as before.
 C09 joins the five earlier offline passes; twelve typed dependencies remain pending.
 The guarded live smoke failed and provides no live certificate.
+
+Gemini offline conformance now proves C05 through canonical saved-step GETs,
+durable SSE gap markers and restart/deduplication checks. Its adapter declares
+`step:0` as the saved-message identity; other adapters retain the C05 default
+`item`. The matrix is eight PASS and ten typed PENDING. Snapshot tests alone
+do not certify C09's missing vault/session-deletion requirements, and host
+scenarios stay pending until their actual host evidence is connected.

@@ -891,7 +891,7 @@ class GeminiEvents(Base):
                                 delivered.add(item.id)
                                 yield item
                     elif kind == "error":
-                        yield event(
+                        gap = event(
                             session,
                             interaction,
                             root,
@@ -899,11 +899,21 @@ class GeminiEvents(Base):
                             {
                                 "domain": interaction,
                                 "after": after,
-                                "recoverable": True,
+                                # Saved steps recover final content, but cannot
+                                # prove lossless replay of the interrupted SSE domain.
+                                "recoverable": False,
                             },
                             identity=str(raw.get("event_id") or "stream_error"),
                             now=now(),
+                            native_type="error",
                         )
+                        async with self._storage.transaction() as records:
+                            current = self._record(records, scope, session)
+                            self._append(current, (gap,))
+                            gap = current.events[gap.id]
+                        if gap.id not in delivered:
+                            delivered.add(gap.id)
+                            yield gap
             finally:
                 close = getattr(source, "aclose", None)
                 if close is not None:
@@ -947,6 +957,7 @@ class GeminiEvents(Base):
                 state=s.state if s.state != "provisioning" else "running",
                 active_root_turn=s.active_root_turn,
                 required_actions=s.required_actions,
+                gaps=tuple(e.id for e in record.events.values() if e.type == "session.history_gap"),
                 taken_at=now(),
             )
 

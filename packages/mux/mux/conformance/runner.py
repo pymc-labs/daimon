@@ -33,6 +33,7 @@ class Scenario:
     session: Session
     desired: SessionSpec
     shared_resources: tuple[ResourceRef, ...] = ()
+    saved_message_item_id: str = "item"
 
 
 @dataclass(frozen=True)

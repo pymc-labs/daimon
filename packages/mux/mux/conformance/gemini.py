@@ -26,6 +26,10 @@ from mux.state.memory import CrashPoint, MemoryStateStore
 from mux.state.store import StateStore
 
 PENDING_REASONS = {
+    "C01": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Multi-human admission/batching host scenario and conformance hook are absent.",
+    ),
     "C02": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
         "Snapshot bytes implemented; clock-driven expiry and unexpected-loss proof absent.",
@@ -34,21 +38,35 @@ PENDING_REASONS = {
         PendingKind.ADAPTER_DEPENDENCY,
         "Ambiguous accepted POST reconciliation is absent; provider offers no idempotency lookup.",
     ),
-    "C05": PendingReason(
-        PendingKind.ADAPTER_DEPENDENCY,
-        "No durable saved-item/SSE gap bridge; preview and EOF tests do not prove this fixture.",
-    ),
     "C08": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
         "Driver next-turn tool/mount update port is not implemented.",
     ),
     "C09": PendingReason(
         PendingKind.CAPABILITY_UNAVAILABLE,
-        "Snapshot downloads are implemented; no provider vault API.",
+        "Binary snapshots are proved; provider vault API and session-delete receipt "
+        "are unavailable.",
     ),
     "C11": PendingReason(
         PendingKind.ADAPTER_DEPENDENCY,
         "Conformance bridge for interaction-time inline skill deployment is absent.",
+    ),
+    "C12": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Gemini host ledger/outbox recovery scenario has not been connected "
+        "to the accounting hook.",
+    ),
+    "C14": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Existing/new-thread backend selection host scenario and conformance hook are absent.",
+    ),
+    "C17": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Host wake generation/lease fencing scenario and conformance hook are absent.",
+    ),
+    "C18": PendingReason(
+        PendingKind.ADAPTER_DEPENDENCY,
+        "Gemini host termination outcome persistence scenario and conformance hook are absent.",
     ),
 }
 
@@ -74,12 +92,21 @@ class GeminiScript(FakeTransport):
         self.storage = MemoryStorage()
         self.store = MemoryStateStore()
         self.timeout_after_accept = False
+        self.stamp = datetime.now(UTC)
         self.scope = Scope(
             tenant_id="tenant", account_id="account", principal_id="human", authorization_id="auth"
         )
         self.ma = GeminiManagedAgents(
             self, storage=self.storage, state_store=self.store, account_scope_id="project"
         )
+
+    def native(self, id_: str, *, status: str = "completed", output: int | None = 0) -> Object:
+        # Provider revisions advance deterministically, independently of the
+        # speed of repeated reads/cancellation on the shared test host.
+        self.stamp += timedelta(seconds=1)
+        response = native(id_, status=status, output=output)
+        response["created"] = response["updated"] = self.stamp.isoformat()
+        return response
 
     async def arrange(self, fixture_id: str) -> Scenario:
         if fixture_id in PENDING_REASONS:
@@ -117,9 +144,10 @@ class GeminiScript(FakeTransport):
         if fixture_id in ("C03", "C07"):
             await self.store.put_binding(session.binding, expected_generation=0)
         if fixture_id == "C03":
-            self.responses.append(native("acknowledged"))
-        elif fixture_id in ("C06", "C07"):
-            self.responses.append(native("root", status="in_progress", output=None))
+            self.responses.append(self.native("acknowledged"))
+        elif fixture_id in ("C05", "C06", "C07"):
+            running = self.native("root", status="in_progress", output=None)
+            self.responses.append(running)
             await self.ma.events.send(
                 self.scope,
                 session.ref,
@@ -127,25 +155,59 @@ class GeminiScript(FakeTransport):
                 key="seed",
             )
             if fixture_id == "C07":
-                initial = datetime.now(UTC)
+                initial = self.stamp
                 for index, count in enumerate((100, 120, 110), start=1):
-                    response = native("root", status="in_progress", output=count)
+                    response = self.native("root", status="in_progress", output=count)
                     response["updated"] = (initial + timedelta(seconds=index)).isoformat()
                     self.saved["root"] = response
                     await self.ma.usage.reconcile(self.scope, session.ref)
             session = await self.ma.sessions.retrieve(self.scope, session.ref)
+            if fixture_id == "C05":
+                completed = self.native("root")
+                completed["steps"] = [
+                    {"type": "model_output", "content": [{"type": "text", "text": "done"}]},
+                    {"type": "function_result", "call_id": "call", "result": "result"},
+                ]
+                # A child-completion signal and EOF cannot terminate the root.
+                # Both the stream's canonical read and post-EOF retrieval see
+                # it running; only the final saved GET observes completion.
+                self.reads["root"] = [running, running, completed]
+                gap: Object = {
+                    "event_type": "error",
+                    "event_id": "lost-domain",
+                    "error": {"code": "stream_interrupted", "message": "scripted loss"},
+                }
+                self.streams["root"] = [
+                    {
+                        "event_type": "step.delta",
+                        "event_id": "preview",
+                        "index": 0,
+                        "delta": {"type": "text", "text": "do"},
+                    },
+                    {
+                        "event_type": "interaction.completed",
+                        "event_id": "child-end",
+                        "interaction": {"id": "child", "status": "completed"},
+                    },
+                    gap,
+                    gap,
+                ]
         elif fixture_id not in ("C10", "C13", "C15", "C16"):
             raise ValueError("unsupported executable fixture")
         return Scenario(
-            self.scope, self.scope.model_copy(update={"tenant_id": "foreign"}), session, spec
+            self.scope,
+            self.scope.model_copy(update={"tenant_id": "foreign"}),
+            session,
+            spec,
+            saved_message_item_id="step:0",
         )
 
     def fault(self, name: str) -> None:
         if name == "timeout_after_accept":
-            self.responses.append(native("unobserved-acceptance"))
+            self.responses.append(self.native("unobserved-acceptance"))
             self.timeout_after_accept = True
         elif name == "observed_stop":
-            self.saved["root"] = native("root", status="cancelled", output=None)
+            self.saved["root"] = self.native("root", status="cancelled", output=None)
         elif name in ("admission_unsupported", "admission_unknown"):
             # memory_stores is statically unsupported in the real profile;
             # either missing-support probe must be refused without native I/O.
