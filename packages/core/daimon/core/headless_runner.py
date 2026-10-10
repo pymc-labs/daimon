@@ -35,7 +35,9 @@ the `daimon_tenant`/`daimon_account` metadata stamp that
 `run_turn` keeps its string `agent_id`/`environment_id` signature (the
 scheduler only has ids) and bridges to `create_session`'s SDK-object
 signature via `beta.agents.retrieve` / `beta.environments.retrieve`
-(mirrors `daimon.adapters.cli.sessions_bootstrap`).
+(mirrors `daimon.adapters.cli.sessions_bootstrap`). An optional
+`model_override` applies only to the new session; it never updates the stored
+agent.
 
 Per `guideline:architecture` "Error propagation" the runner does not
 swallow exceptions: `httpx.HTTPError`, `anthropic.APIError`, and a failed
@@ -139,6 +141,7 @@ async def run_turn(
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
+    model_override: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -167,6 +170,7 @@ async def run_turn(
             on_state=on_state,
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
+            model_override=model_override,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -195,6 +199,7 @@ async def run_turn(
                 on_state=on_state,
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
+                model_override=model_override,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -227,6 +232,7 @@ async def run_turn_impl(
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
+    model_override: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -333,6 +339,7 @@ async def run_turn_impl(
             origin_thread_id=origin_place.thread_id if origin_place is not None else None,
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
+            model_override=model_override,
         )
 
     try:

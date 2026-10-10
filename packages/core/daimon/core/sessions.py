@@ -152,6 +152,7 @@ async def create_session(
     origin_seal_ids: Collection[str] = (),
     before_create: Callable[[], Awaitable[None]] | None = None,
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    model_override: str | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -173,6 +174,9 @@ async def create_session(
 
     ``channel_skills`` are the turn's channel's extra skills, added after the
     agent's own (`session_skills`, the shape the drift check hashes too).
+
+    ``model_override`` replaces the model for this session through
+    ``agent_with_overrides``. It never changes the stored agent.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -528,7 +532,7 @@ async def create_session(
         servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-        if hidden or gated or healed or channel_skills:
+        if hidden or gated or healed or channel_skills or model_override is not None:
             overrides: BetaManagedAgentsAgentWithOverridesParams = {
                 "type": "agent_with_overrides",
                 "id": agent.id,
@@ -545,6 +549,8 @@ async def create_session(
                     cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
                 ],
             }
+            if model_override is not None:
+                overrides["model"] = model_override
             if channel_skills:
                 # A full replacement too: the agent's own at the versions it pins.
                 overrides["skills"] = [

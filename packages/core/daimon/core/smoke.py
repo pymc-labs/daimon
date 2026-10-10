@@ -16,14 +16,15 @@ value, so comparing it against an app-clock timestamp would make the
 pass/fail assertion sensitive to VM/Cloud-SQL clock skew. This is a clock
 read, not a domain query, so it does not touch `daimon.core._models`.
 
-Bare-turn constraint: the smoke turn intentionally passes nothing beyond
-`agent_id`/`environment_id`/`trigger_message`/`usage_record_factory`/
-`tenant_id` to `headless_runner.run_turn` — every other optional keyword
-(vault/MCP settings, the caller account id, the per-agent uuid, the DB
-session factory, the crypto key, and the three GitHub credential params)
-is left at its default. A smoke turn never touches vault, MCP, or GitHub
-code paths; it only proves the MA + billing plumbing works. For the same
-reason the smoke tenant's defaults are reconciled with `public_url=None`:
+A smoke turn passes only its agent/environment IDs, prompt, usage recorder,
+tenant ID, and the per-session `SMOKE_MODEL` override to
+`headless_runner.run_turn`. Every other optional keyword (vault/MCP settings,
+the caller account ID, per-agent UUID, database session factory, crypto key,
+and GitHub credentials) keeps its default. The model override changes this
+session only; reconciliation leaves the smoke agent's default model alone.
+A smoke turn never touches vault, MCP, or GitHub code paths; it only proves
+the MA and billing plumbing works. For the same reason the smoke tenant's
+defaults are reconciled with `public_url=None`:
 a non-None public_url makes the defaults merge attach the `daimon-mcp`
 server to the seeded agent, and MA refuses to start a session for such an
 agent without a vault credential — which a bare turn never binds.
@@ -65,6 +66,9 @@ SMOKE_WORKSPACE_ID = "smoke"
 
 SMOKE_PROMPT = "Reply with the single word: done"
 """SPEC req 4: a fixed, trivial, no-tools message bounding per-run spend."""
+
+SMOKE_MODEL = "claude-haiku-5-5"
+"""Keep the deployment smoke turn inexpensive without changing seeded agents."""
 
 SMOKE_TOPUP_USD = Decimal("5.00")
 """D-07's small top-up credit, applied only when the ledger balance is <= 0."""
@@ -187,6 +191,7 @@ async def run_smoke_check(
                 usage_record_factory=usage_record_factory,
                 session_factory=session_factory,
                 tenant_id=tenant_id,
+                model_override=SMOKE_MODEL,
             )
     except TimeoutError as err:
         raise SmokeCheckError(f"smoke turn timed out after {timeout_s}s") from err
