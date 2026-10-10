@@ -175,7 +175,7 @@ class RoutinesPanel:
         error = await self._create(actor, values)
         if error is not None:
             return await self._form(actor, values, error)
-        created = created_notice(values["agent"], values["cron"])
+        created = created_notice(values["agent"], values["cron"], values["timezone"])
         if ctx.activity.reply_to_id:
             panel = await self._panel(
                 actor.tenant_id, user_id=actor.user_id, is_admin=True, notice=created
@@ -192,8 +192,8 @@ class RoutinesPanel:
             next_fire_at = validated_next_slot(
                 values["cron"], values["timezone"], datetime.now(UTC)
             )
-        except InvalidScheduleError as error:
-            return f"Could not schedule the routine: {error}."
+        except InvalidScheduleError:
+            return "That schedule or time zone isn't valid.\n\nCheck both and try again."
         agent = await find_agent_by_daimon_tag(
             self._runtime.anthropic, tenant_id=actor.tenant_id, name=values["agent"]
         )

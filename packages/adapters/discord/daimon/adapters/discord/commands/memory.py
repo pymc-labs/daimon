@@ -31,7 +31,7 @@ log = structlog.get_logger()
 BotInteraction = Interaction[commands.Bot]
 
 _DISCORD_LIMIT = 1900  # headroom under the 2000-char message cap (split.py convention)
-_EMPTY = "This agent has no memories yet — it will start remembering as it works."
+_EMPTY = "No memory to show here."
 
 
 def _get_runtime(interaction: BotInteraction) -> DiscordRuntime:
@@ -168,7 +168,7 @@ class MemoryCog(commands.Cog):
                     break
             if mem_id is None:
                 await interaction.followup.send(
-                    f"No memory at `{path}`. Run `/memory` to list paths.",
+                    f"No memory file called `{path}`.\n\nRun `/memory` to see them all.",
                     ephemeral=True,
                 )
                 return

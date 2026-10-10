@@ -107,7 +107,7 @@ def test_picker_description_format() -> None:
     picker = _find_select(view)
     desc = picker.options[0].description
     assert desc is not None
-    assert desc.startswith(entry.glyph), "description must lead with the glyph"
+    assert desc.startswith("Not run yet:"), "description must lead with the status words"
     # R3 spec: '{glyph} {state} · {agent}' — cron no longer in picker description
     assert "agent" in desc, "description must include the agent name"
     assert len(desc) <= 100, "description must respect the 100-char Discord ceiling"
@@ -343,7 +343,7 @@ async def test_unauthorized_pause_click_rejected(monkeypatch: pytest.MonkeyPatch
     interaction.response.send_message.assert_called_once()
     args, kwargs = interaction.response.send_message.call_args
     text = args[0] if args else kwargs.get("content", "")
-    assert "creator or a guild admin" in text, (
+    assert "creator or a server admin" in text, (
         "non-creator non-admin must see the explicit gate message"
     )
     assert pause_calls == [], "no UPDATE must be issued on rejected click"
@@ -622,7 +622,7 @@ async def test_picker_callback_value_outside_guild_rejected(
     interaction.response.send_message.assert_called_once()
     args, kwargs = interaction.response.send_message.call_args
     text = args[0] if args else kwargs.get("content", "")
-    assert "does not belong to this guild" in text, (
+    assert "is from another server" in text, (
         "cross-guild routine ids must be rejected with an explicit message"
     )
     assert invoked == [], "no UPDATE must be issued for a cross-guild row"
@@ -676,7 +676,7 @@ def test_panel_container_subtext_contains_cron_and_agent() -> None:
     container = build_panel_container(state, now=_NOW)
     texts = _collect_text_display_content(container)
     header_text = texts[0]
-    assert "0 9 * * 1-5" in header_text, "subtext line must contain the cron expression"
+    assert "weekdays at 09:00 UTC" in header_text, "subtext line must contain the cron expression"
     assert "my-agent" in header_text, "subtext line must contain the agent name"
     # Cron/agent must NOT appear as separate body groups
     body_texts = texts[1:]
@@ -692,7 +692,7 @@ def test_panel_container_body_contains_next_run_line() -> None:
     container = build_panel_container(state, now=_NOW)
     texts = _collect_text_display_content(container)
     body_texts = texts[1:]
-    assert any("⏱ **Next run in " in t for t in body_texts), (
+    assert any("Next run: May 14 at 13:00 UTC" in t for t in body_texts), (
         "body must contain '⏱ **Next run in …' timeline line"
     )
 
@@ -705,7 +705,7 @@ def test_panel_container_body_contains_last_run_dim_line_for_prior_run() -> None
     container = build_panel_container(state, now=_NOW)
     texts = _collect_text_display_content(container)
     body_texts = texts[1:]
-    assert any("-# last run " in t for t in body_texts), (
+    assert any("-# Last started 1 hour ago" in t for t in body_texts), (
         "body must contain '-# last run …' dim line for a routine with a prior run"
     )
 

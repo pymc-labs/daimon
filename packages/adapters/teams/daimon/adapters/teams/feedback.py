@@ -110,13 +110,10 @@ TITLE = "What went wrong?"
 REASONS_INPUT = "reasons"
 TEXT_INPUT = "text"
 MAX_FEEDBACK_CHARS = 4000  # Slack's feedback modal cap.
-THANKS_VOTE = "Thanks — noted."
-THANKS_TEXT = "Thanks — your feedback has been recorded."
-NEEDS_ONE = "Pick a reason or tell us what went wrong."
-SHARED_HINT = (
-    "What you send here also goes to the support team, with a link to this answer "
-    "(not its content)."
-)
+THANKS_VOTE = "Thanks."
+THANKS_TEXT = "Thanks for the feedback."
+NEEDS_ONE = "Pick a reason or write a few words."
+SHARED_HINT = "Support gets your feedback and a link to the answer, not the answer itself."
 
 
 def feedback_text(raw: str) -> str:

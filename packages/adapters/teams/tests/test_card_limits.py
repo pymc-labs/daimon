@@ -398,7 +398,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         10**6,
         user_id="u",
         is_admin=True,
-        notice=routines_card.created_notice(NAME, _routine().cron_expr),
+        notice=routines_card.created_notice(NAME, _routine().cron_expr, _routine().timezone),
     ),
     "routine_output": lambda: routines_card.output_card(_routine()),
     "routine_error": lambda: routines_card.output_card(
@@ -417,7 +417,7 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "billing_checkout": lambda: checkout_card(URL, 100),
     "memory": lambda: memory._card(f"/memories/{EMOJI * 100}.md", EMOJI * 100_000),  # pyright: ignore[reportPrivateUsage]  # what show_memory sends
     "memory_missing": lambda: memory._card(  # pyright: ignore[reportPrivateUsage]
-        f"No memory at /memories/{EMOJI * 10_000}.md.", hint="Send memory to list paths."
+        f"No memory file called /memories/{EMOJI * 10_000}.md.", hint="Send memory to see them all."
     ),
     "help": lambda: help_card(COMMAND_HELP, bot=NAME),
     "here": lambda: here_card(

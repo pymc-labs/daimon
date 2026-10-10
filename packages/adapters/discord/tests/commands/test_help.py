@@ -44,42 +44,55 @@ class TestBuildHelpView:
     def test_header_contains_only_you_can_see_this_subtext(self) -> None:
         view = build_help_view()
         texts = _collect_text_display_content(view)
-        assert any("-# only you can see this" in t for t in texts), (
+        assert any("-# Only you can see this." in t for t in texts), (
             "header must include '-# only you can see this' subtext"
         )
 
     def test_joined_content_contains_billing_command(self) -> None:
         view = build_help_view()
-        assert "-# /billing" in _joined_content(view), (
+        assert "/billing" in _joined_content(view), (
             "joined content must list /billing (was previously missing)"
         )
 
     def test_joined_content_contains_privacy_command(self) -> None:
         view = build_help_view()
-        assert "-# /privacy" in _joined_content(view), (
+        assert "/privacy" in _joined_content(view), (
             "joined content must list /privacy (was previously missing)"
         )
 
     def test_joined_content_contains_agent_setup_command(self) -> None:
         view = build_help_view()
-        assert "-# /agent-setup" in _joined_content(view), "joined content must list /agent-setup"
+        assert "/agent-setup" in _joined_content(view), "joined content must list /agent-setup"
 
     def test_joined_content_contains_routines_command(self) -> None:
         view = build_help_view()
-        assert "-# /routines" in _joined_content(view), "joined content must list /routines"
+        assert "/routines" in _joined_content(view), "joined content must list /routines"
 
     def test_joined_content_contains_help_command(self) -> None:
         view = build_help_view()
-        assert "-# /help" in _joined_content(view), "joined content must list /help"
+        assert "/help" in _joined_content(view), "joined content must list /help"
 
     def test_joined_content_contains_here_command(self) -> None:
-        assert "-# /here" in _joined_content(build_help_view())
+        assert "/here" in _joined_content(build_help_view())
 
     def test_joined_content_contains_conversational_group(self) -> None:
         view = build_help_view()
-        assert "💬 **Or just talk to your agent**" in _joined_content(view), (
-            "view must include the conversational group '💬 **Or just talk to your agent**'"
+        assert "💬 Or just ask" in _joined_content(view), (
+            "view must include the conversational group '💬 Or just ask'"
         )
+
+    def test_approved_command_list_has_no_blank_lines_or_dm(self) -> None:
+        content = _joined_content(build_help_view("Daimon"))
+        commands = next(
+            text
+            for text in _collect_text_display_content(build_help_view())
+            if text.startswith("/agent-setup")
+        )
+        assert len(commands.splitlines()) == 9
+        assert all(line.startswith("/") for line in commands.splitlines())
+        assert "/dm" not in content
+        assert "## 📖 Commands\n\n-# Only you can see this." in content
+        assert "@Daimon help me set up" in content
 
     def test_every_command_line_references_exactly_one_slash_command(self) -> None:
         """Each '-# /command' line must contain exactly one slash command token."""
@@ -87,7 +100,7 @@ class TestBuildHelpView:
         texts = _collect_text_display_content(view)
         for text in texts:
             for line in text.splitlines():
-                if line.startswith("-# /"):
+                if line.startswith("/"):
                     slash_commands = re.findall(r"/[a-z-]+", line)
                     assert len(slash_commands) == 1, (
                         f"command line must reference exactly one slash command, "
@@ -98,10 +111,10 @@ class TestBuildHelpView:
         """Lines starting with '-# /' must match '-# /command — description' pattern."""
         view = build_help_view()
         texts = _collect_text_display_content(view)
-        pattern = re.compile(r"^-# /[a-z-]+(?: [a-z-]+)? — ")
+        pattern = re.compile(r"^/[a-z-]+(?: [a-z-]+)? +[A-Z]")
         for text in texts:
             for line in text.splitlines():
-                if line.startswith("-# /"):
+                if line.startswith("/"):
                     assert pattern.match(line), (
                         f"command line must match '^-# /[a-z-]+ — ' pattern, got: {line!r}"
                     )

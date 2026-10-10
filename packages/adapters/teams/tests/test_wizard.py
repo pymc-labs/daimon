@@ -122,7 +122,7 @@ async def test_checked_boxes_ride_the_next_button_as_indices(
     await _form(db_session_factory, step=1)
     wizards, _ = _wizards(db_session_factory)
     forged = await wizards.on_action(_tap("next", sel="s1_sel", values="0,9"))
-    assert forged.value == "This form changed before your tap landed."
+    assert forged.value == "This form just changed.\n\nCheck it and try again."
     await wizards.on_action(_tap("next", sel="s1_sel", values="1"))
     row = await _row(db_session_factory)
     assert (row.answers["toppings"], row.current_step) == (["o"], 2)
@@ -133,9 +133,7 @@ async def test_a_text_answer_must_be_typed(
 ) -> None:
     await _form(db_session_factory, step=2)
     wizards, _ = _wizards(db_session_factory)
-    assert (
-        await wizards.on_action(_tap("s2_custom", text="  "))
-    ).value == "Type your answer first."
+    assert (await wizards.on_action(_tap("s2_custom", text="  "))).value == "Type an answer first."
     await wizards.on_action(_tap("s2_custom", text="extra cheese"))
     row = await _row(db_session_factory)
     assert (row.answers["notes"], row.current_step) == (["extra cheese"], 3)

@@ -559,7 +559,7 @@ async def test_whitespace_only_modal_text_writes_nothing_and_replies(
     interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
     message = interaction.followup.send.call_args.args[0]
-    assert "empty" in message.lower()
+    assert message == "Type an answer first."
 
     async with db_session_factory() as session:
         after = await get_wizard_session(session, short_id=row.id)

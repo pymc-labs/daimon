@@ -75,7 +75,6 @@ from daimon.core.billing_panel import (
     panel_tone,
     spender_line,
     timed_credit_note,
-    turns_phrase,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -187,7 +186,7 @@ def _spenders_text(state: BillingPanelState) -> str:
         for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
     ] or [NOTHING_USED]
     if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
-        rows.append(f"-# + {overflow} more — look one up below")
+        rows.append(f"-# + {overflow} more. Look one up below.")
     return "\n".join([f"**{TOP_SPENDERS}**", *rows])
 
 
@@ -289,11 +288,6 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
             discord.SelectOption(
                 label=f"${amount}",
                 value=str(amount),
-                description=turns_phrase(
-                    estimate_turns(
-                        float(amount), guild_spend=state.guild_spend, guild_turns=state.guild_turns
-                    )
-                )[:100],
             )
             for amount in TOPUP_AMOUNTS
         ]

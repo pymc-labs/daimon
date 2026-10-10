@@ -28,12 +28,12 @@ from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
 log = structlog.get_logger()
 
-EMPTY = "This agent has no memories yet — it will start remembering as it works."
+EMPTY = "No memory to show here."
 KEPT_INSIDE = (
-    "Only turns inside that channel read it, so its agent's memory isn't shown here. "
-    "Ask the agent in the channel instead."
+    "This channel's rules keep its agent's memory out of this chat.\n\n"
+    "Ask the agent in that channel."
 )
-_FAILED = "Something went wrong fetching memory — try again later."
+_FAILED = "Couldn't load the memory.\n\nTry again in a minute."
 _TITLE_MAX_CHARS = 300
 
 
@@ -47,7 +47,7 @@ def _card(title: str, text: str | None = None, hint: str | None = None) -> Adapt
     if text is not None:
         body.append(TextBlock(text=_truncated(text), font_type="Monospace", wrap=True))
     if hint is not None:
-        body.append(TextBlock(text=hint, is_subtle=True, wrap=True))
+        body.append(TextBlock(text=hint, is_subtle=True, spacing="Medium", wrap=True))
     return AdaptiveCard(body=body, fallback_text=title)
 
 
@@ -87,7 +87,7 @@ async def _memory_card(context: CommandContext) -> AdaptiveCard:
         return _card(title, "\n".join(paths), "Send memory <path> to read one.")
     content = await get_memory_content(runtime.anthropic, store_id, path)
     if content is None:
-        return _card(f"No memory at {path}.", hint="Send memory to list paths.")
+        return _card(f"No memory file called {path}.", hint="Send memory to see them all.")
     return _card(path, content)
 
 

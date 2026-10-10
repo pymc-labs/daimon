@@ -439,7 +439,7 @@ def test_no_rendered_panel_has_a_dot_separator_or_a_user_label() -> None:
         )
         assert "·" not in text and "≈" not in text and "User " not in text, text
     options = json.dumps(_make_admin_view_options())
-    assert "about " in options and "turns" in options
+    assert "about " not in options and "turns" not in options
 
 
 def _make_admin_view_options() -> list[dict[str, Any]]:
@@ -455,7 +455,7 @@ def _make_admin_view_options() -> list[dict[str, Any]]:
     )
     for option in select["options"]:
         assert option["text"]["text"] == f"${option['value']}", "the amount alone"
-        assert option["description"]["text"].startswith("about "), option
+        assert "description" not in option, option
     return select["options"]
 
 

@@ -37,7 +37,7 @@ def test_build_help_blocks_contains_all_commands_and_at_bot_entrypoint() -> None
     commands = _manifest_commands()
     assert "/memory" in commands and "/dm" in commands
     for cmd in commands:
-        assert f"{cmd} —" in all_text, (
+        assert f"{cmd} " in all_text, (
             f"/help must list the manifest command {cmd!r} "
             f"(found keys: {[b.get('text', {}).get('text', '') if isinstance(b.get('text'), dict) else '' for b in blocks]!r})"
         )
@@ -183,5 +183,4 @@ def test_help_uses_the_configured_bot_name() -> None:
 
     text = str(build_help_blocks(display_name="research-bot"))
     assert "@research-bot help me set up" in text, "help should mention the configured bot"
-    assert "what research-bot stores" in text, "privacy help should use the configured bot"
     assert "daimon" not in text, "help should contain no hardcoded bot name"

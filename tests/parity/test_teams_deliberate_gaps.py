@@ -43,6 +43,7 @@ No platform parametrization, no database -- this is a scope check.
 from __future__ import annotations
 
 import dataclasses
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -207,7 +208,7 @@ async def test_teams_memory_from_a_limited_readers_channel_is_not_shown_in_the_c
     ):
         await memory.show_memory(context)
     store.assert_not_awaited()
-    assert memory.KEPT_INSIDE in send.await_args.args[0].model_dump_json(), (
+    assert json.dumps(memory.KEPT_INSIDE)[1:-1] in send.await_args.args[0].model_dump_json(), (
         "Teams has no private reply inside a channel; if it gained one, replace this record"
     )
 

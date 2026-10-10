@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from collections.abc import Iterator
@@ -149,8 +150,14 @@ def test_redeem_result_text() -> None:
         granted=True,
         balance_usd=Decimal("12.5"),
     )
-    assert redeem_result_text(redeemed) == "🎟️ Redeemed *$10.00* of credit. Balance: *$12.50*.", (
+    assert redeem_result_text(redeemed) == "🎟️ Added *$10.00* of credit.\n\nBalance: *$12.50*", (
         "a credit reply should name the amount and balance"
+    )
+    timed = dataclasses.replace(
+        redeemed, kind="timed", credit_ends_at=datetime(2026, 5, 20, tzinfo=UTC)
+    )
+    assert redeem_result_text(timed).startswith(
+        "🎟️ Added *$10.00* of credit.\n\nUsed before credit with no expiry. "
     )
     assert redeem_result_text(PromoRedeemRefused("revoked")) == "That code is no longer active.", (
         "a refusal should explain itself"
@@ -208,9 +215,9 @@ async def test_submission_redeems_and_refreshes_the_panel(
         "the code should be credited only once"
     )
     result, root, retry = _bodies(fake_slack_web_client, "views.update")
-    assert result["view_id"] == "V_FORM" and "Redeemed *$10.00*" in _texts(
-        result["view"]["blocks"]
-    ), "the form should confirm the credit"
+    assert result["view_id"] == "V_FORM" and "Added *$10.00*" in _texts(result["view"]["blocks"]), (
+        "the form should confirm the credit"
+    )
     assert root["view_id"] == "V_ROOT" and "*$10.00* total credit left" in _texts(
         root["view"]["blocks"]
     ), "the panel should show the new balance"
@@ -257,9 +264,9 @@ async def test_submission_keeps_the_success_reply_when_the_panel_refresh_fails(
 
     failing_refresh.assert_awaited_once()
     [result] = _bodies(fake_slack_web_client, "views.update")
-    assert result["view_id"] == "V_FORM" and "Redeemed *$10.00*" in _texts(
-        result["view"]["blocks"]
-    ), "the form should keep confirming the credit"
+    assert result["view_id"] == "V_FORM" and "Added *$10.00*" in _texts(result["view"]["blocks"]), (
+        "the form should keep confirming the credit"
+    )
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("10"), (
         "the credit should stay in the workspace ledger"
     )

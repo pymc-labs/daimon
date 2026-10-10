@@ -88,6 +88,17 @@ def test_derive_state_success() -> None:
     assert color == 0x57F287
 
 
+def test_status_words_match_the_recorded_state() -> None:
+    from daimon.adapters.discord.routines_panel.state import state_label
+
+    assert {glyph: state_label(glyph) for glyph in ("✅", "❌", "⏸", "⏳")} == {
+        "✅": "No errors",
+        "❌": "Error recorded",
+        "⏸": "Paused",
+        "⏳": "Not run yet",
+    }
+
+
 def test_derive_state_paused_beats_never_run() -> None:
     row = _make_row(enabled=False, last_fired_at=None)
     glyph, color = derive_state(row)

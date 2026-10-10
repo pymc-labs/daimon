@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Plain words and spaced text for feedback, help, billing, memory, routines, and wizard panels across Discord, Slack, and Teams.
+
 ### Added
 
 - **More Discord assertions run in live QA.** Message counts, per-message balanced fences, cost-footer placement, thread-name readback, and filename-filtered attachment counts are supported.

@@ -27,34 +27,21 @@ log = structlog.get_logger()
 # Static text constants ported from discord/commands/help.py (_BODY / _CONVERSATIONAL).
 # Slack mrkdwn: *bold* instead of **bold**; -# (Discord small text) replaced by plain text.
 _BODY = """\
-*Agent management*
-/agent-setup — See your agents, who answers where, and make changes
-/github — Connect repos and choose which agents can use them
-/github connect [agent] — Send a private connect link for one agent
-/memory — List what this channel's agent remembers; add a path to see one file
-
-*Routines*
-/routines — Show scheduled routines for this workspace
-
-*Billing*
-/billing — Show your billing usage (admins see per-member breakdown)
-
-*Direct messages*
-/dm — Continue this channel privately in your DMs, once an admin runs `/dm enable` \
-(`/dm disable` turns it off)
-
-*Privacy*
-/privacy — See, export, or delete what {display_name} stores about you
-
-*Meta*
-/here — Who answers here, what it can read and holds
-/help — List commands and the @bot conversational entrypoint\
+/agent-setup  Your agents and where they answer
+/github       Connect repos and choose which agents use them
+/memory       What the agent remembers
+/routines     Scheduled jobs
+/dm           Carry on in private after an admin enables it
+/billing      Your usage and credit
+/privacy      See, export or delete your data
+/here         Who answers here and what they can access
+/help         This list\
 """
 
 _CONVERSATIONAL = """\
-💬 *Or just talk to your agent*
-@{display_name} help me set up
-@{display_name} make a routine that runs daily\
+💬 Or just ask
+
+@{display_name} help me set up\
 """
 
 
@@ -65,6 +52,8 @@ def build_help_blocks(*, display_name: str = "daimon") -> list[dict[str, Any]]:
     slack_sdk.models.blocks types). Mirrors Discord's build_help_view().
     """
     return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "📖 Commands"}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "Only you can see this."}},
         {
             "type": "section",
             "text": {

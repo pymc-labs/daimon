@@ -50,7 +50,7 @@ async def _send_callback_error(interaction: discord.Interaction, exc: Exception)
     """
     log.exception("routines_panel_callback_failed", error=str(exc))
     sentry_sdk.capture_exception(exc)
-    error_text = "Something went wrong handling that click. Please try again."
+    error_text = "Something went wrong.\n\nTry again."
     try:
         if interaction.response.is_done():
             await interaction.followup.send(error_text, ephemeral=True)
@@ -67,9 +67,7 @@ class _RoutinePicker(discord.ui.Select["RoutinesPanelView"]):
                 discord.SelectOption(
                     label=entry.label,
                     value=str(entry.routine.id),
-                    description=(f"{entry.glyph} {state_label(entry.glyph)} · {entry.agent_name}")[
-                        :100
-                    ],
+                    description=(f"{state_label(entry.glyph)}: {entry.agent_name}")[:100],
                     default=(
                         state.selected is not None and entry.routine.id == state.selected.routine.id
                     ),
@@ -165,10 +163,8 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                 )
                 refusals = {
                     "gone": "This routine no longer exists.",
-                    "wrong_tenant": "This routine does not belong to this guild.",
-                    "not_owner": (
-                        "Only the routine's creator or a guild admin can pause this routine."
-                    ),
+                    "wrong_tenant": "This routine is from another server.",
+                    "not_owner": ("Only its creator or a server admin can pause it."),
                 }
                 if result != "changed":
                     await interaction.response.send_message(refusals[result], ephemeral=True)
@@ -281,7 +277,7 @@ class RoutinesPanelView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                "Only the person who opened this can use it.",
                 ephemeral=True,
             )
             return False
@@ -297,7 +293,7 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
         row = await get_tenant(session, tenant_id)
         if row is None:
             raise UserFacingError(
-                "This server is not registered. Ask a server admin to finish setup."
+                "Daimon isn't set up on this server yet.\n\nAsk an admin to set it up."
             )
         entries, over_cap_count, agent_name_map = await load_guild_routines(
             session,

@@ -200,10 +200,7 @@ def test_admin_view_has_topup_select_with_4_options() -> None:
     )
     for opt in options:
         assert opt.label == f"${opt.value}", "the label is the amount alone"
-        assert opt.description is not None and opt.description.startswith("about "), (
-            f"option '{opt.label}' says what it buys as `about N turns`"
-        )
-        assert opt.description.endswith(" turns")
+        assert opt.description is None, "top-up options show the amount alone"
 
 
 def test_the_admin_panel_has_the_member_lookup_and_a_member_panel_does_not() -> None:
@@ -827,7 +824,7 @@ def test_top_spenders_names_five_and_counts_the_rest() -> None:
     state = _make_state(is_admin=True, member_rows=rows, over_cap_count=2)
     assert _section(state, "**Top spenders**") == (
         "**Top spenders**\n1. user0  $8.00\n2. user1 (you)  $7.00\n3. user2  $6.00\n"
-        "4. user3  $5.00\n5. user4  $4.00\n-# + 5 more — look one up below"
+        "4. user3  $5.00\n5. user4  $4.00\n-# + 5 more. Look one up below."
     ), "overflow is (8-5) rows plus over_cap_count=2"
 
 

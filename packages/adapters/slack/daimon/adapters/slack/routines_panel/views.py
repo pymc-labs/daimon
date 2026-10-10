@@ -16,7 +16,7 @@ from typing import Any
 from daimon.adapters.slack.agent_setup.state import encode_private_metadata
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.routines_panel.state import RoutineEntry, RoutinesPanelState
-from daimon.core.routines import PANEL_CAP
+from daimon.core.cron_words import schedule_words
 
 __all__ = [
     "build_content_view",
@@ -27,9 +27,7 @@ __all__ = [
 ]
 
 _MAX_OUTPUT_CHARS = 1000
-_EMPTY_HINT = (
-    "_No routines yet._ Ask your agent to schedule one, e.g. _'daily 9am stand-up summary'_."
-)
+_EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
 
 
 def build_loading_view(*, channel_id: str = "") -> dict[str, Any]:
@@ -66,7 +64,17 @@ def _routine_row_block(entry: RoutineEntry) -> dict[str, Any]:
     dispatcher can parse the routine UUID directly from the action_id string.
     Options: pause / resume / "View last output" (output).
     """
-    text = f"{entry.glyph} *{escape_mrkdwn(entry.label)}* · {escape_mrkdwn(entry.agent_name)}"
+    schedule = schedule_words(entry.routine.cron_expr, entry.routine.timezone)
+    status = {
+        "✅": "No errors",
+        "❌": "Error recorded",
+        "⏸": "Paused",
+        "⏳": "Not run yet",
+    }[entry.glyph]
+    text = (
+        f"{entry.glyph} *{escape_mrkdwn(entry.label)}*\n\n"
+        f"{escape_mrkdwn(entry.agent_name)}, {escape_mrkdwn(schedule)}\n\n{status}"
+    )
     return {
         "type": "section",
         "text": {"type": "mrkdwn", "text": text},
@@ -116,10 +124,7 @@ def build_content_view(state: RoutinesPanelState, *, channel_id: str = "") -> di
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": (
-                            f"_+{state.over_cap_count} more routine(s) not shown "
-                            f"(cap: {PANEL_CAP})_"
-                        ),
+                        "text": f"+{state.over_cap_count} more not shown.",
                     }
                 ],
             }
@@ -137,7 +142,7 @@ def build_content_view(state: RoutinesPanelState, *, channel_id: str = "") -> di
                 {
                     "type": "button",
                     "action_id": "routines_create",
-                    "text": {"type": "plain_text", "text": "+ New Routine"},
+                    "text": {"type": "plain_text", "text": "New routine"},
                 },
             ],
         }
@@ -218,7 +223,12 @@ def build_create_routine_modal(
             {
                 "type": "input",
                 "block_id": "routines_create__cron",
-                "label": {"type": "plain_text", "text": "Cron expression"},
+                "label": {"type": "plain_text", "text": "Schedule"},
+                "hint": {
+                    "type": "plain_text",
+                    "text": "Five fields: minute, hour, day of month, month, day of week. "
+                    "0 9 * * * means every day at 09:00.",
+                },
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "routines_create__cron",
@@ -238,7 +248,7 @@ def build_create_routine_modal(
             {
                 "type": "input",
                 "block_id": "routines_create__message",
-                "label": {"type": "plain_text", "text": "Trigger message"},
+                "label": {"type": "plain_text", "text": "What to ask the agent"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "routines_create__message",

@@ -18,13 +18,11 @@ from daimon.adapters.discord.routines_panel.state import (
     RoutinesPanelState,
     state_label,
 )
+from daimon.core.cron_words import schedule_words
 
 import discord
 
-_EMPTY_HINT = (
-    "_No routines yet._ Ask your default agent to create a routine, e.g. "
-    "_'schedule a daily 9am stand-up summary'_."
-)
+_EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
 
 
 def _humanize_delta(target: datetime, now: datetime) -> str:
@@ -37,10 +35,13 @@ def _humanize_delta(target: datetime, now: datetime) -> str:
     if seconds < 60:
         return f"{seconds}s {suffix}"
     if seconds < 3600:
-        return f"{seconds // 60}m {suffix}"
+        count = seconds // 60
+        return f"{count} minute{'s' if count != 1 else ''} {suffix}"
     if seconds < 86400:
-        return f"{seconds // 3600}h {suffix}"
-    return f"{seconds // 86400}d {suffix}"
+        count = seconds // 3600
+        return f"{count} hour{'s' if count != 1 else ''} {suffix}"
+    count = seconds // 86400
+    return f"{count} day{'s' if count != 1 else ''} {suffix}"
 
 
 def build_panel_container(
@@ -48,15 +49,8 @@ def build_panel_container(
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """R3 timeline-forward container for the /routines panel.
 
-    Structure:
-    - ``## 📜 {trigger_message}`` header with
-      ``-# {glyph} {state} · {agent} · {cron} · {tz}`` subtext
-      (cron/agent demoted to subtext, NOT body groups)
-    - hairline separator
-    - one TextDisplay timeline group:
-      ``⏱ **Next run in {delta}** — {local time}``
-      with ``-# last run {delta} · {result glyph}`` beneath when prior
-      run data exists (omitted for never-run routines)
+    The header shows status, agent and schedule. The body shows the next run
+    and, when present, when the last run started.
 
     Accent rule (F5 "default = no accent"):
     ``color_int != theme.COLOR_BLURPLE`` → ``accent_colour=color_int``
@@ -76,23 +70,23 @@ def build_panel_container(
     trigger = selected.routine.trigger_message[:40] or selected.routine.id.hex[:8]
 
     subtext = (
-        f"{glyph} {state_label(glyph)} · {selected.agent_name} · "
-        f"{selected.routine.cron_expr} · {selected.routine.timezone}"
+        f"{glyph} {state_label(glyph)}\n\n{selected.agent_name}, "
+        f"{schedule_words(selected.routine.cron_expr, selected.routine.timezone)}"
     )
 
-    # Timeline body — two _humanize_delta calls (next run + last run)
+    # Timeline body.
     if selected.routine.next_fire_at is None:
-        next_line = "⏱ **Next run** — not scheduled"
+        next_line = "Next run: not scheduled"
     else:
-        next_delta = _humanize_delta(selected.routine.next_fire_at, now)
-        local_ts = selected.routine.next_fire_at.strftime("%Y-%m-%d %H:%M %Z").strip()
-        next_line = f"⏱ **Next run in {next_delta}** — {local_ts}"
+        next_at = selected.routine.next_fire_at
+        next_line = f"Next run: {next_at.strftime('%b')} {next_at.day} at {next_at:%H:%M} UTC"
 
     if selected.routine.last_fired_at is not None:
         last_delta = _humanize_delta(selected.routine.last_fired_at, now)
-        result_glyph = "❌" if selected.routine.last_error is not None else "✅"
-        last_line = f"-# last run {last_delta} · {result_glyph}"
-        timeline_body = f"{next_line}\n{last_line}"
+        last_line = f"-# Last started {last_delta}"
+        if selected.routine.last_error is not None:
+            last_line += "\n\nError recorded"
+        timeline_body = f"{next_line}\n\n{last_line}"
     else:
         timeline_body = next_line
 
@@ -100,7 +94,7 @@ def build_panel_container(
     accent: int | None = color_int if color_int != theme.COLOR_BLURPLE else None
 
     return discord.ui.Container(
-        layout.header(f"📜 {trigger}", subtext=subtext),
+        discord.ui.TextDisplay(f"## 📜 {trigger}\n\n-# {subtext}"),
         layout.hairline(),
         discord.ui.TextDisplay(timeline_body),
         accent_colour=accent,

@@ -26,39 +26,31 @@ BotInteraction = Interaction[commands.Bot]
 
 
 def _body(bot_display_name: str) -> str:
-    return f"""\
-**Agent management**
--# /agent-setup — See your agents, who answers where, and make changes
--# /github connect — Connect GitHub repos to an agent
--# /github home — See connected repos and your GitHub link
-
-**Routines**
--# /routines — Show scheduled routines for this guild
-
-**Billing**
--# /billing — Show your billing usage (admins see per-member breakdown)
-
-**Privacy**
--# /privacy — See, export, or delete what {bot_display_name} stores about you
-
-**Meta**
--# /here — Who answers here, what it can read and holds
--# /help — List commands and the @bot conversational entrypoint\
+    return """\
+/agent-setup     Your agents and where they answer
+/github connect  Connect GitHub repos
+/github home     Your connected repos and GitHub account
+/memory          What the agent remembers
+/routines        Scheduled jobs
+/billing         Your usage and credit
+/privacy         See, export or delete your data
+/here            Who answers here and what they can access
+/help            This list\
 """
 
 
 def _conversational(bot_display_name: str) -> str:
     return f"""\
-💬 **Or just talk to your agent**
--# @{bot_display_name} help me set up
--# @{bot_display_name} make a routine that runs daily\
+💬 Or just ask
+
+@{bot_display_name} help me set up\
 """
 
 
 def build_help_view(bot_display_name: str = "daimon") -> discord.ui.LayoutView:
     """Build the static /help V2 LayoutView. Pure — no I/O."""
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
-        layout.header("📖 Commands", subtext="only you can see this"),
+        discord.ui.TextDisplay("## 📖 Commands\n\n-# Only you can see this."),
         layout.hairline(),
         discord.ui.TextDisplay(_body(bot_display_name)),
         layout.hairline(),

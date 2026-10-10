@@ -41,13 +41,16 @@ def redeem_result_text(result: PromoRedeemResult) -> str:
         return f"🎟️ {describe_refusal(result.reason)}"
     amount = f"**${result.amount_usd:,.2f}**"
     if result.credit_ends_at is None:
-        return f"🎟️ Redeemed {amount} of credit. Balance: **${result.balance_usd:,.2f}**."
-    window = f"until {_ts(result.credit_ends_at)}"
+        return f"🎟️ Added {amount} of credit.\n\nBalance: **${result.balance_usd:,.2f}**"
     if not result.granted and result.credit_starts_at is not None:
-        window = f"from {_ts(result.credit_starts_at)} {window}"
+        return (
+            f"🎟️ Credit scheduled: {amount} from {_ts(result.credit_starts_at)} "
+            f"until {_ts(result.credit_ends_at)}."
+        )
     return (
-        f"🎟️ Redeemed {amount} of timed credit, usable {window}. "
-        "It is spent before other credit, and what is left then expires."
+        f"🎟️ Added {amount} of credit.\n\n"
+        "Used before credit with no expiry. Anything unused expires "
+        f"{_ts(result.credit_ends_at)}."
     )
 
 

@@ -90,7 +90,6 @@ from daimon.core.billing_panel import (
     channel_budget_phrase,
     create_checkout,
     credit_headline,
-    estimate_turns,
     expiry_rows,
     load_billing_snapshot,
     lookup_line,
@@ -102,7 +101,6 @@ from daimon.core.billing_panel import (
     spender_line,
     stored_name_labels,
     timed_credit_note,
-    turns_phrase,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
@@ -147,10 +145,7 @@ log = structlog.get_logger()
 VERB = "billing"
 ADMIN_ONLY = "Only an admin can top up credit."
 UNKNOWN_AMOUNT = "That top-up amount is not offered."
-NOT_CONFIGURED = (
-    "Payments aren't configured for this organisation. "
-    "Ask an operator about a manual credit top-up."
-)
+NOT_CONFIGURED = "Card payments aren't set up here.\n\nAsk the team running Daimon to add credit."
 REDEEM_ADMIN_ONLY = "Only an admin can redeem a promo code."
 LOOKUP_ADMIN_ONLY = "Only an admin can look up a person's spend."
 PICK_A_PERSON = "Pick a person to look up."
@@ -346,21 +341,23 @@ async def _no_roster(_team_id: str, _user_id: str) -> str | None:
 def redeemed_text(result: PromoRedeemed) -> str:
     amount = f"**${result.amount_usd:,.2f}**"
     if result.credit_ends_at is None:
-        return f"🎟️ Redeemed {amount} of credit. Balance: **${result.balance_usd:,.2f}**."
-    window = f"until {card_time(result.credit_ends_at)}"
+        return f"🎟️ Added {amount} of credit.\n\nBalance: **${result.balance_usd:,.2f}**"
     if not result.granted and result.credit_starts_at is not None:
-        window = f"from {card_time(result.credit_starts_at)} {window}"
+        return (
+            f"🎟️ Credit scheduled: {amount} from {card_time(result.credit_starts_at)} "
+            f"until {card_time(result.credit_ends_at)}."
+        )
     return (
-        f"🎟️ Redeemed {amount} of timed credit, usable {window}. "
-        "It is spent before other credit, and what is left then expires."
+        f"🎟️ Added {amount} of credit.\n\n"
+        "Used before credit with no expiry. Anything unused expires "
+        f"{card_time(result.credit_ends_at)}."
     )
 
 
 def _topup(amount: int, state: BillingPanelState, place: str | None) -> Column:
-    """`$10` as a button, and under it in grey what it buys: `about 100 turns`."""
-    turns = estimate_turns(amount, guild_spend=state.guild_spend, guild_turns=state.guild_turns)
+    """A payment button labelled with its amount."""
     pay = button(VERB, f"${amount}", "topup", amount=str(amount), place=place or "")
-    return Column(width="auto", items=[ActionSet(actions=[pay]), *_details(turns_phrase(turns))])
+    return Column(width="auto", items=[ActionSet(actions=[pay])])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -467,7 +464,11 @@ def _panel_body(
     body: list[CardElement] = [_header(TITLE, *subtext)]
     if not state.is_admin:
         own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
-        over = "  ⚠️ Over your cap" if spend_over_cap(state.caller_spend, state.caller_cap) else ""
+        over = (
+            "  ⚠️ Over your monthly limit"
+            if spend_over_cap(state.caller_spend, state.caller_cap)
+            else ""
+        )
         body.append(_titled(f"{YOU}{over}", *_rows(own)))
     body.append(_block(*_credit(state)))
     if state.channel_budget is not None:
@@ -518,7 +519,7 @@ def checkout_card(url: str, amount: int, place: str | None = None) -> AdaptiveCa
     pay: list[Action] = [OpenUrlAction(title="Complete payment", url=url), _back(place)]
     body: list[CardElement] = [
         heading(f"💳 Top up ${amount}"),
-        *text_lines("Complete the payment in your browser; the credit lands once Stripe confirms."),
+        *text_lines("Pay in your browser.\n\nYour credit appears once the payment goes through."),
         ActionSet(actions=pay),
     ]
     return AdaptiveCard(body=body, fallback_text="Complete payment")

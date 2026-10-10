@@ -151,11 +151,16 @@ def test_redeem_result_text() -> None:
         return PromoRedeemed(**(base | kw))
 
     assert redeem_result_text(redeemed()) == (
-        "🎟️ Redeemed **$10.00** of credit. Balance: **$12.50**."
+        "🎟️ Added **$10.00** of credit.\n\nBalance: **$12.50**"
     ), "a credit reply should name the amount and balance"
     later = redeemed(kind="timed", credit_starts_at=NOW, credit_ends_at=END, granted=False)
-    assert f"usable from <t:{int(NOW.timestamp())}:f> until" in redeem_result_text(later), (
+    assert f"from <t:{int(NOW.timestamp())}:f> until" in redeem_result_text(later), (
         "a timed credit not yet granted should name its window"
+    )
+    active = redeemed(kind="timed", credit_ends_at=END)
+    assert redeem_result_text(active) == (
+        "🎟️ Added **$10.00** of credit.\n\n"
+        f"Used before credit with no expiry. Anything unused expires <t:{int(END.timestamp())}:f>."
     )
     assert redeem_result_text(PromoRedeemRefused("expired")) == "🎟️ That code has expired.", (
         "a refusal should explain itself"
@@ -261,7 +266,7 @@ async def test_modal_submit_redeems_rerenders_and_replies(
     interaction.response.defer.assert_awaited_once()
     rerender.assert_awaited_once_with(interaction)
     assert calls == ["reply", "rerender"], "the reply should go out before the panel rerenders"
-    assert "Redeemed **$10.00**" in interaction.followup.send.call_args.args[0], (
+    assert "Added **$10.00**" in interaction.followup.send.call_args.args[0], (
         "the reply should confirm the credit"
     )
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
@@ -298,7 +303,7 @@ async def test_modal_submit_keeps_the_success_reply_when_the_rerender_fails(
 
     rerender.assert_awaited_once_with(interaction)
     [reply] = interaction.followup.send.call_args_list
-    assert "Redeemed **$10.00**" in reply.args[0], "the only reply should confirm the credit"
+    assert "Added **$10.00**" in reply.args[0], "the only reply should confirm the credit"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
         "the credit should stay in the server ledger"
     )
