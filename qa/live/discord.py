@@ -612,7 +612,6 @@ class DiscordBackend:
             exit_code = obj(data).get("exit_code", 0)
             if type(exit_code) is not int or exit_code < 0:
                 raise ValueError("admin hook must return a nonnegative CLI exit_code")
-            self.bindings["last_admin_exit_code"] = str(exit_code)
             if exit_code:
                 output = obj(data).get("stdout", "")
                 stderr = obj(data).get("stderr", "")

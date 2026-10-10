@@ -618,7 +618,7 @@ def test_admin_expected_refusal_never_hides_transport_or_unexpected_exit(
             backend.admin(step, "parent")
     else:
         backend.admin(step, "parent")
-        assert backend.bindings["last_admin_exit_code"] == "1"
+        assert "last_admin_exit_code" not in backend.bindings
 
 
 def test_refresh_and_empty_thread_inventory_require_owned_matching_evidence(
@@ -667,3 +667,36 @@ def test_refresh_and_empty_thread_inventory_require_owned_matching_evidence(
 
     monkeypatch.setattr(backend.driver, "call", missing)
     assert backend.created_threads([turn]) == set()
+
+
+def test_collect_records_distinct_running_edits_and_baseline_ids(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    backend.owned.add("parent")
+    started = utcnow()
+    backend.baseline_ids["123"] = {"old-card"}
+    working: Message = {
+        "id": "card",
+        "channel_id": "thread",
+        "working": True,
+        "edited_timestamp": started.isoformat(),
+    }
+    second: Message = {**working, "edited_timestamp": (started + timedelta(seconds=1)).isoformat()}
+    terminal: Message = {
+        **working,
+        "working": False,
+        "edited_timestamp": (started + timedelta(seconds=2)).isoformat(),
+    }
+    rows = iter([[working], [working], [second], [terminal]])
+    monkeypatch.setattr(driver, "turn_messages", lambda *args, **kwargs: next(rows, [terminal]))
+    turn = Turn(1, "123", "parent", started)
+    backend.collect(turn, 0.1)
+    assert turn.settled and turn.baseline_message_ids == ["old-card"]
+    assert len(turn.card_history) == 2
+    assert {e["edited_timestamp"] for e in turn.card_history} == {
+        working["edited_timestamp"],
+        second["edited_timestamp"],
+    }
+    assert all(e["phase"] == "running" for e in turn.card_history)
