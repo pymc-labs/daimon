@@ -41,7 +41,7 @@ from daimon.adapters.discord.gating import (
     is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
-from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, drain_retained_card_tasks
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -102,6 +102,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
+from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.domain import Role, TaskContinuationRow, TenantRow, TurnCardIntentRow
@@ -206,11 +207,11 @@ GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
 TENANT_CAP_NOTICE = "This server has too many chats in flight right now — try again in a moment."
 THREAD_OPEN_FAILED_NOTICE = "Couldn't open a thread. @mention Daimon again."
 
-# Grace window for graceful shutdown drain. Must match the deployment's
-# container kill/stop timeout of 60s. The drain polls _processing up to this
-# many seconds before calling close(), ensuring in-flight turns are not cut
-# mid-stream.
+# Grace window for active turns. The documented worker stop grace is 90s,
+# leaving time for bounded cleanup and card edits after this 60s window.
 _DRAIN_GRACE_S: float = 60.0
+_DRAIN_CLEANUP_S: float = 10.0
+_DRAIN_CARD_EDITS_S: float = 10.0
 
 # Bounded concurrency for the on_ready re-seed sweep. Each tenant reconcile
 # issues roughly two dozen Skills API calls (a read per seeded skill, plus an
@@ -554,6 +555,7 @@ class DaimonBot(commands.Bot):
         # Drained after the current turn finishes into a single composite follow-up
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
+        self._processing_tasks: dict[int, asyncio.Task[object]] = {}
         self._pending: dict[int, list[discord.Message]] = {}
         self._queued_reactions: set[int] = set()
         # Continuation dispatches skipped because the thread was processing,
@@ -629,6 +631,11 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def _track_processing_task(self, thread_id: int) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._processing_tasks[thread_id] = task
 
     def _track_live_turn_card(self, intent_id: uuid.UUID) -> None:
         """Exclude this process's turn from periodic recovery until its task ends."""
@@ -721,6 +728,7 @@ class DaimonBot(commands.Bot):
             log.info("turn.thread_archive_skipped_busy", thread_id=thread.id)
             return
         self._processing.add(thread.id)
+        self._track_processing_task(thread.id)
         try:
             await archive_thread_quietly(thread)
         finally:
@@ -760,9 +768,8 @@ class DaimonBot(commands.Bot):
 
         Flips draining=True so on_message rejects new mentions, then polls the
         existing _processing set until it empties or the grace window elapses.
-        Any cut turn surfaces as a retryable error (acceptable). Waits for
-        pending budget notices, then calls bot.close() unconditionally so the
-        gateway disconnects cleanly.
+        Cancels turns left after the grace period, waits for their cleanup and
+        retained card writes, then closes the client.
         """
         self.draining = True
         # Pending auto batches are unasked-for turns that have not started;
@@ -779,6 +786,31 @@ class DaimonBot(commands.Bot):
         log.info("discord.drain_complete", remaining=len(self._processing))
         # Before close(): it closes the HTTP session a notice still DMs through.
         await drain_budget_notices()
+        tasks = {
+            task
+            for thread_id in self._processing
+            if (task := self._processing_tasks.get(thread_id)) is not None and not task.done()
+        }
+        current = asyncio.current_task()
+        if current is not None:
+            tasks.discard(current)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=_DRAIN_CLEANUP_S)
+            if pending:
+                log.warning("discord.drain_turn_cleanup_pending", remaining=len(pending))
+
+        # Both retained lifecycle writes and confirmation edits need the HTTP
+        # client. Share one deadline so either kind cannot extend shutdown.
+        deadline = asyncio.get_running_loop().time() + _DRAIN_CARD_EDITS_S
+        remaining = await drain_card_edits(_DRAIN_CARD_EDITS_S)
+        if remaining:
+            log.warning("discord.drain_card_edits_pending", remaining=remaining)
+        remaining_s = max(0.0, deadline - asyncio.get_running_loop().time())
+        retained = await drain_retained_card_tasks(remaining_s)
+        if retained:
+            log.warning("discord.drain_retained_card_tasks_pending", remaining=retained)
         await self.close()
 
     async def setup_hook(self) -> None:
@@ -1814,6 +1846,7 @@ class DaimonBot(commands.Bot):
                 )
             return
         self._processing.add(thread_id)
+        self._track_processing_task(thread_id)
         with holding(ticket):
             try:
                 # The ledger row is written when the turn is admitted, not when it
@@ -2179,6 +2212,7 @@ class DaimonBot(commands.Bot):
 
                 thread_id = message.channel.id
                 self._processing.add(thread_id)
+                self._track_processing_task(thread_id)
                 try:
                     await self._handle_mention(message, guild_id, tenant_id)
                     await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
@@ -2460,6 +2494,7 @@ class DaimonBot(commands.Bot):
             (tenant_id, thread, guild_id),
         ):
             return
+        self._track_processing_task(thread.id)
         try:
             await dispatch_and_drain(
                 lambda: self._dispatch_continuations(
@@ -2585,6 +2620,8 @@ class DaimonBot(commands.Bot):
         return True
 
     def _release_thread(self, thread_id: int) -> None:
+        self._processing_tasks.pop(thread_id, None)
+
         def resume(_key: int, request: tuple[uuid.UUID, discord.Thread, str]) -> None:
             tenant_id, thread, guild_id = request
             self._spawn(
@@ -3308,6 +3345,7 @@ class DaimonBot(commands.Bot):
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)
+                self._track_processing_task(opened.id)
                 if created_thread_ids is not None:
                     created_thread_ids.append(opened.id)
                 await recorder.opened_thread(opened)
