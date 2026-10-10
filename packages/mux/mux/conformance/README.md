@@ -170,8 +170,9 @@ reservation = guard.reserve(plan)  # Before all billable I/O, including setup.
 ```
 
 Exactly 80% is admitted; greater prospective provider or total spend is refused.
-Completed measured usage releases only known savings. Unknown totals, failures,
-cancellations and crashes retain the worst-case reservation. Cached/write inputs
+Complete dated usage and runtime evidence releases the hold immediately,
+including failed/cancelled runs whose costs are known. Unknown usage/runtime,
+undated prices and crashes retain a separately labelled unverified hold. Cached/write inputs
 are inclusive subsets; unknown buckets use the highest input rate. Partial usage
 can still establish an overrun, which is conservatively charged and blocks even
 zero-cost future runs for that provider. Each reservation settles once. Opening
@@ -339,3 +340,76 @@ uv run pytest packages/mux/tests/test_default_capability_anthropic.py -n 2
 
 No provider call or key is used by these commands. F2 live runs remain separate,
 lead-authorized, budgeted work; no live certification is claimed here.
+
+## Exact probe accounting
+
+`ProbePlan` defaults to 20,000 inclusive input and 2,000 output tokens.
+`ProbePlan.create_only(...)` reserves zero tokens. Hosted work adds an explicit
+`container_allowance=ContainerAllowance(memory_gb=1, sessions=1,
+seconds_per_session=1200)`; it is never hidden inside a token quote. A matching
+reviewed `session_prices` entry is required before admission. These are financial
+holds: the caller still enforces its provider/request limits.
+
+For exact settlement, pass `actual=ActualSpend(requests=(...), containers=(...),
+usage_complete=True)` to `guard.settle`. Each `MeasuredRequest` carries its ID,
+observation timestamp, inclusive `TokenUsage` and explicit `pricing_basis`
+matching the reviewed rate card (e.g. `standard-global`). Only a complete walk
+of disjoint requests qualifies. Unknown counts, cache-write duration, processing
+basis or container time keep `actual_usd=None`. An empty walk requires explicit
+complete evidence; null runtime is not an empty container list.
+Unknown actual aggregates do not erase known usage: disjoint requests contribute
+independent inclusive-input, output and dated-charge lower bounds. A proven
+overrun enlarges the conservative hold and blocks the provider's next dispatch,
+including a zero-token plan, while actual dollars remain nullable.
+
+Model price entries carry `effective_from`, optional exclusive `effective_until`
+and the official `source`. Rates are pinned into the reservation; later config
+changes cannot retroactively lower them. `short_prompt` selects a price tier per
+request, not from a run's aggregate. `cache_write_5m_input` distinguishes cache
+lifetimes; `actual_input_limit` refuses admission beyond a reviewed price range
+and prevents declaring actual spend for an unreviewed tier. Receipts retain the
+workflow `status` for adapter compatibility and add `accounting_status`:
+`pending`, `estimated_unverified` or `actual`, plus separate `actual_usd` and
+`held_usd`. `cost_estimate_usd` remains the compatibility budget debit; it is
+never a billed-spend claim. `guard.report()` returns the current receipts with
+these fields. Legacy rows stay unchanged and do not acquire an actual claim.
+
+The pure `usage_settlement.actual_from_observations` accepts model-request
+increments only, rejecting foreign models, duplicate IDs and overlapping
+turn/session totals. The caller resolves revisions and proves the walk complete.
+`settle_anthropic_events` calls the actual Anthropic `observation_from_event`
+normalizer, retaining only fixed token fields, including cache-write durations.
+It refuses a reservation without an `agent_session` allowance. Runtime requires
+exactly one measured `agent_session`; missing, empty, foreign or ambiguous
+measurements remain unknown and retain the hold. An explicitly measured zero
+running duration is distinct from an empty measurement list.
+It makes no provider calls. `ProbeOutcome(actual=..., result=...)` wires this
+same evidence through `run_probe`.
+
+For OpenAI container time, configure the published memory tier and billing
+quantum. [Official OpenAI pricing](https://developers.openai.com/api/docs/pricing)
+lists $0.03 per 1GB container per 20-minute session, with other memory tiers and
+eligible per-minute sessions priced separately. Configure the confirmed billing
+mode; elapsed harness time is not proof of a billed container interval.
+For Anthropic MA, use `meter="agent_session", memory_gb=None`,
+`billing="proportional", unit_seconds=3600, usd_per_unit=".08"`; runtime is
+billable running time, measured to milliseconds, excluding idle/rescheduling.
+[Official Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing#claude-managed-agents-pricing)
+charges this session runtime instead of a separate container-hour fee. Money is
+rounded to 18 decimal places for proportional time.
+
+`guard.propose_reconciliation(...)` reads without changing the ledger. The
+immutable `Reconciliation` binds the ledger ID, run ID, previous receipt SHA256,
+evidence-file SHA256, basis (`billed_export` or `provider_usage`), dated price
+when calculated from usage, and token/runtime components. The lead signs by
+pinning that exact `proposal.digest` in the trusted config's
+`approved_reconciliations` list. `guard.reconcile(proposal)` refuses unsigned,
+changed, foreign, stale or repeated proposals and appends a `reconciled` receipt,
+releasing the held balance without deleting any prior row. A still-`reserved`
+run can be reconciled for crash recovery: this fences a later worker settlement
+as already settled, so the lead must first stop that worker. Approval uses
+trusted operator config, not a cryptographic identity service. A fresh
+lead approval is needed for every immutable proposal. Unknown historical usage
+must be obtained or remain `estimated_unverified`; no synthetic zero is applied.
+Upgrade all ledger consumers before the first version-2 receipt; old pinned
+guards intentionally refuse its schema. Never reset the shared ledger.

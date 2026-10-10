@@ -7,7 +7,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
 
-from mux.conformance.budget import BudgetGuard, ProbeModel, ProbePlan, SpendReceipt, TokenUsage
+from mux.conformance.budget import (
+    ActualSpend,
+    BudgetGuard,
+    ProbeModel,
+    ProbePlan,
+    SpendReceipt,
+    TokenUsage,
+)
 from mux.conformance.recording import Recorder, sensitive
 from mux.conformance.runner import Result
 
@@ -17,7 +24,8 @@ class ProbeRunError(Exception):
 
 
 class ProbeOutcome(ProbeModel):
-    usage: TokenUsage
+    usage: TokenUsage = TokenUsage()
+    actual: ActualSpend | None = None
     result: Result
 
 
@@ -68,7 +76,10 @@ async def run_probe(
             reservation,
             status=status,
             limits=plan.limits,
-            usage=outcome.usage if status == "completed" and outcome is not None else None,
+            usage=outcome.usage
+            if status == "completed" and outcome is not None and outcome.actual is None
+            else None,
+            actual=outcome.actual if outcome is not None else None,
         )
         recorder.save(
             recording_path,
