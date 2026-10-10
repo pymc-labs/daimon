@@ -18,6 +18,7 @@ from daimon.adapters.discord.post_transport import (
     _unavailable_until,
     _webhooks,
 )
+from discord.webhook.async_ import async_context
 
 
 @pytest.fixture(autouse=True)
@@ -532,6 +533,40 @@ async def test_webhook_message_edits_and_deletes_through_webhook() -> None:
     channel.create_webhook.assert_not_awaited()
     message.edit.assert_not_awaited()
     message.delete.assert_not_awaited()
+
+
+async def test_urgent_webhook_edit_uses_an_independent_adapter() -> None:
+    client, channel, hook = _world()
+    message = MagicMock(spec=discord.Message)
+    message.id = 40
+    message.webhook_id = hook.id
+    message.application_id = client.application_id
+    transport = DiscordPostTransport(
+        client, channel, name="Research", avatar_url=None, builtin=False
+    )
+    _webhooks[channel.id] = {hook.id: hook}
+    normal_adapter = async_context.get()
+    started, release = asyncio.Event(), asyncio.Event()
+    adapters: list[object] = []
+
+    async def edit_message(*args: object, **kwargs: object) -> discord.Message:
+        adapters.append(async_context.get())
+        if kwargs.get("content") == "working":
+            started.set()
+            await release.wait()
+        return message
+
+    hook.edit_message = AsyncMock(side_effect=edit_message)
+    progress = asyncio.create_task(transport.edit(message, content="working"))
+    await asyncio.wait_for(started.wait(), 1)
+    assert (
+        await asyncio.wait_for(transport.edit(message, content="done", _urgent=True), 1) is message
+    )
+    assert len(adapters) == 2 and adapters[0] is normal_adapter
+    assert adapters[1] is not normal_adapter
+    assert async_context.get() is normal_adapter
+    release.set()
+    await progress
 
 
 @pytest.mark.parametrize("excluded", [False, True])

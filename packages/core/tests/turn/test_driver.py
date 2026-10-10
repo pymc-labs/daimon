@@ -9,9 +9,10 @@ from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.errors import TurnError
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.state import TextBlock
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing.turn_fakes import (
     BlockForever,
+    DelayThenYield,
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
@@ -36,6 +37,53 @@ def _now() -> datetime:
 
 def _cast(fa: FakeAnthropic) -> AsyncAnthropic:
     return cast(AsyncAnthropic, fa)
+
+
+async def test_progress_generation_stops_before_render_cancellation_and_final_render() -> None:
+    order: list[str] = []
+
+    class Lifecycle(RecordingLifecycle):
+        stopped = False
+
+        def on_render_stopped(self) -> None:
+            self.stopped = True
+            order.append("stopped")
+
+        async def on_render(self, state: TurnState) -> None:
+            if self.stopped:
+                order.append("final_render")
+                return
+            order.append("progress")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                assert self.stopped, "progress must close before its waiter is cancelled"
+                order.append("cancelled")
+                raise
+
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_agent_message(event_id="message", text="answer")),
+            DelayThenYield(0.05, make_status_idle(event_id="idle", stop_reason=make_end_turn())),
+        ]
+    ]
+    lc = Lifecycle()
+    await asyncio.wait_for(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        2,
+    )
+    assert order == ["progress", "stopped", "cancelled", "final_render"]
+    assert len(lc.terminal_success) == 1
 
 
 async def test_run_turn_folds_full_stream_and_returns_terminal_state() -> None:

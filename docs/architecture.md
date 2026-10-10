@@ -231,6 +231,19 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+The turn driver closes Discord progress generation before cancelling the render
+loop. A shared per-message queue then lets each already-sent progress edit and
+missing-card replacement finish before sending the answer, stop notice or
+error to that card. The five-second local settle wait does not let a terminal
+write overtake a request still in the queue. A dead-session recovery lifecycle
+adopts the same queue and card; stale writes queued by the old lifecycle are
+dropped. A defensive repair reasserts the final render if a stale completion is
+detected. The bot's outer error boundary finishes the card through the same
+lifecycle. Long answers keep their summary on the last chunk, and failed turns
+preserve sealed answer text before showing the error card. Process death loses
+the in-memory queue: a request already sent to Discord may still arrive after
+the new process edits an orphaned card to its restarted notice.
+
 A Discord Unknown Message (10008) while editing a turn card posts a fresh
 message if the answer has not arrived yet. Once an answer is delivered, a
 stale edit is logged and ignored. Stop still interrupts the turn when its

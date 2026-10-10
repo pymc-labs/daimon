@@ -519,6 +519,12 @@ async def _mark_card_interrupted(
     if intent_id not in turn_card_ids_from_message(message):
         return True
     try:
+        log.info(
+            "turn.card_orphan_retirement_issued",
+            turn_id=str(intent_id),
+            message_id=str(message.id),
+            source="intent_recovery",
+        )
         embed = discord.Embed(
             color=0xE74C3C,
             title="Daimon restarted before this request finished." if restarted else "Stopped.",
@@ -541,6 +547,12 @@ async def _mark_card_interrupted(
                 return False
         else:
             await message.edit(embed=embed, view=None)
+        log.info(
+            "turn.card_orphan_retirement_completed",
+            turn_id=str(intent_id),
+            message_id=str(message.id),
+            source="intent_recovery",
+        )
         return True
     except (discord.HTTPException, discord.ClientException) as err:
         if isinstance(err, discord.HTTPException) and err.code == 10008:

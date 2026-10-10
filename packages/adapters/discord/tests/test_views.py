@@ -105,6 +105,22 @@ class TestGuardedView:
 
 class TestCancelView:
     @pytest.mark.asyncio
+    async def test_stale_stop_only_cancels_its_original_turn(self) -> None:
+        """A dead turn's leftover card must not stop the next turn in its thread."""
+        old_cancel = asyncio.Event()
+        new_cancel = asyncio.Event()
+        old_turn_id = UUID("12345678-1234-5678-1234-567812345678")
+        new_turn_id = UUID("87654321-4321-8765-4321-876543218765")
+        old_view = CancelView(allowed_user_id=123, cancel=old_cancel, turn_id=old_turn_id)
+        new_view = CancelView(allowed_user_id=123, cancel=new_cancel, turn_id=new_turn_id)
+
+        assert _find_button(old_view, "Stop").custom_id != _find_button(new_view, "Stop").custom_id
+        await _find_button(old_view, "Stop").callback(_mock_interaction(user_id=123))
+
+        assert old_cancel.is_set()
+        assert not new_cancel.is_set(), "a stale Stop must not affect the newer turn"
+
+    @pytest.mark.asyncio
     async def test_cancel_sets_event_and_finalizes(self) -> None:
         cancel = asyncio.Event()
         view = CancelView(allowed_user_id=123, cancel=cancel)

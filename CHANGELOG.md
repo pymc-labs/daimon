@@ -58,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live QA records private redacted tracebacks for harness errors, reports them as PENDING without root alerts, and retries a transient read-only model-probe failure once before refusing a trigger.
 - Live QA suppresses alerts only for judge execution failures, preserves other PENDING streaks, and records the sanitized exception type/status in run notes.
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING without root alerts; failed verdicts still fail and alert.
+- Discord turn cards serialize progress, recovery, and terminal writes per message, so an older in-process edit cannot restore Working and Stop after an answer, stop, or error. Recovered turns take ownership of the same card; failed turns preserve sealed answer text. The write order is model-checked and logged for replay.
+
 - Live QA records private redacted tracebacks for harness errors, reports them as PENDING with consecutive-unavailability alerts, and retries a transient read-only model-probe failure once before refusing a trigger.
 - Live QA preserves PENDING streaks and records the sanitized judge exception type/status in run notes.
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING with consecutive-unavailability alerts; failed verdicts still fail and alert.

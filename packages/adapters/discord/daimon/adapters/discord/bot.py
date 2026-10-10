@@ -1198,6 +1198,14 @@ class DaimonBot(commands.Bot):
         for row in orphans:
             if row.active_turn_message_id is None:  # pragma: no cover - filtered by the query
                 continue
+            orphan_turn_id = next(
+                (
+                    str(intent.id)
+                    for intent in self._boot_turn_card_intents or ()
+                    if intent.message_id == row.active_turn_message_id
+                ),
+                None,
+            )
             try:
                 channel = self.get_channel(int(row.thread_id)) or await self.fetch_channel(
                     int(row.thread_id)
@@ -1212,28 +1220,72 @@ class DaimonBot(commands.Bot):
                         title="Daimon restarted before this request finished.",
                         description="@mention Daimon with your request to try again.",
                     )
+                    log.info(
+                        "turn.card_orphan_retirement_issued",
+                        turn_id=orphan_turn_id,
+                        session_id=str(row.id),
+                        message_id=row.active_turn_message_id,
+                    )
+                    edited = False
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
-                        await transport.edit(
+                        result = await transport.edit(
                             message, embed=embed, view=None, _allow_replacement=False
                         )
+                        edited = result is not None and result.id == message.id
                     elif not isinstance(message.webhook_id, int):
                         await message.edit(embed=embed, view=None)
-                    log.info(
-                        "turn.orphan_retired",
-                        thread_id=row.thread_id,
+                        edited = True
+                    if edited:
+                        log.info(
+                            "turn.orphan_retired",
+                            turn_id=orphan_turn_id,
+                            session_id=str(row.id),
+                            thread_id=row.thread_id,
+                            message_id=row.active_turn_message_id,
+                            # How long the user stared at a spinner. The only place
+                            # this is visible -- the turn's own logs died with its
+                            # container.
+                            frozen_for_s=(
+                                (datetime.now(UTC) - row.active_turn_started_at).total_seconds()
+                                if row.active_turn_started_at is not None
+                                else None
+                            ),
+                        )
+                        log.info(
+                            "turn.card_orphan_retirement_completed",
+                            turn_id=orphan_turn_id,
+                            session_id=str(row.id),
+                            message_id=row.active_turn_message_id,
+                        )
+                    else:
+                        log.warning(
+                            "turn.card_orphan_retirement_dropped",
+                            turn_id=orphan_turn_id,
+                            session_id=str(row.id),
+                            message_id=row.active_turn_message_id,
+                            reason="webhook_path_unavailable",
+                        )
+                else:
+                    log.warning(
+                        "turn.card_orphan_retirement_dropped",
+                        turn_id=orphan_turn_id,
+                        session_id=str(row.id),
                         message_id=row.active_turn_message_id,
-                        # How long the user stared at a spinner. The only place
-                        # this is visible -- the turn's own logs died with its
-                        # container.
-                        frozen_for_s=(
-                            (datetime.now(UTC) - row.active_turn_started_at).total_seconds()
-                            if row.active_turn_started_at is not None
-                            else None
-                        ),
+                        reason="channel_not_messageable",
                     )
             except (discord.HTTPException, discord.ClientException, ValueError) as err:
                 log.warning(
+                    "turn.card_orphan_retirement_dropped",
+                    turn_id=orphan_turn_id,
+                    session_id=str(row.id),
+                    message_id=row.active_turn_message_id,
+                    reason="message_missing"
+                    if isinstance(err, discord.HTTPException) and err.code == 10008
+                    else "edit_failed",
+                )
+                log.warning(
                     "turn.orphan_retire_failed",
+                    turn_id=orphan_turn_id,
                     thread_id=row.thread_id,
                     message_id=row.active_turn_message_id,
                     error=str(err),
@@ -2700,6 +2752,12 @@ class DaimonBot(commands.Bot):
         ) -> discord.Message | None:
             return await transport.edit(msg, **kwargs)
 
+        async def _urgent_edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            return await transport.edit(msg, _urgent=True, **kwargs)
+
         async def _delete_message(msg: discord.Message) -> None:
             await transport.delete(msg)
 
@@ -2719,10 +2777,12 @@ class DaimonBot(commands.Bot):
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
@@ -2841,17 +2901,20 @@ class DaimonBot(commands.Bot):
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
                 ),
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
                     cancel=cancel_event,
                     turn_id=turn_card_intent.id,
                 ),
-                adopt_message_ref=lifecycle.message_ref,
+                adopt_message_ref=lifecycle.release_message_ref(),
+                adopt_pending_progress=lifecycle,
                 unprompted=False,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_card_intent.id
@@ -3293,6 +3356,12 @@ class DaimonBot(commands.Bot):
         ) -> discord.Message | None:
             return await transport.edit(msg, **kwargs)
 
+        async def _urgent_edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            return await transport.edit(msg, _urgent=True, **kwargs)
+
         async def _delete_message(msg: discord.Message) -> None:
             await transport.delete(msg)
 
@@ -3314,10 +3383,12 @@ class DaimonBot(commands.Bot):
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id, cancel=cancel, turn_id=turn_id
@@ -3353,13 +3424,7 @@ class DaimonBot(commands.Bot):
             if current.message_ref is not None:
                 # No replacement post: retiring the intent below is only right
                 # when the card itself now shows the error.
-                await _edit_message(
-                    current.message_ref,
-                    content=text,
-                    embed=None,
-                    view=None,
-                    _allow_replacement=False,
-                )
+                await current.end_card(text)
             else:
                 await turn_send(text)
             shown_on = current.message_ref
@@ -3778,10 +3843,12 @@ class DaimonBot(commands.Bot):
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=turn_send,
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id,
@@ -3791,7 +3858,8 @@ class DaimonBot(commands.Bot):
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
-                adopt_message_ref=lifecycle.message_ref,
+                adopt_message_ref=lifecycle.release_message_ref(),
+                adopt_pending_progress=lifecycle,
                 unprompted=unprompted,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_card_intent.id
