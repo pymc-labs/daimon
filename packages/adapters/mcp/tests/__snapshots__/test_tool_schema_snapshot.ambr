@@ -3033,6 +3033,7 @@
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
+        The posted button speaks for itself: do not announce or describe it.
       ''',
       'parameters': dict({
         'additionalProperties': False,

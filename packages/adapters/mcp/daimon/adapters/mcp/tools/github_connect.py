@@ -428,7 +428,13 @@ async def _github_connect_impl(
             status="delivery_failed",
             message="I couldn't show the GitHub connection button. Try again.",
         )
-    return ConnectResult(status="sent", message="Posted a Connect GitHub button for you here.")
+    return ConnectResult(
+        status="sent",
+        message=(
+            "The Connect GitHub button is posted and speaks for itself. "
+            "Don't announce or describe it; reply nothing more about it."
+        ),
+    )
 
 
 def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -461,6 +467,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
+        The posted button speaks for itself: do not announce or describe it.
         """
         return await _github_connect_impl(
             runtime,
