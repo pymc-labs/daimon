@@ -97,10 +97,13 @@ class _LegacyStream(AsyncIterator[TurnEvent]):
 
 
 class LegacyTurnIO:
-    def __init__(self, client: anthropic.AsyncAnthropic, session_id: str) -> None:
-        self._transport = LegacyTurnTransport(client, session_id)
+    def __init__(
+        self, client: anthropic.AsyncAnthropic, session_id: str, *, scope: Scope | None = None
+    ) -> None:
+        self._transport = LegacyTurnTransport(client, session_id, scope=scope)
         self._client = client
         self._session_id = session_id
+        self._scope = scope
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         await self._transport.send(events)
@@ -114,11 +117,13 @@ class LegacyTurnIO:
     async def replay(
         self, *, timeout_s: float = REPLAY_TIMEOUT_S
     ) -> list[BetaManagedAgentsSessionEvent]:
-        return await replay_events(self._client, session_id=self._session_id, timeout_s=timeout_s)
+        return await replay_events(
+            self._client, session_id=self._session_id, timeout_s=timeout_s, scope=self._scope
+        )
 
     async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
         await send_interrupt_and_wait(
-            self._client, session_id=self._session_id, timeout_s=timeout_s
+            self._client, session_id=self._session_id, timeout_s=timeout_s, scope=self._scope
         )
         return None
 
@@ -404,7 +409,7 @@ def turn_io(
     """Bind every turn helper to the same authorized session as its driver."""
     selected = path if path is not None else load_turn_settings().path
     if selected == "legacy":
-        return LegacyTurnIO(client, session_id)
+        return LegacyTurnIO(client, session_id, scope=scope)
     if scope is None:
         raise ScopeViolation(session_id, "mux turns require the caller's authorized scope")
     if backend is None:

@@ -17,11 +17,27 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsStreamSessionEvents,
 )
 
+from mux.contracts.ids import Scope
+from mux.errors import ScopeViolation
+
 
 class LegacyTurnTransport:
-    def __init__(self, client: AsyncAnthropic, session_id: str) -> None:
+    def __init__(
+        self, client: AsyncAnthropic, session_id: str, *, scope: Scope | None = None
+    ) -> None:
+        if scope is not None and (
+            scope.is_platform
+            or scope.is_legacy_host_authorized
+            or not scope.tenant_id.strip()
+            or not scope.account_id.strip()
+        ):
+            raise ScopeViolation(session_id, "turn transport requires a real tenant/account scope")
         self._client = client
         self._session_id = session_id
+        # The host binds this identity from its existing admitted session.
+        # Legacy raw/operator entry points still omit it during the rollout;
+        # no lookup or wire argument is added to obtain an identity.
+        self.scope = scope
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         await self._client.beta.sessions.events.send(self._session_id, events=events)

@@ -78,6 +78,7 @@ async def replay_events(
     *,
     session_id: str,
     timeout_s: float = REPLAY_TIMEOUT_S,
+    scope: Scope | None = None,
 ) -> list[SessionEvent]:
     """Return the full ordered event history for `session_id`.
 
@@ -97,7 +98,7 @@ async def replay_events(
 
     try:
         return await asyncio.wait_for(
-            LegacyTurnTransport(anthropic, session_id).replay(), timeout=timeout_s
+            LegacyTurnTransport(anthropic, session_id, scope=scope).replay(), timeout=timeout_s
         )
     except TimeoutError as err:
         raise TurnError(
@@ -144,6 +145,7 @@ async def send_interrupt_and_wait(
     *,
     session_id: str,
     timeout_s: float = 120.0,
+    scope: Scope | None = None,
 ) -> None:
     """Fire `user.interrupt` against `session_id` and block until MA reaches a
     terminal idle or `timeout_s` elapses.
@@ -161,7 +163,7 @@ async def send_interrupt_and_wait(
     The caller owns rendering (`lifecycle.on_render("… interrupting")`). This
     helper is pure I/O-and-wait.
     """
-    transport = LegacyTurnTransport(anthropic, session_id)
+    transport = LegacyTurnTransport(anthropic, session_id, scope=scope)
     await transport.send([{"type": "user.interrupt"}])
 
     async def _wait_for_terminal_idle() -> None:

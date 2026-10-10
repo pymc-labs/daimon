@@ -35,7 +35,6 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
-from daimon.core.mux_backend import resource_scope
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -68,6 +67,7 @@ from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
     PreparedTurn,
+    admitted_session_scope,
     bind_recorder,
     create_ma_session,
     insert_mapping,
@@ -92,16 +92,13 @@ def _turn_port_kwargs(
 ) -> _TurnPortKwargs:
     """Derive a real tenant scope from the existing admitted operation."""
     selected = deps.turn_path or load_turn_settings().path
+    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
     if selected == "legacy":
-        # Keep today's call arguments unchanged in the normal default case.
-        return {"path": "legacy"} if load_turn_settings().path != "legacy" else {}
-    if admission.grant is not None and admission.grant.tenant_id != tenant_id:
-        raise ScopeViolation(session_id, "the prepared turn belongs to another tenant")
-    scope = resource_scope(
-        tenant_id=str(tenant_id),
-        account_id=str(admission.account_id),
-        authorization_id="admitted-turn",
-    )
+        return (
+            {"path": "legacy", "scope": scope}
+            if load_turn_settings().path != "legacy"
+            else {"scope": scope}
+        )
     result: _TurnPortKwargs = {"path": "mux", "scope": scope}
     if deps.backend is not None:
         if deps.backend_session_ref is None:
@@ -278,6 +275,7 @@ async def _replay_previous_session(
     session_id: str,
     from_agent_name: str,
     io: TurnIO | None = None,
+    scope: Scope | None = None,
 ) -> str | None:
     """The lost session's conversation as a quoted block, or None.
 
@@ -296,7 +294,7 @@ async def _replay_previous_session(
         events = (
             await io.replay()
             if io is not None
-            else await replay_events(anthropic, session_id=session_id)
+            else await replay_events(anthropic, session_id=session_id, scope=scope)
         )
     except (_anthropic.APIError, TurnError) as err:
         log.info(
@@ -341,7 +339,11 @@ Short: the caller is usually unwinding a ceiling or a cancel."""
 
 
 async def _archive_orphaned_session(
-    anthropic: _anthropic.AsyncAnthropic, *, session_id: str, io: TurnIO | None = None
+    anthropic: _anthropic.AsyncAnthropic,
+    *,
+    session_id: str,
+    io: TurnIO | None = None,
+    scope: Scope | None = None,
 ) -> None:
     """Best-effort archive of an upstream session no mapping row names.
 
@@ -351,7 +353,8 @@ async def _archive_orphaned_session(
     swallowed: the error being unwound is the one the caller must see.
     """
     archive_task = asyncio.create_task(
-        (io or LegacyTurnIO(anthropic, session_id)).archive(), name="turn.orphan_session_archive"
+        (io or LegacyTurnIO(anthropic, session_id, scope=scope)).archive(),
+        name="turn.orphan_session_archive",
     )
     deadline = asyncio.get_running_loop().time() + _ORPHAN_ARCHIVE_TIMEOUT_S
 
@@ -505,7 +508,11 @@ async def _replace_dead_session_locked(
                     raise SessionRetired("This session belongs to the handoff successor.")
                 admission = current
                 await stamp_session_seal(
-                    deps, live.ma_session_id, admission, now=lambda: datetime.now(UTC)
+                    deps,
+                    live.ma_session_id,
+                    admission,
+                    tenant_id=tenant_id,
+                    now=lambda: datetime.now(UTC),
                 )
                 return _Replacement(
                     ma_session_id=live.ma_session_id,

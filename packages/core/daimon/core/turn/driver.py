@@ -666,10 +666,10 @@ async def run_turn(
                 # Keep main's proof/retry semantics on the existing SDK client;
                 # the rejected batch was never accepted. Only this turn falls
                 # back, and the closed first stream cannot end the retry.
-                io = LegacyTurnIO(anthropic, session_id)
+                io = LegacyTurnIO(anthropic, session_id, scope=scope)
                 log.info("turn.confirmation_recovery_legacy", session_id=session_id)
             settled = await _interrupt_and_settle(
-                anthropic, session_id=session_id, cancel=cancel, io=io
+                anthropic, session_id=session_id, cancel=cancel, io=io, scope=scope
             )
             if settled == "failed":
                 unwedge_failure[0] = stuck.__cause__
@@ -718,6 +718,7 @@ async def _interrupt_and_settle(
     session_id: str,
     cancel: asyncio.Event,
     io: TurnIO | None = None,
+    scope: Scope | None = None,
 ) -> Literal["idle", "cancelled", "failed"]:
     """Interrupt a session stuck on confirmations and wait until it is idle.
 
@@ -733,7 +734,7 @@ async def _interrupt_and_settle(
     waits on confirmations.
     """
 
-    recovery_io = io if io is not None else LegacyTurnIO(anthropic, session_id)
+    recovery_io = io if io is not None else LegacyTurnIO(anthropic, session_id, scope=scope)
 
     async def _recover() -> bool:
         await recovery_io.send([{"type": "user.interrupt"}])
@@ -741,7 +742,9 @@ async def _interrupt_and_settle(
             status = await recovery_io.status()
             if status == "terminated":
                 return False
-            if status == "idle" and await _latest_idle_is_settled(anthropic, session_id=session_id):
+            if status == "idle" and await _latest_idle_is_settled(
+                anthropic, session_id=session_id, scope=scope
+            ):
                 return True
             await asyncio.sleep(0.5)
 
@@ -773,12 +776,14 @@ async def _interrupt_and_settle(
     return "idle"
 
 
-async def _latest_idle_is_settled(anthropic: AsyncAnthropic, *, session_id: str) -> bool:
+async def _latest_idle_is_settled(
+    anthropic: AsyncAnthropic, *, session_id: str, scope: Scope | None = None
+) -> bool:
     """Whether the session's most recent idle exists and is not a `requires_action` pause.
 
     No idle in the history is no evidence MA took the interrupt, so it does not count.
     """
-    return await LegacyTurnTransport(anthropic, session_id).latest_idle_is_settled()
+    return await LegacyTurnTransport(anthropic, session_id, scope=scope).latest_idle_is_settled()
 
 
 async def _pump(
