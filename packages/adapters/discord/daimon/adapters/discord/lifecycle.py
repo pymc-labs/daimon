@@ -166,6 +166,15 @@ class _CardWriteSequencer:
                 self.dirty.add(message_id)
         self.queue_repair()
 
+    def owns_terminal_replacement(self, token: object, message: discord.Message) -> bool:
+        issued = self.terminal_tokens.get(token)
+        message_id = self.key(message)
+        return (
+            issued is not None
+            and issued == (message_id, self.epoch, self.terminal_version.get(message_id))
+            and self.owner._message_ref is message  # pyright: ignore[reportPrivateUsage]
+        )
+
     def queue_repair(self) -> None:
         owner = self.owner
         message = owner._card_message_ref  # pyright: ignore[reportPrivateUsage]
@@ -584,6 +593,7 @@ class DiscordTurnLifecycle:
                                 recover_missing=recover_missing,
                                 missing_is_error=missing_is_error,
                                 urgent=True,
+                                terminal_token=terminal_token,
                                 **kwargs,
                             )
                             if card_write:
@@ -663,9 +673,16 @@ class DiscordTurnLifecycle:
         recover_missing: bool,
         missing_is_error: bool,
         urgent: bool = False,
+        terminal_token: object | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> bool:
         may_outlive_terminal = progress or not self._terminal
+
+        def stale_replacement() -> bool:
+            if terminal_token is not None:
+                return not self._card_writes.owns_terminal_replacement(terminal_token, message)
+            return may_outlive_terminal and (self._terminal or self._message_ref is not message)
+
         if self._terminal and not progress and message is self._card_message_ref:
             if "embeds" in kwargs:
                 self._terminal_card_embeds = kwargs["embeds"]
@@ -698,10 +715,10 @@ class DiscordTurnLifecycle:
 
             async def send_replacement() -> bool:
                 # Another missing-card edit may already have replaced this ref.
-                if may_outlive_terminal and (self._terminal or self._message_ref is not message):
+                if stale_replacement():
                     return False
                 replacement = await self._send_message(**send_kwargs)
-                if may_outlive_terminal and await self._reconcile_late_replacement(
+                if stale_replacement() and await self._reconcile_late_replacement(
                     replacement, message
                 ):
                     return False
@@ -721,9 +738,7 @@ class DiscordTurnLifecycle:
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
         if isinstance(replacement, discord.Message) and replacement.id != message.id:
-            if may_outlive_terminal and await self._reconcile_late_replacement(
-                replacement, message
-            ):
+            if stale_replacement() and await self._reconcile_late_replacement(replacement, message):
                 return False
             self._message_ref = replacement
             if message is self._card_message_ref:

@@ -11,6 +11,9 @@ after Discord accepts HTTP 200 but before discord.py returns. The retained task
 records the eventual result and repairs progress that finishes on either side
 of that return. Its broken mode records the behavior of `12f716c25`: timeout
 discards terminal readiness, leaving a later Working card without repair.
+`CardTerminalReplacement.tla` checks a retained terminal edit whose deleted
+card is replaced by a newer ceiling render. Its broken mode reproduces
+`6aa14e5ed`: the older edit posts a duplicate after the ceiling card appears.
 `CardHandover.tla` preserves the
 reviewed intermediate design from `73cef3f9c`; its three broken modes are
 witnesses for Astra's replacement, successor-edit, and repair-gate reports.
@@ -29,6 +32,9 @@ accidentally modeled away.
 | `DeleteCard`, `StartReplacement`, `FinishReplacement` | `lifecycle.py:595-669`, `:670-705`; #607 recovery and returned transport replacements |
 | `Repair` | `lifecycle.py:147-214`; a successful stale completion schedules a same-message edit with a strong task reference; the transport is never cancelled by a local deadline |
 | `CardUncertain` `Bound`, `AcceptTerminal`, `FinishTerminal`, `FinishProgress` | `lifecycle.py:_edit_message`, `_CardWriteSequencer.complete`; `discord/webhook/async_.py:192-205,115-123` accepts HTTP 200 before the adapter's deferred lock returns |
+| `CardTerminalReplacement` `BoundOld`, `IssueNew`, `FinishNew` | `run.py:run_prepared_turn_impl` ceiling handler; `lifecycle.py:_edit_message` retains the old edit after its ten-second caller wait and issues the newer render |
+| `CardTerminalReplacement` `OldEditNotFound`, `StartOldSend`, `DropOldSend` | `lifecycle.py:_perform_edit_message`; Discord `10008` enters missing-card recovery, which checks the terminal token before replacement send |
+| `CardTerminalReplacement` `OldSendReturns`, `ReconcileOldSend` | `lifecycle.py:_perform_edit_message`, `_reconcile_late_replacement`; an already-started stale send is deleted before the old task completes |
 | `Crash` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1130-1158`; a new process enters the boot barrier |
 | `RetireOrphan`, `DropOrphan` | `bot.py:1159-1275`, `packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:511-569`; the boot sweep edits the old message or reports that it could not |
 | `CardHandover` edit/send/terminal/handover/repair actions | `73cef3f9c:packages/adapters/discord/daimon/adapters/discord/lifecycle.py:80-205`, `:423-690`, `:746-775` |
@@ -45,6 +51,10 @@ The urgent webhook edit uses its own discord.py adapter lock in
 bucket wait; the caller's wait is bounded while the transport keeps running.
 `CardUncertain` scales the ten-second bound to one `Bound` action and allows
 Discord acceptance and progress completion on either side of it. The three
+`CardTerminalReplacement` uses one original card and two replacement IDs; the
+ten-second caller bound is one `BoundOld` action. Discord's `10008` response
+and a successful duplicate delete are injected transport assumptions, replayed
+by the lifecycle regression test. The three
 recovery attempts and five-second retries in
 `turn_card_recovery.py:361,483-505` are outside the write-order property.
 
@@ -59,6 +69,8 @@ recovery attempts and five-second retries in
 | `CardQueueOrphanDrop` | violates `NoWorkingAfterRetirement` | 20 | boot lacks a route to edit the old card |
 | `CardUncertainSafe` | clean | 18 | a late terminal result retains readiness and repairs either progress ordering |
 | `CardUncertainDropped` | violates `RepairQueued` | 18 | the old timeout loses readiness after HTTP 200 |
+| `CardTerminalReplacementSafe` | clean | 20 | stale terminal work cannot leave or own a second card |
+| `CardTerminalReplacementBroken` | violates `NoStaleReplacement` | 18 | the old terminal edit posts a duplicate after the ceiling card |
 | `CardHandoverSafe` | clean | 1,564 | historical intermediate under its bounded assumptions |
 | `CardHandoverUnsafe` | violates `NoStaleReplacement` | 171 | stale replacement is left visible |
 | `CardHandoverSuccessorUnsafe` | violates `SettledCards` | 154 | successor edit is not tracked |
@@ -82,6 +94,9 @@ Plain counterexamples:
 6. Discord accepts the terminal edit, then holds its return past ten seconds.
    The old timeout forgets the edit. Progress then restores Working and Stop;
    no repair is queued.
+7. Card 0 is deleted and its terminal edit is held. The caller's bound expires;
+   the ceiling render posts card 2. The old edit gets `10008` and posts card 1,
+   leaving both visible and its message reference pointing at card 1.
 
 ## Assumptions and limits
 
@@ -95,6 +110,7 @@ Plain counterexamples:
 | Started progress calls eventually return | Needed for a late-write repair to run; an indefinitely hung call cannot overwrite the terminal card |
 | Started terminal and repair edits eventually return successfully | Unsupported by a Discord contract; transport failure or an indefinitely held call is outside the clean model |
 | Stale replacement deletion or fallback control stripping succeeds | Assumed only by historical `CardHandoverSafe`; real transport failures remain possible |
+| The adapter can delete a duplicate it just posted | Injected in `test_ceiling_render_supersedes_retained_terminal_replacement`; without delete permission, fallback can strip controls but cannot guarantee one card |
 
 ## Accepted limitations
 
@@ -113,6 +129,11 @@ checks the separate webhook adapter context.
 `test_lifecycle.py::test_terminal_deadline_does_not_close_discord_global_gate`
 replays the installed HTTPClient global limit path. The uncertain-terminal
 test replays acceptance before return with progress completing on either side.
+`test_ceiling_render_supersedes_retained_terminal_replacement` replays the
+broken terminal replacement trace through `run_prepared_turn_impl`, both before
+send and while the send is in flight. It fails on `6aa14e5ed` and passes with
+the token check and reconciliation. The new model is checked within those
+three card IDs and assumes a successful duplicate delete.
 Discord documents
 [eventual consistency and reordering](https://docs.discord.com/developers/reference#consistency)
 without a bound for draining an already-sent request. No finite local wait

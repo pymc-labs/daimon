@@ -19,6 +19,7 @@ from typing import Any, NoReturn
 from unittest.mock import MagicMock
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
+import daimon.core.turn.run as turn_runner
 import discord
 import httpx
 import pytest
@@ -38,6 +39,7 @@ from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
@@ -318,6 +320,100 @@ async def test_terminal_edit_has_an_application_timeout(monkeypatch: pytest.Monk
     release.set()
     await asyncio.wait_for(asyncio.gather(*lc._card_writes.terminal_tasks), 1)
     assert lc._card_writes.key(_SENTINEL_REF) in lc._card_writes.terminal_ready
+
+
+@pytest.mark.parametrize("held_stage", ["edit", "replacement_send"])
+async def test_ceiling_render_supersedes_retained_terminal_replacement(
+    monkeypatch: pytest.MonkeyPatch, held_stage: str
+) -> None:
+    """A timed-out final edit cannot post a second card after the ceiling render."""
+    monkeypatch.setattr(lifecycle_module, "_TERMINAL_EDIT_S", 0.01)
+    release = asyncio.Event()
+    first_edit = True
+    next_id = 1000
+    cards: dict[int, dict[str, Any]] = {}
+
+    async def send(**kwargs: Any) -> Any:
+        nonlocal next_id
+        ref = MagicMock(spec=discord.Message)
+        ref.id = next_id
+        next_id += 1
+        if held_stage == "replacement_send" and ref.id == 1001:
+            await release.wait()
+        cards[ref.id] = dict(kwargs)
+        return ref
+
+    async def edit(ref: Any, **kwargs: Any) -> Any:
+        nonlocal first_edit
+        if first_edit:
+            first_edit = False
+            if held_stage == "edit":
+                await release.wait()
+        if ref.id not in cards:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="gone"),
+                {"code": 10008, "message": "gone"},
+            )
+        cards[ref.id].update(kwargs)
+        return ref
+
+    async def delete(ref: Any) -> None:
+        cards.pop(ref.id, None)
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, delete=delete, agent_name="test", model_id="m")
+    await lc.post_initial()
+    del cards[1000]
+
+    async def fake_driver(**kwargs: Any) -> TurnState:
+        error = TurnError(kind="upstream", message="original failure")
+        state = TurnState(error=error)
+        await kwargs["lifecycle"].on_terminal_failure(state, error)
+        return state
+
+    async def unused_reseed() -> NoReturn:
+        raise AssertionError("unexpected recovery")
+
+    def unused_recovery(*args: Any) -> NoReturn:
+        raise AssertionError("unexpected recovery")
+
+    prepared = types.SimpleNamespace(
+        admission=types.SimpleNamespace(
+            asks_before_publishing=False, agent=types.SimpleNamespace(system="")
+        ),
+        ma_session_id="fake-session",
+        mapping_id=None,
+        continuity=ContinuityOutcome(),
+        _record=None,
+    )
+    deps = types.SimpleNamespace(
+        tool_safety=False, public_url="https://example.test", anthropic=None
+    )
+    monkeypatch.setattr(turn_runner, "run_turn", fake_driver)
+    monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(turn_runner, "trusted_servers_for", lambda *args: ())
+    monkeypatch.setattr(turn_runner, "context_prompt", lambda *args, **kwargs: "")
+    monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args: None)
+    result = await turn_runner.run_prepared_turn_impl(
+        deps,
+        prepared,
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        thread_id="20",
+        external_user_id="1",
+        user_message="test",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        reseed_user_message=unused_reseed,
+        recovery_lifecycle=unused_recovery,
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    assert result.state.error is not None and result.state.error.kind == "ceiling"
+    assert len(cards) == 1
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*lc._card_writes.terminal_tasks), 1)
+    assert len(cards) == 1
+    assert lc.message_ref is lc._card_message_ref
+    assert lc.message_ref is not None and lc.message_ref.id in cards
 
 
 async def test_terminal_deadline_does_not_close_discord_global_gate(

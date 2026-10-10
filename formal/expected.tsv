@@ -211,6 +211,8 @@ discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:RestartStable	57	
 discord_card_lifecycle	CardLifecycle	CardQueueOrphanDrop	violates:NoWorkingAfterRetirement	20	-	boot cannot edit an orphaned card when its webhook token is unavailable
 discord_card_lifecycle	CardUncertain	CardUncertainSafe	clean	18	-	bounded wait retains terminal outcome and repairs late progress
 discord_card_lifecycle	CardUncertain	CardUncertainDropped	violates:RepairQueued	18	-	12f716c25 drops tracking when timeout precedes successful edit return
+discord_card_lifecycle	CardTerminalReplacement	CardTerminalReplacementSafe	clean	20	-	retained terminal request checks ownership before sending and deletes an in-flight duplicate
+discord_card_lifecycle	CardTerminalReplacement	CardTerminalReplacementBroken	violates:NoStaleReplacement	18	-	6aa14e5ed lets a superseded terminal request post and own a duplicate card
 discord_card_lifecycle	CardHandover	CardHandoverSafe	clean	1564	-	prior sequencer repairs reviewed in-process handover interleavings
 discord_card_lifecycle	CardHandover	CardHandoverUnsafe	violates:NoStaleReplacement	171	-	rejected design leaves a late replacement visible
 discord_card_lifecycle	CardHandover	CardHandoverSuccessorUnsafe	violates:SettledCards	154	-	rejected design ignores successor progress edits
