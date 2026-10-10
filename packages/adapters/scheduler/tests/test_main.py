@@ -2209,7 +2209,7 @@ async def test_fire_does_not_invite_a_post_into_a_destination_protected_since(
 
     trigger = str(seen["trigger_message"])
     assert "do not post there" in trigger
-    assert "posts the end of your final reply there" not in trigger
+    assert "posts your full final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster still routes it (DM fallback)"
 
 
@@ -2246,7 +2246,7 @@ async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
 
     trigger = str(seen["trigger_message"])
     assert "Do not post to the destination yourself" in trigger
-    assert "posts the end of your final reply there" not in trigger
+    assert "posts your full final reply there" not in trigger
     assert after.delivery_status == "pending", "the poster resolves placement and delivers"
 
 
@@ -2266,7 +2266,7 @@ async def test_fire_still_invites_a_post_when_nothing_relevant_is_protected(
         policy=TenantAccessPolicy(protected_channel_ids=("999",)),
     )
 
-    assert "posts the end of your final reply there" in str(seen["trigger_message"])
+    assert "posts your full final reply there" in str(seen["trigger_message"])
 
 
 async def test_settle_promo_credit_grants_a_due_timed_code(

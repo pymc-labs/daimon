@@ -2,7 +2,7 @@
 
 Non-interactive turn driver — opens an MA session, sends a single trigger
 message, drains SSE through the turn-state reducers until terminal `status_idle`,
-returns the truncated final-message tail.
+returns the complete final message.
 
 Tests use transport-level fakes via build_fake_anthropic and MARouter from
 daimon.testing.ma. SDK event and session objects are constructed inline at
@@ -65,7 +65,7 @@ from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
-from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX, run_turn
+from daimon.core.headless_runner import run_turn
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.stores import agent_github_binding as github_binding_store
 from daimon.core.stores import agent_repo_binding as repo_binding_store
@@ -231,8 +231,8 @@ async def test_run_turn_returns_last_message_text(origin, db_session, db_session
     assert "hello world" not in str(outcomes[0])
 
 
-async def test_tail_truncated_at_1000() -> None:
-    long_text = "a" * 2000
+async def test_full_final_response_is_returned_for_delivery() -> None:
+    long_text = "HEAD-ONLY " + "completeword " * 300 + "END-COMPLETE"
     events: list[BetaManagedAgentsSessionEvent] = [
         BetaManagedAgentsAgentMessageEvent(
             id="evt_msg_1",
@@ -256,9 +256,7 @@ async def test_tail_truncated_at_1000() -> None:
         trigger_message="hi",
     )
 
-    assert len(tail) == LAST_RESULT_TAIL_MAX == 1000, (
-        "tail must be truncated to LAST_RESULT_TAIL_MAX (1000) chars"
-    )
+    assert tail == long_text, "the scheduler needs the complete reply, including its ending"
 
 
 async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_action() -> None:

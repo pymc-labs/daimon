@@ -45,7 +45,6 @@ from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_repo_auth import RepoAccess
-from daimon.core.headless_runner import LAST_RESULT_TAIL_MAX
 from daimon.core.here_card import assemble_here_card
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.mcp_auth import coding_tool_config
@@ -65,6 +64,7 @@ from daimon.core.routines import PANEL_CAP
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, RoutineRow
+from daimon.core.stores.routines import LAST_RESULT_TAIL_MAX
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.notices import TerminationNotice
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState

@@ -62,3 +62,23 @@ class TestSplitFenced:
         text = "a" * 5700
         result = split_fenced(text, 1900)
         assert len(result) == 3, "5700 chars should produce 3 chunks at 1900 limit"
+
+
+def test_routine_chunks_keep_words_and_all_content():
+    text = " ".join(f"word{i}" for i in range(500))
+    chunks = split_fenced(text, 83, word_boundary=True)
+    assert all(len(chunk) <= 83 for chunk in chunks)
+    assert "".join(chunks) == text, "no word or separator is lost at a boundary"
+    assert all(chunk.endswith(" ") for chunk in chunks[:-1])
+
+
+def test_routine_fence_repairs_fit_inside_the_message_limit():
+    lines = [f"value_{i}" for i in range(400)]
+    text = "```python\n" + "\n".join(lines) + "\n```"
+    chunks = split_fenced(text, 80, word_boundary=True)
+    assert all(len(chunk) <= 80 for chunk in chunks)
+    restored = []
+    for chunk in chunks:
+        assert chunk.startswith("```python\n") and chunk.endswith("```")
+        restored.extend(chunk.splitlines()[1:-1])
+    assert restored == lines, "fence repair must not swallow or duplicate content"

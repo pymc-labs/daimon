@@ -394,3 +394,24 @@ async def test_a_deleted_thread_is_not_posted_at_the_channel_root(
     assert outcome.note == "dm_fallback:destination_unavailable"
     channels = [c.kwargs["channel"] for c in client.chat_postMessage.await_args_list]
     assert channels == ["D_CREATOR"], "nothing posted to C1"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_long_routine_delivers_every_word_to_thread_or_creator(
+    db_session, db_session_factory, monkeypatch, fallback
+):
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    result = " ".join(f"digestword{i}" for i in range(3000)) + " FINAL-COMPLETE"
+    row = row.model_copy(update={"delivery_payload": result})
+    post, client = _poster(db_session_factory, monkeypatch)
+    if fallback:
+        row = row.model_copy(update={"destination_id": "missing-thread-separator"})
+    outcome = await post(row)
+    assert outcome.status == "delivered"
+    calls = client.chat_postMessage.await_args_list
+    assert len(calls) > 1 and all(len(call.kwargs["text"]) <= 11800 for call in calls)
+    assert "".join(call.kwargs["text"] for call in calls).split("\n\n", 1)[1] == result
+    expected_channel = "D_CREATOR" if fallback else "C1"
+    assert all(call.kwargs["channel"] == expected_channel for call in calls)
+    if not fallback:
+        assert all(call.kwargs["thread_ts"] == "1717.5" for call in calls)
