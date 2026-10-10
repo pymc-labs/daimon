@@ -1811,8 +1811,9 @@
         <blank line>
         Then upload with: curl -sS -X PUT --data-binary @<file> "<upload_url>". The
         curl response JSON carries the live url and expires_at (null for a blog);
-        share that whole url and say when it expires. Its access_token is the
-        notebook's only key, so share it only where the notebook belongs. Never
+        share that whole url and say when it expires. It is a notebook-scoped share
+        link; share it only where the notebook belongs. Never post legacy URLs
+        with access_token query strings; re-publish the same slug for a share link. Never
         paste large file contents into a tool argument.
         <blank line>
         Pass this turn's origin_context_id. An agent with a rule (where it runs)
