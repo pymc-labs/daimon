@@ -28,7 +28,11 @@ from typing import Any
 import anthropic
 import structlog
 from daimon.adapters.slack.privacy_panel.read import resolve_privacy_account
-from daimon.adapters.slack.privacy_panel.views import build_deleting_view, build_post_delete_view
+from daimon.adapters.slack.privacy_panel.views import (
+    build_delete_paused_view,
+    build_deleting_view,
+    build_post_delete_view,
+)
 from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.core.errors import DaimonError
 from daimon.core.purge import purge_account
@@ -54,7 +58,9 @@ class DeleteDecision:
     view_id: str | None
 
 
-def evaluate_delete_submission(payload: dict[str, Any]) -> DeleteDecision:
+def evaluate_delete_submission(
+    payload: dict[str, Any], *, delete_enabled: bool = True
+) -> DeleteDecision:
     """Pure: validate the view_submission payload for the privacy delete modal.
 
     Reads private_metadata (account_id, user_name, view_id) and the submitted
@@ -67,6 +73,16 @@ def evaluate_delete_submission(payload: dict[str, Any]) -> DeleteDecision:
     returned payload synchronously, then calls run_purge_and_update as a background
     task (Pitfall 2).
     """
+    if not delete_enabled:
+        return DeleteDecision(
+            response_payload={
+                "response_action": "update",
+                "view": build_delete_paused_view(),
+            },
+            proceed=False,
+            account_id=None,
+            view_id=None,
+        )
     view: dict[str, Any] = payload.get("view") or {}
     raw_meta: str = view.get("private_metadata") or ""
 
@@ -152,6 +168,12 @@ async def run_purge_and_update(
     and refuse if it does not match. This means the destructive key is anchored to
     the submitter's identity, not to a client-supplied metadata blob.
     """
+    if not runtime.settings.privacy.delete_enabled:
+        await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
+            view_id=view_id,
+            view=build_delete_paused_view(),
+        )
+        return
     try:
         async with runtime.sessionmaker() as s:
             resolved = await resolve_privacy_account(

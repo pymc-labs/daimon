@@ -31,6 +31,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _POLICY_URL = "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"
 
 
+def test_paused_panel_keeps_policy_and_export() -> None:
+    view = build_privacy_main_container(
+        is_slack_connected=False,
+        slack_connect_url=None,
+        policy_url=_POLICY_URL,
+        delete_enabled=False,
+    )
+    actions = [element["action_id"] for element in view["blocks"][2]["elements"]]
+    assert actions == ["privacy_policy", "privacy_export"]
+
+
 @pytest.mark.parametrize(
     ("failed", "upstream_error", "expected"),
     [

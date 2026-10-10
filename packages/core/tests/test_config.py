@@ -22,6 +22,17 @@ from daimon.core.config import (
 from pydantic import HttpUrl, PostgresDsn, SecretStr, ValidationError
 
 
+def test_privacy_delete_flag_defaults_on_and_reads_nested_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_PRIVACY__DELETE_ENABLED", raising=False)
+    assert load_settings(_env_file=None).privacy.delete_enabled is True
+    monkeypatch.setenv("DAIMON_PRIVACY__DELETE_ENABLED", "false")
+    assert load_settings(_env_file=None).privacy.delete_enabled is False
+
+
 def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:
     from daimon.core.turn.ceiling import TURN_CEILING_S
 

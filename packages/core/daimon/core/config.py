@@ -1206,6 +1206,17 @@ class ThreadNamingSettings(BaseModel):
     )
 
 
+class PrivacySettings(BaseModel):
+    delete_enabled: bool = Field(
+        default=True,
+        description=(
+            "Show account deletion in Discord, Slack, and Teams privacy panels and allow "
+            "delete confirmations. Set DAIMON_PRIVACY__DELETE_ENABLED=false to pause "
+            "deletion during an event; Policy and Export remain available."
+        ),
+    )
+
+
 class ArtifactsSettings(BaseModel):
     """Optional private object storage for hosted-client artifacts."""
 
@@ -1396,6 +1407,7 @@ class Settings(BaseSettings):
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
         ),
     )
+    privacy: PrivacySettings = Field(default_factory=PrivacySettings)
     cli: CLISettings = Field(default_factory=CLISettings)
     log: LogSettings = Field(default_factory=LogSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)

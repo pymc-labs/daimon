@@ -47,6 +47,7 @@ log = structlog.get_logger()
 NAME_MISMATCH = "That doesn't match your name."
 STALE = "Could not verify your account, so nothing was deleted. Please send privacy again."
 DELETING = "⏳ Deleting… this may take a moment."
+DELETE_PAUSED = "Deleting your account is paused during the event."
 
 
 class PrivacyPanel:
@@ -80,7 +81,11 @@ class PrivacyPanel:
         if account_id is None:
             return no_data_card(bot)
         policy_url = str(self._runtime.settings.privacy_policy_url)
-        return panel_card(bot=bot, policy_url=policy_url)
+        return panel_card(
+            bot=bot,
+            policy_url=policy_url,
+            delete_enabled=self._runtime.settings.privacy.delete_enabled,
+        )
 
     async def _act(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -91,6 +96,8 @@ class PrivacyPanel:
             return toast(DENIED)
         data = activity.value.action.data
         op, bot = data.get("op"), activity.recipient.name or "daimon"
+        if op in ("delete", "confirm_delete") and not self._runtime.settings.privacy.delete_enabled:
+            return toast(DELETE_PAUSED)
         if op not in ("export", "delete", "confirm_delete"):
             return replace_card(await self._panel(actor.tenant_id, actor.user_id, bot=bot))
         account_id = await self._account(actor.tenant_id, actor.user_id)
@@ -118,6 +125,9 @@ class PrivacyPanel:
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity], account_id: uuid.UUID, bot: str
     ) -> None:
         """Purge, then edit the card to the outcome. Logs carry counts, never who."""
+        if not self._runtime.settings.privacy.delete_enabled:
+            await edit_origin_card(ctx, text_card("🔒 Privacy", DELETE_PAUSED))
+            return
         try:
             runtime = self._runtime
             result = await purge_account(

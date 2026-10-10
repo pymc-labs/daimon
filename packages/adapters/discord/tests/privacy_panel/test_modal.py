@@ -25,6 +25,19 @@ def _make_modal(*, user_name: str = "carlos") -> DeleteConfirmModal:
     )
 
 
+async def test_paused_modal_does_not_purge(monkeypatch: pytest.MonkeyPatch) -> None:
+    modal = _make_modal()
+    modal.runtime.settings.privacy.delete_enabled = False
+    purge = AsyncMock()
+    monkeypatch.setattr("daimon.adapters.discord.privacy_panel.modal.purge_account", purge)
+    interaction = _make_interaction_with_response()
+    await modal.on_submit(interaction)
+    interaction.response.send_message.assert_awaited_once_with(
+        "Deleting your account is paused during the event.", ephemeral=True
+    )
+    purge.assert_not_awaited()
+
+
 def _make_interaction_with_response() -> MagicMock:
     interaction = MagicMock()
     interaction.response.send_message = AsyncMock()

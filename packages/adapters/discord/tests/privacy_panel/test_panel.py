@@ -49,6 +49,26 @@ def test_main_view_has_policy_export_delete_and_done_buttons() -> None:
     )
 
 
+def test_main_view_hides_delete_when_paused() -> None:
+    runtime = _make_runtime()
+    runtime.settings.privacy.delete_enabled = False
+    view = _make_view(runtime=runtime)
+    labels = {c.label for c in view.walk_children() if isinstance(c, discord.ui.Button)}
+    assert labels == {"📄 Policy", "📤 Export", "✓ Done"}
+
+
+async def test_old_delete_button_answers_pause_without_loading_preview() -> None:
+    runtime = _make_runtime()
+    runtime.settings.privacy.delete_enabled = False
+    view = _make_view(runtime=runtime)
+    interaction = MagicMock()
+    interaction.response.send_message = AsyncMock()
+    await view._on_delete(interaction)
+    interaction.response.send_message.assert_awaited_once_with(
+        "Deleting your account is paused during the event.", ephemeral=True
+    )
+
+
 def test_main_view_policy_button_is_link_style_pointing_to_policy_url() -> None:
     view = _make_view()
     policy = _find_button(view, "📄 Policy")

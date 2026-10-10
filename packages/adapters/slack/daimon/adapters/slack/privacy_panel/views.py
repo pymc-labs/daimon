@@ -134,12 +134,30 @@ def build_loading_view() -> dict[str, Any]:
     }
 
 
+def build_delete_paused_view() -> dict[str, Any]:
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Privacy"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Deleting your account is paused during the event.",
+                },
+            }
+        ],
+    }
+
+
 def build_privacy_main_container(
     *,
     is_slack_connected: bool,
     slack_connect_url: str | None,
     policy_url: str,
     display_name: str = "daimon",
+    delete_enabled: bool = True,
 ) -> dict[str, Any]:
     """Main privacy view: the title, two lines on who stores what, then the buttons.
 
@@ -169,13 +187,16 @@ def build_privacy_main_container(
             "action_id": "privacy_export",
             "text": {"type": "plain_text", "text": "📤 Export"},
         },
-        {
-            "type": "button",
-            "action_id": "privacy_delete_open",
-            "text": {"type": "plain_text", "text": "🗑 Delete…"},
-            "style": "danger",
-        },
     ]
+    if delete_enabled:
+        action_elements.append(
+            {
+                "type": "button",
+                "action_id": "privacy_delete_open",
+                "text": {"type": "plain_text", "text": "🗑 Delete…"},
+                "style": "danger",
+            }
+        )
     if is_slack_connected:
         action_elements.append(
             {
