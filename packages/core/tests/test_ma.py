@@ -51,6 +51,7 @@ from daimon.testing.ma import (
     sse_response,
 )
 from daimon.testing.ma_models import ma_agent, ma_session
+from mux.contracts.ids import Scope
 
 
 def _user_message(event_id: str, text: str) -> BetaManagedAgentsUserMessageEvent:
@@ -741,7 +742,15 @@ async def test_interrupt_orphaned_session_gives_up_after_its_timeout() -> None:
 
     async with asyncio.timeout(5):
         interrupted = await interrupt_orphaned_session(
-            anthropic, session_id="sesn_hung", timeout_s=0.05
+            anthropic,
+            session_id="sesn_hung",
+            scope=Scope(
+                tenant_id=str(uuid.uuid4()),
+                account_id=str(uuid.uuid4()),
+                principal_id="daimon",
+                authorization_id="test-orphan-sweep",
+            ),
+            timeout_s=0.05,
         )
 
     assert interrupted is False

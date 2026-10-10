@@ -159,6 +159,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.core.turn_queue import TurnQueue
+from mux.contracts.ids import Scope
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1205,7 +1206,18 @@ class DaimonBot(commands.Bot):
                 self.runtime.sessionmaker,
                 row,
                 clear=clear_active_turn_if_message_id,
-                interrupt=partial(interrupt_orphaned_session, self.runtime.anthropic),
+                interrupt=partial(
+                    interrupt_orphaned_session,
+                    self.runtime.anthropic,
+                    scope=Scope(
+                        tenant_id=str(row.tenant_id),
+                        account_id=str(row.account_id),
+                        principal_id="daimon",
+                        authorization_id="discord-orphan-sweep",
+                    )
+                    if row.account_id is not None
+                    else None,
+                ),
             )
             if not cleared:
                 log.info(

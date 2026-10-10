@@ -211,7 +211,7 @@ async def test_boot_rows_match_base(monkeypatch, platform, case):
             trace.append(("clear", id, expected_message_id))
             return case != "moved"
 
-        async def interrupt(client, *, session_id, trace=trace):
+        async def interrupt(client, *, session_id, scope=None, trace=trace):
             trace.append(("interrupt", session_id))
             return True
 

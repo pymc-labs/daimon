@@ -265,3 +265,13 @@ cleanup retention. Hosted charts retain the lazy Files API scan cap, Managed
 Agents beta header and binary read. Hub sessions retain account, legacy-access
 and seal filtering; skill details count partial native version rows. The native
 compatibility edge consumes only fields used by these existing callers.
+`anthropic.core_admin@1` retains the account-purge session paginator, hard-delete
+request and best-effort orphan interrupt without additional provider reads.
+Tenant operations check the host's authorized agent/session IDs before I/O.
+Its workspace-wide snapshot walks require explicit platform Scope and preserve
+`limit=100` with omitted archive filters. Destructive test cleanup keeps both the
+host opt-in and disposable-sentinel gate, its early exit and archive fallbacks.
+Native snapshots retain SDK partial-response fields without requiring unused
+agent/session properties. DM archive retains the selected TurnIO/backend
+dispatch. Responder identity keeps its SDK read and untouched response for
+configuration snapshot backfill, including null channel and thread metadata.

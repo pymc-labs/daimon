@@ -71,6 +71,7 @@ from daimon.core.stores.turn_card_intents import (
     retire_turn_card_intent,
 )
 from daimon.core.turn.bookkeeping import reconcile_found_card, recover_orphan_marker
+from mux.contracts.ids import Scope
 from slack_sdk.errors import SlackApiError
 from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.web.async_client import AsyncWebClient
@@ -620,7 +621,18 @@ async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None
                 runtime.sessionmaker,
                 row,
                 clear=clear_active_turn_if_message_id,
-                interrupt=partial(interrupt_orphaned_session, runtime.anthropic),
+                interrupt=partial(
+                    interrupt_orphaned_session,
+                    runtime.anthropic,
+                    scope=Scope(
+                        tenant_id=str(row.tenant_id),
+                        account_id=str(row.account_id),
+                        principal_id="daimon",
+                        authorization_id="slack-orphan-sweep",
+                    )
+                    if row.account_id is not None
+                    else None,
+                ),
             )
             if not cleared:
                 log.info(

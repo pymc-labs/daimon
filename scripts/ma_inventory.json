@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2125,
+  "files_scanned": 2127,
   "parse_errors": [],
   "calls": [
     {
@@ -1410,105 +1410,6 @@
         "skill_id",
         "type"
       ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 342,
-      "end": 342,
-      "scope": "find_workspace_disposable_sentinel",
-      "category": "production",
-      "resource": "agents.list",
-      "call": "client.beta.agents.list(limit=100)",
-      "request_keys": [],
-      "response_access": [
-        "agent.metadata",
-        "agent.metadata.get"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 396,
-      "end": 396,
-      "scope": "delete_entire_workspace_for_testing",
-      "category": "production",
-      "resource": "environments.list",
-      "call": "client.beta.environments.list(limit=100)",
-      "request_keys": [],
-      "response_access": [
-        "env.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 412,
-      "end": 412,
-      "scope": "delete_entire_workspace_for_testing",
-      "category": "production",
-      "resource": "agents.list",
-      "call": "client.beta.agents.list(limit=100)",
-      "request_keys": [],
-      "response_access": [
-        "agent.id"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 451,
-      "end": 451,
-      "scope": "delete_sessions_for_account",
-      "category": "production",
-      "resource": "sessions.list",
-      "call": "client.beta.sessions.list(agent_id=agent.id)",
-      "request_keys": [],
-      "response_access": [
-        "session.id",
-        "session.metadata",
-        "session.metadata.get"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 398,
-      "end": 398,
-      "scope": "delete_entire_workspace_for_testing",
-      "category": "production",
-      "resource": "environments.delete",
-      "call": "client.beta.environments.delete(env.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 416,
-      "end": 416,
-      "scope": "delete_entire_workspace_for_testing",
-      "category": "production",
-      "resource": "agents.archive",
-      "call": "client.beta.agents.archive(agent.id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 459,
-      "end": 459,
-      "scope": "delete_sessions_for_account",
-      "category": "production",
-      "resource": "sessions.delete",
-      "call": "client.beta.sessions.delete(session_id)",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/ma.py",
-      "line": 402,
-      "end": 402,
-      "scope": "delete_entire_workspace_for_testing",
-      "category": "production",
-      "resource": "environments.archive",
-      "call": "client.beta.environments.archive(env.id)",
-      "request_keys": [],
       "response_access": []
     },
     {
@@ -3783,6 +3684,159 @@
       ]
     },
     {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 61,
+      "end": 61,
+      "scope": "legacy_workspace_cleanup",
+      "category": "test",
+      "resource": "agents.list",
+      "call": "client.beta.agents.list(limit=100)",
+      "request_keys": [],
+      "response_access": [
+        "agent.id",
+        "agent.metadata",
+        "agent.metadata.get"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 68,
+      "end": 68,
+      "scope": "legacy_workspace_cleanup",
+      "category": "test",
+      "resource": "environments.list",
+      "call": "client.beta.environments.list(limit=100)",
+      "request_keys": [],
+      "response_access": [
+        "env.id"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 76,
+      "end": 76,
+      "scope": "legacy_workspace_cleanup",
+      "category": "test",
+      "resource": "agents.list",
+      "call": "client.beta.agents.list(limit=100)",
+      "request_keys": [],
+      "response_access": [
+        "agent.id",
+        "agent.metadata",
+        "agent.metadata.get"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 113,
+      "end": 113,
+      "scope": "test_sentinel_stops_at_first_match_without_fetching_next_page",
+      "category": "test",
+      "resource": "agents.list",
+      "call": "legacy.beta.agents.list(limit=100)",
+      "request_keys": [],
+      "response_access": [
+        "agent.metadata",
+        "agent.metadata.get"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 144,
+      "end": 144,
+      "scope": "legacy_account_purge",
+      "category": "test",
+      "resource": "sessions.list",
+      "call": "client.beta.sessions.list(agent_id=agent.id)",
+      "request_keys": [],
+      "response_access": [
+        "session.id",
+        "session.metadata",
+        "session.metadata.get"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 335,
+      "end": 335,
+      "scope": "test_legacy_identity_lookup_keeps_partial_sdk_reply_and_one_request",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "legacy.beta.sessions.retrieve('sess_identity')",
+      "request_keys": [],
+      "response_access": [
+        "original.model_dump"
+      ]
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 70,
+      "end": 70,
+      "scope": "legacy_workspace_cleanup",
+      "category": "test",
+      "resource": "environments.delete",
+      "call": "client.beta.environments.delete(env.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 78,
+      "end": 78,
+      "scope": "legacy_workspace_cleanup",
+      "category": "test",
+      "resource": "agents.archive",
+      "call": "client.beta.agents.archive(agent.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 150,
+      "end": 150,
+      "scope": "legacy_account_purge",
+      "category": "test",
+      "resource": "sessions.delete",
+      "call": "client.beta.sessions.delete(session_id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 209,
+      "end": 211,
+      "scope": "test_orphan_interrupt_keeps_sdk_wire_and_best_effort_errors",
+      "category": "test",
+      "resource": "sessions.events.send",
+      "call": "legacy.beta.sessions.events.send('sess_orphan', events=[{'type': 'user.interrupt'}])",
+      "request_keys": [
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 401,
+      "end": 401,
+      "scope": "test_dm_quarantine_keeps_archive_wire_and_sealed_error",
+      "category": "test",
+      "resource": "sessions.archive",
+      "call": "legacy.beta.sessions.archive('sess_dm')",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 73,
+      "end": 73,
+      "scope": "legacy_workspace_cleanup",
+      "category": "test",
+      "resource": "environments.archive",
+      "call": "client.beta.environments.archive(env.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
       "file": "packages/core/tests/test_headless_ports.py",
       "line": 37,
       "end": 37,
@@ -3806,8 +3860,8 @@
     },
     {
       "file": "packages/core/tests/test_ma.py",
-      "line": 537,
-      "end": 537,
+      "line": 538,
+      "end": 538,
       "scope": "apply_update",
       "category": "test",
       "resource": "agents.update",
@@ -3817,8 +3871,8 @@
     },
     {
       "file": "packages/core/tests/test_ma.py",
-      "line": 579,
-      "end": 579,
+      "line": 580,
+      "end": 580,
       "scope": "apply_update",
       "category": "test",
       "resource": "agents.update",
@@ -3828,8 +3882,8 @@
     },
     {
       "file": "packages/core/tests/test_ma.py",
-      "line": 618,
-      "end": 618,
+      "line": 619,
+      "end": 619,
       "scope": "apply_update",
       "category": "test",
       "resource": "agents.update",
@@ -5733,6 +5787,50 @@
       "category": "test",
       "resource": "sessions.archive",
       "call": "unchanged_client.beta.sessions.archive(SESSION.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/core_admin.py",
+      "line": 60,
+      "end": 60,
+      "scope": "workspace_agents",
+      "category": "production",
+      "resource": "agents.list",
+      "call": "self._client.beta.agents.list(limit=100)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/core_admin.py",
+      "line": 65,
+      "end": 65,
+      "scope": "workspace_environment_ids",
+      "category": "production",
+      "resource": "environments.list",
+      "call": "self._client.beta.environments.list(limit=100)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/core_admin.py",
+      "line": 72,
+      "end": 72,
+      "scope": "sessions_for_agent",
+      "category": "production",
+      "resource": "sessions.list",
+      "call": "self._client.beta.sessions.list(agent_id=agent.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/core_admin.py",
+      "line": 77,
+      "end": 77,
+      "scope": "delete_session",
+      "category": "production",
+      "resource": "sessions.delete",
+      "call": "self._client.beta.sessions.delete(session.id)",
       "request_keys": [],
       "response_access": []
     },
@@ -12658,7 +12756,7 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
-      "line": 27,
+      "line": 26,
       "module": "anthropic",
       "names": [
         "APIError",
@@ -12669,10 +12767,20 @@
     },
     {
       "file": "packages/core/daimon/core/ma.py",
+      "line": 27,
+      "module": "anthropic._models",
+      "names": [
+        "construct_type_unchecked"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/ma.py",
       "line": 28,
       "module": "anthropic.types.beta",
       "names": [
-        "BetaManagedAgentsAgent"
+        "BetaManagedAgentsAgent",
+        "BetaManagedAgentsSession"
       ],
       "category": "production"
     },
@@ -15116,6 +15224,17 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_core_admin_port_requests.py",
+      "line": 12,
+      "module": "anthropic",
+      "names": [
+        "APIError",
+        "APIStatusError",
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_credential_env.py",
       "line": 11,
       "module": "anthropic",
@@ -16991,6 +17110,15 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_event_params",
       "names": [
         "BetaManagedAgentsEventParams"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/core_admin.py",
+      "line": 6,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "production"
     },

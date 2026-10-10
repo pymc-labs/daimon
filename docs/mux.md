@@ -917,3 +917,16 @@ cleanup retention. Hosted charts retain the lazy Files API scan cap, Managed
 Agents beta header and binary read. Hub sessions retain account, legacy-access
 and seal filtering; skill details count partial native version rows. The native
 compatibility edge consumes only fields used by these existing callers.
+### Scoped core cleanup
+
+Account purge, private-conversation quarantine and adapter orphan interruption
+use the authorized tenant and account at the port boundary. Orphan rows with no account skip the provider interrupt and log the
+reason while retaining card and marker retirement. Account session walks keep
+SDK pagination and filter account metadata before deletion; missing sessions
+retain the existing idempotent count.
+Disposable-workspace test cleanup remains explicitly workspace-wide behind its
+destructive opt-in and sentinel gates, retaining deletion order, pagination,
+early sentinel exit and the environment archive fallback.
+
+Responder identity retains its SDK read and response for configuration snapshot
+backfill, including null channel and thread metadata, without an additional read.
