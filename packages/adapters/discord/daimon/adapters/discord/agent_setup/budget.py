@@ -29,9 +29,9 @@ ROSTER_ROW_COST: Final = 3
 ROSTER_CHROME_COST: Final = 15
 """Everything in the roster view that is not a row, at its widest.
 
-Container 1 + header TextDisplay 1 + thread-context line 1 + admin webhook-fix
-line 1 + hairline 1 + three ActionRows at 1 + 2 buttons each 9 + the admin
-GitHub button 1 = 15.
+Container 1 + header TextDisplay 1 + thread-context line 1 + admin webhook note
+1 (one TextDisplay, however many channels it names) + hairline 1 + three
+ActionRows at 1 + 2 buttons each 9 + the admin GitHub button 1 = 15.
 ``ROSTER_PAGE_SIZE`` rows cost 24, so the widest roster renders 39 of the 40
 available components.
 """

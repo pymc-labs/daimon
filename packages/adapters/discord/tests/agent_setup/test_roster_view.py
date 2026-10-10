@@ -24,7 +24,12 @@ from daimon.adapters.discord.agent_setup.navigation import (
     STALE_PANEL_MESSAGE,
 )
 from daimon.adapters.discord.agent_setup.roster_view import RosterView, roster_rows
-from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
+from daimon.adapters.discord.agent_setup.state import (
+    DenyingRole,
+    PanelState,
+    ThreadContext,
+    WebhookBlock,
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.config import Settings
@@ -433,10 +438,88 @@ def test_the_webhook_fix_line_renders_only_when_hydrate_supplied_a_link() -> Non
     text = _text(RosterView(state, runtime=MagicMock(), allowed_user_id=42))
 
     assert (
-        "Agents answer as Daimon here because Daimon can't manage webhooks. "
+        "Daimon can't manage webhooks in this server, so new agent posts here may show as Daimon. "
         "Re-authorize Daimon to show each agent's name and face: "
         "https://discord.com/oauth2/authorize?client_id=1"
     ) in text
+
+
+def test_a_channel_block_names_the_channel_and_the_denying_role() -> None:
+    answering = _agent("research-bot", tier="channel")
+    state = _state(agents=(answering,), answering=answering, is_admin=True)
+    state.webhook_blocks = (
+        WebhookBlock(
+            channel_name="insighta-client",
+            denied_by="roles",
+            roles=(DenyingRole(id=1, name="insighta client"),),
+        ),
+        WebhookBlock(channel_name="general", denied_by="@everyone"),
+        WebhookBlock(channel_name="ops", denied_by="member"),
+        WebhookBlock(
+            channel_name="sales",
+            denied_by="roles",
+            roles=tuple(DenyingRole(id=index, name=name) for index, name in enumerate("abc")),
+        ),
+        WebhookBlock(
+            channel_name="lab", denied_by="roles", roles=(DenyingRole(id=2999, name=None),)
+        ),
+    )
+
+    text = _text(RosterView(state, runtime=MagicMock(), allowed_user_id=42))
+
+    assert (
+        "In #insighta-client Daimon can't manage webhooks because the 'insighta client' role "
+        "is denied Manage Webhooks there, so new agent posts there may show as Daimon. "
+        "Allow it for Daimon in that channel's permissions."
+    ) in text
+    assert "In #general Daimon can't manage webhooks because @everyone is denied" in text
+    assert "In #ops Daimon can't manage webhooks because Daimon's own permissions deny" in text
+    assert "because the 'a' role and 2 other roles are denied" in text
+    assert "In #lab Daimon can't manage webhooks because a role (id 2999) is denied" in text
+    assert "agents answer as Daimon" not in text, (
+        "a cached webhook keeps posting after the deny, so the note claims only new posts"
+    )
+    assert "Re-authorize" not in text, "the server grants the permission, so no link"
+
+
+def test_channel_blocks_list_five_then_count_the_rest() -> None:
+    answering = _agent("research-bot", tier="channel")
+    state = _state(agents=(answering,), answering=answering, is_admin=True)
+    state.webhook_blocks = tuple(
+        WebhookBlock(channel_name=f"room-{index}", denied_by="@everyone") for index in range(8)
+    )
+
+    view = RosterView(state, runtime=MagicMock(), allowed_user_id=42)
+    text = _text(view)
+
+    assert [f"#room-{index} " in text for index in range(8)] == [True] * 5 + [False] * 3
+    assert "And 3 more channels like these." in text
+    blocked_text = [
+        item
+        for item in view.walk_children()
+        if isinstance(item, discord.ui.TextDisplay) and "#room-0 " in item.content
+    ]
+    assert len(blocked_text) == 1 and "#room-4 " in blocked_text[0].content, (
+        "every channel line shares one text block, so the note costs one component"
+    )
+
+
+def test_a_full_admin_page_with_channel_blocks_stays_within_the_component_budget() -> None:
+    answering = _agent("answering", tier="channel")
+    agents = (answering, *(_agent(f"agent-{index:02d}") for index in range(40)))
+    state = _state(
+        agents=agents,
+        answering=answering,
+        is_admin=True,
+        thread_context=ThreadContext(kind="setup", responder_name="Daimon", target_name="agent-00"),
+    )
+    state.webhook_blocks = tuple(
+        WebhookBlock(channel_name=f"room-{index}", denied_by="@everyone") for index in range(10)
+    )
+
+    view = RosterView(state, runtime=MagicMock(), allowed_user_id=42)
+
+    assert view.total_children_count == ROSTER_CHROME_COST + ROSTER_PAGE_SIZE * ROSTER_ROW_COST
 
 
 # ---------------------------------------------------------------------------

@@ -103,9 +103,22 @@ default) posts with no override, so it keeps the app's own name and icon.
   back-off early. The first fallback for want of Manage Webhooks logs
   `discord.identity_fallback_no_manage_webhooks` once per guild per process.
 - When identity is on and the bot's server permissions lack Manage Webhooks,
-  `/agent-setup` shows admins one line saying agents answer as Daimon there,
+  `/agent-setup` shows admins one line saying new agent posts may show as Daimon,
   with a re-authorize link that re-adds the bot with its full install
-  permissions. Members don't see it, and nothing is posted in channels.
+  permissions. When the server grants it, the panel checks the bot's
+  effective permission in up to 10 channels: the one the panel was opened in
+  (a thread's parent), channels with their own setting, then channels named
+  by agent rules. Each channel whose overwrites deny Manage Webhooks gets a
+  line saying new agent posts there may show as Daimon (a webhook Daimon
+  already holds keeps posting), naming the overwrite to change: a role
+  Daimon holds, `@everyone`, or Daimon's own member entry. A role missing
+  from discord.py's cache is named by id. A role allow beats a role deny and
+  a member allow beats both, so those channels are left out, as are
+  channels Daimon can't see. At most 5 channels are
+  listed, then a count of the rest. The lines share one text block, so the
+  panel's component count is unchanged. The check reads discord.py's cache
+  and makes no API call. Members don't see it, and nothing is posted in
+  channels.
   Edits and deletes go through the webhook when the message's `webhook_id` is
   ours (with the thread), through the bot otherwise. If our webhook was
   deleted, its old messages can no longer be edited: an edit that fails that

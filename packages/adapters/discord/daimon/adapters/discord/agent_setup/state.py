@@ -49,6 +49,32 @@ class ThreadContext:
     target_name: str | None
 
 
+@dataclasses.dataclass(frozen=True)
+class DenyingRole:
+    """A role Daimon holds whose channel overwrite denies Manage Webhooks.
+
+    `name` is None when the role is missing from discord.py's cache; the
+    overwrite still applies, so the role is named by id instead.
+    """
+
+    id: int
+    name: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class WebhookBlock:
+    """One channel whose own permissions deny Daimon Manage Webhooks.
+
+    The server grants Manage Webhooks but an overwrite in this channel takes
+    it away. `denied_by` is the overwrite to change: "@everyone", "member"
+    (Daimon's own entry) or "roles", with `roles` highest cached role first.
+    """
+
+    channel_name: str
+    denied_by: Literal["@everyone", "roles", "member"]
+    roles: tuple[DenyingRole, ...] = ()
+
+
 @dataclasses.dataclass
 class PanelState:
     """State held for the lifetime of an /agent-setup View.
@@ -129,8 +155,11 @@ class PanelState:
     # answers for the caller exactly as a mention would.
     thread_id: str | None = None
     # Re-authorize link shown to an admin when identity is on but the bot lacks
-    # Manage Webhooks, so agents answer as Daimon. None hides the line.
+    # Manage Webhooks, so new agent posts may show as Daimon. None hides the line.
     webhook_fix_url: str | None = None
+    # Channels whose overwrites deny Manage Webhooks while the server grants
+    # it, for the same admin note. Empty hides the lines.
+    webhook_blocks: tuple[WebhookBlock, ...] = ()
 
     def select_agent(self, agent: RosterAgent) -> None:
         """Point Details and setup at `agent`, keeping the legacy selection in step.
