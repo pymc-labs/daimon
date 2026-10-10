@@ -12,6 +12,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.resources._authorization import (
     ResourceAuthorization,
     authorize,
+    check_record,
     check_ref,
     visible,
 )
@@ -52,6 +53,7 @@ class EventPage(NativeConfig):
 
 
 class SessionTools(Protocol):
+    async def retrieve(self, scope: Scope, session: ResourceRef) -> NativeSnapshot: ...
     def walk(
         self, scope: Scope, agent: ResourceRef, *, page: str | None = None
     ) -> AsyncIterator[NativeSnapshot]: ...
@@ -77,6 +79,14 @@ class AnthropicSessionTools:
     def _check(self, scope: Scope, ref: ResourceRef, kind: str) -> None:
         authorize(self._authorization, scope, kind, ref.id)
         check_ref(scope, ref, self._account_scope_id, kind)
+
+    async def retrieve(self, scope: Scope, session: ResourceRef) -> NativeSnapshot:
+        self._check(scope, session, "session")
+        item = await provider_call(self._client.beta.sessions.retrieve(session.id))
+        check_record(scope, session.id, item.metadata)
+        # MCP reads the SDK projection, not a durable provider binding. Native
+        # location metadata can be absent/null and must remain untouched.
+        return native_snapshot(item)
 
     async def walk(
         self, scope: Scope, agent: ResourceRef, *, page: str | None = None

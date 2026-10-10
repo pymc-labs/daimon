@@ -889,8 +889,10 @@ Environment forks validate the scoped request configuration and discard the SDK 
 
 MCP agent chat and session inspection use tenant/account scopes derived from
 verified MCP identities. Their native `anthropic.session_tools@1` extension
-provides the existing user-message/interrupt send, lazy SDK session walk and
-single event-page read. It preserves omitted filters, opaque cursors, partial
+provides the existing user-message/interrupt send, native session retrieval,
+lazy SDK session walk and single event-page read. Retrieval preserves nullable
+native location metadata without constructing or changing a durable provider
+binding. It preserves omitted filters, opaque cursors, partial
 SDK replies and send echoes; the adapter retains ownership checks, seals,
 mutation fences and Decimal cost folding. Scope/ref/grant mismatches fail
 before I/O, without a platform or legacy-host authorization escape. Operation

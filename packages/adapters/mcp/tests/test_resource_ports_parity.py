@@ -94,6 +94,57 @@ def same_model(old: BaseModel, new: BaseModel) -> None:
     assert old.model_fields_set == new.model_fields_set
 
 
+@pytest.fixture(params=["full", "null-channel", "null-thread", "null-both", "partial-null"])
+def session_read_body(request: pytest.FixtureRequest) -> dict[str, Any]:
+    body = dict(BODY)
+    metadata = dict(BODY["metadata"])
+    if request.param in {"null-channel", "null-both", "partial-null"}:
+        metadata["daimon_channel"] = None
+    if request.param in {"null-thread", "null-both", "partial-null"}:
+        metadata["daimon_thread"] = None
+    body["metadata"] = metadata
+    if request.param == "partial-null":
+        # Keep only fields consumed by these callers. The SDK accepts omitted
+        # environment/resources/model/revision fields without a binding.
+        body = {
+            name: body[name]
+            for name in (
+                "id",
+                "title",
+                "status",
+                "created_at",
+                "updated_at",
+                "archived_at",
+                "metadata",
+            )
+        }
+        body["agent"] = {"id": "agent", "name": AGENT.name, "tools": []}
+    return body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"id": "session"},
+        {"agent": {"id": "agent"}},
+        {"metadata": None},
+        {"metadata": {"daimon_channel": None}},
+        {"metadata": {"daimon_thread": None}},
+    ],
+)
+async def test_session_read_preserves_sdk_partial_and_null_projection(
+    body: dict[str, Any],
+) -> None:
+    replies = [("GET", "/v1/sessions/session", 200, body)]
+    old, new = script(replies), script(replies)
+    async with old.client() as before, new.client() as after:
+        expected = await before.beta.sessions.retrieve("session")
+        actual = await resource_ports.retrieve_session(after, "session", scope=SCOPE)
+        same_model(expected, actual)
+    same(old, new)
+
+
 @pytest.mark.parametrize("initial", [None, "", "opaque-start"])
 @pytest.mark.parametrize("stop", ["last", "next", "empty-cursor", "empty-next"])
 async def test_walk_uses_the_original_async_paginator(
@@ -152,6 +203,7 @@ async def test_walk_uses_the_original_async_paginator(
 @pytest.mark.parametrize(
     "body",
     [
+        {"data": [cast(dict[str, Any], {})], "next_page": None},
         {"data": [], "next_page": "empty-but-opaque"},
         {
             "data": [
@@ -198,7 +250,14 @@ async def test_send_preserves_echo_and_wire_bytes(interrupt: bool, body: dict[st
     same(old, new)
 
 
-@pytest.mark.parametrize("body", [{}, {"id": "file", "filename": "bundle.tar.gz"}])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"id": "file", "filename": "bundle.tar.gz"},
+        {"id": "file", "created_at": None, "size_bytes": None, "mime_type": None},
+    ],
+)
 async def test_file_existence_read_does_not_validate_unused_fields(body: dict[str, Any]) -> None:
     replies = [("GET", "/v1/files/file", 200, body)]
     old, new = script(replies), script(replies)
@@ -230,6 +289,38 @@ async def test_send_keeps_sdk_status_errors(status: int) -> None:
         assert actual.value.status_code == expected.value.status_code
         assert actual.value.body == expected.value.body
     same(old, new)
+
+
+@pytest.mark.parametrize("status", [404, 429, 500])
+async def test_session_read_keeps_sdk_status_errors(status: int) -> None:
+    replies = [
+        (
+            "GET",
+            "/v1/sessions/session",
+            status,
+            {"type": "error", "error": {"type": "api_error", "message": "unreadable"}},
+        )
+    ]
+    old, new = script(replies), script(replies)
+    async with old.client() as before, new.client() as after:
+        with pytest.raises(APIStatusError) as expected:
+            await before.beta.sessions.retrieve("session")
+        with pytest.raises(type(expected.value)) as actual:
+            await resource_ports.retrieve_session(after, "session", scope=SCOPE)
+        assert actual.value.status_code == expected.value.status_code
+        assert actual.value.body == expected.value.body
+    same(old, new)
+
+
+async def test_session_read_rejects_foreign_tenant_tag_without_an_extra_request() -> None:
+    transport = script(
+        [("GET", "/v1/sessions/session", 200, {"metadata": {"daimon_tenant": "other"}})]
+    )
+    async with transport.client() as client:
+        with pytest.raises(ScopeViolation):
+            await resource_ports.retrieve_session(client, "session", scope=SCOPE)
+    transport.assert_consumed()
+    assert len(transport.requests) == 1
 
 
 class SessionFactory:
@@ -300,13 +391,15 @@ def host_guards(monkeypatch: pytest.MonkeyPatch) -> list[Scope]:
 
 @pytest.mark.parametrize("operation", ["get", "cancel", "archive"])
 async def test_agent_session_tools_keep_ownership_then_mutation_order(
-    operation: Literal["get", "cancel", "archive"], host_guards: list[Scope]
+    operation: Literal["get", "cancel", "archive"],
+    host_guards: list[Scope],
+    session_read_body: dict[str, Any],
 ) -> None:
-    replies = [("GET", "/v1/sessions/session", 200, BODY)]
+    replies = [("GET", "/v1/sessions/session", 200, session_read_body)]
     if operation == "cancel":
         replies += [
             ("POST", "/v1/sessions/session/events", 200, ECHO),
-            ("GET", "/v1/sessions/session", 200, BODY),
+            ("GET", "/v1/sessions/session", 200, session_read_body),
         ]
     elif operation == "archive":
         replies += [("POST", "/v1/sessions/session/archive", 200, {"id": "session"})]
@@ -330,7 +423,10 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
 
 @pytest.mark.parametrize("owner", ["agent", "tenant"])
 async def test_public_event_tools_keep_retrieve_then_filtered_page(
-    owner: Literal["agent", "tenant"], host_guards: list[Scope], monkeypatch: pytest.MonkeyPatch
+    owner: Literal["agent", "tenant"],
+    host_guards: list[Scope],
+    monkeypatch: pytest.MonkeyPatch,
+    session_read_body: dict[str, Any],
 ) -> None:
     monkeypatch.setattr(sessions, "list_agents_by_tenant", AsyncMock(return_value=[AGENT]))
     query: dict[str, Any] = {"page": "opaque", "limit": 7, "order": "desc"}
@@ -341,7 +437,7 @@ async def test_public_event_tools_keep_retrieve_then_filtered_page(
         "next_page": "",
     }
     replies: list[tuple[str, str, int, dict[str, Any]]] = [
-        ("GET", "/v1/sessions/session", 200, BODY),
+        ("GET", "/v1/sessions/session", 200, session_read_body),
         ("GET", "/v1/sessions/session/events", 200, event_body),
     ]
     old, new = script(replies), script(replies)
@@ -374,7 +470,10 @@ async def test_public_event_tools_keep_retrieve_then_filtered_page(
 
 @pytest.mark.parametrize("owner", ["agent", "tenant-filtered", "tenant-all"])
 async def test_public_session_lists_keep_async_loop_and_account_filter(
-    owner: str, host_guards: list[Scope], monkeypatch: pytest.MonkeyPatch
+    owner: str,
+    host_guards: list[Scope],
+    monkeypatch: pytest.MonkeyPatch,
+    session_read_body: dict[str, Any],
 ) -> None:
     monkeypatch.setattr(agent_chat, "_resolve_ma_agent", AsyncMock(return_value=AGENT))
     monkeypatch.setattr(sessions, "find_agent_by_daimon_tag", AsyncMock(return_value=AGENT))
@@ -393,7 +492,7 @@ async def test_public_session_lists_keep_async_loop_and_account_filter(
             "GET",
             "/v1/sessions",
             200,
-            {"data": [BODY, other.model_dump(mode="json")], "next_page": None},
+            {"data": [session_read_body, other.model_dump(mode="json")], "next_page": None},
         )
     ]
     old, new = script(replies), script(replies)
@@ -545,11 +644,12 @@ async def test_public_turn_cost_keeps_decimal_fold_filters_and_explicit_page_loo
     same(old, new)
 
 
-@pytest.mark.parametrize("mode", ["own", "foreign", "unreadable"])
+@pytest.mark.parametrize("mode", ["own", "foreign", "unreadable", "minimal"])
 async def test_session_card_gate_keeps_one_read_and_refusal_copy(
     mode: str,
     host_guards: list[Scope],
     monkeypatch: pytest.MonkeyPatch,
+    session_read_body: dict[str, Any],
 ) -> None:
     clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
     origin = TurnOriginRow(
@@ -585,11 +685,13 @@ async def test_session_card_gate_keeps_one_read_and_refusal_copy(
         return True
 
     monkeypatch.setattr(_session_gate, "has_confirmation_gate", gated)
-    body = (
-        BODY
+    body: dict[str, Any] = (
+        session_read_body
         if mode != "foreign"
         else ma_session(id="session", agent_id="other").model_dump(mode="json")
     )
+    if mode == "minimal":
+        body = {"agent": {"id": "agent", "tools": []}, "metadata": None}
     if mode == "unreadable":
         body = {"type": "error", "error": {"type": "not_found_error", "message": "gone"}}
     replies = [("GET", "/v1/sessions/session", 404 if mode == "unreadable" else 200, body)]
@@ -605,15 +707,18 @@ async def test_session_card_gate_keeps_one_read_and_refusal_copy(
         )
         assert (
             actual
-            == {"own": None, "foreign": "other_agents_session", "unreadable": "session_unreadable"}[
-                mode
-            ]
+            == {
+                "own": None,
+                "minimal": None,
+                "foreign": "other_agents_session",
+                "unreadable": "session_unreadable",
+            }[mode]
         )
     assert host_guards
     same(old, new)
 
 
-@pytest.mark.parametrize("operation", ["walk", "send", "events"])
+@pytest.mark.parametrize("operation", ["retrieve", "walk", "send", "events"])
 @pytest.mark.parametrize("violation", ["scope", "ref", "grant"])
 async def test_session_tool_scope_violations_stop_before_provider_io(
     operation: str,
@@ -635,7 +740,9 @@ async def test_session_tool_scope_violations_stop_before_provider_io(
         elif violation == "ref":
             ref = ref.model_copy(update={"account_id": "other"})
         with pytest.raises(ScopeViolation):
-            if operation == "walk":
+            if operation == "retrieve":
+                await port.retrieve(scope, ref)
+            elif operation == "walk":
                 _ = [item async for item in port.walk(scope, ref)]
             elif operation == "send":
                 await port.send(

@@ -27,6 +27,17 @@ def mcp_scope(auth: AuthIdentity) -> Scope:
     )
 
 
+async def retrieve_session(
+    client: AsyncAnthropic, session_id: str, *, scope: Scope
+) -> BetaManagedAgentsSession:
+    backend = managed_agents(client, scope=scope, resources=frozenset({("session", session_id)}))
+    port = backend.extension(SessionTools, namespace="anthropic.session_tools", version=1)
+    result = await legacy_call(
+        port.retrieve(scope, resource_ref(backend, "session", session_id, scope=scope))
+    )
+    return construct_type_unchecked(value=result.native, type_=BetaManagedAgentsSession)
+
+
 async def walk_sessions(
     client: AsyncAnthropic, *, agent_id: str, scope: Scope, page: str | None = None
 ) -> AsyncIterator[BetaManagedAgentsSession]:

@@ -22,6 +22,7 @@ from daimon.adapters.mcp.resource_ports import (
 )
 from daimon.adapters.mcp.resource_ports import (
     mcp_scope,
+    retrieve_session,
     walk_sessions,
 )
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -33,7 +34,6 @@ from daimon.adapters.mcp.tools._session_access import (
     sessions_outside_seals,
 )
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.session_ports_compat import retrieve_session_record
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.errors import ScopeViolation
@@ -131,7 +131,7 @@ async def _verify_caller_owns_session(
     that channel: the transcript holds everything the seal keeps in.
     """
     try:
-        s = await retrieve_session_record(runtime.client, session_id, scope=mcp_scope(auth))
+        s = await retrieve_session(runtime.client, session_id, scope=mcp_scope(auth))
     except ScopeViolation:
         raise ToolError("session not found") from None
     tenant_agent_ids = {

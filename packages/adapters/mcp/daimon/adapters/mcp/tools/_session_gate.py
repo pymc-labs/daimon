@@ -13,14 +13,13 @@ from typing import Literal
 import anthropic
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.resource_ports import mcp_scope
+from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -72,7 +71,7 @@ async def session_card_gap(
     if live is None:
         return "no_live_session"
     try:
-        ma_session = await retrieve_session_record(
+        ma_session = await retrieve_session(
             runtime.client, live.ma_session_id, scope=mcp_scope(auth)
         )
         if ma_session.agent.id != origin.responder_ma_agent_id:

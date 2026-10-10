@@ -72,6 +72,7 @@ from daimon.adapters.mcp.resource_ports import (
 from daimon.adapters.mcp.resource_ports import (
     mcp_scope,
     retrieve_file_metadata,
+    retrieve_session,
     send_session_events,
     walk_sessions,
 )
@@ -104,7 +105,7 @@ from daimon.core.permissions import agent_permissions, channel_permissions, memo
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
-from daimon.core.session_ports_compat import archive_session_record, retrieve_session_record
+from daimon.core.session_ports_compat import archive_session_record
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores.agent_repo_binding import get_binding
@@ -333,7 +334,7 @@ async def _verify_agent_owns_session(
     channel is sealed is refused too.
     """
     try:
-        s = await retrieve_session_record(runtime.client, handle, scope=mcp_scope(auth))
+        s = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
     except ScopeViolation:
         raise ToolError("session not found") from None
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
@@ -798,7 +799,7 @@ async def _cancel_turn_impl(
         await send_session_events(
             runtime.client, handle, events=[{"type": "user.interrupt"}], scope=mcp_scope(auth)
         )
-    session = await retrieve_session_record(runtime.client, handle, scope=mcp_scope(auth))
+    session = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
     return {"handle": handle, "status": session.status}
 
 
