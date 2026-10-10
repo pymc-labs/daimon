@@ -320,3 +320,8 @@ command/MCP items normalize into paired tool records. The checked-in F1 tape is
 scripted offline evidence with fresh provisioning on replay; it makes no live,
 model-quality, tool-argument or atomic agent revision-pin claim. See the OpenAI
 driver README for the explicit mapping and supported boundaries.
+Gemini's supplementary F1 default-capability adapter is replay-only and returns
+typed PENDING before provisioning while complete binary skill deployment and
+authenticated MCP/session seams are unavailable. Ten complete text skill bundles
+are supported; that subset cannot certify the full authored default. See
+`mux/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.

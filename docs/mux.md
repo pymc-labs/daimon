@@ -974,3 +974,10 @@ Responder identity uses the authorized row's tenant/account scope and the native
 `anthropic.session_reads@1` extension. It retains the SDK response for configuration
 snapshot backfill, including null channel and thread metadata, without an additional
 read or a generic provider-binding projection.
+The supplementary Gemini F1 adapter is explicitly selected from
+`mux.drivers.gemini.default_capability`. It returns typed ADAPTER_DEPENDENCY
+before I/O for the complete default's binary skill bundle and authenticated
+MCP/session seams. Tests load the actual default YAML and complete skill trees;
+supported text-only subsets cannot pass the full-default scenario. This offline
+adapter supplies no live path and does not change the C01–C18 matrix or host
+backend selection.
