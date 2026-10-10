@@ -56,7 +56,7 @@ def test_max_length_error_notice_keeps_the_summary_line() -> None:
     assert embed.description == "Add credit."
     assert embed.fields[0].value == notice.replace("**Next:** Add credit.\n", "")
     assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
-    assert embed.footer.text == "test-agent\u2003\u200312s\u2003\u2003$0.05 used\u2003\u2003$9.95"
+    assert embed.footer.text == "test-agent\u2003\u200312s\u2003\u2003$0.05 used"
 
 
 def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
@@ -72,7 +72,7 @@ def test_empty_notice_next_step_keeps_retry_text_and_metrics() -> None:
     assert "`rid: test`" in embed.fields[0].value
     assert embed.footer.text is not None
     assert "$0.05 used" in embed.footer.text
-    assert embed.footer.text.endswith("$9.95")
+    assert "$9.95" not in embed.footer.text
 
 
 def test_a_long_agent_name_gives_way_so_the_footer_fits() -> None:
@@ -84,9 +84,7 @@ def test_a_long_agent_name_gives_way_so_the_footer_fits() -> None:
 
     assert embed.footer.text is not None
     assert len(embed.footer.text) == 2048, "Discord rejects a footer over 2,048 characters"
-    assert embed.footer.text.endswith(
-        "…\u2003\u200312s\u2003\u2003$0.042 used\u2003\u2003$41.20 left"
-    )
+    assert embed.footer.text.endswith("…\u2003\u200312s\u2003\u2003$0.042 used")
 
 
 class TestUpdate:
@@ -159,7 +157,7 @@ class TestToEmbedData:
         assert data.color == COLOR_RED
         assert data.color == 0xED4245
 
-    def test_in_progress_is_one_description_with_headline_tools_and_draft(self) -> None:
+    def test_public_progress_keeps_status_without_tools_or_draft(self) -> None:
         state = dataclasses.replace(
             _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=100.0),
             tool_lines=("✔️ Ran a command", "🔍 Reading a file"),
@@ -167,15 +165,19 @@ class TestToEmbedData:
         )
         data = to_embed_data(state, now=165.0)
         assert data.title == "Working on it…"
-        assert data.description == "> Checking \\*the\\* logs"
-        assert data.details == "`✔️ Ran a command`\n`🔍 Reading a file`"
+        assert data.description == ""
+        assert data.details is None
 
-    def test_tool_line_markdown_stays_in_inline_code(self) -> None:
+    def test_tool_diagnostics_are_kept_out_of_public_card(self) -> None:
         state = dataclasses.replace(
             _make_state(phase=TurnPhase.TOOL_RUNNING),
-            tool_lines=("🔍 Search *issue* <#123>",),
+            tool_lines=("internal_tool sesn_private agent_private rid: private",),
+            text_preview="internal_tool sesn_private agent_private rid: private",
         )
-        assert to_embed_data(state).details == "`🔍 Search *issue* <#123>`"
+        data = to_embed_data(state)
+        assert data.details is None
+        assert data.description == ""
+        assert "private" not in repr(data)
 
     def test_footer_none_on_non_terminal(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
@@ -203,8 +205,8 @@ class TestToEmbedData:
             balance_str="$12.50 left",
         )
         data = to_embed_data(state, now=12.0)
-        assert data.footer == "Atlas\u2003\u200312s\u2003\u2003$0.04 used\u2003\u2003$12.50 left", (
-            "one line, fields set apart by em spaces, no dot and no tokens"
+        assert data.footer == "Atlas\u2003\u200312s\u2003\u2003$0.04 used", (
+            "the shared one-line format retains cost without public balance or tokens"
         )
         assert data.details is None, "no Details field on a finished card"
 
@@ -273,3 +275,21 @@ class TestHeadline:
     def test_in_progress_without_now_has_no_elapsed(self) -> None:
         data = to_embed_data(_make_state(started_at=100.0))
         assert data.title == "Working on it…"
+
+
+def test_public_connection_failure_omits_server_names() -> None:
+    from daimon.adapters.discord.embed import format_termination_notice
+    from daimon.core.turn.notices import TerminationNotice
+    from daimon.core.turn.termination import TerminationReason
+
+    notice = TerminationNotice(
+        reason=TerminationReason.MCP_DEGRADED_EMPTY,
+        headline="Tool connection failed",
+        cause="internal_server agent_private sesn_private could not connect",
+        survived="The conversation is kept.",
+        next_step="Ask an admin to check the connection.",
+    )
+    text = format_termination_notice(notice)
+    assert "A connected service failed" in text
+    assert "private" not in text
+    assert "internal_server" not in text

@@ -1,10 +1,9 @@
-"""Executable record: Discord, Slack and Teams draw the same in-progress status card.
+"""Executable record of shared status words and deliberate public-copy differences.
 
-All three fold the turn state through `daimon.core.turn.status_lines`, so the
-headline, tool lines and draft are the same words and only the markup differs:
-Teams draws the tool lines as a monospace block and the draft as subtle text,
-since an Adaptive Card TextBlock renders no code fence or quote. One
-deliberate asymmetry: a Discord embed has a bar color and the others have none.
+All three fold the turn state through the shared status helpers. Slack and
+Teams show the same headline, tool trail and draft. Discord keeps the shared
+headline and omits the trail and draft from its public card. A Discord embed
+also has a bar color and the others have none.
 """
 
 from __future__ import annotations
@@ -46,12 +45,9 @@ def _discord_lines() -> list[str]:
     )
     state = discord_embed.update_activity(state, _TURN)
     data = discord_embed.to_embed_data(state, now=165.0)
-    return [
-        data.title,
-        "Details",
-        *((data.details or "").replace("`", "").splitlines()),
-        data.description.removeprefix("> "),
-    ]
+    assert data.details is None
+    assert data.description == ""
+    return [data.title]
 
 
 def _slack_lines() -> list[str]:
@@ -86,10 +82,8 @@ def test_teams_shows_the_same_status_words_as_slack() -> None:
     assert _teams_lines() == _slack_lines(), "the Teams card must say what the Slack card says"
 
 
-def test_discord_and_slack_show_the_same_status_words() -> None:
-    assert _discord_lines() == _slack_lines(), (
-        "the two cards must say the same thing about the same turn, markup aside"
-    )
+def test_discord_keeps_the_shared_headline_without_public_diagnostics() -> None:
+    assert _discord_lines() == _slack_lines()[:1]
 
 
 def test_only_discord_has_a_bar_color() -> None:

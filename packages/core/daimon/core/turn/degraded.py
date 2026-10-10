@@ -19,10 +19,16 @@ _REASON = {
 }
 
 
-def render_degraded_notice(failures: Sequence[McpServerFailure]) -> str | None:
+def render_degraded_notice(
+    failures: Sequence[McpServerFailure], *, show_server_names: bool = True
+) -> str | None:
     """One line per failed server, or None when nothing failed."""
     if not failures:
         return None
+    if not show_server_names:
+        return (
+            "A connected service was unavailable this turn. Ask an admin to check the connection."
+        )
     lines = [
         f"⚠️ `{f.server_name}` was unavailable this turn: it {_REASON[f.error_type]}. "
         "Ask to reconnect it, or to disconnect it."

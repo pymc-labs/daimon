@@ -492,7 +492,9 @@ class DiscordTurnLifecycle:
                 self._summary_ref = self._message_ref
                 # #79: a tool-only turn has no reply to hang the notice under,
                 # so a dropped server is named on its own line.
-                tool_only_notice = render_degraded_notice(state.mcp_failures)
+                tool_only_notice = render_degraded_notice(
+                    state.mcp_failures, show_server_names=False
+                )
                 if tool_only_notice is not None:
                     await self._send_message(
                         content=tool_only_notice, allowed_mentions=discord.AllowedMentions.none()
@@ -514,7 +516,7 @@ class DiscordTurnLifecycle:
             self.answer_prefix_applied = True
         # #79: a server MA dropped this turn is named under the reply, so a
         # degraded answer never reads as a complete one.
-        degraded_notice = render_degraded_notice(state.mcp_failures)
+        degraded_notice = render_degraded_notice(state.mcp_failures, show_server_names=False)
         if degraded_notice is not None:
             response_text = f"{response_text}\n\n{degraded_notice}"
         use_name_prefix = (
