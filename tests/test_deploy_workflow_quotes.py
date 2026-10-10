@@ -55,15 +55,48 @@ def _shell_command(text: str) -> str:
     return text[:index]
 
 
+def _unquoted_ssh_matches(text: str) -> list[re.Match[str]]:
+    """Find SSH invocations outside quoted arguments and shell comments."""
+    matches: list[re.Match[str]] = []
+    quote = ""
+    comment = False
+    command_start = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if comment:
+            if char == "\n":
+                comment = False
+                command_start = index + 1
+        elif char == "\\" and quote != "'":
+            index += 2
+            continue
+        elif char == quote:
+            quote = ""
+        elif not quote:
+            if char in "'\"":
+                quote = char
+            elif char == "#" and (index == 0 or text[index - 1] in " \t\n;|&"):
+                comment = True
+            elif char in "\n;|&(){}":
+                command_start = index + 1
+            else:
+                match = _SSH.match(text, index)
+                prefix = text[command_start:index].strip()
+                if match and prefix in {"", "if", "then", "do", "else", "elif", "!"}:
+                    matches.append(match)
+                    index = match.end()
+                    continue
+        index += 1
+    return matches
+
+
 def _check_workflow(name: str, source: str) -> int:
     document = cast("Node | None", yaml.compose(source))  # pyright: ignore[reportUnknownMemberType]
     assert document is not None, f"{name}: empty workflow"
     scripts = 0
     for block in _run_blocks(document):
-        for match in _SSH.finditer(block.value):
-            prefix = block.value[block.value.rfind("\n", 0, match.start()) + 1 : match.start()]
-            if prefix.lstrip().startswith("#"):
-                continue
+        for match in _unquoted_ssh_matches(block.value):
             line = (
                 block.start_mark.line
                 + (2 if block.style in {"|", ">"} else 1)
@@ -117,9 +150,9 @@ def _check_workflow(name: str, source: str) -> int:
                     opening = next(line for line in command.splitlines() if "--command" in line)
                     opening_indent = len(opening) - len(opening.lstrip())
                     closing_indent = len(closing) - len(closing.lstrip())
-                    assert closing.strip() == "'" and closing_indent <= opening_indent, (
-                        f"{name}:{line}: SSH payload closed inside its body: {closing.strip()}"
-                    )
+                    assert re.fullmatch(r"'\s*(?:#.*)?", closing.strip()) and (
+                        closing_indent <= opening_indent
+                    ), f"{name}:{line}: SSH payload closed inside its body: {closing.strip()}"
     return scripts
 
 
@@ -140,6 +173,8 @@ def test_deploy_workflow_remote_scripts() -> None:
         ("fixture.yml", "--command 'echo ok'", None),
         ("fixture.yaml", "--command 'echo ok'", None),
         ("fixture.yml", "--command 'echo it'\\''s ok'", None),
+        ("fixture.yml", "--command 'echo \"gcloud compute ssh is available\"'", None),
+        ("fixture.yml", "--command '\n  echo ok\n' # done", None),
     ],
 )
 def test_ssh_quote_fixtures(filename: str, command: str, error: str | None) -> None:
