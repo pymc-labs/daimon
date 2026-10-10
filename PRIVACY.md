@@ -30,8 +30,9 @@ organisation a Teams deployment serves), daimon stores:
 - **Usage and billing events** — turn counts and credit/usage records used
   to enforce the operator's configured usage limits. Promo code redemptions
   record which account redeemed; a privacy deletion clears that link.
-- **Security audit metadata** — authenticated main-JWT MCP tool names, authorization outcomes,
-  reason codes, timestamps and tenant/account/platform-user/agent identifiers.
+- **Security audit metadata** — names of tools called through Daimon's main
+  tool service after sign-in, authorization outcomes, reason codes, timestamps
+  and tenant/account/platform-user/agent identifiers.
   Tool arguments, messages, credentials and response bodies are excluded. These
   records have a default retention age of 90 days, enforced by the operator's
   scheduled `daimon audit prune TENANT_UUID` command. A privacy deletion clears
@@ -43,51 +44,58 @@ organisation a Teams deployment serves), daimon stores:
   personal access token used by `get_cli_token`), encrypted at rest.
 
 Conversation content lives in Anthropic's Managed Agents service. When an admin
-enables DM conversations, daimon also stores the selected workspace, a bounded
-source-context excerpt (up to 12 messages / 16,000 characters), and the most recent
-12 private user/agent messages (up to 16,000 characters). This supports private
-conversation recovery without mixing the history of different workspaces.
-Running `/dm` again replaces that local context. `/privacy` account deletion removes
-it along with the private routing record. Full JSON export remains unimplemented.
+enables DM conversations, daimon also stores the selected workspace, an
+excerpt from the conversation (up to 12 messages / 16,000 characters), and the
+most recent 12 private user/agent messages (up to 16,000 characters). This
+supports private conversation recovery without mixing the history of different
+workspaces. Running `/dm` again replaces that local context. `/privacy` account
+deletion removes it along with the record linking your private chat to its
+workspace. Full JSON export remains unimplemented.
 
 ## Your rights via `/privacy`
 
-Every daimon deployment exposes a `/privacy` slash command (Discord), an
-equivalent panel (Slack) or a `privacy` command (Teams, answered in your 1:1
-chat with the bot), available to any user, in DM or in a shared channel. It
-lets you:
+On Discord, run `/privacy` in a server where your account is linked. On Slack,
+run `/privacy` to open the privacy panel. On Teams, send `privacy`; the bot
+replies in your private chat. These controls let you:
 
 - **View** a summary of records linked to your account.
-- **Export** that summary.
+- **Export** shows a summary on Slack and Teams. Export is not yet available on
+  Discord.
 - **Delete** your account and its linked personal records ("delete me").
 
-Deleting your account removes your account and linked personal records across every server, workspace and organisation linked to it in this Daimon deployment.
-Daimon also deletes your conversations stored at Anthropic. The shared agents
-and their memory stay. Chat transcript deletion at Anthropic can fail. If Daimon reports a failure, ask the person who runs it to check and help remove the remaining transcripts.
+Account deletion covers every server, workspace and organisation linked to your
+account in this copy of Daimon. Daimon also tries to delete conversations
+linked to your account from Anthropic. The shared agents and their memory stay.
+Chat transcript deletion at Anthropic can fail. If Daimon reports a failure,
+ask the person who runs it to check and help remove the remaining transcripts.
 
 Deletion does not remove usage and billing records. These records can still
-contain your chat platform user ID and conversation ID. Uploaded skill files
-at Anthropic also stay, even though Daimon removes its record of your uploads.
+contain your chat platform user ID and conversation ID. Uploaded skill files at
+Anthropic stay. Daimon deletes skill records owned by your account. Records
+owned by a shared agent stay, but the link to your account is cleared.
 Shared agent memory may still contain information about you. Account deletion
 does not remove hosted charts, notebooks or reports. The GitHub
 authorization also stays on your GitHub account. Revoke it in your GitHub
 settings if you want to remove it there.
-Feedback or help requests made in a server before it was linked to your
-account may remain there. Run `/privacy` in that server to remove them.
+Feedback or help requests from a server or workspace not linked to your account
+may remain. Ask the person who runs Daimon to help remove them.
 
 The per-user deletion flow clears account and platform-user identifiers from
-security audit rows across that account's tenants, including previously unlinked
-tenants. Remaining event metadata expires under the operator's retention schedule.
-Operators include audit records in privacy exports with `daimon audit list TENANT_UUID
---account ACCOUNT_UUID --json`, paging through all records with `--limit` and
-`--offset`. Existing privacy panels do not deliver the audit JSON themselves.
+security logs across that account's tenants, including previously unlinked
+tenants. The remaining log details expire under the operator's retention
+schedule.
+Operators include audit records in privacy exports with
+`daimon audit list TENANT_UUID --account ACCOUNT_UUID --json`, paging through
+all records with `--limit` and `--offset`. Existing privacy panels do not
+deliver the audit JSON themselves.
 
 ## Data isolation
 
-Data is scoped per tenant at the database `tenant_id` layer. Guilds,
-workspaces and organisations never see each other's data, even though many tenants may share a
-single operator's Anthropic API key. There is no cross-guild or
-cross-workspace sharing of stored data.
+Daimon keeps workspace settings and conversation records separate for each
+server, workspace and organisation. Your account can link identities across
+these places. Privacy summaries and account deletion cover those linked
+identities. One operator may use the same Anthropic API key for several
+workspaces.
 
 ## Operator responsibility
 
