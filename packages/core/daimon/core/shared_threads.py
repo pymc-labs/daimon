@@ -23,6 +23,7 @@ writer's platform user.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 
@@ -31,6 +32,7 @@ from daimon.core.stores import mux_state
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
+from mux.errors import BindingConflict
 from mux.state.lease import Slot
 from mux.state.store import check_binding_successor
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,7 +60,10 @@ def shared_slot(tenant_id: uuid.UUID, platform: str, channel_id: str, thread_id:
 def shared_owner(slot: Slot) -> uuid.UUID:
     """The session-row owner of a shared thread: a pure function of the thread."""
     channel = slot.thread.channel
-    key = f"{channel.tenant_id}:{channel.platform}:{channel.channel_id}:{slot.thread.thread_id}"
+    # JSON keeps the key injective: Teams ids contain ':' themselves.
+    key = json.dumps(
+        [channel.tenant_id, channel.platform, channel.channel_id, slot.thread.thread_id]
+    )
     return uuid.uuid5(SHARED_OWNER_NAMESPACE, key)
 
 
@@ -111,7 +116,13 @@ async def resolve_shared_thread(
 async def record_shared_binding(
     session: AsyncSession, shared: SharedThread, *, ma_session_id: str
 ) -> ProviderBinding:
-    """Bind the thread's shared slot to `ma_session_id`; a new generation if it changed."""
+    """Bind the thread's shared slot to `ma_session_id`; a new generation if it changed.
+
+    Idempotent: two first turns racing on a new thread prepare the same
+    session (they share the owner's preparation lock), so the loser of the
+    binding write finds that session bound and returns it. A conflict over a
+    different session is a real one and raises `BindingConflict`.
+    """
     current = await mux_state.get_binding(session, shared.slot)
     if current is not None and current.native_refs.get("session") == ma_session_id:
         return current
@@ -127,4 +138,10 @@ async def record_shared_binding(
     )
     expected = current.generation if current else 0
     check_binding_successor(current, binding, expected_generation=expected)
-    return await mux_state.put_binding(session, binding, expected_generation=expected)
+    try:
+        return await mux_state.put_binding(session, binding, expected_generation=expected)
+    except BindingConflict:
+        winner = await mux_state.get_binding(session, shared.slot)
+        if winner is not None and winner.native_refs.get("session") == ma_session_id:
+            return winner
+        raise

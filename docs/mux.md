@@ -123,10 +123,13 @@ revision can no longer run is refused. A shared session carries no caller's
 credentials (no personal vault, MCP identity, personal servers or GitHub
 user grant), so the agent must run in app mode; otherwise the turn is
 refused as `backend_unsupported`. Each turn's usage is still recorded
-against the person who wrote it. Unconfigured and per-caller channels read
-nothing more than before; a per-caller channel whose configuration changed
-reads the thread's binding, so a thread shared under the earlier revision
-stays shared.
+against the person who wrote it. An unconfigured channel, and a channel
+configured per caller once, read nothing more than before. With the flag
+on, a channel whose configuration was changed (any revision after the
+first) reads the thread's binding on every turn, one indexed lookup, so a
+thread shared under an earlier revision stays shared. Two first turns
+racing in a new shared thread prepare the same session and record one
+binding.
 
 ## Ports
 

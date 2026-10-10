@@ -1,12 +1,15 @@
-"""Opt-in shared threads (M1): C01, C14, cross-tenant, legacy invisibility, SYS-047/048 first.
+"""Opt-in shared threads (M1): C01, C14, C15, C16, cross-tenant, legacy invisibility,
+SYS-047/048 first, and the concurrent first turn.
 
-C15 (migrate unsupported, binding unchanged) and C16 (no extension bypass)
-are certified for the Anthropic driver by the mux conformance runner
-(`packages/mux/mux/conformance`); nothing here can reach a raw client.
+C15 and C16 are checked here on Daimon's own Anthropic port
+(`daimon.core.mux_backend.managed_agents`); the mux conformance runner does
+not register an Anthropic driver yet.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import uuid
 from dataclasses import replace
@@ -17,6 +20,7 @@ from typing import Any
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core._models import AgentGitHubMode
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
@@ -24,6 +28,7 @@ from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.mux_backend import managed_agents
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import (
     SharedThread,
@@ -54,8 +59,16 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.resources import ProviderBinding
+from mux.errors import (
+    BindingConflict,
+    ExtensionVersionError,
+    MigrationUnsupported,
+    UnsupportedCapability,
+)
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 10, 10, tzinfo=UTC)
 _SHARED = BackendConfig(thread_mode="shared")
@@ -557,3 +570,139 @@ async def test_access_policy_and_protection_refuse_before_a_shared_thread_is_con
         )
     assert raised.value.reason == reason
     assert calls == []
+
+
+# M1: the owner key is injective (Teams ids contain ':')
+
+
+def test_the_owner_key_cannot_collide_on_separators() -> None:
+    tenant = uuid.uuid4()
+    assert shared_owner(shared_slot(tenant, "teams", "19:a", "b")) != shared_owner(
+        shared_slot(tenant, "teams", "19", "a:b")
+    )
+
+
+# B1: two first turns in a new shared thread
+
+
+@pytest.fixture
+async def engine_factory(
+    db_engine: AsyncEngine, db_clean: None
+) -> async_sessionmaker[AsyncSession]:
+    """Pooled connections of their own, so concurrent binds really race."""
+    return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
+async def test_concurrent_records_of_one_session_return_one_binding(
+    engine_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with engine_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        revision = await set_channel_backend(
+            session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+        )
+    slot = _slot(tenant)
+    shared = SharedThread(slot=slot, owner=shared_owner(slot), revision=revision, binding=None)
+
+    async def record(session_id: str) -> ProviderBinding:
+        async with engine_factory() as session, session.begin():
+            return await record_shared_binding(session, shared, ma_session_id=session_id)
+
+    first, second = await asyncio.gather(record("sess_x"), record("sess_x"))
+    assert first == second and first.generation == 1
+
+    # A writer that read the slot empty and lost to another session must not
+    # take it over: the conflict stands.
+    real_get = mux_state.get_binding
+    reads = 0
+
+    async def stale_first_read(session: AsyncSession, slot_: object) -> ProviderBinding | None:
+        nonlocal reads
+        reads += 1
+        return None if reads == 1 else await real_get(session, slot_)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mux_state, "get_binding", stale_first_read)
+    with pytest.raises(BindingConflict):
+        await record("sess_y")
+
+
+async def test_c13_two_first_turns_in_a_new_shared_thread_share_one_session(
+    engine_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with engine_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        alice = await make_account(session, tenant=tenant)
+        bob = await make_account(session, tenant=tenant)
+        agent, env = await _app_agent(session, tenant)
+        revision = await set_channel_backend(
+            session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+        )
+    fake = _Fake()
+    deps = _deps(engine_factory, fake)
+
+    first, second = await asyncio.gather(
+        _bind(deps, tenant, _admission(alice.id, agent, env, revision), user="alice"),
+        _bind(deps, tenant, _admission(bob.id, agent, env, revision), user="bob"),
+    )
+
+    assert first.ma_session_id == second.ma_session_id
+    assert fake.sessions == 1
+    async with engine_factory() as session:
+        binding = await mux_state.get_binding(session, _slot(tenant))
+    assert binding is not None and binding.generation == 1
+    assert binding.native_refs["session"] == first.ma_session_id
+
+
+# C15 / C16 on Daimon's Anthropic port
+
+
+async def test_c15_migrate_is_unsupported_and_leaves_the_binding_unchanged(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    slot = _slot(tenant)
+    bound = await record_shared_binding(
+        db_session,
+        SharedThread(slot=slot, owner=shared_owner(slot), revision=revision, binding=None),
+        ma_session_id="sess_1",
+    )
+    backend = managed_agents(build_fake_anthropic(_Fake().dispatch))
+    scope = Scope(tenant_id=str(tenant.id), account_id="a", principal_id="p", authorization_id="z")
+    ref = ResourceRef(
+        id="sess_1",
+        kind="session",
+        provider="anthropic",
+        account_scope_id=backend.account_scope_id,
+        tenant_id=str(tenant.id),
+    )
+    target = await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, "discord", "chan-1"),
+        BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-5"),
+    )
+
+    with pytest.raises(MigrationUnsupported):
+        await backend.sessions.migrate(scope, ref, target, expected=bound.generation, key="k")
+
+    assert await mux_state.get_binding(db_session, slot) == bound
+
+
+def test_c16_the_port_exposes_no_raw_client_and_refuses_undeclared_extensions() -> None:
+    client = build_fake_anthropic(_Fake().dispatch)
+    backend = managed_agents(client)
+    raw_names = {"client", "raw_client", "sdk", "raw", "anthropic"}
+    for port in (backend, backend.sessions, backend.events):
+        public = {name for name in dir(port) if not name.startswith("_")}
+        assert not public & raw_names
+        for name in public:
+            # Static lookup: a property such as `models` may itself refuse.
+            value = inspect.getattr_static(port, name)
+            assert not isinstance(value, (AsyncAnthropic, httpx.AsyncClient))
+    with pytest.raises(UnsupportedCapability):
+        backend.extension(object, namespace="anthropic.undeclared", version=1)
+    offered = backend.capabilities().extensions[0]
+    with pytest.raises(ExtensionVersionError):
+        backend.extension(object, namespace=offered.namespace, version=offered.version + 99)

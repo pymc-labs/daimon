@@ -77,6 +77,12 @@ whether it arrives live, in a replay, or both. Calls made after an interrupt
 or a turn ceiling, or while the adapter process is down, are not seen by the
 driver at all; those are left to [the sweep](#the-tables).
 
+In a shared thread (`thread_mode="shared"`, see `docs/mux.md`) everyone's
+turns run on one session, and the recorder still bills each turn to the
+person who wrote it. The sweep cannot: a shared session carries no caller
+account, so usage it alone recovers is debited to the tenant without a
+person.
+
 The posture is a union in `packages/core/daimon/core/turn/posture.py`:
 `Billed(record=...)` or `BillingExempt(reason=...)`. There is deliberately no
 no-op recorder, so a caller must say in the type which one it is.
