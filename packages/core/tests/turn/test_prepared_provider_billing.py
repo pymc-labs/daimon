@@ -21,7 +21,9 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.io import TurnEvent, TurnIO, TurnStream
 from daimon.core.turn.posture import Billed
 from daimon.core.turn.prepare import PreparedTurn
+from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionPrompt
 from daimon.core.turn.run import prepared_billing, run_prepared_turn_impl
+from daimon.core.turn.state import TurnState
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
@@ -266,7 +268,19 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
 
     codec = FailedCodec()
 
+    async def provider_hook(prompt: ProviderActionPrompt) -> None:
+        raise AssertionError("failing stream cannot ask for approval")
+
+    approvals: list[ProviderActionApproval] = []
+
     def factory(*args: object, **kwargs: object) -> TurnIO:
+        approval = kwargs.get("provider_actions")
+        assert isinstance(approval, ProviderActionApproval)
+        assert approval.hook is provider_hook
+        assert approval.requester.platform == "slack"
+        assert approval.requester.thread_id == "thread"
+        assert approval.requester.platform_user_id == "caller"
+        approvals.append(approval)
         return cast(TurnIO, codec)
 
     async def forbidden_recovery(*args: object, **kwargs: object) -> NoReturn:
@@ -290,7 +304,10 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
         cancel=asyncio.Event(),
         reseed_user_message=forbidden_reseed,
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        provider_action=provider_hook,
     )
+    assert len(approvals) == 1
+    assert approvals[0].deadline > datetime.now(UTC)
     assert result.recovered is False and result.ma_session_id == ref.id
     assert result.state.error is not None and result.state.error.kind == "upstream"
     assert recorded == [observation] and recorded[0] is observation
@@ -304,3 +321,59 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
         ttl=timedelta(minutes=5),
     )
     assert lease.holder == "after-failure"
+
+
+@pytest.mark.parametrize("configured", [False, True])
+async def test_anthropic_prepared_turn_never_forwards_a_provider_action_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    configured: bool,
+) -> None:
+    selected = admitted()
+    if configured:
+        selected = replace(
+            selected,
+            backend_revision=ConfigRevision.create(CHANNEL, 1, resolve_default(BackendConfig())),
+        )
+
+    async def record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+        raise AssertionError("the mocked turn cannot bill")
+
+    prepared = PreparedTurn(
+        admission=selected,
+        ma_session_id="anthropic-session",
+        mapping_id=None,
+        watermark=None,
+        reused=False,
+        session_account_id=ACCOUNT,
+        _record=record,
+    )
+    calls: list[dict[str, object]] = []
+
+    async def run(*args: object, **kwargs: object) -> TurnState:
+        calls.append(kwargs)
+        assert "provider_actions" not in kwargs
+        return TurnState()
+
+    async def hook(prompt: ProviderActionPrompt) -> None:
+        raise AssertionError("Anthropic must keep its existing approval surface")
+
+    async def forbidden_reseed() -> NoReturn:
+        raise AssertionError("successful Anthropic turn cannot recover")
+
+    monkeypatch.setattr(run_module, "run_turn", run)
+    await run_prepared_turn_impl(
+        _deps(sessionmaker=db_session_factory, router=MARouter()),
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="hi",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        provider_action=hook,
+        reseed_user_message=forbidden_reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+    )
+    assert len(calls) == 1

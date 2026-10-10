@@ -1162,3 +1162,24 @@ Missing runtime dependencies or unsupported deployment policies return the visib
 identities include the interaction identity, preserving later turns and function
 continuations in a reused session.
 Gemini always sends an explicit `tools` list compiled from the agent configuration; an omitted neutral tool list becomes `[]`. The SDK boundary also makes older stored requests explicit. This prevents Gemini from silently enabling its default search and URL tools. Continuations and selected 503 fallback sends retain the same reviewed tools. See [Gemini supported tools](https://ai.google.dev/gemini-api/docs/antigravity-agent#supported-tools).
+
+### Provider action callback
+
+Opt-in provider codecs receive a scoped `TurnCodecRequest.provider_actions`
+callback when a prepared caller supplies `provider_action`. It carries the
+original required action and the admitted native session, current root,
+requester and expiry. Browser origin permission has separate approve, deny and
+cancel controls; browser authentication has completion and cancel controls,
+with completion omitted until the provider verifies its native response.
+Adapters authorize the requester and return an offered native response without
+rendering native payloads or collecting credentials. Missing support, expiry
+and turn cancellation leave the action unanswered. Responses still go through
+the provider's claimed mutation path. Default Anthropic confirmations retain
+their existing hook and wire requests.
+
+Each provider-native approval starts its configured confirmation window when the
+card is requested, capped by the turn deadline. An adapter hook failure refuses
+the action and logs only the boundary name. Foreign dead sessions remain failed
+outcomes; native replacement with its corresponding binding, accounting and
+approval context requires a provider-specific recovery path. Anthropic recovery
+continues to use its existing tool confirmation surface.

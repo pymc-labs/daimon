@@ -27,6 +27,7 @@ from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S, replay_events, send_interrupt_and_wait
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
+from daimon.core.turn.provider_actions import BoundProviderActions, ProviderActionApproval
 from mux.contracts.actions import InputEvent, NativeInput, UserMessage, UserToolConfirmation
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import ContentPart, Event, ImagePart, TextPart
@@ -83,6 +84,7 @@ class TurnCodecRequest:
     config: ConfigRevision | None = None
     runtime: TurnRuntime | None = None
     persistence: TurnPersistence | None = None
+    provider_actions: BoundProviderActions | None = None
 
     @property
     def model(self) -> str | None:
@@ -679,6 +681,7 @@ def turn_io(
     profile: str | None = None,
     backend_request: TurnBackendRequest | None = None,
     persistence: TurnPersistence | None = None,
+    provider_actions: ProviderActionApproval | None = None,
 ) -> TurnIO:
     """Bind every turn helper to the same authorized session as its driver."""
     if profile is None and backend_request is not None:
@@ -747,5 +750,6 @@ def turn_io(
             backend_request.config if backend_request is not None else None,
             backend_request.runtime if backend_request is not None else None,
             persistence,
+            provider_actions.bind(scope, session_ref) if provider_actions is not None else None,
         )
     )

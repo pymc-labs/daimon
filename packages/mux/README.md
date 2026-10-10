@@ -505,3 +505,8 @@ Unsupported runtime/model/policy selections return the host's typed
 the interaction, so reused-session turns and function continuations remain
 distinct without changing neutral event IDs or ordering domains.
 Gemini interactions always serialize configured tools explicitly, using `[]` when none are configured. This includes reused sessions and fallback creates; provider default search and URL tools are never enabled by omission.
+The host's optional typed provider-action callback keeps browser origin access
+and browser authentication separate. Provider codecs supply validated native
+response objects and send the chosen body through claimed mutations; the mux
+input contract has no arbitrary native-response bypass. Unsupported
+credential forms remain refused.
