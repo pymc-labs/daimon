@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Daimon staging QA canary hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+Unit=daimon-qa-canary.service
+
+[Install]
+WantedBy=timers.target

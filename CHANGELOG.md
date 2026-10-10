@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.
+
 ### Changed
 
 - The scheduler's headless usage sweep is off by default (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`). It listed every session in the shared Managed Agents workspace and drained its request rate limit, stalling admission. While it's off, headless MCP turns aren't metered and usage a live adapter missed isn't recovered; turning it back on backfills sessions still present in the workspace (and restores the full scan until the scoped sweep ships). `--once` honours the same switch.
