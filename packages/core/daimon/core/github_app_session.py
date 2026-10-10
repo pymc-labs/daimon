@@ -110,6 +110,39 @@ async def effective_repo_urls(
     return urls
 
 
+async def effective_repo_url_sets(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    is_external: bool,
+    config: GithubAppSettings,
+    fernet: MultiFernet | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(every repo the App tokens cover, the mounted working repo) in one lookup."""
+    every, _ = await effective_repo_state(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=account_id,
+        is_external=is_external,
+        config=config,
+        fernet=fernet,
+    )
+    if not every:
+        return (), ()
+    async with sessionmaker() as session:
+        working = {
+            f"https://github.com/{repo.repo_full_name}"
+            for grant, repo in await list_live_grant_repositories(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+            if grant.is_working_repo
+        }
+    return every, tuple(url for url in every if url in working)
+
+
 async def effective_repo_state(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
