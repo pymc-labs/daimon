@@ -132,6 +132,21 @@ async def replay_channels(
     )
     result: list[tuple[str, str | None]] = []
     for channel_id in channels:
+        # A receipt older than this window proves the ledger was already in
+        # use throughout it. Scan the whole window and dedupe each input: a
+        # long turn's later answer must not hide an unreceived draining mention.
+        prior_receipt = await session.scalar(
+            select(DiscordMessageAdmission.message_id)
+            .where(
+                DiscordMessageAdmission.tenant_id == tenant_id,
+                DiscordMessageAdmission.channel_id == channel_id,
+                DiscordMessageAdmission.created_at < cutoff,
+            )
+            .limit(1)
+        )
+        if prior_receipt is not None:
+            result.append((str(channel_id), None))
+            continue
         # Legacy sessions predate receipts. Their answer watermark is the safe
         # lower bound for first deployment of replay; unreceipted old mentions
         # before it must not be answered again.

@@ -145,3 +145,32 @@ async def test_replay_does_not_repeat_an_opening_turn_from_before_receipts(
     assert not await claim_message(
         db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
     )
+
+
+async def test_new_ledger_channel_does_not_use_an_answer_watermark_to_hide_missed_inputs(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    row = await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="100",
+        account_id=uuid4(),
+        ma_session_id="sesn_long",
+    )
+    assert await claim_message(
+        db_session, tenant_id=tenant.id, channel_id="100", message_id="200", owner_key=11
+    )
+    await finish_messages(db_session, tenant_id=tenant.id, message_ids=("200",))
+    await db_session.execute(
+        text("UPDATE discord_message_admissions SET created_at = :old WHERE tenant_id = :tenant"),
+        {"old": datetime.now(UTC) - timedelta(minutes=20), "tenant": tenant.id},
+    )
+    # A long turn's final answer can arrive after a missed, unreceipted mention
+    # during draining. Its answer ID must not hide that input on the next boot.
+    await update_watermark(db_session, id=row.id, watermark_message_id="400")
+    channels = await replay_channels(
+        db_session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - timedelta(minutes=15), limit=25
+    )
+    assert ("100", None) in channels, "ledger-era channels scan the whole bounded time window"

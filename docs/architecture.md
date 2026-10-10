@@ -224,6 +224,9 @@ but never posted are requeued only after two complete no-card history reads
 separated by a minute; the ledger reset and intent retirement commit together.
 Turn markers and card intents also carry the owner,
 so startup never retires another live worker's cards.
+Channels whose ledger predates the replay window scan that whole window using
+per-message dedupe. Legacy-only channels retain their stored answer boundary
+during the first rollout.
 
 Orphan recovery runs at most four rows concurrently. Successful completed
 provider text is delivered by editing the existing card, with a text attachment
