@@ -120,8 +120,8 @@ def register_github_working_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def set_working_repo(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        origin_context_id: str,
         repo_name: str,
+        origin_context_id: str = "",
         agent_name: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> WorkingRepoResult:

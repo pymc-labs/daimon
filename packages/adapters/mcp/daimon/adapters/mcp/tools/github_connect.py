@@ -441,7 +441,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def github_connect(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        origin_context_id: str,
+        origin_context_id: str = "",
         agent_name: str | None = None,
         expected_ma_agent_id: str | None = None,
         requested_work: str | None = None,
