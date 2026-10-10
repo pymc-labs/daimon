@@ -25,10 +25,11 @@ import pytest
 import structlog
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.credential_submit import note_credential_save_failure
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.discovery import McpProbe
-from daimon.core.posted_controls import card_for_request, card_text
+from daimon.core.posted_controls import RECEIVED_FOOTER, card_for_request, card_text
 from daimon.core.scope import DeploymentDefault
 from daimon.core.security_audit import capture_decision
 from daimon.core.stores import agent_mcp_credentials, mcp_oauth_flows
@@ -274,20 +275,16 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
     async def edit(*args, row=None, state=None, outcome=None, **kwargs):
         if row is None:
             row, state = args[:2]
-        messages.append(
-            (
-                "card",
-                state,
-                card_text(
-                    card_for_request(
-                        row,
-                        state=state,
-                        outcome=outcome,
-                        refusal=kwargs.get("refusal", kwargs.get("reason")),
-                    )
-                ),
-            )
+        if state == "partial":
+            note_credential_save_failure(row, outcome)
+        card = card_for_request(
+            row,
+            state=state,
+            outcome=outcome,
+            refusal=kwargs.get("refusal", kwargs.get("reason")),
+            retry_reason=kwargs.get("retry_reason"),
         )
+        messages.append(("card", state, card_text(card), bool(card.buttons)))
 
     async def private(*args, **kwargs):
         messages.append(("private", kwargs.get("text", args[0] if args else "")))
@@ -531,6 +528,40 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
     )
 
 
+def _assert_retry_lifecycle_change(base, current, *, outcome):
+    """Accept only the intended failure lifecycle delta from the historical adapter.
+
+    Bindings, access proofs, skill credentials, MCP tokens, OAuth flows,
+    upstream writes and live authorization decisions still match exactly.
+    """
+    assert current[0] is False, "failed saves must not burn the form"
+    assert current[1] == outcome, "every failure records its outcome"
+    assert current[2] is None, "failed attempts must not occupy the retry's continuation"
+    assert base[2] is None or base[2][2] is None, "historical failures owed no work either"
+    assert current[3:7] == base[3:7], "credential data and proofs are unchanged"
+    assert current[8] == base[8], "upstream side effects are unchanged"
+    assert current[10] == base[10], "live authorization decisions are unchanged"
+
+    def audit_fields(audits):
+        # The new boundary logs only exception types, without raw traceback data.
+        fields = tuple(
+            {k: v for k, v in audit.items() if k not in ("log_level", "exc_info")}
+            for audit in audits
+        )
+        for audit in fields:
+            if audit.get("note") == (
+                "Attaching them did not finish. Try again using the same form."
+            ):
+                audit["note"] = "Attaching them did not finish. Ask again to retry."
+        return fields
+
+    assert audit_fields(current[9]) == audit_fields(base[9])
+    cards = [message for message in current[7] if message[0] == "card"]
+    assert cards and cards[-1][1] == "requested" and cards[-1][3], "same form offered again"
+    assert "Try again" in cards[-1][2] and RECEIVED_FOOTER not in cards[-1][2]
+    assert "fixture-token" not in repr(current[7]), "no submitted token in receipts"
+
+
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("admin", (False, True), ids=("member", "admin"))
@@ -550,7 +581,12 @@ async def test_external_submit_matches_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, admin, monkeypatch)
         )
-    assert results[0] == results[1]
+    if kind == "skill_repo" and shared is True and admin and results[1][1] == "write_failed":
+        # Imported skills cannot attach to the built-in target; the confirmed
+        # import stays identical, while its failed form becomes reusable.
+        _assert_retry_lifecycle_change(results[0], results[1], outcome="write_failed")
+    else:
+        assert results[0] == results[1]
     if kind == "mcp" and policy == "open" and shared and not admin:
         assert results[1][0] is True
         assert results[1][1] == ("applied" if existing == "new" else "write_failed")
@@ -585,7 +621,15 @@ async def test_external_failures_match_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, True, monkeypatch, fault)
         )
-    assert results[0] == results[1]
+    if fault == "race":
+        assert results[0] == results[1], "policy refusals stay terminal"
+    else:
+        outcome = (
+            "token_rejected"
+            if fault == "rejected" and (kind != "repo" or platform == "teams")
+            else "write_failed"
+        )
+        _assert_retry_lifecycle_change(results[0], results[1], outcome=outcome)
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
@@ -618,7 +662,10 @@ async def test_repo_credential_precedence_matches_real_base(
         results.append(
             await _run(db_session_factory, module, tenant, row, agent, True, monkeypatch, fault)
         )
-    assert results[0] == results[1]
+    if fault in ("stored_denied", "private"):
+        _assert_retry_lifecycle_change(results[0], results[1], outcome="write_failed")
+    else:
+        assert results[0] == results[1]
 
 
 @pytest.mark.parametrize("platform", ("discord", "slack", "teams"))
