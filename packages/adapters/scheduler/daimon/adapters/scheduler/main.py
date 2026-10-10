@@ -1018,20 +1018,33 @@ async def _repeat_until_stopped(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
+async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None]]) -> None:
+    """One usage pass for `--once`, honouring the same switch as the loop."""
+    if not enabled:
+        log.warning("scheduler.usage_sweep.disabled")
+        return
+    await sweep()
+
+
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
-    usage_sweep: Callable[[], Awaitable[None]],
+    usage_sweep: Callable[[], Awaitable[None]] | None,
     interval_s: float,
     stop_event: asyncio.Event,
 ) -> None:
     """Run ticks and usage sweeps on separate loops until ``stop_event`` is set.
+
+    ``usage_sweep=None`` (the sweep is switched off) runs ticks alone.
 
     A usage pass lists every session in the workspace and can outlast many
     ticks; inline, routine claims waited for it. On stop the pass in flight is
     cancelled: each model call commits on its own and an unfinished pass leaves
     the watermark in place. A crash in either loop ends both and propagates.
     """
+    if usage_sweep is None:
+        await _repeat_until_stopped(tick, interval_s=interval_s, stop_event=stop_event)
+        return
     async with asyncio.TaskGroup() as loops:
         sweeps = loops.create_task(
             _repeat_until_stopped(usage_sweep, interval_s=interval_s, stop_event=stop_event)
@@ -1158,8 +1171,11 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_pending_files(client, sm)
-            await _sweep_headless_usage(
-                client, sm, markup=settings.billing.markup, watermark=usage_watermark
+            await _usage_sweep_once(
+                enabled=scheduler_settings.usage_sweep_enabled,
+                sweep=lambda: _sweep_headless_usage(
+                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
+                ),
             )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
@@ -1222,9 +1238,11 @@ async def run(
         async with runtime_health(
             "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
         ):
+            if not scheduler_settings.usage_sweep_enabled:
+                log.warning("scheduler.usage_sweep.disabled")
             await _run_loops(
                 tick=tick,
-                usage_sweep=usage_sweep,
+                usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
             )
