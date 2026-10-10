@@ -9,13 +9,24 @@ continuity loss. Native memory stores are unavailable and fail admission.
 
 ## Source and transport
 
-The supplied official Agents API snapshots were fetched **2026-09-14** and checked
-**2026-10-09** (`source-O-{overview,architecture,configuration,sessions,events,lifecycle,skills}.txt`),
-alongside the official reference pages linked below. The Python package remains pinned
-`openai>=2.54.0,<3`; version 2.54 has no generated `beta.agents` binding. The transport
-uses that SDK's public `AsyncOpenAI.get`, `post` and `delete` primitives, with
-`OpenAI-Beta: agents=v1` and `max_retries=0`. The lead approved this approach at
-15:13Z on 2026-10-09. There is no Responses API or Agents SDK substitute.
+The official [Agents guide](https://developers.openai.com/api/docs/guides/agents),
+[managed Agents API guide and subpages](https://developers.openai.com/api/docs/guides/agents-api/overview),
+and API reference were re-fetched and audited **2026-10-10**. The sprint lane archive
+`api-snapshots/2026-10-10T070515Z/manifest.json` records URLs, fetch timestamps,
+HTTP status and SHA-256 hashes for 56 snapshots, including the complete Agents
+reference, streaming events, hosted environments, observability, skills/files,
+Admin usage/costs, pricing and SDK installation guide. It supersedes the supplied
+**2026-09-14** seven-page archive as the source checked for this driver.
+
+The Python package remains pinned `openai>=2.54.0,<3`. The current official guide
+uses generated `beta.agents` convenience bindings; locally verified version
+2.54.0 has no such binding. The official pages do not establish a minimum Python
+package version that includes it, so this audit does not justify a version bump.
+The transport uses that SDK's verified public `AsyncOpenAI.get`, `post` and
+`delete` primitives, with `OpenAI-Beta: agents=v1` and `max_retries=0`. The lead
+approved this approach at 15:13Z on 2026-10-09. Today's reference retains the
+implemented paths and SSE contract. There is no Responses API or Agents SDK
+substitute.
 
 | HTTP resource | Methods | Official evidence |
 | --- | --- | --- |
@@ -39,6 +50,23 @@ root outcome. A POST connection failure returns `outcome_unknown`; the port neve
 retries it. SDK exceptions and malformed native records become `ProviderError`,
 without carrying SDK objects or upstream exception messages. Caller page-limit and
 empty-input validation errors use `invalid_request` rather than `upstream`.
+
+## Explicit session controls
+
+Hosts may construct `OpenAIDriver(..., session_controls=SessionControls(...))`
+from `mux.drivers.openai.session_controls`. `container_size` accepts `small`,
+`medium` or `large`, sent as `environment.container_size` on hosted session
+creation. It can override a template's size. A conversation-only driver refuses
+this hosted setting before provider I/O. Omission preserves the provider/template
+selection; without a template, the documented hosted default is `medium`.
+
+`spend_limit_usd_cents` accepts a strictly positive integer and maps to
+`spend_control.limit` for either profile. For example, `220` means **$2.20 across
+the session**, not 220 dollars or a per-turn token limit. This provider spending
+control supplements host admission and accounting; it does not turn a harness
+reservation into an exact bill. Without explicit controls, existing creation
+request bodies remain unchanged. See [hosted resources](https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted)
+and [create-session parameters](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/methods/create).
 
 ## Identity, turns and recovery
 
@@ -101,6 +129,25 @@ revision; identical replay does not. Revisions support signed corrections such a
 `null → 100 → 120 → 110`. Session totals are never added to turn totals. Native
 cache-write counts, model identity and final billing amounts are not fabricated.
 See [observability and usage](https://developers.openai.com/api/docs/guides/agents-api/observability).
+Session resources also expose a nullable cumulative `usage` snapshot. A host
+choosing this grain must not add overlapping turn totals. Neither grain is a final
+bill. `spend_control.consumed`, when present, is an integer **floored to whole USD
+cents**: divide by 100 for its USD floor, and preserve null as unknown. It does
+not establish an exact model or container charge.
+
+The hosted guide points to standard container rates and separate model rates.
+Session/environment timestamps are not billed container duration. When actual
+charges cannot be resolved from session/turn usage plus verified compute usage,
+retain an `estimated_unverified` result and the held amount. The organization
+[Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs)
+(`GET /v1/organization/costs`) and
+[Usage API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/completions)
+(`GET /v1/organization/usage/completions`) require an
+[organization Admin API key](https://developers.openai.com/api/reference/administration/overview).
+Costs are bucketed organization/project/key/source amounts, not a session-scoped
+bill, so even Admin access alone does not establish per-session exact spend.
+The driver does not discover an Admin credential or call those endpoints.
+
 
 ## Current boundaries
 
@@ -119,6 +166,12 @@ SSE replay and atomic `expected_turn` are refused. Session update plans return
 fingerprints describe a retrieved record; they are not native conditional-write
 preconditions. Input-mode/steering/cancel-target checks depend on host serialization,
 not on a provider CAS. Generic tool confirmations and native input bypasses refuse.
+The current computer-use schema keeps `browser_origin_access` decisions
+(`approve`, `deny`, `cancel`) distinct from `browser_authentication` actions
+(`submit`, `cancel`). Both remain native required actions here; generic host
+approval does not authorize secret-field submission. G1 must implement that
+routing explicitly against the [computer-use guide](https://developers.openai.com/api/docs/guides/agents-api/tools/computer-use).
+
 
 ### Observed Agents model eligibility
 
