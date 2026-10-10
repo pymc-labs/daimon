@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from typing import cast
 
 from pydantic import JsonValue
@@ -116,6 +117,28 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
         else:
             if turn is None:
                 raise Pending("turn was not executed")
+            if kind in {"footer_cost_matches_ledger", "ledger_matches_usage"}:
+                from qa.live.billing import footer_matches, totals
+
+                if not turn.settled:
+                    raise Pending("billing requires a settled turn")
+                billing = backend.billing_evidence(turn)
+                expected, debit = totals(billing)
+                if kind == "footer_cost_matches_ledger":
+                    passed = footer_matches(turn, debit, assertion.tol_usd or 0)
+                else:
+                    passed = (
+                        abs(debit - expected)
+                        <= expected * Decimal(str(assertion.tol_pct or 0)) / 100
+                    )
+                return Check(
+                    kind,
+                    "PASS" if passed else "FAIL",
+                    f"independent expected=${expected}; ledger debit=${debit}; "
+                    f"markup={billing.markup}",
+                    assertion.turn,
+                    evidence=[str(billing.outcome["id"])],
+                )
             evidence = [
                 f"https://discord.com/channels/{turn.guild_id}/"
                 f"{turn.thread_id or turn.channel_id}/{m['id']}"

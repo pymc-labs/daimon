@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - QA expected CLI refusals reject transport/crash signatures before matching refusal text, reject empty-match patterns, and refuse wrapped or structured tenant-credit commands before mutation.
+- QA footer and ledger assertions compare scoped per-request token usage, independent rates and deployment markup with exact ledger debit identities.
 
 - QA supports frozen Discord answer/thread counts, nested alternatives, component/card observations, running card edits and chunk delivery gaps, with scoped guild and expected CLI-exit parameters.
 - Staging QA records deployment images and restart evidence, keeps deploy-interrupted runs silent and PENDING, and retries once after workers settle within the pass budget.

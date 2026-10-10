@@ -19,6 +19,7 @@ from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from qa.live.billing import BillingEvidence, amount, request_refs, totals
 from qa.live.config import Config, Target
 from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
@@ -147,6 +148,7 @@ class DiscordBackend:
         self.thread_parents: dict[str, str] = {}
         self.fallback_watch_s = config.fallback_watch_s
         self.bindings: dict[str, str] = {}
+        self.billing_cache: dict[str, BillingEvidence] = {}
 
     @property
     def driver(self) -> Driver:
@@ -934,6 +936,123 @@ class DiscordBackend:
         if len(rows) == 1 and len(rows[0]) == 1:
             return next(iter(rows[0].values()))
         return result
+
+    def billing_evidence(self, turn: Turn) -> BillingEvidence:
+        from daimon.core.ma_identity import derive_tenant_uuid
+
+        if self.env != "staging" or turn.guild_id != self.target.guild_id:
+            raise Pending("billing verification is restricted to the staging QA guild")
+        self._owned(turn.channel_id)
+        if not turn.settled or not turn.thread_id or not turn.ended_at:
+            raise Pending("billing requires a settled turn with a bounded thread window")
+        self._owned(turn.thread_id)
+        if turn.trigger_id in self.billing_cache:
+            return self.billing_cache[turn.trigger_id]
+        command = self.target.billing_probe
+        if not command:
+            raise Pending("read-only deployment billing markup probe is not configured")
+        try:
+            probe = subprocess.run(
+                command,
+                input=json.dumps(
+                    {"env": "staging", "guild_id": self.target.guild_id, "read_only": True}
+                ),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if probe.returncode:
+                raise Pending("read-only billing markup probe failed")
+            data = obj(cast(JsonValue, json.loads(probe.stdout)))
+            if data.get("guild_id") != self.target.guild_id or not data.get("source"):
+                raise Pending("billing markup probe lacks scoped provenance")
+            markup = amount(data.get("markup"))
+            tenant = str(derive_tenant_uuid(platform="discord", workspace_id=self.target.guild_id))
+            outcomes = objects(
+                asyncio.run(
+                    self._query(
+                        "SELECT id,tenant_id,thread_id,session_id,started_at,ended_at,"
+                        "usage_refs,model_calls "
+                        "FROM turn_outcomes WHERE tenant_id=CAST(:tenant AS uuid) "
+                        "AND thread_id=:thread "
+                        "AND started_at>=:start AND started_at<=:end ORDER BY started_at",
+                        {
+                            "tenant": tenant,
+                            "thread": turn.thread_id,
+                            "start": turn.started_at,
+                            "end": turn.ended_at,
+                        },
+                    )
+                )
+            )
+            if len(outcomes) != 1:
+                raise Pending("billing turn outcome is missing or ambiguous")
+            outcome = outcomes[0]
+            if (
+                str(outcome.get("tenant_id")) != tenant
+                or outcome.get("thread_id") != turn.thread_id
+            ):
+                raise Pending("billing outcome scope does not match the QA turn")
+            for field in ("started_at", "ended_at"):
+                timestamp = datetime.fromisoformat(
+                    str(outcome.get(field) or "").replace("Z", "+00:00")
+                )
+                if timestamp.tzinfo is None or not turn.started_at <= timestamp <= turn.ended_at:
+                    raise Pending("billing outcome window does not match the QA turn")
+            request_refs(outcome)
+            if not outcome.get("id"):
+                raise Pending("billing outcome identity is unavailable")
+            requests = objects(
+                asyncio.run(
+                    self._query(
+                        "SELECT u.id,u.tenant_id,u.channel_id,u.managed_session_id,"
+                        "u.event_id,u.model,"
+                        "u.input_tokens,u.output_tokens,u.cache_creation_input_tokens,u.cache_read_input_tokens,"
+                        "l.id AS ledger_id,l.tenant_id AS ledger_tenant,"
+                        "l.channel_id AS ledger_channel,"
+                        "l.delta_usd,l.reason AS ledger_reason,l.idempotency_key "
+                        "FROM usage_events u LEFT JOIN tenant_ledger l ON l.tenant_id=u.tenant_id "
+                        "AND l.idempotency_key='turn:' || u.managed_session_id "
+                        "|| ':' || u.event_id "
+                        "WHERE u.tenant_id=CAST(:tenant AS uuid) "
+                        "AND EXISTS (SELECT 1 FROM turn_outcomes o,"
+                        "jsonb_array_elements(o.usage_refs) ref WHERE o.id=CAST(:outcome AS uuid) "
+                        "AND o.tenant_id=u.tenant_id AND ref->>'session_id'=u.managed_session_id "
+                        "AND ref->>'event_id'=u.event_id) ORDER BY u.occurred_at,u.event_id",
+                        {"tenant": tenant, "outcome": str(outcome["id"])},
+                    )
+                )
+            )
+            parent = self.thread_parents.get(turn.channel_id, turn.channel_id)
+            if any(
+                str(row.get("tenant_id")) != tenant
+                or str(row.get("ledger_tenant")) != tenant
+                or row.get("channel_id") != parent
+                or row.get("ledger_channel") != parent
+                for row in requests
+            ):
+                raise Pending("billing usage or ledger scope is missing or foreign")
+            evidence = BillingEvidence(
+                outcome, requests, markup, self.config.billing_rates, self.config.models
+            )
+            totals(evidence)
+            turn.billing = {
+                "outcome": outcome,
+                "requests": cast(JsonValue, requests),
+                "markup": str(markup),
+                "markup_source": data.get("source"),
+                "rates": {
+                    model: schedule.model_dump(mode="json")
+                    for model, schedule in self.config.billing_rates.items()
+                },
+            }
+            self.billing_cache[turn.trigger_id] = evidence
+            return evidence
+        except Pending:
+            raise
+        except Exception as exc:
+            raise Pending("read-only billing evidence unavailable: " + type(exc).__name__) from exc
 
     def usage(self, turn: Turn) -> Usage:
         footer = self._footer_usage(turn)

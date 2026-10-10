@@ -8,6 +8,7 @@ from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
+from qa.live.billing import BillingSchedule, approved_rates
 from qa.live.models import BackendName, ModelPolicy
 from qa.live.schema import Contract
 
@@ -29,6 +30,7 @@ class Target(Contract):
     warm_url: str = "https://staging-daimon-mcp-251774259661.us-east4.run.app/readyz"
     model_probe: list[str] = Field(default_factory=list)
     deployment_probe: list[str] = Field(default_factory=list)
+    billing_probe: list[str] = Field(default_factory=list)
     qa_agent_name: str | None = None
     backend: BackendName = "anthropic"
 
@@ -62,6 +64,7 @@ class Schedule(Contract):
 class Config(Contract):
     driver_path: str = str(Path.home() / ".config/daimon-qa/qa.py")
     models: ModelPolicy = Field(default_factory=ModelPolicy)
+    billing_rates: dict[str, BillingSchedule] = Field(default_factory=approved_rates)
     pricing: Pricing
     staging: Target = Field(default_factory=Target)
     prod: Target = Field(
