@@ -59,6 +59,8 @@ class Replay:
             _participation=None,
             draining=draining,
             runtime=SimpleNamespace(sessionmaker=None),
+            _processing_tasks={},
+            _track_processing_task=lambda thread_id: None,
         )
         self.obj._thread_queue = ThreadQueue(self.obj._processing, self.obj._pending)
         names = {

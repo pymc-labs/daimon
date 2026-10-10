@@ -210,8 +210,11 @@ THREAD_OPEN_FAILED_NOTICE = "Couldn't open a thread. @mention Daimon again."
 # Grace window for active turns. The documented worker stop grace is 90s,
 # leaving time for bounded cleanup and card edits after this 60s window.
 _DRAIN_GRACE_S: float = 60.0
-_DRAIN_CLEANUP_S: float = 10.0
-_DRAIN_CARD_EDITS_S: float = 10.0
+_DRAIN_CLEANUP_S: float = 5.0
+_DRAIN_CARD_EDITS_S: float = 5.0
+#: Budget-limit DMs still sending at drain end. Grace 60 s + 10 + 5 + 5 stays
+#: under the worker's 90 s stop grace, so close() runs before Docker kills.
+_DRAIN_NOTICES_S: float = 10.0
 
 # Bounded concurrency for the on_ready re-seed sweep. Each tenant reconcile
 # issues roughly two dozen Skills API calls (a read per seeded skill, plus an
@@ -785,7 +788,10 @@ class DaimonBot(commands.Bot):
             await asyncio.sleep(0.5)
         log.info("discord.drain_complete", remaining=len(self._processing))
         # Before close(): it closes the HTTP session a notice still DMs through.
-        await drain_budget_notices()
+        notices = asyncio.ensure_future(drain_budget_notices())
+        _, late = await asyncio.wait({notices}, timeout=_DRAIN_NOTICES_S)
+        if late:
+            log.warning("discord.drain_notices_timed_out", budget_s=_DRAIN_NOTICES_S)
         tasks = {
             task
             for thread_id in self._processing
