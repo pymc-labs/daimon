@@ -183,7 +183,7 @@ def test_credential_shaped_metadata_refuses_before_ledger_write(
     assert guard.spend_path.read_bytes() == before
     config = json.loads(guard.config_path.read_text())
     config["providers"]["openai"]["models"][value] = config["providers"]["openai"]["models"].pop(
-        "fake"
+        "gpt-6-luna"
     )
     with pytest.raises(ValidationError, match="metadata"):
         BudgetConfig.model_validate(config)
@@ -198,7 +198,7 @@ from mux.conformance.budget import BudgetGuard, BudgetRefused, ProbePlan, TokenL
 if 'mux.conformance.recording' in sys.modules:
     raise SystemExit('budget imported recorder')
 guard = BudgetGuard(Path(sys.argv[1]), Path(sys.argv[2]))
-plan = ProbePlan(provider='openai', model='fake', fixture_id='C16',
+plan = ProbePlan(provider='openai', model='gpt-6-luna', fixture_id='C16',
     limits=TokenLimits(input_tokens=8_000_000, output_tokens=0))
 guard.reserve(plan)
 try:
@@ -226,7 +226,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
                     provider: {
                         "cap_usd": cap,
                         "models": {
-                            "fake": {
+                            ("gpt-6-luna" if provider == "openai" else "claude-haiku-5-5"): {
                                 "input": "1",
                                 "cached_input": "1",
                                 "cache_write_input": "1",
@@ -246,7 +246,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
 def plan(tokens: int = 1_000_000, provider: str = "openai") -> ProbePlan:
     return ProbePlan(
         provider=provider,
-        model="fake",
+        model="gpt-6-luna" if provider == "openai" else "claude-haiku-5-5",
         fixture_id="C16",
         limits=TokenLimits(input_tokens=tokens, output_tokens=0),
     )
