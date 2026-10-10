@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
 import yarl
 from daimon.adapters.slack.privacy_panel.submit import (
     evaluate_delete_submission,
@@ -29,6 +30,39 @@ from daimon.testing.factories import make_account, make_platform_principal, make
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def test_paused_delete_submission_does_not_proceed() -> None:
+    decision = evaluate_delete_submission({}, delete_enabled=False)
+    assert not decision.proceed
+    assert decision.account_id is None
+    assert decision.response_payload["view"]["blocks"][0]["text"]["text"] == (
+        "Deleting your account is paused during the event."
+    )
+
+
+async def test_paused_background_handler_does_not_purge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = MagicMock()
+    runtime.settings.privacy.delete_enabled = False
+    web_client = MagicMock()
+    web_client.views_update = AsyncMock()
+    purge = AsyncMock()
+    monkeypatch.setattr("daimon.adapters.slack.privacy_panel.submit.purge_account", purge)
+    await run_purge_and_update(
+        runtime,
+        web_client,
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform_user_id="U1",
+        view_id="V1",
+    )
+    purge.assert_not_awaited()
+    assert web_client.views_update.await_args.kwargs["view"]["blocks"][0]["text"]["text"] == (
+        "Deleting your account is paused during the event."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Payload helpers

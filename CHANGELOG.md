@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Account deletion on Discord, Slack, and Teams privacy panels can be paused during an event with `DAIMON_PRIVACY__DELETE_ENABLED=false`; Policy and Export remain available.
 - **More Discord assertions run in live QA.** Message counts, per-message balanced fences, cost-footer placement, thread-name readback, and filename-filtered attachment counts are supported.
 - **Haiku 5.5 can be picked as an agent model and is metered.** It is billed at Anthropic's list price by prompt length: $0.10 input and $0.50 output per million tokens up to a 100,000-token prompt, and five times that above it. Before this, turns on `claude-haiku-5-5` were recorded as free.
 

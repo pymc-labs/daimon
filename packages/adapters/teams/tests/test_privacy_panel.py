@@ -12,13 +12,14 @@ from contextlib import AbstractAsyncContextManager
 import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
-from daimon.adapters.teams.privacy_card import no_data_card, post_delete_card
-from daimon.adapters.teams.privacy_panel import DELETING, NAME_MISMATCH, STALE
+from daimon.adapters.teams.privacy_card import no_data_card, panel_card, post_delete_card
+from daimon.adapters.teams.privacy_panel import DELETE_PAUSED, DELETING, NAME_MISMATCH, STALE
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -39,6 +40,30 @@ pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 POLICY_URL = "https://example.com/privacy"
 NAME = USER_NAME
+
+
+def test_paused_panel_keeps_policy_and_export() -> None:
+    rendered = json.dumps(
+        panel_card(bot="daimon", policy_url=POLICY_URL, delete_enabled=False).model_dump(),
+        ensure_ascii=False,
+    )
+    assert "📄 Policy" in rendered
+    assert "📤 Export" in rendered
+    assert "🗑 Delete" not in rendered
+
+
+async def test_paused_delete_action_preserves_account(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    account_id = str(await _account(db_session_factory, AAD_OBJECT_ID))
+    runtime = build_teams_runtime(db_session_factory)
+    runtime.settings.privacy.delete_enabled = False
+    async with running_service(runtime, teams_api_fake) as service:
+        response = await post_activity(
+            service, _click("confirm_delete", account=account_id, confirm_name=NAME)
+        )
+    assert DELETE_PAUSED in json.dumps(response)
+    assert await _has_principal(db_session_factory, AAD_OBJECT_ID)
 
 
 @pytest.mark.parametrize(
@@ -94,7 +119,7 @@ def _running(
     runtime = build_teams_runtime(
         db_factory, anthropic=build_fake_anthropic(make_fake_ma_handler())
     )
-    runtime.settings.privacy_policy_url = POLICY_URL
+    runtime.settings.privacy_policy_url = HttpUrl(POLICY_URL)
     return running_service(runtime, fake)
 
 

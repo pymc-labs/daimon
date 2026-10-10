@@ -71,21 +71,22 @@ class PrivacyPanelView(discord.ui.LayoutView):
         )
         export_btn.callback = self._on_export  # type: ignore[method-assign]
 
-        delete_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
-            label="🗑 Delete…",
-            style=discord.ButtonStyle.danger,
-        )
-        delete_btn.callback = self._on_delete  # type: ignore[method-assign]
-
         done_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
             label="✓ Done",
             style=discord.ButtonStyle.secondary,
         )
         done_btn.callback = self._on_done  # type: ignore[method-assign]
 
-        action_row: discord.ui.ActionRow[PrivacyPanelView] = discord.ui.ActionRow(
-            policy_btn, export_btn, delete_btn, done_btn
-        )
+        buttons = [policy_btn, export_btn]
+        if runtime.settings.privacy.delete_enabled:
+            delete_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
+                label="🗑 Delete…",
+                style=discord.ButtonStyle.danger,
+            )
+            delete_btn.callback = self._on_delete  # type: ignore[method-assign]
+            buttons.append(delete_btn)
+        buttons.append(done_btn)
+        action_row: discord.ui.ActionRow[PrivacyPanelView] = discord.ui.ActionRow(*buttons)
         container = build_privacy_main_container(bot_display_name=self._bot_display_name)
         container.add_item(layout.hairline())
         container.add_item(action_row)
@@ -98,6 +99,11 @@ class PrivacyPanelView(discord.ui.LayoutView):
         )
 
     async def _on_delete(self, interaction: discord.Interaction) -> None:
+        if not self.runtime.settings.privacy.delete_enabled:
+            await interaction.response.send_message(
+                "Deleting your account is paused during the event.", ephemeral=True
+            )
+            return
         # Lazy import to avoid circular: panel.py <-> cascade.py
         from daimon.adapters.discord.privacy_panel.cascade import CascadePreviewView
         from daimon.adapters.discord.privacy_panel.read import load_purge_preview

@@ -48,6 +48,11 @@ class DeleteConfirmModal(discord.ui.Modal, title="Confirm delete"):
         self.add_item(self.name_in)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:  # type: ignore[override]  # base uses broader Interaction[Client] type
+        if not self.runtime.settings.privacy.delete_enabled:
+            await interaction.response.send_message(
+                "Deleting your account is paused during the event.", ephemeral=True
+            )
+            return
         rid = generate_request_id()
         typed = str(self.name_in.value).strip() if self.name_in.value else ""
         if typed != self.user_name:

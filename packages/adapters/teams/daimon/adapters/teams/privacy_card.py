@@ -54,13 +54,14 @@ def _spaced(*lines: str) -> list[CardElement]:
     return [TextBlock(text=line, wrap=True, spacing="Medium") for line in lines]
 
 
-def panel_card(*, bot: str, policy_url: str) -> AdaptiveCard:
+def panel_card(*, bot: str, policy_url: str, delete_enabled: bool = True) -> AdaptiveCard:
     """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
     actions: list[Action] = [
         OpenUrlAction(title="📄 Policy", url=policy_url),
         button(VERB, "📤 Export", "export"),
-        button(VERB, "🗑 Delete…", "delete", style="destructive"),
     ]
+    if delete_enabled:
+        actions.append(button(VERB, "🗑 Delete…", "delete", style="destructive"))
     body: list[CardElement] = [
         heading(PRIVACY_TITLE),
         *_spaced(*privacy_lines(bot)),

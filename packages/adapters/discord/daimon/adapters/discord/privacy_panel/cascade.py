@@ -154,6 +154,11 @@ class CascadePreviewView(discord.ui.LayoutView):
         self.add_item(container)
 
     async def _on_confirm(self, interaction: discord.Interaction) -> None:
+        if not self.runtime.settings.privacy.delete_enabled:
+            await interaction.response.send_message(
+                "Deleting your account is paused during the event.", ephemeral=True
+            )
+            return
         await interaction.response.send_modal(
             DeleteConfirmModal(
                 runtime=self.runtime,

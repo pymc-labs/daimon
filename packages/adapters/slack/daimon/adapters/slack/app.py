@@ -702,7 +702,9 @@ class SlackApp:
             view_vs: dict[str, Any] = payload.get("view") or {}
             cb_id: str = str(view_vs.get("callback_id") or "")
             if cb_id == "privacy_delete":
-                decision = evaluate_delete_submission(payload)
+                decision = evaluate_delete_submission(
+                    payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
+                )
                 await (
                     client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
                         SocketModeResponse(

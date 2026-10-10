@@ -18,6 +18,7 @@ typo is silent — check the spelling here.
 - [Core](#core)
 - [Database](#database)
 - [Anthropic](#anthropic)
+- [Privacy](#privacy)
 - [CLI](#cli)
 - [Logging](#logging)
 - [Observability](#observability)
@@ -195,6 +196,18 @@ default API endpoint.
 Maximum Anthropic Skills API requests per minute in this process. Default 80 leaves
 headroom below the 100 requests/minute organization limit. Other deployments in the same
 organization share that limit.
+
+## Privacy
+
+Read from `daimon.core.config.PrivacySettings`. Prefix `DAIMON_PRIVACY__`.
+
+### `DAIMON_PRIVACY__DELETE_ENABLED`
+
+`bool` · optional · default `True`
+
+Show account deletion in Discord, Slack, and Teams privacy panels and allow delete
+confirmations. Set DAIMON_PRIVACY__DELETE_ENABLED=false to pause deletion during an
+event; Policy and Export remain available.
 
 ## CLI
 
