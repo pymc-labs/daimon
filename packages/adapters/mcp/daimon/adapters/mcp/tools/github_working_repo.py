@@ -107,9 +107,10 @@ async def set_working_repo_impl(
         message=(
             f"{agent.name} will use {saved} as its working repo when GitHub setup finishes."
             if pending
-            else f"{agent.name}'s working repo is {saved}."
+            else f"{agent.name}'s working repo is now {saved}. "
+            "To switch back, ask me for another repo or none."
             if saved is not None
-            else f"{agent.name} has no working repo."
+            else f"{agent.name} has no working repo now. To set one, ask me for a repo."
         ),
         working_repo=saved,
         pending=pending,
@@ -127,7 +128,8 @@ def register_github_working_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
     ) -> WorkingRepoResult:
         """Choose the one repo in this agent's filesystem, or pass 'none' to clear it.
 
-        Ask once in plain words during agent setup. Use an owner/repo already on
+        A clear ask is enough: set it right away and reply with the returned
+        line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one by name when
         asked. Only a server admin or an admin for this non-managed agent's
         channels may change this setting. Pass the current turn origin and the
