@@ -26,6 +26,18 @@ on:
         description: "Full commit SHA to deploy"
         required: true
         type: string
+      daimon_digest:
+        description: "Prebuilt staging daimon image digest from this CI run"
+        required: false
+        type: string
+      notebook_digest:
+        description: "Prebuilt staging notebook-host image digest from this CI run"
+        required: false
+        type: string
+      report_digest:
+        description: "Prebuilt staging report-host image digest from this CI run"
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       environment:
@@ -104,16 +116,49 @@ jobs:
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
           echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
-      # Builds read the GitHub Actions cache that ci.yml's docker-build job
-      # fills on every push to main, so only changed layers are rebuilt. No
-      # provenance or SBOM attestations: they would turn the push into an
-      # image index, and every consumer (VMs, Cloud Run, promote.yml's image
-      # check) has only ever seen the plain manifest `docker push` produces.
+      - name: Select immutable prebuilt images or canonical build tags
+        id: images
+        env:
+          DAIMON_DIGEST: ${{ inputs.daimon_digest }}
+          NOTEBOOK_DIGEST: ${{ inputs.notebook_digest }}
+          REPORT_DIGEST: ${{ inputs.report_digest }}
+        run: |
+          if [ -z "$DAIMON_DIGEST$NOTEBOOK_DIGEST$REPORT_DIGEST" ]; then
+            echo "prebuilt=false" >> "$GITHUB_OUTPUT"
+            echo "daimon=${{ steps.tags.outputs.daimon }}" >> "$GITHUB_OUTPUT"
+            echo "notebook=${{ steps.tags.outputs.notebook }}" >> "$GITHUB_OUTPUT"
+            echo "report=${{ steps.tags.outputs.report }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A partial or malformed set must never silently fall back to a build.
+          for digest in "$DAIMON_DIGEST" "$NOTEBOOK_DIGEST" "$REPORT_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          done
+          if [ "${{ inputs.environment }}" != staging ]; then
+            echo "Prebuilt digests are restricted to staging" >&2
+            exit 1
+          fi
+          BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
+          echo "prebuilt=true" >> "$GITHUB_OUTPUT"
+          echo "daimon=$BASE/daimon@$DAIMON_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "notebook=$BASE/notebook-host@$NOTEBOOK_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "report=$BASE/report-host@$REPORT_DIGEST" >> "$GITHUB_OUTPUT"
+          # Confirm Buildx's digest is a manifest Artifact Registry can serve.
+          for image in "$BASE/daimon@$DAIMON_DIGEST" "$BASE/notebook-host@$NOTEBOOK_DIGEST" "$BASE/report-host@$REPORT_DIGEST"; do
+            gcloud artifacts docker images describe "$image" --format=json >/dev/null
+          done
+
+      # Manual staging and production deploys still build from the pinned SHA.
+      # Main CI passes prebuilt digests and skips these steps. No provenance or
+      # SBOM attestations: they would turn the push into an image index, while
+      # existing consumers expect a plain image manifest.
       - uses: docker/setup-buildx-action@v3
+        if: steps.images.outputs.prebuilt != 'true'
         with:
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build + push daimon image
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -125,6 +170,7 @@ jobs:
           cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -136,6 +182,7 @@ jobs:
           cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
+        if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -149,13 +196,13 @@ jobs:
       - name: Run migrations (blocking gate)
         run: |
           gcloud run jobs update ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" \
-            --image "${{ steps.tags.outputs.daimon }}"
+            --image "${{ steps.images.outputs.daimon }}"
           gcloud run jobs execute ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" --wait
 
       - name: Deploy mcp revision
         run: |
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
-            --image "${{ steps.tags.outputs.daimon }}"
+            --image "${{ steps.images.outputs.daimon }}"
 
       - name: Resolve seam URL for report-host
         id: seam
@@ -209,14 +256,14 @@ jobs:
                 # exit status comes from the trailing `prune || true` and every
                 # failure inside is silent.
                 set -euo pipefail
-                export NOTEBOOK_IMAGE="${{ steps.tags.outputs.notebook }}"
+                export NOTEBOOK_IMAGE="${{ steps.images.outputs.notebook }}"
                 # Caddy fronts notebook-host with TLS on this domain; the compose
                 # file interpolates NOTEBOOK_DOMAIN + NOTEBOOK_PUBLIC_URL_BASE
                 export NOTEBOOK_DOMAIN="${{ env.NOTEBOOK_DOMAIN }}"
                 export NOTEBOOK_PUBLIC_URL_BASE="https://${{ env.NOTEBOOK_DOMAIN }}"
                 # report-host is the second service on this same VM, behind the
                 # same Caddy on its own hostname.
-                export REPORT_IMAGE="${{ steps.tags.outputs.report }}"
+                export REPORT_IMAGE="${{ steps.images.outputs.report }}"
                 export REPORT_DOMAIN="${{ env.REPORT_DOMAIN }}"
                 export REPORT_PUBLIC_URL_BASE="https://${{ env.REPORT_DOMAIN }}"
                 export REPORT_MCP_URL="${{ steps.seam.outputs.url }}"
@@ -295,7 +342,7 @@ jobs:
               # refresh, or a failed `up -d` all reported success. Every
               # "refresh failed" comment below was aspirational until now.
               set -euo pipefail
-              export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
+              export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
               # sudo -E keeps the SSH user HOME, so docker would look for
               # Artifact Registry credentials in ~/.docker (none there). Point
               # at root docker config, where the boot startup script ran
@@ -392,7 +439,7 @@ jobs:
           # workers VM is stopped, the SSH command below fails and so does this step.
           gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
             --tunnel-through-iap --command '
-              export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
+              export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
               export SMOKE_DEPLOY_SHA="${{ inputs.sha }}"
               export DOCKER_CONFIG=/root/.docker
               cd /etc/daimon
@@ -432,7 +479,7 @@ jobs:
           verify() {
             gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
               --tunnel-through-iap --command '
-                export DAIMON_IMAGE="${{ steps.tags.outputs.daimon }}"
+                export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
                 export DOCKER_CONFIG=/root/.docker
                 cd /etc/daimon
                 sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify
@@ -445,3 +492,12 @@ jobs:
             sleep 60
             verify
           fi
+
+      - name: Mark tested staging images promotable
+        if: steps.images.outputs.prebuilt == 'true'
+        run: |
+          # promote.yml recognizes only the canonical short-SHA daimon tag.
+          # Publish that tag last, after all three images and deploy gates pass.
+          gcloud artifacts docker tags add "${{ steps.images.outputs.notebook }}" "${{ steps.tags.outputs.notebook }}" --quiet
+          gcloud artifacts docker tags add "${{ steps.images.outputs.report }}" "${{ steps.tags.outputs.report }}" --quiet
+          gcloud artifacts docker tags add "${{ steps.images.outputs.daimon }}" "${{ steps.tags.outputs.daimon }}" --quiet

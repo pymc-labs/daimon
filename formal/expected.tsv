@@ -49,6 +49,8 @@ approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre
 # ---- test schema cleanup ----
 test_schema_cleanup	SchemaCleanup	SchemaCleanupSafe	clean	9	-	face transaction rollback completes before test schema drop
 test_schema_cleanup	SchemaCleanup	SchemaCleanupUnsafe	violates:NoDropDuringFaceTransaction	6	-	old fixture starts table drop while queued face still holds a transaction
+ci_deploy_gate	CiDeployGate	CiDeployGateSafe	clean	10	-	candidate publish may precede tests but SHA tag waits for staging verdict
+ci_deploy_gate	CiDeployGate	CiDeployGateUnsafe	violates:PromotableOnlyAfterStagingPass	7	-	early SHA tag permits promotion while tests are pending
 # ---- scheduler ----
 privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	49	-	durable local commit keeps upstream work across crashes and failures
 privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
