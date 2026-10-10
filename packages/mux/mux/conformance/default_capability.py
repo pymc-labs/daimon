@@ -7,13 +7,14 @@ claim about live model quality or about arguments omitted from a replay tape.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from types import MappingProxyType
+from typing import Literal, Protocol
 
 from mux.conformance.recording import Recorder, RecordingError, Replay, RequestMetadata
-from mux.conformance.runner import ConformanceFailure, PendingReason, Result, require
+from mux.conformance.runner import ConformanceFailure, PendingKind, PendingReason, Result, require
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.events import (
     AgentMessagePayload,
@@ -25,7 +26,7 @@ from mux.contracts.events import (
     TurnEndedPayload,
     UserMessagePayload,
 )
-from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Scope, SkillRef
+from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import (
@@ -51,15 +52,20 @@ DEFAULT_SKILLS = (
     "exploratory-data-analysis",
     "eda-storytelling",
 )
-DEFAULT_TOOLS = ("bash", "read", "edit", "grep", "glob", "write")
+BuiltinCapability = Literal["bash", "read", "edit", "grep", "glob", "write"]
+DEFAULT_TOOLS: tuple[BuiltinCapability, ...] = ("bash", "read", "edit", "grep", "glob", "write")
 MCP_TOOLS = frozenset({"client_context", "list_events"})
 BASH_RESULT = "f1-bash-ok"
 FINAL_MESSAGE = "f1-default-capability-ok"
 PROMPT = (
     "Load the attached file-handling skill by reading its entire SKILL.md. "
     "Call daimon-mcp client_context and list_events (read-only). "
+    "In this fresh disposable workspace, write f1.txt containing f1-initial, "
+    "edit it to f1-edited, read it back (f1-edited), grep with line numbers "
+    "(1:f1-edited), and glob its basename (f1.txt). Use the mapped tool for "
+    "each capability; return each operation's successful tool result. "
     "Run bash printf f1-bash-ok. Finish with f1-default-capability-ok. "
-    "Do not modify files, services or workspace state."
+    "Modify only f1.txt; do not modify services or other workspace files."
 )
 
 
@@ -96,6 +102,15 @@ class DefaultCapabilityAdapter:
     environment: ResourceRef | None
     transport: DefaultCapabilityTransport
     pending: PendingReason | None = None
+    builtin_mapping: Mapping[BuiltinCapability, ToolSpec] = field(
+        default_factory=lambda: {
+            name: ToolSpec(name=name, kind="builtin") for name in DEFAULT_TOOLS
+        }
+    )
+    atomic_revision_pin: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "builtin_mapping", MappingProxyType(dict(self.builtin_mapping)))
 
 
 def request_metadata(session: ResourceRef, *, stream: bool) -> RequestMetadata:
@@ -166,9 +181,19 @@ def check_agent(actual: AgentSpec, desired: AgentSpec) -> None:
         )
 
 
-def check_turn(events: tuple[Event, ...], session: ResourceRef, instructions: str) -> None:
+def check_turn(
+    events: tuple[Event, ...],
+    session: ResourceRef,
+    instructions: str,
+    builtin_mapping: Mapping[BuiltinCapability, ToolSpec] | None = None,
+) -> None:
     """Evidence comes from authoritative paired records, never text claims."""
     require(bool(events), "F1: turn produced no events")
+    mapping = (
+        builtin_mapping
+        if builtin_mapping is not None
+        else {name: ToolSpec(name=name, kind="builtin") for name in DEFAULT_TOOLS}
+    )
     calls: dict[str, ToolUsePayload] = {}
     results: dict[str, ToolResultPayload] = {}
     running: list[StatusRunningPayload] = []
@@ -195,6 +220,8 @@ def check_turn(events: tuple[Event, ...], session: ResourceRef, instructions: st
             event.authority in ("record", "reconciled"), "F1: preview is not authoritative evidence"
         )
         require(not terminal, "F1: records after root completion")
+        if running:
+            require(event.turn_id == running[0].root_turn_id, "F1: event belongs to another root")
         payload = event.typed_payload()
         if event.type == "user.message":
             inputs += 1
@@ -222,9 +249,12 @@ def check_turn(events: tuple[Event, ...], session: ResourceRef, instructions: st
                     and payload.mcp_server == "daimon-mcp"
                     and payload.tool_name in MCP_TOOLS
                 ) or (
-                    payload.executor == "agent"
-                    and payload.mcp_server is None
-                    and payload.tool_name in ("read", "bash")
+                    payload.mcp_server is None
+                    and any(
+                        payload.tool_name == tool.name
+                        and payload.executor == ("host" if tool.kind == "custom" else "agent")
+                        for tool in mapping.values()
+                    )
                 )
                 require(allowed, "F1: unexpected/mutating tool or wrong executor/server")
                 calls[payload.call_id] = payload
@@ -242,6 +272,10 @@ def check_turn(events: tuple[Event, ...], session: ResourceRef, instructions: st
                 results[payload.call_id] = payload
         elif event.type == "agent.message":
             require(len(running) == 1, "F1: message outside root turn")
+            require(
+                len(calls) >= 9 and set(calls) == set(results),
+                "F1: final message precedes capabilities",
+            )
             require(isinstance(payload, AgentMessagePayload), "F1: untyped final message")
             if isinstance(payload, AgentMessagePayload):
                 messages.append(payload)
@@ -261,20 +295,47 @@ def check_turn(events: tuple[Event, ...], session: ResourceRef, instructions: st
     require(set(calls) == set(results), "F1: tool invocation lacks a result")
     used_mcp = {c.tool_name for c in calls.values() if c.executor == "mcp"}
     require(used_mcp == set(MCP_TOOLS), "F1: two distinct read-only MCP tools required")
-    require(
-        any(
-            c.tool_name == "read" and results[id_].content == (TextPart(text=instructions),)
-            for id_, c in calls.items()
-        ),
-        "F1: pinned skill instructions were not loaded",
+    claimed: set[str] = set()
+    read_call: str | None = None
+    probes: tuple[tuple[BuiltinCapability, str], ...] = (
+        ("read", instructions),
+        ("bash", BASH_RESULT),
+        ("read", "f1-edited"),
+        ("grep", "1:f1-edited"),
+        ("glob", "f1.txt"),
     )
-    require(
-        any(
-            c.tool_name == "bash" and results[id_].content == (TextPart(text=BASH_RESULT),)
-            for id_, c in calls.items()
-        ),
-        "F1: successful bash invocation required",
-    )
+    for capability, text in probes:
+        tool = mapping[capability]
+        matches = tuple(
+            id_
+            for id_, call in calls.items()
+            if id_ not in claimed
+            and call.tool_name == tool.name
+            and call.executor == ("host" if tool.kind == "custom" else "agent")
+            and results[id_].content == (TextPart(text=text),)
+        )
+        require(bool(matches), "F1: mapped skill/read/bash/grep/glob capability not exercised")
+        claimed.add(matches[0])
+        if text == "f1-edited":
+            read_call = matches[0]
+    ordered = tuple(calls)
+    previous_write = -1
+    for capability in ("write", "edit"):
+        tool = mapping[capability]
+        matches = tuple(
+            id_
+            for id_, call in calls.items()
+            if id_ not in claimed
+            and call.tool_name == tool.name
+            and call.executor == ("host" if tool.kind == "custom" else "agent")
+            and previous_write < ordered.index(id_) < ordered.index(read_call or "")
+        )
+        require(
+            bool(matches),
+            "F1: distinct successful mapped write/edit calls before readback required",
+        )
+        claimed.add(matches[0])
+        previous_write = ordered.index(matches[0])
     require(
         len(messages) == 1
         and messages[0].complete
@@ -289,6 +350,27 @@ async def scenario(
     if adapter.pending is not None:
         return Result("F1", "pending", (adapter.pending.detail,), adapter.pending)
     instructions = skill_text(manifest)
+    missing = tuple(name for name in DEFAULT_TOOLS if name not in adapter.builtin_mapping)
+    if missing:
+        reason = PendingReason(
+            PendingKind.CAPABILITY_UNAVAILABLE, "default builtin capability mapping is incomplete"
+        )
+        return Result("F1", "pending", (reason.detail,), reason)
+    require(
+        set(adapter.builtin_mapping) == set(DEFAULT_TOOLS),
+        "F1: unexpected builtin capability mapping",
+    )
+    tools: list[ToolSpec] = []
+    for name in DEFAULT_TOOLS:
+        tool = adapter.builtin_mapping[name]
+        require(
+            tool.kind in ("builtin", "custom") and bool(tool.name),
+            "F1: invalid builtin capability route",
+        )
+        same_name = tuple(existing for existing in tools if existing.name == tool.name)
+        require(not same_name or same_name == (tool,), "F1: conflicting mapped tool definitions")
+        if not same_name:
+            tools.append(tool)
     ma, scope, transport = adapter.driver, adapter.scope, adapter.transport
     pins: list[SkillRef] = []
     for named in manifest.skills:
@@ -321,8 +403,7 @@ async def scenario(
         name=manifest.name,
         system=manifest.system,
         model=adapter.model,
-        tools=tuple(ToolSpec(name=name, kind="builtin") for name in manifest.builtin_tools)
-        + (ToolSpec(name="daimon-mcp", kind="mcp_toolset"),),
+        tools=tuple(tools) + (ToolSpec(name="daimon-mcp", kind="mcp_toolset"),),
         mcp_servers=(manifest.mcp,),
         skills=tuple(pins),
     )
@@ -339,7 +420,7 @@ async def scenario(
         scope,
         SessionSpec(
             agent=agent.ref,
-            agent_revision=agent.revision,
+            agent_revision=agent.revision if adapter.atomic_revision_pin else Revision(local=0),
             environment=adapter.environment,
             config_revision=0,
         ),
@@ -360,16 +441,26 @@ async def scenario(
     events = tuple([event async for event in ma.events.stream(scope, session.ref)])
     if recorder is not None:
         recorder.record(request_metadata(session.ref, stream=True), events)
-    check_turn(events, session.ref, instructions)
+    check_turn(events, session.ref, instructions, adapter.builtin_mapping)
     transport.assert_consumed()
+    gaps = (
+        ()
+        if adapter.atomic_revision_pin
+        else (
+            "capability gap: atomic native agent revision pin unavailable; "
+            "session provisioned unpinned; no CAS claim",
+        )
+    )
     return Result(
         "F1",
         "pass",
         (
             "eleven exact skill uploads and immutable pins",
             "default toolset and daimon-mcp deployment/readback",
-            "one root: pinned skill read, two read-only MCP tools, bash and completion",
-        ),
+            "one root: skill read, two read-only MCP tools, "
+            "six mapped builtin capabilities and completion",
+        )
+        + gaps,
     )
 
 
