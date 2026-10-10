@@ -12,22 +12,11 @@ from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import Operation
 from mux.contracts.resources import CredentialBinding, CredentialInfo, Vault
 from mux.drivers.openai._common import Context, objects, owned, page_of, query, revision, text
+from mux.drivers.openai.secret_value import RedactedCredential
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ProviderError, ScopeViolation
 
 SecretResolver = Callable[[Scope, str], Awaitable[str]]
-
-
-class _Credential(str):
-    """Keep native JSON intact while redacting the pinned SDK's options repr.
-
-    The SDK logs its Python request-options mapping at DEBUG. JSON encoding
-    preserves this string's actual value; repr of that mapping must not.
-    The real SDK log and wire behavior are tested together.
-    """
-
-    def __repr__(self) -> str:
-        return repr("[redacted]")
 
 
 def metadata_credential(raw: Object, vault_id: str) -> CredentialInfo:
@@ -194,7 +183,9 @@ class OpenAIVaults:
         auth: Object = {
             "type": credential.kind,
             "mcp_server_url": credential.mcp_server_url,
-            "token" if credential.kind == "static_bearer" else "access_token": _Credential(secret),
+            "token" if credential.kind == "static_bearer" else "access_token": RedactedCredential(
+                secret
+            ),
         }
         raw = await self._c.call(
             "POST",

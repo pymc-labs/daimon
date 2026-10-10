@@ -510,3 +510,37 @@ and browser authentication separate. Provider codecs supply validated native
 response objects and send the chosen body through claimed mutations; the mux
 input contract has no arbitrary native-response bypass. Unsupported
 credential forms remain refused.
+
+The opt-in OpenAI driver accepts `mcp_secrets(scope, credential_ref, destination)`
+for authenticated remote MCP connections. The host must authorize the reference
+and exact HTTPS destination for that tenant/account before returning a bearer.
+Agent definitions store reference intent and the closed `allowed_tools`/`required`
+policy; the driver resolves each session's credential immediately before its
+create request, preserving any admitted model and delegation controls. The native
+session transport carries the bearer with a redacted SDK debug representation.
+Missing resolvers, changed destinations/policies and mixed inline/vault auth
+refuse before a session write. Omitted authentication keeps the existing request
+shape. See the [OpenAI Agents MCP protocol](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).
+Offline SDK/loopback proofs cover discovery, owned reads and revoked credentials;
+they do not certify live model execution or HTTPS service reachability.
+
+The authenticated OpenAI MCP edge validates every saved native MCP tool before
+any scoped credential resolver runs, including tools absent from the reference
+map and agents with no references. Inline authorization, native credential
+bindings and mixed authentication refuse before session creation. Only a
+resolver value bound to the caller and exact destination enters the ephemeral
+session request; actual SDK DEBUG logs retain its redacted representation.
+Credential-free anonymous-only and custom tools preserve their existing request
+bytes. All MCP destinations require HTTPS without userinfo, query strings,
+fragments or malformed authority. A closed native tool/transport shape refuses
+headers, authentication and undeclared credential carriers before resolution.
+Every MCP tool copied into an authenticated session override must match its own
+scoped resolver binding exactly; mixed bound/anonymous MCP definitions refuse
+before agent creation. Authenticated sessions accept exactly one resolver-bound MCP server. Non-MCP
+entries have exact type and key allowlists: `web_search`, `tool_search` and
+`programmatic_tool_calling` carry only `type`; `function` permits only `type`,
+`name`, `description`, `parameters` and boolean `strict`. Unknown types (including
+MCP spelling variants), extra fields and multiple bindings refuse before any
+resolver or session write. The override rebuilds these admitted tools and the
+bound MCP connection; it never copies a saved tool object verbatim. Multiple
+bound servers are deferred under RULES 24.

@@ -21,6 +21,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
+from mux.drivers.openai.mcp_auth import MCPSecretResolver, session_tools
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
 from mux.drivers.openai.session_controls import SessionControls
@@ -40,9 +41,11 @@ class OpenAISessions:
         binding_lookup: BindingLookup | None = None,
         *,
         controls: SessionControls | None = None,
+        mcp_secrets: MCPSecretResolver | None = None,
     ) -> None:
         self._c, self._binding_lookup = context, binding_lookup
         self._controls = controls if controls is not None else SessionControls()
+        self._mcp_secrets = mcp_secrets
 
     def _binding(self, scope: Scope, raw: Object) -> ProviderBinding:
         id_ = text(raw["id"])
@@ -245,6 +248,11 @@ class OpenAISessions:
             body["input"] = [
                 {"role": "user", "content": content(initial.content, self._c.profile_id)}
             ]
+        tools = await session_tools(
+            scope, agent, self._c, self._mcp_secrets, vaults_attached=bool(vaults)
+        )
+        if tools is not None:
+            body["agent"] = {**object_json(body.get("agent") or {}), "tools": tools}
         return await self._decode(
             scope, await self._c.call("POST", "/agents/sessions", body=body, key=key)
         )
