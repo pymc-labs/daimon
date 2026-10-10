@@ -1236,3 +1236,30 @@ class TestReplayedMessagesAreUntrusted:
         assert [child.tag for child in envelope] == ["message"]
         assert envelope[0].text == _INJECTION, "the message arrives verbatim, as text"
         assert result.count("<user_query") == 1, "only the real request is a user_query"
+
+
+class TestDeliveryHint:
+    """The trusted <delivery> note: what reaches the agent, so it never denies receipt."""
+
+    @pytest.mark.asyncio
+    async def test_first_thread_turn_explains_delivery(self) -> None:
+        trigger = _make_message(msg_id=10, content="<@999> did you get my earlier message?")
+        thread = _make_thread([trigger])
+
+        result, _ = await build_context_xml(thread, trigger)
+
+        assert "<delivery hint=" in result, "a session's first turn says what reaches the agent"
+        assert "other threads are separate conversations" in result
+        assert "never say it did not reach you" in result
+
+    @pytest.mark.asyncio
+    async def test_channel_mention_explains_delivery_outside_untrusted_history(self) -> None:
+        trigger = _make_message(msg_id=10, content="<@999> did you see my last ping?")
+        channel = _make_text_channel([trigger])
+        thread = _make_thread([trigger], thread_id=900, parent_id=42)
+
+        result, _ = await build_channel_context_xml(channel, trigger, thread=thread)
+
+        assert result.index("<delivery hint=") < result.index("<channel_context"), (
+            "the note is trusted context, not inside the untrusted channel history"
+        )

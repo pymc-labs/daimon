@@ -79,3 +79,61 @@ def is_participation_candidate(
     if deployment_mode is ParticipationMode.DISABLED or author_is_bot or bot_mentioned:
         return False
     return in_thread and guild_id is not None
+
+
+def is_unmentioned_reply_hint_candidate(
+    *,
+    enabled: bool,
+    author_is_bot: bool,
+    author_id: str,
+    author_is_webhook: bool,
+    bot_mentioned: bool,
+    in_bot_owned_thread: bool,
+    mentions_someone_else: bool,
+    is_plain_message: bool,
+    self_user_id: str | None = None,
+    qa_bot_user_ids: Collection[str] = (),
+) -> bool:
+    """Pre-DB gate for the hint that an unmentioned reply in daimon's thread is not answered.
+
+    Only a person's plain message in a thread daimon opened qualifies. A
+    message that @mentions someone else (a user, a role, everyone) is people
+    talking to each other, not a missed request, so it gets no hint. Bots get
+    none either, except allow-listed QA drivers standing in for a person.
+    """
+    if not enabled or bot_mentioned or author_is_webhook:
+        return False
+    if not (in_bot_owned_thread and is_plain_message) or mentions_someone_else:
+        return False
+    if author_is_bot:
+        return _is_allowed_bot_author(
+            author_id=author_id, self_user_id=self_user_id, qa_bot_user_ids=qa_bot_user_ids
+        )
+    return True
+
+
+class HintCooldown:
+    """At most one hint per key per `cooldown_s`, kept in memory.
+
+    `claim` checks and stamps in one synchronous step, so two messages racing
+    in the same thread cannot both win.
+    """
+
+    _PRUNE_AT: int = 4096
+
+    def __init__(self, cooldown_s: float) -> None:
+        self._cooldown_s = cooldown_s
+        self._last: dict[int, float] = {}
+
+    def claim(self, key: int, *, now: float) -> bool:
+        last = self._last.get(key)
+        if last is not None and now - last < self._cooldown_s:
+            return False
+        if len(self._last) >= self._PRUNE_AT:
+            self._last = {k: t for k, t in self._last.items() if now - t < self._cooldown_s}
+        self._last[key] = now
+        return True
+
+    def release(self, key: int) -> None:
+        """Give a claim back when the hint was not shown after all."""
+        self._last.pop(key, None)

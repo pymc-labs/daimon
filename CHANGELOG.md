@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord acknowledges mentions with 👀 before resolving agents and environments, and clears it when the turn settles. Queued follow-up ⌛ markers and Slack 👀 markers also clear on completion, failure or cancellation, regardless of completion pings.
 - Routine digests now deliver the full final reply across Discord, Slack and Teams messages, including creator fallbacks. The saved last-output preview shows the actual tail and marks truncation.
 
+- On Discord, the first reply in Daimon's thread that doesn't @mention Daimon gets a 🔔 reaction, once per thread a day, as a hint that only a mention continues the conversation. The reply itself is still not answered. Turn it off with `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=false`.
+- Daimon no longer tells you an earlier message "never reached me" when it was answered in another thread or didn't mention Daimon. It now says it only sees messages that mention it and that other threads are separate conversations.
 - A rejected notebook re-publish keeps the previous source, so its link still opens the original notebook after an idle stop or host restart.
 - When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
 - Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.

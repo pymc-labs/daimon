@@ -76,6 +76,25 @@ def _render_location(thread: discord.Thread) -> list[str]:
     ]
 
 
+#: Why the agent may not see a message someone says they sent. Without it the
+#: agent, asked about an earlier mention answered in a sibling thread, reads
+#: the gap in its own context as a delivery failure and tells the user the
+#: message "never reached me", which is false: every thread is its own session.
+_DELIVERY_HINT = (
+    "a message reaches you as a request only when it @mentions you or replies to one of your "
+    "posts; you see this thread's other messages as history, but every thread is a separate "
+    "conversation with its own session, so you cannot see what was said or answered in other "
+    "threads. If asked about an earlier message you have no "
+    "record of, say you only see messages that mention you and that other threads are "
+    "separate conversations; never say it did not reach you or that you did not receive it"
+)
+
+
+def _render_delivery() -> str:
+    """The trusted note on what reaches the agent, emitted on a session's first turn."""
+    return f"<delivery hint={quoteattr(_DELIVERY_HINT)}/>"
+
+
 def _render_message(
     msg: discord.Message,
     bot_user_id: int | None,
@@ -229,6 +248,7 @@ async def build_context_xml(
     lines: list[str] = [
         "<context>",
         *_render_location(thread),
+        _render_delivery(),
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]
@@ -399,6 +419,7 @@ async def build_channel_context_xml(
 
     lines: list[str] = [
         *_render_location(thread),
+        _render_delivery(),
         render_keys_element(key_names),
     ]
     lines = [line for line in lines if line]

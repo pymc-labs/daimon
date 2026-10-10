@@ -388,6 +388,24 @@ class DiscordSettings(BaseModel):
             "finishes; a failed creation is answered with a visible error reply."
         ),
     )
+    unmentioned_reply_hint: bool = Field(
+        default=True,
+        description=(
+            "React with 🔔 to a person's reply that does not @mention the bot in a thread the "
+            "bot opened, as a hint that only mentions start a turn. The message itself is "
+            "never answered. At most once per thread per unmentioned_reply_hint_cooldown_h, "
+            "never on a message that mentions someone else, never to bots, and never while "
+            "the thread is followed (thread participation on)."
+        ),
+    )
+    unmentioned_reply_hint_cooldown_h: float = Field(
+        default=24.0,
+        gt=0,
+        description=(
+            "Hours before the unmentioned-reply hint may be shown again in the same thread. "
+            "Kept in memory, so a restart allows one more."
+        ),
+    )
     max_concurrent_turns_per_tenant: int = Field(
         default=3,
         description=(
