@@ -72,6 +72,10 @@ async def backfill_credential_guidance(
         updated += 1
         _log.info("agents.guidance_backfilled", agent_id=agent.id, tenant_id=str(tenant_id))
 
+    # Quiet when nothing changed: this runs inside CLI commands whose stdout
+    # is JSON, and an every-run summary line would corrupt it.
+    if not updated and not failed:
+        return
     _log.info(
         "agents.guidance_backfill_done",
         tenant_id=str(tenant_id),
