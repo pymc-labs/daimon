@@ -3065,6 +3065,7 @@
             'default': None,
           }),
           'origin_context_id': dict({
+            'default': '',
             'type': 'string',
           }),
           'repo_name': dict({
@@ -3098,9 +3099,6 @@
             'type': 'string',
           }),
         }),
-        'required': list([
-          'origin_context_id',
-        ]),
         'type': 'object',
       }),
     }),
@@ -4304,6 +4302,7 @@
             'default': None,
           }),
           'origin_context_id': dict({
+            'default': '',
             'type': 'string',
           }),
           'repo_name': dict({
@@ -4311,7 +4310,6 @@
           }),
         }),
         'required': list([
-          'origin_context_id',
           'repo_name',
         ]),
         'type': 'object',
@@ -5676,6 +5674,7 @@
             'default': None,
           }),
           'origin_context_id': dict({
+            'default': '',
             'type': 'string',
           }),
           'repo_name': dict({
@@ -5683,7 +5682,6 @@
           }),
         }),
         'required': list([
-          'origin_context_id',
           'repo_name',
         ]),
         'type': 'object',

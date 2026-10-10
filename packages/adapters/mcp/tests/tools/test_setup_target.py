@@ -481,3 +481,49 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
         "the refusal must say configuration is still available, or the model stops trying"
     )
     assert "/agent-setup" not in message, "the refusal must name a reachable control, not a path"
+
+
+async def test_missing_origin_uses_the_callers_only_running_turn(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A model that drops origin_context_id still reaches its own single turn."""
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, build_fake_anthropic(MARouter().dispatch))
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_daimon"),
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="parent",
+        thread_id="thread-one",
+        responder_ma_agent_id="agent_daimon",
+        responder_name="Daimon",
+        role=Role.USER,
+    ) as first:
+        assert (await require_turn_origin(runtime, auth, "")).id == first.id
+        # A second running turn with the same agent makes it ambiguous: refuse.
+        async with turn_origin(
+            committing_sessionmaker,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="parent",
+            thread_id="thread-two",
+            responder_ma_agent_id="agent_daimon",
+            responder_name="Daimon",
+            role=Role.USER,
+        ):
+            with pytest.raises(ToolError, match="origin_context_id"):
+                await require_turn_origin(runtime, auth, "")

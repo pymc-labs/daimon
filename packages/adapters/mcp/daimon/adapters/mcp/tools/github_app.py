@@ -66,7 +66,8 @@ async def _post_app_install_link_impl(
     if slug is None:
         raise ToolError(
             "this deployment has no GitHub App install link configured — "
-            "tell the user an operator must configure it"
+            "for repo access call github_connect instead, which posts the Connect GitHub "
+            "button and needs no install link"
         )
     post_button = {
         "slack": _post_slack_app_install_button_impl,
