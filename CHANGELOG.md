@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Agents created before the Connect GitHub change get the new guidance on the next restart.
 - Agents no longer suggest pasting a GitHub token. When a private repo can't be read, they offer the Connect GitHub link. Agents that already use a saved token keep working.
+- QA reports model verification as n/a PENDING on confirmed pre-admission skipped turns, preserving product silence failures and recording zero spend.
+
 - Approval cards still up during a Discord restart are retired before the client closes, so their buttons no longer stay live.
 
 ### Changed

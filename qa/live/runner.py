@@ -259,7 +259,16 @@ class Executor:
             for turn in result.turns:
                 try:
                     turn.usage = self.backend.usage(turn)
-                    if not turn.usage.models and harness_failed:
+                    if turn.usage.skipped_reason and not turn.usage.models and turn.usage.usd == 0:
+                        result.checks.append(
+                            Check(
+                                "model",
+                                "PENDING",
+                                "n/a: Daimon skipped this turn: " + turn.usage.skipped_reason,
+                                turn.number,
+                            )
+                        )
+                    elif not turn.usage.models and harness_failed:
                         result.checks.append(
                             Check(
                                 "model",

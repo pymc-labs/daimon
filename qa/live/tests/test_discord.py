@@ -516,3 +516,60 @@ def test_thread_name_refuses_unverified_metadata(
     driver.thread_metadata[field] = value
     with pytest.raises(Pending, match="readback"):
         backend.thread_name(Turn(1, "trigger", "parent", utcnow(), thread_id="thread"))
+
+
+@pytest.mark.parametrize("mismatch", [None, "guild", "channel", "time", "event", "missing"])
+def test_model_skip_requires_positive_scoped_pre_admission_log(
+    monkeypatch: pytest.MonkeyPatch, backend: DiscordBackend, mismatch: str | None
+) -> None:
+    from datetime import timedelta
+
+    start = utcnow()
+    turn = Turn(
+        1,
+        "123",
+        "parent",
+        start,
+        ended_at=start + timedelta(seconds=20),
+        guild_id=backend.target.guild_id,
+    )
+    payload: Message = {
+        "event": "turn.skipped.writers_none",
+        "guild_id": turn.guild_id,
+        "channel_id": "parent",
+        "timestamp": (start + timedelta(seconds=1)).isoformat(),
+    }
+    if mismatch == "guild":
+        payload["guild_id"] = "foreign"
+    if mismatch == "channel":
+        payload["channel_id"] = "foreign"
+    if mismatch == "event":
+        payload["event"] = "turn.started"
+    if mismatch == "time":
+        payload["timestamp"] = (start - timedelta(seconds=1)).isoformat()
+    queries: list[str] = []
+
+    def logs(query: str) -> list[Message]:
+        queries.append(query)
+        return [] if mismatch == "missing" else [{"jsonPayload": payload}]
+
+    monkeypatch.setattr(backend, "_read_logs", logs)
+    monkeypatch.setattr(backend, "_wait_for_logs", lambda turn: None)
+    usage = backend._skipped_usage(turn)
+    assert len(queries) == 1
+    assert all(
+        part in queries[0]
+        for part in [
+            "timestamp>=",
+            "timestamp<=",
+            "guild_id",
+            "channel_id",
+            "turn.skipped.writers_none",
+        ]
+    )
+    if mismatch is None:
+        assert usage and usage.usd == 0 and usage.models == []
+        assert usage.skipped_reason == "turn.skipped.writers_none"
+        assert usage.skip_evidence["channel_id"] == "parent"
+    else:
+        assert usage is None

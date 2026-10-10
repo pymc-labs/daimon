@@ -48,6 +48,8 @@ class Usage:
     usd: float | None = None
     source: str = "unavailable"
     models: list[str] = field(default_factory=list[str])
+    skipped_reason: str | None = None
+    skip_evidence: Message = field(default_factory=dict[str, JsonValue])
 
 
 @dataclass
