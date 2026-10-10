@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import subprocess
@@ -22,6 +23,7 @@ from mux.conformance.default_capability import (
     BASH_RESULT,
     DEFAULT_TOOLS,
     FINAL_MESSAGE,
+    MCP_TOOLS,
     PROMPT,
     DefaultCapabilityAdapter,
     DefaultCapabilityReplayEvents,
@@ -120,7 +122,7 @@ def spec(raw) -> AgentSpec:
                 policy(
                     next((c for c in tool.get("configs", ()) if c["name"] == name), default_config)
                 )
-                for name in ("client_context", "list_events")
+                for name in ("describe_agent", "list_my_sessions")
             ]
             if all(enabled for enabled, _ in policies):
                 tools.append(
@@ -308,8 +310,8 @@ def native_turn(expected: DefaultManifest):
     ]
     operations = (
         ("read", {"file_path": "/skills/file-handling/SKILL.md"}, skill_text(expected), None),
-        ("client_context", {}, "offline-client-context", "daimon-mcp"),
-        ("list_events", {}, "offline-events", "daimon-mcp"),
+        ("describe_agent", {}, "offline-agent-description", "daimon-mcp"),
+        ("list_my_sessions", {}, "offline-my-sessions", "daimon-mcp"),
         ("write", {"file_path": "f1.txt", "content": "f1-initial"}, "written", None),
         (
             "edit",
@@ -377,6 +379,28 @@ async def record(path: Path) -> None:
     if result.status != "pass":
         raise RuntimeError(result.evidence)
     recorder.save(path, fixture_id="F1", provider=MODEL.provider, model=MODEL.id, complete=True)
+
+
+def test_required_mcp_tools_are_registered_no_argument_agent_reads() -> None:
+    catalog = (ROOT / "docs/mcp-tools.md").read_text()
+    module = ast.parse(
+        (ROOT / "packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py").read_text()
+    )
+    functions = {
+        node.name: node for node in ast.walk(module) if isinstance(node, ast.AsyncFunctionDef)
+    }
+    assert {"describe_agent", "list_my_sessions"} == MCP_TOOLS
+    for name in MCP_TOOLS:
+        assert f"| `{name}` | agent tokens only |" in catalog
+        function = functions[name]
+        assert [arg.arg for arg in function.args.args] == ["ctx"]
+        assert not function.args.kwonlyargs and function.args.vararg is function.args.kwarg is None
+        assert any(
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr == "tool"
+            for decorator in function.decorator_list
+        )
 
 
 async def test_scripted_default_agent_turn_and_repeatable_normalized_replay(tmp_path: Path) -> None:
@@ -511,6 +535,7 @@ CORRUPTIONS = (
     "skill_text",
     "missing_skill_read",
     "missing_mcp",
+    "nonexistent_mcp",
     "duplicate_mcp_name",
     "foreign_server",
     "bash_result",
@@ -558,7 +583,9 @@ def corrupt(data, fault: str) -> None:
         events.remove(uses[f"call_f1_{index}"])
         events.remove(results[f"call_f1_{index}"])
     elif fault == "duplicate_mcp_name":
-        uses["call_f1_2"]["payload"]["tool_name"] = "client_context"
+        uses["call_f1_2"]["payload"]["tool_name"] = "describe_agent"
+    elif fault == "nonexistent_mcp":
+        uses["call_f1_1"]["payload"]["tool_name"] = "client_context"
     elif fault == "foreign_server":
         uses["call_f1_1"]["payload"]["mcp_server"] = "other"
     elif fault == "failed_edit":
@@ -675,7 +702,14 @@ async def test_null_pre_running_user_turn_id_remains_legal(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "fault", ("failed_edit", "null_running_start", "mismatched_running_start", "foreign_user_start")
+    "fault",
+    (
+        "failed_edit",
+        "nonexistent_mcp",
+        "null_running_start",
+        "mismatched_running_start",
+        "foreign_user_start",
+    ),
 )
 def test_corrupt_f1_checks_survive_python_optimization(tmp_path: Path, fault: str) -> None:
     path = tmp_path / "optimized.json"
