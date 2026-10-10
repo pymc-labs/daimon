@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2136,
+  "files_scanned": 2135,
   "parse_errors": [],
   "calls": [
     {
@@ -1411,20 +1411,6 @@
         "type"
       ],
       "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/turn/session_identity.py",
-      "line": 45,
-      "end": 45,
-      "scope": "check_session_agent",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "anthropic.beta.sessions.retrieve(mapping.ma_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "observed.agent",
-        "observed.agent.id"
-      ]
     },
     {
       "file": "packages/core/tests/contracts/test_agents.py",
@@ -5229,6 +5215,19 @@
       "call": "legacy.beta.files.delete('file_ttl')",
       "request_keys": [],
       "response_access": []
+    },
+    {
+      "file": "packages/core/tests/test_session_identity_port_requests.py",
+      "line": 88,
+      "end": 88,
+      "scope": "test_identity_native_read_preserves_minimal_sdk_reply_and_authorized_scope",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "legacy.beta.sessions.retrieve('sess_identity')",
+      "request_keys": [],
+      "response_access": [
+        "original.model_dump"
+      ]
     },
     {
       "file": "packages/core/tests/test_session_port_requests.py",
@@ -14244,6 +14243,15 @@
     {
       "file": "packages/core/daimon/core/turn/session_identity.py",
       "line": 8,
+      "module": "anthropic._models",
+      "names": [
+        "construct_type_unchecked"
+      ],
+      "category": "production"
+    },
+    {
+      "file": "packages/core/daimon/core/turn/session_identity.py",
+      "line": 9,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSession"

@@ -308,3 +308,7 @@ a native session revision precondition and adds an explicit capability gap to a
 passing result; immutable skill pins remain mandatory. Replay checks pairings
 and recorded results, while free-form tool arguments remain omitted. See
 `mux/conformance/README.md` for the contract and offline reproduction command.
+dispatch. Responder identity uses `anthropic.session_reads@1` with the authorized
+row's tenant/account scope, retaining the SDK response for configuration snapshot
+backfill, including null channel and thread metadata, without binding projection
+or an additional read.
