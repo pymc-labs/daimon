@@ -8,10 +8,10 @@ additionally claims the row exactly once and starts a billed turn, so it gets
 its own `discord.ui.DynamicItem` template (`SUBMIT_CUSTOM_ID_TEMPLATE`) and
 its own module rather than sharing `WizardNavButton`'s dispatch.
 
-Three things are load-bearing about `callback`'s shape:
+Three things are load-bearing about the submit dispatch:
 
-1. **The acknowledgement comes first, the turn second, and the turn is never
-   awaited from inside `callback`.** discord.py wraps a `DynamicItem`
+1. **The acknowledgement comes before the row lookup and the turn, and the
+   turn is never awaited from inside `callback`.** discord.py wraps a `DynamicItem`
    callback in a bare catch-and-log (verified against the installed
    `discord/ui/view.py`, same as every other class in this adapter's short
    list of persistent dynamic items). A turn can run for minutes; awaiting
@@ -89,6 +89,7 @@ from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard import (
     _authorize_tap,  # pyright: ignore[reportPrivateUsage]  # shared requester-only gate the sibling dispatch classes use -- reused verbatim so authorization logic exists in exactly one place
     _load_row,  # pyright: ignore[reportPrivateUsage]  # shared row loader the sibling dispatch classes use -- reused verbatim
+    _reconstruct_row,  # pyright: ignore[reportPrivateUsage]
     _reply_or_followup,  # pyright: ignore[reportPrivateUsage]  # shared is_done()-gated reply helper the sibling dispatch classes use -- reused verbatim
 )
 from daimon.adapters.discord.wizard_render import build_wizard_view
@@ -157,7 +158,9 @@ class WizardSubmitButton(
     `wizard.py`'s docstrings for why `from_custom_id`/`interaction_check`/
     `callback` each catch their own exceptions."""
 
-    def __init__(self, *, short_id: str, wizard_row: WizardSessionRow | None) -> None:
+    def __init__(
+        self, *, short_id: str, wizard_row: WizardSessionRow | None, lookup_timed_out: bool = False
+    ) -> None:
         button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
             style=discord.ButtonStyle.success,
             label="Submit",
@@ -166,6 +169,7 @@ class WizardSubmitButton(
         super().__init__(button)
         self.short_id = short_id
         self.wizard_row = wizard_row
+        self.lookup_timed_out = lookup_timed_out
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]  # discord.py's ClientT is a free TypeVar; this adapter only ever runs DaimonBot
@@ -177,19 +181,21 @@ class WizardSubmitButton(
     ) -> Self:
         short_id = match["short_id"]
         bot = cast(DaimonBot, interaction.client)
-        wizard_row = await _load_row(bot, short_id)
-        return cls(short_id=short_id, wizard_row=wizard_row)
+        wizard_row, timed_out = await _reconstruct_row(bot, short_id, interaction, defer=True)
+        return cls(short_id=short_id, wizard_row=wizard_row, lookup_timed_out=timed_out)
 
     async def interaction_check(  # type: ignore[override]  # see from_custom_id
         self, interaction: discord.Interaction[commands.Bot], /
     ) -> bool:
         try:
+            if self.lookup_timed_out:
+                return False
             return await _authorize_tap(self.wizard_row, interaction)
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here
             _log.exception("wizard_submit.interaction_check_failed", err_type=type(err).__name__)
-            await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
+            await _reply_or_followup(interaction, _CHECK_FAILED)
             return False
 
     async def callback(  # type: ignore[override]  # see from_custom_id
@@ -201,9 +207,10 @@ class WizardSubmitButton(
                 return
             bot = cast(DaimonBot, interaction.client)
 
-            # The acknowledgement is unconditionally the FIRST statement --
-            # see the module docstring, point 1.
-            await interaction.response.defer()
+            # Reconstruction already deferred this tap; directly constructed
+            # items still need an acknowledgement before the claim.
+            if not interaction.response.is_done():
+                await interaction.response.defer()
 
             spec = WizardSpec.model_validate(row.spec)
             state = WizardState(

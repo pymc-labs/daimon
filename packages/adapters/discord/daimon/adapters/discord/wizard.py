@@ -41,6 +41,7 @@ rather than sharing one with ordinary navigation.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from typing import Any, Self, cast
@@ -75,6 +76,8 @@ _STALE = "This form changed before your tap landed."
 _CHECK_FAILED = "Something went wrong checking this form -- please try again."
 _CALLBACK_FAILED = "Something went wrong updating this form -- please try again."
 _EMPTY_TEXT = "Your answer can't be empty -- try again."
+_LOOKUP_TIMEOUT = 2.0
+_LOOKUP_TIMED_OUT = "That took too long. Try the button again."
 
 _OPENER_ACTION_RE = re.compile(r"^s(?P<step>\d{1,2})_(?:enter|custom)$")
 
@@ -82,7 +85,7 @@ _OPENER_ACTION_RE = re.compile(r"^s(?P<step>\d{1,2})_(?:enter|custom)$")
 async def _load_row(bot: DaimonBot, short_id: str) -> WizardSessionRow | None:
     """One indexed primary-key read through `bot.runtime.sessionmaker()`.
 
-    Runs before the 3s ack budget starts (called from `from_custom_id`).
+    Called from `from_custom_id`; its caller acknowledges or bounds the read.
     Never raises: discord.py logs and discards any exception raised from
     `from_custom_id`, so a raised DB error here would leave the user with a
     permanently stuck interaction and nothing in our own logs.
@@ -106,7 +109,7 @@ async def _authorize_tap(row: WizardSessionRow | None, interaction: discord.Inte
     the form was posted as.
     """
     if row is None:
-        await interaction.response.send_message(_NOT_AVAILABLE, ephemeral=True)
+        await _reply_or_followup(interaction, _NOT_AVAILABLE)
         return False
     message = interaction.message
     if message is not None and str(message.id) != row.message_id:
@@ -121,16 +124,16 @@ async def _authorize_tap(row: WizardSessionRow | None, interaction: discord.Inte
             expected_message_id=row.message_id,
             actual_message_id=str(message.id),
         )
-        await interaction.response.send_message(_NOT_AVAILABLE, ephemeral=True)
+        await _reply_or_followup(interaction, _NOT_AVAILABLE)
         return False
     if str(interaction.user.id) != row.requester_platform_user_id:
-        await interaction.response.send_message(_WRONG_REQUESTER, ephemeral=True)
+        await _reply_or_followup(interaction, _WRONG_REQUESTER)
         return False
     if row.status == WizardStatus.SUBMITTED:
-        await interaction.response.send_message(_ALREADY_SUBMITTED, ephemeral=True)
+        await _reply_or_followup(interaction, _ALREADY_SUBMITTED)
         return False
     if row.status == WizardStatus.ABANDONED or row.expires_at < datetime.now(UTC):
-        await interaction.response.send_message(_EXPIRED, ephemeral=True)
+        await _reply_or_followup(interaction, _EXPIRED)
         return False
     return True
 
@@ -142,6 +145,20 @@ async def _reply_or_followup(interaction: discord.Interaction, message: str) -> 
         await interaction.followup.send(message, ephemeral=True)
     else:
         await interaction.response.send_message(message, ephemeral=True)
+
+
+async def _reconstruct_row(
+    bot: DaimonBot, short_id: str, interaction: discord.Interaction, *, defer: bool
+) -> tuple[WizardSessionRow | None, bool]:
+    """Acknowledge nonmodal taps first; bound reads needed before a modal."""
+    if defer:
+        await interaction.response.defer()
+    try:
+        async with asyncio.timeout(_LOOKUP_TIMEOUT):
+            return await _load_row(bot, short_id), False
+    except TimeoutError:
+        await _reply_or_followup(interaction, _LOOKUP_TIMED_OUT)
+        return None, True
 
 
 async def _apply_and_render(
@@ -218,6 +235,7 @@ class WizardNavButton(
         label: str,
         style: discord.ButtonStyle,
         wizard_row: WizardSessionRow | None,
+        lookup_timed_out: bool = False,
         row: int | None = None,
     ) -> None:
         button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
@@ -230,6 +248,7 @@ class WizardNavButton(
         self.short_id = short_id
         self.action = action
         self.wizard_row = wizard_row
+        self.lookup_timed_out = lookup_timed_out
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]  # discord.py's ClientT is a free TypeVar; this adapter only ever runs DaimonBot
@@ -242,23 +261,32 @@ class WizardNavButton(
         short_id = match["short_id"]
         action = match["action"]
         bot = cast(DaimonBot, interaction.client)
-        wizard_row = await _load_row(bot, short_id)
+        wizard_row, timed_out = await _reconstruct_row(
+            bot, short_id, interaction, defer=_OPENER_ACTION_RE.match(action) is None
+        )
         label = item.label if isinstance(item, discord.ui.Button) and item.label else action
         style = item.style if isinstance(item, discord.ui.Button) else discord.ButtonStyle.secondary
         return cls(
-            short_id=short_id, action=action, label=label, style=style, wizard_row=wizard_row
+            short_id=short_id,
+            action=action,
+            label=label,
+            style=style,
+            wizard_row=wizard_row,
+            lookup_timed_out=timed_out,
         )
 
     async def interaction_check(  # type: ignore[override]  # see from_custom_id
         self, interaction: discord.Interaction[commands.Bot], /
     ) -> bool:
         try:
+            if self.lookup_timed_out:
+                return False
             return await _authorize_tap(self.wizard_row, interaction)
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here
             _log.exception("wizard.nav_interaction_check_failed", err_type=type(err).__name__)
-            await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
+            await _reply_or_followup(interaction, _CHECK_FAILED)
             return False
 
     async def callback(  # type: ignore[override]  # see from_custom_id
@@ -283,12 +311,10 @@ class WizardNavButton(
                 )
                 return
 
-            # This handler needs an indexed read, a pure transition, and an
-            # indexed write before it could otherwise answer -- more work
-            # inside the 3s ack budget than any other handler in this
-            # adapter does, so the deferral is unconditionally the first
-            # statement on every non-opener path.
-            await interaction.response.defer()
+            # Reconstruction already deferred this tap. Keep the guard for
+            # directly constructed items used outside persistent dispatch.
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             await _apply_and_render(
                 interaction, bot=bot, row=row, action=self.action, values=[], text=None
             )
@@ -316,6 +342,7 @@ class WizardSelect(
         max_values: int,
         options: list[discord.SelectOption],
         wizard_row: WizardSessionRow | None,
+        lookup_timed_out: bool = False,
         row: int | None = None,
     ) -> None:
         select: discord.ui.Select[discord.ui.LayoutView] = discord.ui.Select(
@@ -330,6 +357,7 @@ class WizardSelect(
         self.short_id = short_id
         self.action = action
         self.wizard_row = wizard_row
+        self.lookup_timed_out = lookup_timed_out
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]  # see WizardNavButton.from_custom_id
@@ -342,7 +370,7 @@ class WizardSelect(
         short_id = match["short_id"]
         action = match["action"]
         bot = cast(DaimonBot, interaction.client)
-        wizard_row = await _load_row(bot, short_id)
+        wizard_row, timed_out = await _reconstruct_row(bot, short_id, interaction, defer=True)
 
         # Rebuilt from the row's spec/answers, not from the raw component on
         # the message, so the reconstructed widget's options and defaults
@@ -380,18 +408,21 @@ class WizardSelect(
             max_values=max_values,
             options=options,
             wizard_row=wizard_row,
+            lookup_timed_out=timed_out,
         )
 
     async def interaction_check(  # type: ignore[override]  # see WizardNavButton.interaction_check
         self, interaction: discord.Interaction[commands.Bot], /
     ) -> bool:
         try:
+            if self.lookup_timed_out:
+                return False
             return await _authorize_tap(self.wizard_row, interaction)
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here
             _log.exception("wizard.select_interaction_check_failed", err_type=type(err).__name__)
-            await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
+            await _reply_or_followup(interaction, _CHECK_FAILED)
             return False
 
     async def callback(  # type: ignore[override]  # see WizardNavButton.callback
@@ -402,7 +433,8 @@ class WizardSelect(
             if row is None:
                 return
             bot = cast(DaimonBot, interaction.client)
-            await interaction.response.defer()
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             await _apply_and_render(
                 interaction,
                 bot=bot,

@@ -9,12 +9,15 @@ all run for real.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
+from daimon.adapters.discord import wizard as wizard_module
 from daimon.adapters.discord.wizard import (
     WizardCustomTextModal,
     WizardNavButton,
@@ -73,11 +76,68 @@ def _interaction(*, user_id: str, client: Any, message_id: str = _MESSAGE_ID) ->
     interaction.message.id = int(message_id)
     interaction.response.send_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
-    interaction.response.defer = AsyncMock()
-    interaction.response.is_done = MagicMock(return_value=False)
+    deferred = False
+
+    def mark_deferred(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal deferred
+        deferred = True
+
+    interaction.response.defer = AsyncMock(side_effect=mark_deferred)
+    interaction.response.is_done = MagicMock(side_effect=lambda: deferred)
     interaction.edit_original_response = AsyncMock()
     interaction.followup.send = AsyncMock()
     return interaction
+
+
+@pytest.mark.parametrize(
+    ("item_class", "match", "component"),
+    [
+        (WizardNavButton, lambda: _nav_match("abc12345", "next"), MagicMock()),
+        (WizardSelect, lambda: _select_match("abc12345", "s0_sel"), MagicMock()),
+    ],
+)
+async def test_nonmodal_lookup_defers_before_database_returns(
+    monkeypatch: pytest.MonkeyPatch, item_class: Any, match: Any, component: Any
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_lookup(_bot: Any, _short_id: str) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(wizard_module, "_load_row", slow_lookup)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=_fake_bot(MagicMock()))
+    task = asyncio.create_task(item_class.from_custom_id(interaction, component, match()))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        interaction.response.defer.assert_awaited_once()
+    finally:
+        release.set()
+        await task
+
+
+async def test_modal_lookup_timeout_replies_once_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def slow_lookup(_bot: Any, _short_id: str) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(wizard_module, "_load_row", slow_lookup)
+    monkeypatch.setattr(wizard_module, "_LOOKUP_TIMEOUT", 0.01, raising=False)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=_fake_bot(MagicMock()))
+    item = await asyncio.wait_for(
+        WizardNavButton.from_custom_id(
+            interaction, MagicMock(), _nav_match("abc12345", "s0_enter")
+        ),
+        0.2,
+    )
+    assert await item.interaction_check(interaction) is False
+    interaction.response.send_message.assert_awaited_once_with(
+        "That took too long. Try the button again.", ephemeral=True
+    )
+    interaction.response.send_modal.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 def _nav_match(short_id: str, action: str) -> Any:
@@ -148,7 +208,7 @@ async def test_interaction_check_rejects_a_different_user_with_no_state_change(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a non-requester tap must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "someone else" in message, "rejection must say the form was for someone else"
 
     async with db_session_factory() as session:
@@ -173,7 +233,7 @@ async def test_interaction_check_rejects_a_tap_from_a_different_message(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a tap that did not come from the form's own message must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "no longer available" in message
 
     async with db_session_factory() as session:
@@ -194,7 +254,7 @@ async def test_interaction_check_rejects_unknown_short_id(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "an unknown short id must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "no longer available" in message
 
 
@@ -211,7 +271,7 @@ async def test_interaction_check_rejects_an_already_submitted_row(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a submitted row must reject further taps"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "already submitted" in message
 
 
@@ -231,7 +291,7 @@ async def test_interaction_check_rejects_an_expired_row(
         "an expired form must say so -- this replaces what would otherwise be "
         "a silent no-op on a stale form"
     )
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "expired" in message
 
 
@@ -246,6 +306,7 @@ async def test_next_tap_defers_before_any_write_or_render(
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot)
     call_order: list[str] = []
     interaction.response.defer = AsyncMock(side_effect=lambda *a, **k: call_order.append("defer"))
+    interaction.response.is_done = MagicMock(side_effect=lambda: "defer" in call_order)
     interaction.edit_original_response = AsyncMock(
         side_effect=lambda *a, **k: call_order.append("edit")
     )

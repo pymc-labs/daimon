@@ -12,12 +12,16 @@ button dispatches (or doesn't) correctly.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
+from daimon.adapters.discord import wizard as wizard_module
+from daimon.adapters.discord import wizard_submit as wizard_submit_module
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
 from daimon.core.stores.domain import WizardSessionRow
 from daimon.core.stores.wizard_session import get_wizard_session, update_wizard_state
@@ -110,6 +114,32 @@ def _submit_match(short_id: str) -> Any:
     matched = WizardSubmitButton.__discord_ui_compiled_template__.fullmatch(custom_id)
     assert matched is not None, "test action must satisfy WizardSubmitButton's own template"
     return matched
+
+
+async def test_submit_lookup_defers_then_replies_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+
+    async def slow_lookup(_bot: Any, _short_id: str) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(wizard_module, "_load_row", slow_lookup)
+    monkeypatch.setattr(wizard_submit_module, "_load_row", slow_lookup)
+    monkeypatch.setattr(wizard_module, "_LOOKUP_TIMEOUT", 0.01, raising=False)
+    interaction = _interaction(user_id=_REQUESTER_ID, client=_fake_bot(MagicMock(), []))
+    item = await asyncio.wait_for(
+        WizardSubmitButton.from_custom_id(interaction, MagicMock(), _submit_match("abc12345")),
+        0.2,
+    )
+    assert started.is_set()
+    assert await item.interaction_check(interaction) is False
+    interaction.response.defer.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once_with(
+        "That took too long. Try the button again.", ephemeral=True
+    )
+    interaction.response.send_message.assert_not_awaited()
 
 
 async def _seed(
@@ -328,7 +358,7 @@ async def test_submit_by_a_non_requester_is_rejected_writes_nothing_spawns_nothi
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a non-requester submit tap must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "someone else" in message
 
     async with db_session_factory() as session:
@@ -354,7 +384,7 @@ async def test_submit_from_a_different_message_is_rejected_and_claims_nothing(
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a submit that did not come from the form's own message is rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.followup.send.call_args.args[0]
     assert "no longer available" in message
 
     async with db_session_factory() as session:
