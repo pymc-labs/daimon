@@ -179,7 +179,18 @@ in reports. Named binds `:guild_id`, `:channel_id`, `:thread_id`,
 single-column results become scalars; other results are arrays of row objects.
 Headless context interpolation is unsupported and returns PENDING.
 
-Attachment uniqueness conservatively compares filename and byte size across
+FULL-tier `message_count` counts unique turn messages, excluding thread starters.
+`fences_balanced` checks each independently rendered content/embed component.
+`footer_on_last_message` requires the sole cost footer on the final message,
+ordered by Discord snowflake; a file-only post cannot carry the answer's footer.
+These checks require a completed observation. Missing identities or ordering
+stay PENDING. `thread_name` re-fetches the owned thread and applies every supplied
+`pattern`, `pattern_absent`, and `max_len` constraint; unavailable or mismatched
+thread metadata stays PENDING.
+
+For `attachments`, `name_pattern` filters files before applying min/max and
+uniqueness. A maximum of zero passes when no matching file was delivered, even
+if other file types exist. Attachment uniqueness conservatively compares filename and byte size across
 turns, so two independent files with identical names and sizes fail uniqueness.
 The tool does not download attachments to compare hashes.
 

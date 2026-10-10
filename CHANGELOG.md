@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Live QA supports Discord message counts, per-message balanced fences, cost-footer placement, thread-name readback, and filename-filtered attachment counts.
+
 - **Haiku 5.5 can be picked as an agent model and is metered.** It is billed at Anthropic's list price by prompt length: $0.10 input and $0.50 output per million tokens up to a 100,000-token prompt, and five times that above it. Before this, turns on `claude-haiku-5-5` were recorded as free.
 - An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.
 

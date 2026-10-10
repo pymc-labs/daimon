@@ -26,6 +26,7 @@ class FakeDriver:
         self.permissions = ~0
         self.category_guild = "1435062989119295640"
         self.trigger: Message = {"id": "trigger", "reactions": []}
+        self.thread_metadata: Message = {}
         self.qa_id = "1533049261032341668"
 
     def set_role(self, role: str) -> None:
@@ -46,6 +47,8 @@ class FakeDriver:
             return [{"id": "1530628070405308456"}]
         if "/messages/" in path and method == "GET":
             return self.trigger
+        if path == "/channels/thread":
+            return self.thread_metadata
         return {}
 
     def messages(self, channel_id: str, *, after: str | None, limit: int = 50) -> list[Message]:
@@ -463,3 +466,51 @@ def test_unpriced_model_preserves_larger_rounded_footer_cost(
     receipt = json.loads(ledger.path.read_text())
     assert receipt["usd"] == 0.5
     assert receipt["accounting"] == "conservative_estimate" and receipt["actual_usd"] is None
+
+
+def test_thread_name_is_refetched_from_the_owned_thread(
+    backend: DiscordBackend, driver: FakeDriver
+) -> None:
+    backend.owned.add("parent")
+    backend.threads.add("thread")
+    backend.thread_parents["thread"] = "parent"
+    turn = Turn(1, "trigger", "parent", utcnow(), thread_id="thread")
+    driver.thread_metadata = {
+        "id": "thread",
+        "guild_id": backend.target.guild_id,
+        "parent_id": "parent",
+        "type": 11,
+        "name": "Inventory example",
+    }
+    assert backend.thread_name(turn) == "Inventory example"
+    driver.thread_metadata["name"] = "Renamed by the agent"
+    assert backend.thread_name(turn) == "Renamed by the agent"
+    assert driver.calls[-1] == ("GET", "/channels/thread")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", "another-thread"),
+        ("guild_id", "customer-guild"),
+        ("parent_id", "unowned-channel"),
+        ("type", 0),
+        ("name", None),
+    ],
+)
+def test_thread_name_refuses_unverified_metadata(
+    backend: DiscordBackend, driver: FakeDriver, field: str, value: JsonValue
+) -> None:
+    backend.owned.add("parent")
+    backend.threads.add("thread")
+    backend.thread_parents["thread"] = "parent"
+    driver.thread_metadata = {
+        "id": "thread",
+        "guild_id": backend.target.guild_id,
+        "parent_id": "parent",
+        "type": 11,
+        "name": "Inventory example",
+    }
+    driver.thread_metadata[field] = value
+    with pytest.raises(Pending, match="readback"):
+        backend.thread_name(Turn(1, "trigger", "parent", utcnow(), thread_id="thread"))

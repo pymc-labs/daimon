@@ -729,5 +729,23 @@ class DiscordBackend:
             )
         return Usage()
 
+    def thread_name(self, turn: Turn) -> str:
+        if not turn.thread_id:
+            raise Pending("no observed thread for name readback")
+        self._owned(turn.thread_id)
+        self.driver.set_role("user")
+        metadata = obj(self.driver.call("GET", f"/channels/{turn.thread_id}"))
+        parent = self.thread_parents.get(turn.thread_id)
+        if (
+            str(metadata.get("id")) != turn.thread_id
+            or metadata.get("guild_id") != self.target.guild_id
+            or metadata.get("parent_id") != parent
+            or parent not in self.owned
+            or metadata.get("type") != 11
+            or not isinstance(metadata.get("name"), str)
+        ):
+            raise Pending("thread name readback did not match the owned QA thread")
+        return str(metadata["name"])
+
     def classify(self, message: Message) -> str:
         return self.driver.classify(message)

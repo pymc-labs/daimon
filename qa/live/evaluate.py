@@ -60,6 +60,63 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 match = any(matcher(pattern, component, re.MULTILINE) for component in components)
                 passed = match if kind == "text_present" else not match
                 reason = f"regex {assertion.pattern!r}; matched={match}"
+            elif kind in {"message_count", "fences_balanced", "footer_on_last_message"}:
+                if not turn.ended_at:
+                    raise Pending("turn message observation was not completed")
+                messages = [m for m in turn.messages if m.get("type") != 21]
+                if any(not m.get("id") for m in messages):
+                    raise Pending("message identity is unavailable")
+                messages = list({str(m["id"]): m for m in messages}.values())
+                if kind == "message_count":
+                    passed = len(messages) >= assertion.minimum and (
+                        assertion.maximum is None or len(messages) <= assertion.maximum
+                    )
+                    reason = f"observed {len(messages)} unique messages"
+                elif kind == "fences_balanced":
+                    passed = bool(messages) and all(
+                        component.count("```") % 2 == 0
+                        for m in messages
+                        for component in text_components(m)
+                    )
+                    reason = "code fences balanced in each message component"
+                else:
+                    if len(messages) > 1:
+                        if any(not str(m["id"]).isdigit() for m in messages):
+                            raise Pending("Discord message order is unavailable")
+                        messages.sort(key=lambda m: int(str(m["id"])))
+                    footer_ids = [
+                        str(m["id"])
+                        for m in messages
+                        if any(
+                            re.search(
+                                r"<?\$[0-9]+(?:\.[0-9]+)?\s+used\b",
+                                str(obj(e.get("footer")).get("text", "")),
+                            )
+                            for e in objects(m.get("embeds"))
+                        )
+                    ]
+                    last = messages[-1] if messages else {}
+                    file_only = (
+                        bool(last.get("attachments")) and not str(last.get("content", "")).strip()
+                    )
+                    passed = (
+                        bool(messages) and footer_ids == [str(last.get("id"))] and not file_only
+                    )
+                    reason = (
+                        f"cost footer ids={footer_ids}; last={last.get('id')}; "
+                        f"file_only={file_only}"
+                    )
+            elif kind == "thread_name":
+                name = backend.thread_name(turn)
+                passed = (
+                    (assertion.pattern is None or bool(re.search(assertion.pattern, name)))
+                    and (
+                        assertion.pattern_absent is None
+                        or not re.search(assertion.pattern_absent, name)
+                    )
+                    and (assertion.max_len is None or len(name) <= assertion.max_len)
+                )
+                reason = f"thread name={name!r}; length={len(name)}"
             elif kind == "in_thread":
                 passed = (
                     bool(turn.messages)
@@ -126,18 +183,15 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 reason = f"reaction {assertion.emoji}"
             elif kind == "attachments":
                 attachments = [a for m in turn.messages for a in objects(m.get("attachments"))]
+                if assertion.name_pattern:
+                    attachments = [
+                        a
+                        for a in attachments
+                        if re.search(assertion.name_pattern, str(a.get("filename", "")))
+                    ]
                 passed = len(attachments) >= assertion.minimum and (
                     assertion.maximum is None or len(attachments) <= assertion.maximum
                 )
-                if assertion.name_pattern:
-                    passed = (
-                        passed
-                        and bool(attachments)
-                        and all(
-                            re.search(assertion.name_pattern, str(a.get("filename", "")))
-                            for a in attachments
-                        )
-                    )
                 if assertion.unique:
                     previous = {
                         (a.get("filename"), a.get("size"))
@@ -145,6 +199,8 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                         if t.number < turn.number
                         for m in t.messages
                         for a in objects(m.get("attachments"))
+                        if not assertion.name_pattern
+                        or re.search(assertion.name_pattern, str(a.get("filename", "")))
                     }
                     keys = [(a.get("filename"), a.get("size")) for a in attachments]
                     passed = (
