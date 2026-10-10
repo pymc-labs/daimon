@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Separate live probe actual spend from held dollars, settle complete dated token/runtime evidence, size default holds to short probes, and require lead-approved append-only reconciliation for historical holds.
+
 - Restrict live budget admission to Haiku 5.5, Gemini 3.8 Flash and its approved 503 fallback IDs, and GPT-6 Luna; reviewed prices remain required and fallback enforcement stays in the Gemini harness.
 - Dispatch opt-in host turn preparation, backend composition and codecs by the admitted profile, with authorized native binding and injected transport/journal/usage context; preserve default Anthropic requests.
 

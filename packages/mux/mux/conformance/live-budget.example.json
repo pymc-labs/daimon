@@ -3,8 +3,18 @@
   "total_cap_usd": "150",
   "ledger_path": "/absolute/sprint/lanes/N9-qa/spend.md",
   "providers": {
-    "anthropic": {"cap_usd": "50", "models": {}},
-    "openai": {"cap_usd": "50", "models": {}},
-    "gemini": {"cap_usd": "30", "models": {}}
-  }
+    "anthropic": {
+      "cap_usd": "50",
+      "models": {}
+    },
+    "openai": {
+      "cap_usd": "50",
+      "models": {}
+    },
+    "gemini": {
+      "cap_usd": "30",
+      "models": {}
+    }
+  },
+  "approved_reconciliations": []
 }

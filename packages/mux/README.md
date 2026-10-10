@@ -375,3 +375,10 @@ replay/cancel truth and compatibility display records. Transport and durable
 journal/usage dependencies are injected in `TurnRuntime`; mux still imports no
 host package. Channel admission enables a profile separately, after its host
 implementation exists. The default Anthropic path and generic ports are unchanged.
+Live probe receipts separate `actual_usd`, `held_usd` and `accounting_status`.
+Complete token observations under a dated, pinned price card plus measured
+container/session time settle immediately; unknown evidence remains an
+unverified hold. Default plans reserve 20k input/2k output tokens, create-only
+plans zero, and hosted sessions add an explicit runtime allowance. Lead-approved
+reconciliation appends a new receipt and preserves the full ledger history.
+See `mux/conformance/README.md` for the offline settlement and approval API.
