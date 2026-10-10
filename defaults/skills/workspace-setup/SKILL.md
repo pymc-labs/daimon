@@ -272,8 +272,12 @@ survives. Keep working files in `/root/work`, and put only files the person
 should receive in `/mnt/session/outputs` (daimon attaches those to the reply on
 Discord, Slack and Teams 1:1 chats); both travel. The mounted working repo's
 checkout does not: it is mounted again, and only its unsaved work (uncommitted
-changes, commits on no remote, untracked and ignored files) is carried and put
-back. Say this plainly when someone asks where their file went
+changes, commits on no remote, untracked and ignored task files within the size
+cap) is carried and put back into the same repository at the saved commit. If
+the new workspace mounts another repository, restore into a separate clone of
+the old remote. An `inherited-handoff.tar.gz` in the handoff holds work from an
+earlier move; inspect it too. A failed or oversized capture carries only the
+conversation, and you must say which files are missing. Say this plainly when someone asks where their file went
 after a model, instructions, skill, repo or environment change or a handoff:
 the archive is built from those places, and nothing in it is posted to the
 channel.

@@ -57,6 +57,7 @@ from daimon.core.workspace_transfer import (
     HistoryOnly,
     TranscriptOnly,
     _checkpoint_reason,
+    _poll_for_bundle,
     as_prepared_replacement,
     bounded_checkpoint_deadline,
     transfer_workspace,
@@ -434,6 +435,94 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     assert outcome.gap_reason == "not_worth_checkpointing"
     assert "hierarchical model" in outcome.transcript, "the user's own words still cross"
     assert state.sent_batches == [], "no events were sent, so no turn was billed"
+
+
+async def test_inherited_bundle_is_checkpointed_even_without_an_agent_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    uploaded = await client.beta.files.upload(file=("inherited.tar.gz", TARBALL))
+    await client.beta.sessions.resources.add(
+        old_session, type="file", file_id=uploaded.id, mount_path=HANDOFF_MOUNT_PATH
+    )
+    _seed_conversation(state, old_session, with_reply=False)
+    _script_checkpoint_reply(state, old_session, "ok")
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+    assert isinstance(outcome, FullHandoff)
+    assert state.sent_batches, "an inherited archive can contain work without a writer event"
+
+
+async def test_incomplete_capture_cannot_be_promoted_by_an_existing_bundle(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(state, old_session, "HANDOFF_INCOMPLETE")
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+    assert isinstance(outcome, TranscriptOnly)
+    assert outcome.gap_reason == "checkpoint_failed"
+
+
+async def test_bundle_poll_does_not_accept_an_archive_from_an_earlier_move() -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    session = await _make_session(client)
+    state.write_output(session, handoff_filename(UUID(int=1)), TARBALL)
+    bundle = await _poll_for_bundle(
+        client, session_id=session, filename=handoff_filename(TRANSFER_ID), sleep=_no_sleep
+    )
+    assert bundle is None
+
+
+async def test_bundle_poll_does_not_accept_an_archive_that_never_settles() -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    session = await _make_session(client)
+    meta = state.write_output(session, handoff_filename(TRANSFER_ID), TARBALL)
+
+    async def grow(delay: float) -> None:
+        current, data = state.files[meta.id]
+        state.files[meta.id] = (
+            current.model_copy(update={"size_bytes": len(data) + 1}),
+            data + b"x",
+        )
+
+    bundle = await _poll_for_bundle(
+        client, session_id=session, filename=handoff_filename(TRANSFER_ID), sleep=grow
+    )
+    assert bundle is None
 
 
 async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(

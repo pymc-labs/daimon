@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tarfile
 import uuid
 from pathlib import Path
 
+import daimon.core.checkpoint_prompt as checkpoint_module
 import pytest
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
@@ -77,17 +79,13 @@ def test_prompt_excludes_every_configured_path_and_glob() -> None:
     assert "--exclude='*.env'" in prompt, "credential files must never enter the bundle"
 
 
-def test_prompt_writes_an_oversize_exclude_list_before_tarring() -> None:
+def test_prompt_does_not_silently_omit_oversized_task_files() -> None:
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=7
     )
-    find_index = prompt.index("find root mnt/session/outputs tmp/work -type f -size +7M")
-    tar_index = prompt.index("tar czf")
-    assert find_index < tar_index, "the exclude list must exist before tar reads it"
-    exclude_list = prompt[find_index:].split(">", 1)[1].split("\n", 1)[0].strip()
-    assert f"--exclude-from={exclude_list}" in prompt, (
-        "tar must read back the same exclude list the find step wrote"
-    )
+    assert "--exclude-from=" not in prompt
+    assert "Do not omit oversized task files" in prompt
+    assert "HANDOFF_INCOMPLETE" in prompt
 
 
 def test_prompt_forbids_history_changing_git_commands_and_never_asks_for_one() -> None:
@@ -118,10 +116,10 @@ def test_prompt_captures_repo_state_without_a_repo_omitting_the_git_steps() -> N
         f"git -C {REPO} ls-files --others --exclude-standard > /root/untracked.txt",
     ):
         assert command in with_repo, f"{command} is part of the repo-state step"
-    assert with_repo.count(f"git -C {REPO} rev-parse HEAD") == 2, (
-        "HEAD is echoed before and after the archive so a commit is detectable"
+    assert with_repo.count(f"\n  git -C {REPO} rev-parse HEAD") == 2, (
+        "HEAD is echoed before and after the archive; the saved HEAD is redirected"
     )
-    assert "-C / root mnt/session/outputs tmp/work\n" in with_repo + "\n", (
+    assert "-C / root mnt/session/outputs tmp/work && touch" in with_repo, (
         "the repo mount is never a tar root: MA mounts it again"
     )
     assert "--exclude='mnt/repo/analytics'" in with_repo, "and it is excluded wherever it is"
@@ -190,7 +188,7 @@ def test_prompt_is_deterministic_and_under_the_word_budget() -> None:
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
     assert first == second, "the same transfer must produce byte-identical prompts"
-    assert len(first.split()) < 600, "a long checkpoint prompt costs tokens on a billed turn"
+    assert len(first.split()) < 900, "a long checkpoint prompt costs tokens on a billed turn"
 
 
 def test_checkpoint_head_lines_reads_the_two_echoed_hashes() -> None:
@@ -248,13 +246,11 @@ def test_prompt_leaves_uncommitted_changes_behind_when_the_answer_is_leave() -> 
         "the person chose to leave the changes, so nothing captures them as a patch"
     )
     assert "ls-files --others" not in prompt, "nor lists the untracked files to carry"
-    assert "-C / root mnt/session/outputs tmp/work\n" in f"{prompt}\n", (
+    assert "-C / root mnt/session/outputs tmp/work && touch" in prompt, (
         "the checkout must not be tarred either, or the changes would come across anyway"
     )
     assert "-C / root mnt/session/outputs mnt/repo" not in prompt, "the repo is not a root here"
-    assert "find root mnt/session/outputs tmp/work -type f" in prompt, (
-        "and the oversize scan covers only what is archived"
-    )
+    assert "--exclude-from=" not in prompt, "oversized files must not silently disappear"
     assert "deliberately being left behind" in prompt, (
         "the prompt has to say the omission is the person's decision, not a failure"
     )
@@ -368,10 +364,8 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
     expected = "\n".join(
         [
             f"  tar czf {archive} \\",
-            "    --exclude-from=/tmp/daimon-handoff-excludes.txt \\",
             "    --exclude='root/.*' \\",
             "    --exclude='tmp/work/.*' \\",
-            "    --exclude='tmp/daimon-handoff-excludes.txt' \\",
             "    --exclude='mnt/session/outputs/daimon-handoff-*' \\",
             "    --exclude='mnt/session/uploads' \\",
             "    --exclude='mnt/memory' \\",
@@ -383,7 +377,7 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
             "    --exclude='*/.cache' \\",
             "    --exclude='*.env' \\",
             "    --exclude='mnt/repo/analytics' \\",
-            "    -C / root mnt/session/outputs tmp/work",
+            "    -C / root mnt/session/outputs tmp/work && touch /tmp/daimon-handoff-built",
         ]
     )
     assert expected in prompt, "the generated tar command changed"
@@ -399,9 +393,9 @@ def test_prompt_deletes_an_over_cap_archive_and_reports_the_size_instead() -> No
     )
     archive = f"/mnt/session/outputs/{handoff_filename(TRANSFER_ID)}"
     assert (
-        f'  size=$(stat -c %s {archive}); if [ "$size" -gt 20971520 ]; '
+        f'size=$(stat -c %s {archive}); if [ "$size" -gt 20971520 ]; '
         f'then rm -f {archive}; echo "HANDOFF_TOO_LARGE $size"; '
-        f"else ls -l {archive}; fi" in prompt
+        f"else ls -l {archive}; fi; fi" in prompt
     ), "the size guard, the delete and the listing are one command"
     assert "do not retry, shrink or rebuild it" in prompt, (
         "an over-cap archive is a final answer, not an invitation to a second attempt"
@@ -451,12 +445,7 @@ def test_prompt_archives_the_scratch_directory_minus_its_own_exclude_list() -> N
     assert "--exclude='tmp/work/.*'" in prompt, (
         "only the non-hidden entries travel, exactly as under $HOME"
     )
-    assert "--exclude='tmp/daimon-handoff-excludes.txt'" in prompt, (
-        "the list tar is reading must not end up inside the archive tar is writing"
-    )
-    assert "find root mnt/session/outputs tmp/work -type f -size +20M" in prompt, (
-        "and the oversize scan covers every root it will tar"
-    )
+    assert "--exclude-from=" not in prompt, "the size guard must reject incomplete transfers"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -544,3 +533,202 @@ def test_other_checkouts_under_the_archived_roots_still_travel() -> None:
         "nothing under the home directory is excluded except its dot entries and caches"
     )
     assert "mnt/repo/analytics" in excluded, "the mounted checkout alone is left out"
+
+
+def _execute_checkpoint(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, repo: Path | None = None, cap: int = 20
+) -> tuple[Path, str]:
+    home = sandbox / "root"
+    outputs = sandbox / "mnt/session/outputs"
+    uploads = sandbox / "mnt/session/uploads"
+    scratch = sandbox / "tmp/work"
+    for path in (home, outputs, uploads, scratch):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(checkpoint_module, "CHECKPOINT_OUTPUTS_DIR", str(outputs))
+    monkeypatch.setattr(checkpoint_module, "CHECKPOINT_SCRATCH_DIR", str(scratch))
+    monkeypatch.setattr(
+        checkpoint_module, "CHECKPOINT_BUNDLE_MOUNT_PATH", str(uploads / "daimon-handoff.tar.gz")
+    )
+    monkeypatch.setattr(checkpoint_module, "_BUILT_MARKER_PATH", str(sandbox / "built"))
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID,
+        repo_mount_path=str(repo) if repo else None,
+        home_dir=str(home),
+        max_bundle_mib=cap,
+    )
+    (home / "HANDOFF.md").write_text("Task: preserve the files\n")
+    commands = "\n".join(line.strip() for line in prompt.splitlines() if line.startswith("  "))
+    result = subprocess.run(["bash", "-c", commands], capture_output=True, text=True)
+    assert result.returncode == 0 or "HANDOFF_INCOMPLETE" in result.stdout, result.stderr
+    return outputs / handoff_filename(TRANSFER_ID), result.stdout
+
+
+def _extract(archive: Path, destination: Path) -> None:
+    destination.mkdir()
+    with tarfile.open(archive) as bundle:
+        bundle.extractall(destination, filter="data")
+
+
+def test_nested_checkout_work_survives_two_real_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first"
+    clone = first / "root/work/clone"
+    clone.mkdir(parents=True)
+    _git(clone, "init", "-q")
+    (clone / "tracked.bin").write_bytes(b"initial\0")
+    _git(clone, "add", ".")
+    _git(clone, "commit", "-qm", "initial")
+    expected = b"modified binary\0"
+    (clone / "tracked.bin").write_bytes(expected)
+    (clone / "notes.md").write_text("untracked work")
+    archive, _ = _execute_checkpoint(first, monkeypatch)
+    restored = tmp_path / "restored"
+    _extract(archive, restored)
+    second = tmp_path / "second"
+    (second / "root").mkdir(parents=True)
+    shutil.copytree(restored / str(clone).lstrip("/"), second / "root/work/clone")
+    archive, _ = _execute_checkpoint(second, monkeypatch)
+    twice = tmp_path / "twice"
+    _extract(archive, twice)
+    clone = twice / str(second / "root/work/clone").lstrip("/")
+    assert (clone / "tracked.bin").read_bytes() == expected
+    assert (clone / "notes.md").read_text() == "untracked work"
+
+
+def test_unpacked_inherited_archive_is_not_required_for_the_next_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first"
+    (first / "root/work").mkdir(parents=True)
+    (first / "root/work/data.csv").write_text("irreplaceable task data")
+    archive, _ = _execute_checkpoint(first, monkeypatch)
+    second = tmp_path / "second"
+    uploads = second / "mnt/session/uploads"
+    uploads.mkdir(parents=True)
+    shutil.copyfile(archive, uploads / "daimon-handoff.tar.gz")
+    archive, _ = _execute_checkpoint(second, monkeypatch)
+    restored = tmp_path / "restored"
+    _extract(archive, restored)
+    inherited = restored / str(second / "root/inherited-handoff.tar.gz").lstrip("/")
+    original = tmp_path / "original"
+    _extract(inherited, original)
+    assert (original / str(first / "root/work/data.csv").lstrip("/")).read_text() == (
+        "irreplaceable task data"
+    )
+
+
+def test_oversized_task_file_degrades_instead_of_reporting_a_partial_archive_as_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import random
+
+    home = tmp_path / "root"
+    home.mkdir()
+    (home / "task.bin").write_bytes(random.Random(0).randbytes(2 * 1024 * 1024))
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch, cap=1)
+    assert "HANDOFF_TOO_LARGE" in reply
+    assert not archive.exists()
+
+
+def test_failed_repo_capture_cannot_report_a_full_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    # No HEAD: diff/bundle restoration cannot succeed. The shell still builds
+    # an archive, but the missing capture sentinel must reject it.
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch, repo=repo)
+    assert "HANDOFF_INCOMPLETE" in reply
+    assert not archive.exists()
+
+
+def test_mounted_repo_work_survives_a_repo_switch_and_two_transfers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    _git(tmp_path, "clone", "-q", str(origin), str(seed))
+    (seed / "asset.bin").write_bytes(b"initial\0")
+    (seed / ".gitignore").write_text("generated.csv\n*.env\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-qm", "initial")
+    _git(seed, "push", "-q", "origin", "main")
+    old_repo = tmp_path / "old-repo"
+    _git(tmp_path, "clone", "-q", str(origin), str(old_repo))
+    (old_repo / "local.md").write_text("unpublished commit")
+    _git(old_repo, "add", ".")
+    _git(old_repo, "commit", "-qm", "local")
+    saved_head = _git(old_repo, "rev-parse", "HEAD").strip()
+    fork = tmp_path / "fork.git"
+    _git(tmp_path, "init", "-q", "--bare", str(fork))
+    _git(old_repo, "remote", "add", "fork", str(fork))
+    _git(old_repo, "push", "-q", "fork", "HEAD:main")
+    # Published to another remote is still unavailable from the saved origin.
+    (old_repo / "asset.bin").write_bytes(b"modified\0binary")
+    (old_repo / "generated.csv").write_text("ignored task data")
+    (old_repo / "notes with spaces.md").write_text("untracked task work")
+    (old_repo / "private.env").write_text("excluded credential fixture")
+    destination_repo = tmp_path / "destination-repo"
+    destination_repo.mkdir()
+    (destination_repo / "keep.md").write_text("destination task")
+
+    # The new agent has a DIFFERENT repo, so restore the old remote separately.
+    for hop in range(2):
+        sandbox = tmp_path / f"sandbox-{hop}"
+        archive, reply = _execute_checkpoint(sandbox, monkeypatch, repo=old_repo)
+        assert "HANDOFF_INCOMPLETE" not in reply
+        restored = tmp_path / f"restored-{hop}"
+        _extract(archive, restored)
+        home = restored / str(sandbox / "root").lstrip("/")
+        state = home / REPO_STATE_DIR
+        repo = tmp_path / f"separate-checkout-{hop}"
+        _git(tmp_path, "clone", "-q", (state / "remote.txt").read_text().strip(), str(repo))
+        _git(repo, "fetch", "-q", str(state / "local-commits.bundle"), "HEAD")
+        _git(repo, "checkout", "-q", saved_head)
+        _git(repo, "apply", "--binary", str(home / "uncommitted.patch"))
+        subprocess.run(["tar", "xf", str(state / "files.tar"), "-C", str(repo)], check=True)
+        assert (repo / "asset.bin").read_bytes() == b"modified\0binary"
+        assert (repo / "generated.csv").read_text() == "ignored task data"
+        assert (repo / "local.md").read_text() == "unpublished commit"
+        assert (repo / "notes with spaces.md").read_text() == "untracked task work"
+        assert not (repo / "private.env").exists()
+        assert _git(repo, "rev-parse", "HEAD").strip() == saved_head
+        old_repo = repo
+    assert (destination_repo / "keep.md").read_text() == "destination task"
+
+
+def test_ignored_repo_files_are_bounded_without_silent_skipping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / ".gitignore").write_text("generated.csv\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "initial")
+    (repo / "generated.csv").write_bytes(b"x" * (2 * 1024 * 1024))
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch, repo=repo, cap=1)
+    assert "HANDOFF_INCOMPLETE" in reply
+    assert not archive.exists()
+
+
+def test_repo_without_a_remote_carries_a_self_contained_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "task.md").write_text("local task")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "initial")
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch, repo=repo)
+    assert "HANDOFF_INCOMPLETE" not in reply
+    restored = tmp_path / "restored"
+    _extract(archive, restored)
+    bundle = restored / str(tmp_path / "root/repo-state/local-commits.bundle").lstrip("/")
+    successor = tmp_path / "successor"
+    _git(tmp_path, "clone", "-q", str(bundle), str(successor))
+    assert (successor / "task.md").read_text() == "local task"

@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord answers, stopped turns and errors retain their final status when older progress edits complete late, including errors caught outside the turn driver. Repairs preserve text and files without another answer post. Failed turns preserve sealed answer text, and recovered turns take ownership of their card.
 
 - Older live QA configs that omit `dated_snapshots` now inherit the approved backend default when loaded. Explicit conflicting settings still refuse.
+- Workspace replacements preserve dirty nested checkouts, binary repository changes, unpublished commits, ignored task files, and archives inherited from earlier moves. Failed or oversized captures report that files did not transfer; checkpoints remain capped at 90 seconds.
+- Discord answers, stopped turns, and errors retain their final status when an older progress edit completes late, without posting another answer.
 
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
 - Live QA admits the primary alongside its temporary staging override and accepts exact Haiku 5.5 dated snapshots in deployment evidence and judge replies.

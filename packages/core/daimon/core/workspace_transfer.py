@@ -40,6 +40,7 @@ import asyncio
 import contextlib
 import functools
 import io
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -60,12 +61,12 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_OUTPUTS_DIR,
+    HANDOFF_INCOMPLETE_MARKER,
     HANDOFF_MAX_BYTES,
     build_checkpoint_prompt,
     checkpoint_head_lines,
     checkpoint_too_large_bytes,
     handoff_filename,
-    is_handoff_filename,
 )
 from daimon.core.handoff_context import (
     is_worth_checkpointing,
@@ -290,14 +291,14 @@ async def _poll_for_bundle(
     client: AsyncAnthropic,
     *,
     session_id: str,
+    filename: str,
     sleep: Callable[[float], Awaitable[None]],
 ) -> FileMetadata | None:
     """The session's handoff bundle once its size stops changing, or None.
 
     Settles only once cumulative poll time has reached `_MIN_SETTLE_S` AND
     two consecutive polls agree on `size_bytes`. An exhausted schedule
-    returns the last observation, stable or not — the caller would rather
-    try a possibly-truncated archive than silently drop the handoff.
+    returns no bundle: a possibly-truncated archive is not a full handoff.
     """
     latest: FileMetadata | None = None
     previous_size: int | None = None
@@ -308,20 +309,16 @@ async def _poll_for_bundle(
         elapsed += delay
         page = await client.beta.files.list(scope_id=session_id, betas=[_MA_BETA], limit=1000)
         latest = next(
-            (
-                meta
-                for meta in page.data
-                if meta.downloadable is True and is_handoff_filename(meta.filename)
-            ),
+            (meta for meta in page.data if meta.downloadable is True and meta.filename == filename),
             None,
         )
         if latest is None:
             previous_size = None
             continue
         if elapsed >= _MIN_SETTLE_S and latest.size_bytes == previous_size:
-            break
+            return latest
         previous_size = latest.size_bytes
-    return latest
+    return None
 
 
 async def _rehost_bundle(
@@ -420,8 +417,19 @@ async def transfer_workspace(
     transcript = render_previous_session(turns, from_agent_name=from_agent_name) if turns else None
 
     if not is_worth_checkpointing(events):
-        log.info("workspace_transfer.skipped_checkpoint", session_id=old_session_id)
-        return TranscriptOnly(transcript=transcript or "", gap_reason="not_worth_checkpointing")
+        try:
+            session = await client.beta.sessions.retrieve(old_session_id, betas=[_MA_BETA])
+        except anthropic.APIStatusError as err:
+            if not _is_not_found(err):
+                raise
+            return TranscriptOnly(transcript=transcript or "", gap_reason="session_dead")
+        inherited = any(
+            resource.type == "file" and resource.mount_path.endswith("daimon-handoff.tar.gz")
+            for resource in session.resources
+        )
+        if not inherited:
+            log.info("workspace_transfer.skipped_checkpoint", session_id=old_session_id)
+            return TranscriptOnly(transcript=transcript or "", gap_reason="not_worth_checkpointing")
 
     prompt = build_checkpoint_prompt(
         transfer_id=transfer_id,
@@ -484,6 +492,8 @@ async def transfer_workspace(
         return TranscriptOnly(transcript=transcript or "", gap_reason=failure)
 
     reply = extract_final_response(state.content)
+    if re.search(rf"^\s*{HANDOFF_INCOMPLETE_MARKER}\s*$", reply, re.MULTILINE):
+        return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
     # The prompt's own size guard fired: the session deleted its archive and
     # said how big it was, so there is nothing to poll for and nothing left
     # behind in the old session's outputs.
@@ -498,7 +508,9 @@ async def transfer_workspace(
         )
         return TranscriptOnly(transcript=transcript or "", gap_reason="bundle_oversize")
 
-    bundle = await _poll_for_bundle(client, session_id=old_session_id, sleep=sleep)
+    bundle = await _poll_for_bundle(
+        client, session_id=old_session_id, filename=handoff_filename(transfer_id), sleep=sleep
+    )
     if bundle is None:
         log.warning("workspace_transfer.no_bundle", session_id=old_session_id)
         return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")

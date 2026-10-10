@@ -60,11 +60,11 @@ def supports_system_message(model_id: str) -> bool:
 def is_worth_checkpointing(events: Sequence[BetaManagedAgentsSessionEvent]) -> bool:
     """True when the old session produced work worth spending a billed turn on.
 
-    A session that never answered has nothing to hand over: the user's own
-    message is already being replayed into the successor.
+    Messages or tool use can leave working files, including before an answer.
+    The caller also checks inherited resources before skipping a checkpoint.
     """
 
-    return any(event.type == "agent.message" for event in events)
+    return any(event.type == "agent.message" or event.type.endswith("tool_use") for event in events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,10 +223,16 @@ def _framing_text(
             "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/, and "
             "`handoff/tmp/work/...` under /tmp/work/. Anything restored into the outputs "
             "directory may be delivered to this thread a second time, which is expected.\n\n"
+            "If `handoff/root/inherited-handoff.tar.gz` exists, it holds files from an "
+            "earlier move that may not have been unpacked: extract it into a separate "
+            "directory and read its HANDOFF.md too.\n\n"
             "If `handoff/root/repo-state/` exists, the mounted repository's checkout was not "
             "archived, only its unsaved work. Restore it only into a checkout of the same remote "
-            "(`remote.txt`) at the same commit (`head.txt`): `git fetch` "
-            "`local-commits.bundle` if present and fast-forward to it, `git apply --binary "
+            "(`remote.txt`) at the same commit (`head.txt`). If the current repository differs "
+            "or is absent, clone the old remote into a separate /root/work checkout (or clone "
+            "a self-contained bundle when no remote exists). `git fetch` "
+            "`local-commits.bundle` if present, check out the recorded HEAD without overwriting "
+            "any destination work, then `git apply --binary "
             "handoff/root/uncommitted.patch`, then `tar xf files.tar` in the checkout. Otherwise "
             "restore nothing there and tell the person where that work is saved."
         )

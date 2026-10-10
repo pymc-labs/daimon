@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsAgentThinkingEvent,
+    BetaManagedAgentsAgentToolUseEvent,
     BetaManagedAgentsImageBlock,
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsTextBlock,
@@ -81,6 +82,13 @@ def test_is_worth_checkpointing_is_true_once_the_agent_has_replied() -> None:
     ]
 
     assert is_worth_checkpointing(events), "one agent reply is enough to justify the checkpoint"
+
+
+def test_tool_work_before_the_first_answer_still_needs_a_checkpoint() -> None:
+    event = BetaManagedAgentsAgentToolUseEvent(
+        id="tool", type="agent.tool_use", name="write", input={}, processed_at=PROCESSED_AT
+    )
+    assert is_worth_checkpointing([event])
 
 
 def test_select_recent_turns_keeps_the_newest_turns_in_reading_order() -> None:
@@ -434,7 +442,7 @@ def test_framing_stays_under_the_word_budget() -> None:
     # 300, up from 250, to carry the repository-restore paragraph: the mounted
     # checkout is no longer archived, so its unsaved work comes back only if
     # the successor is told how and when to restore it.
-    assert len(system_text(framing_for("claude-sonnet-5")).split()) < 300, (
+    assert len(system_text(framing_for("claude-sonnet-5")).split()) < 400, (
         "framing competes with the agent's own system prompt for attention"
     )
 

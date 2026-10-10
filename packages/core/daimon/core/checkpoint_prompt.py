@@ -46,6 +46,7 @@ matrix §A/§D):
 from __future__ import annotations
 
 import re
+import shlex
 import uuid
 from typing import Literal
 
@@ -76,6 +77,7 @@ CHECKPOINT_OUTPUTS_DIR = "/mnt/session/outputs"
 #: archive is over the cap. The archive is deleted first, so a rejected
 #: transfer leaves nothing behind in the old session's outputs.
 HANDOFF_TOO_LARGE_MARKER = "HANDOFF_TOO_LARGE"
+HANDOFF_INCOMPLETE_MARKER = "HANDOFF_INCOMPLETE"
 
 #: Where the host mounts the finished bundle in the SUCCESSOR workspace. The
 #: prompt names it so the session it asks can see what the archive is for.
@@ -92,10 +94,7 @@ CHECKPOINT_EXCLUDED_GLOBS: tuple[str, ...] = (
     ".cache",
 )
 
-# Written inside the sandbox, outside every archived root (``/tmp`` itself is
-# not archived — only ``/tmp/work`` is), so the list of oversized files never
-# ends up inside the archive it filters.
-_EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
+_BUILT_MARKER_PATH = "/tmp/daimon-handoff-built"
 
 #: Where the git step saves what a fresh mount of the repository cannot give
 #: back: its remote, HEAD and branch, the commits on no remote
@@ -103,8 +102,18 @@ _EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
 #: (`files.tar`). The binary patch stays at `$HOME/uncommitted.patch`.
 REPO_STATE_DIR = "repo-state"
 
-# Untracked or ignored directories a successor rebuilds rather than carries.
-_REPRODUCIBLE_DIRS_PATTERN = r"(^|/)(node_modules|\.venv|__pycache__|\.cache|\.git)/"
+# A bounded, NUL-separated inventory, including ignored task files. Tar does
+# not dereference symlinks. Fail the capture rather than silently skip bytes.
+_REPO_FILE_LIST_SCRIPT = (
+    "import os,subprocess,sys; "
+    "paths=subprocess.check_output(['git','-C',sys.argv[1],'ls-files','-z','--others'])"
+    ".split(b'\\0'); "
+    "paths=[p for p in paths if p and not p.endswith(b'.env') and not "
+    "{b'node_modules',b'.venv',b'__pycache__',b'.cache',b'.git'}.intersection(p.split(b'/'))]; "
+    "total=sum(os.lstat(os.path.join(os.fsencode(sys.argv[1]),p)).st_size for p in paths); "
+    "total<=int(sys.argv[2]) or sys.exit('HANDOFF_INCOMPLETE: repository files exceed cap'); "
+    "sys.stdout.buffer.write(b'\\0'.join(paths)+(b'\\0' if paths else b''))"
+)
 
 #: The third archived root, after ``$HOME`` and the outputs directory. Only this
 #: subdirectory of ``/tmp``: the base image ships ~60 MB of non-hidden browser
@@ -180,7 +189,7 @@ def build_checkpoint_prompt(
     roots = [home_root, outputs_root, scratch_root]
     roots_argument = " ".join(roots)
 
-    excludes = [f"--exclude-from={_EXCLUDE_LIST_PATH}"]
+    excludes: list[str] = []
     # Every dot entry directly under $HOME: .ssh, and the ~100 MB of toolchain
     # caches the base image ships (.bun/.cargo/.rustup/.gradle/.npm/.local/
     # .config). `*` matches `/` in a tar exclude pattern, so the subtree goes
@@ -188,10 +197,8 @@ def build_checkpoint_prompt(
     excludes.append(f"--exclude='{home_root}/.*'")
     # The scratch directory carries a working file when the agent chose it over
     # $HOME, and nothing else worth having: its dot entries are the sandbox's
-    # own sockets and locks, and this transfer's oversize list would otherwise
-    # be archived by the tar command reading it.
+    # own sockets and locks.
     excludes.append(f"--exclude='{scratch_root}/.*'")
-    excludes.append(f"--exclude='{_relative_to_root(_EXCLUDE_LIST_PATH)}'")
     # The bundle being written, and any bundle a previous transfer left.
     excludes.append(f"--exclude='{outputs_root}/{HANDOFF_FILENAME_PREFIX}*'")
     excludes += [f"--exclude='{_relative_to_root(path)}'" for path in CHECKPOINT_EXCLUDED_PATHS]
@@ -251,21 +258,29 @@ def build_checkpoint_prompt(
             f"  git -C {repo_mount_path} status --porcelain",
         ]
         if not leave_unsaved:
-            state = f"{home_dir}/{REPO_STATE_DIR}"
-            repo = repo_mount_path
-            git_commands += [
-                f"  mkdir -p {state}",
-                f"  git -C {repo} remote get-url origin > {state}/remote.txt; "
-                f"git -C {repo} log -1 --format=%H > {state}/head.txt; "
+            state = shlex.quote(f"{home_dir}/{REPO_STATE_DIR}")
+            repo = shlex.quote(repo_mount_path)
+            capture = [
+                f"mkdir -p {state}",
+                f"rm -f {state}/complete {state}/local-commits.bundle",
+                f"git -C {repo} remote get-url origin > {state}/remote.txt || :",
+                f"git -C {repo} rev-parse HEAD > {state}/head.txt",
                 f"git -C {repo} rev-parse --abbrev-ref HEAD > {state}/branch.txt",
-                f"  git -C {repo} diff --binary HEAD > {home_dir}/uncommitted.patch",
-                f"  git -C {repo} ls-files --others --exclude-standard > {home_dir}/untracked.txt",
-                f"  git -C {repo} bundle create {state}/local-commits.bundle HEAD --not"
-                " --remotes || true",
-                f"  git -C {repo} ls-files -z --others"
-                f" | grep -zvE '{_REPRODUCIBLE_DIRS_PATTERN}'"
-                f" | tar -C {repo} --null -T - -cf {state}/files.tar",
+                f"git -C {repo} diff --binary HEAD > {shlex.quote(home_dir)}/uncommitted.patch",
+                f"git -C {repo} ls-files --others --exclude-standard "
+                f"> {shlex.quote(home_dir)}/untracked.txt",
+                f"if [ -s {state}/remote.txt ]; then "
+                f"git -C {repo} rev-list HEAD --not --remotes=origin > {state}/commits.txt; "
+                f"else git -C {repo} rev-list HEAD > {state}/commits.txt; fi",
+                f"if [ -s {state}/commits.txt ]; then git -C {repo} bundle create"
+                f" {state}/local-commits.bundle HEAD "
+                f"$(if [ -s {state}/remote.txt ]; then echo --not --remotes=origin; fi); fi",
+                f"python3 -c {shlex.quote(_REPO_FILE_LIST_SCRIPT)} {repo} {max_bundle_bytes}"
+                f" > {state}/files.list",
+                f"tar -C {repo} --null -T {state}/files.list -cf {state}/files.tar",
+                f"touch {state}/complete",
             ]
+            git_commands.append(f"  bash -e -o pipefail -c {shlex.quote('; '.join(capture))}")
         disposition = (
             "The uncommitted changes in this checkout are deliberately being left behind: "
             "the person was asked and chose to leave them here, so do not save them to a "
@@ -273,7 +288,7 @@ def build_checkpoint_prompt(
             if leave_unsaved
             else "The checkout is not archived; its unsaved work is captured instead."
         )
-        count = "two" if leave_unsaved else "eight"
+        count = "two" if leave_unsaved else "three"
         steps.append(
             "\n".join(
                 [
@@ -290,30 +305,39 @@ def build_checkpoint_prompt(
         "\n".join(
             [
                 f"{step('build the archive.')} The shell starts in /, and the archive must be "
-                "written flat into the outputs directory. Run these three commands, in order, "
+                "written flat into the outputs directory. Run this shell block "
                 "exactly as written:",
+                "  set -e",
                 "  cd /",
                 f"  mkdir -p {home_dir}/work {CHECKPOINT_SCRATCH_DIR}",
-                f"  find {roots_argument} -type f -size +{max_bundle_mib}M > {_EXCLUDE_LIST_PATH}",
-                tar_command,
-                "The find step lists files too large to carry so tar skips them; do not edit "
-                "either command.",
+                f"  rm -f {_BUILT_MARKER_PATH}",
+                f"  if [ -f {CHECKPOINT_BUNDLE_MOUNT_PATH} ]; then cp "
+                f"{CHECKPOINT_BUNDLE_MOUNT_PATH} {home_dir}/inherited-handoff.tar.gz; fi",
+                tar_command + f" && touch {_BUILT_MARKER_PATH}",
+                "Do not omit oversized task files: if the archive exceeds the cap, the "
+                "next step reports that the files could not be carried.",
             ]
         )
     )
 
+    complete_conditions = [f"[ -f {_BUILT_MARKER_PATH} ]"]
+    if repo_mount_path is not None and not leave_unsaved:
+        complete_conditions.append(f"[ -f {shlex.quote(home_dir)}/{REPO_STATE_DIR}/complete ]")
     show: list[str] = [
         f"{step('check the size, then show the result.')} Run:",
-        f'  size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; '
+        f"  if ! ( {' && '.join(complete_conditions)} ); then rm -f {archive_path}; "
+        f"echo {HANDOFF_INCOMPLETE_MARKER}; else "
+        f'size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; '
         f'then rm -f {archive_path}; echo "{HANDOFF_TOO_LARGE_MARKER} $size"; '
-        f"else ls -l {archive_path}; fi",
+        f"else ls -l {archive_path}; fi; fi",
     ]
     if repo_mount_path is not None:
         show.append(f"  git -C {repo_mount_path} rev-parse HEAD")
     show.append(
         f"The archive cannot be carried above {max_bundle_mib} MiB, so that command deletes it "
         f"and prints {HANDOFF_TOO_LARGE_MARKER} instead. That is a complete answer: do not "
-        "retry, shrink or rebuild it."
+        "retry, shrink or rebuild it. A failed capture prints HANDOFF_INCOMPLETE; "
+        "include that line in your reply even if other commands succeeded."
     )
     steps.append("\n".join(show))
 

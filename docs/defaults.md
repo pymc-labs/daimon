@@ -68,6 +68,12 @@ A skill is a directory: `SKILL.md` with YAML frontmatter, plus whatever
 `description` are required in the frontmatter and only those two are
 interpreted; other keys are preserved but mean nothing to Daimon.
 
+The seeded `workspace-setup` skill describes workspace moves: working files
+travel from the archived directories, mounted repository work is restored at
+its saved commit, and inherited archives are inspected for earlier work. Keep
+that guidance aligned with the transfer flow in [architecture.md](architecture.md),
+including its size cap and transcript fallback when files cannot be carried.
+
 `packages/core/daimon/core/skill_zip.py` packages the directory. It rewrites
 every path under a top-level directory matching the skill name (the provider
 rejects a zip whose top directory disagrees with the manifest), renames any

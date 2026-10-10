@@ -1277,9 +1277,17 @@ never archived, since Managed Agents mounts it again: its unsaved work is saved
 under `$HOME/repo-state/` instead -- a `git diff --binary` patch, a bundle of the
 commits on no remote, and a tar of its untracked and ignored files (minus
 `node_modules`, `.venv`, `__pycache__`, `.cache`). The successor restores that
-work only into a checkout of the same remote at the same commit, and otherwise
-says where it is. Any other checkout under the archived roots travels with its
-working files as before.
+work only into a checkout of the same remote at the recorded commit. When the
+destination mounts a different repository, the successor clones the old remote
+into a separate working checkout before applying its saved commits and patch.
+Any other checkout under the archived roots travels with its working files as
+before. A mounted archive inherited from an earlier move is copied into the
+new bundle even if the old session never unpacked it or wrote another file.
+Untracked and ignored repository files have a combined size cap before packing;
+credential files and reproducible caches stay out. A failed repository capture,
+failed tar, or oversized bundle falls back to the transcript rather than
+claiming a full transfer. The transfer polls only this move's filename and
+requires its size to settle before uploading it.
 
 ## Entry points that are not a chat message
 
