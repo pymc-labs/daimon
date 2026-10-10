@@ -217,9 +217,12 @@ async def test_a_failed_interrupt_does_not_stop_the_sweep(
 async def test_sweep_marks_the_embed_failed_and_clears_the_row(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
+    log = MagicMock()
+    monkeypatch.setattr("daimon.adapters.discord.bot.log", log)
     message = MagicMock(spec=discord.Message)
     message.edit = AsyncMock()
     thread = MagicMock(spec=discord.Thread)
@@ -238,18 +241,31 @@ async def test_sweep_marks_the_embed_failed_and_clears_the_row(
     assert await list_orphaned_turns(db_session, platform="discord") == [], (
         "a retired turn must not be retired again on the next boot"
     )
+    retired = [call for call in log.info.call_args_list if call.args[0] == "turn.orphan_retired"]
+    completed = [
+        call
+        for call in log.info.call_args_list
+        if call.args[0] == "turn.card_orphan_retirement_completed"
+    ]
+    assert len(retired) == len(completed) == 1
+    assert retired[0].kwargs["message_id"] == "777"
 
 
 async def test_sweep_clears_the_row_even_when_the_embed_is_unreachable(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A deleted message or lost permission must not make the sweep retry forever."""
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
+    log = MagicMock()
+    monkeypatch.setattr("daimon.adapters.discord.bot.log", log)
     thread = MagicMock(spec=discord.Thread)
     thread.fetch_message = AsyncMock(
-        side_effect=discord.NotFound(MagicMock(status=404), "Unknown Message")
+        side_effect=discord.NotFound(
+            MagicMock(status=404), {"code": 10008, "message": "Unknown Message"}
+        )
     )
     bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -258,9 +274,18 @@ async def test_sweep_clears_the_row_even_when_the_embed_is_unreachable(
     assert await list_orphaned_turns(db_session, platform="discord") == [], (
         "an unreachable embed must still clear its marker"
     )
+    assert not any(call.args[0] == "turn.orphan_retired" for call in log.info.call_args_list)
+    dropped = [
+        call
+        for call in log.warning.call_args_list
+        if call.args[0] == "turn.card_orphan_retirement_dropped"
+    ]
+    assert len(dropped) == 1
+    assert dropped[0].kwargs["message_id"] == "777"
+    assert dropped[0].kwargs["reason"] == "message_missing"
 
 
-@pytest.mark.parametrize("failure", ["missing_token", "unknown_webhook"])
+@pytest.mark.parametrize("failure", ["missing_token", "unknown_webhook", "unavailable_path"])
 async def test_sweep_uneditable_webhook_does_not_post_replacement(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -269,6 +294,8 @@ async def test_sweep_uneditable_webhook_does_not_post_replacement(
 ) -> None:
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
+    log = MagicMock()
+    monkeypatch.setattr("daimon.adapters.discord.bot.log", log)
     message = MagicMock(spec=discord.Message)
     message.webhook_id = 42
     message.application_id = 10
@@ -279,7 +306,9 @@ async def test_sweep_uneditable_webhook_does_not_post_replacement(
     thread.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
     bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
     monkeypatch.setattr(DiscordPostTransport, "_ours", lambda *_: True)
-    if failure == "missing_token":
+    if failure == "unavailable_path":
+        monkeypatch.setattr(DiscordPostTransport, "_destination", lambda *_: None)
+    elif failure == "missing_token":
         monkeypatch.setattr(DiscordPostTransport, "_webhook", AsyncMock(return_value=None))
     else:
         webhook = MagicMock(spec=discord.Webhook)
@@ -297,6 +326,17 @@ async def test_sweep_uneditable_webhook_does_not_post_replacement(
     thread.send.assert_not_awaited()
     message.edit.assert_not_awaited()
     assert await list_orphaned_turns(db_session, platform="discord") == []
+    assert not any(call.args[0] == "turn.orphan_retired" for call in log.info.call_args_list)
+    dropped = [
+        call
+        for call in log.warning.call_args_list
+        if call.args[0] == "turn.card_orphan_retirement_dropped"
+    ]
+    assert len(dropped) == 1
+    assert dropped[0].kwargs["message_id"] == "777"
+    assert dropped[0].kwargs["reason"] == (
+        "webhook_path_unavailable" if failure == "unavailable_path" else "edit_failed"
+    )
 
 
 async def test_sweep_runs_once_per_process_not_once_per_reconnect(

@@ -1228,10 +1228,10 @@ class DaimonBot(commands.Bot):
                     )
                     edited = False
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
-                        await transport.edit(
+                        result = await transport.edit(
                             message, embed=embed, view=None, _allow_replacement=False
                         )
-                        edited = True
+                        edited = result is not None and result.id == message.id
                     elif not isinstance(message.webhook_id, int):
                         await message.edit(embed=embed, view=None)
                         edited = True
@@ -1251,17 +1251,41 @@ class DaimonBot(commands.Bot):
                                 else None
                             ),
                         )
-                    log.info(
-                        "turn.card_orphan_retirement_completed"
-                        if edited
-                        else "turn.card_orphan_retirement_dropped",
+                        log.info(
+                            "turn.card_orphan_retirement_completed",
+                            turn_id=orphan_turn_id,
+                            session_id=str(row.id),
+                            message_id=row.active_turn_message_id,
+                        )
+                    else:
+                        log.warning(
+                            "turn.card_orphan_retirement_dropped",
+                            turn_id=orphan_turn_id,
+                            session_id=str(row.id),
+                            message_id=row.active_turn_message_id,
+                            reason="webhook_path_unavailable",
+                        )
+                else:
+                    log.warning(
+                        "turn.card_orphan_retirement_dropped",
                         turn_id=orphan_turn_id,
                         session_id=str(row.id),
                         message_id=row.active_turn_message_id,
+                        reason="channel_not_messageable",
                     )
             except (discord.HTTPException, discord.ClientException, ValueError) as err:
                 log.warning(
+                    "turn.card_orphan_retirement_dropped",
+                    turn_id=orphan_turn_id,
+                    session_id=str(row.id),
+                    message_id=row.active_turn_message_id,
+                    reason="message_missing"
+                    if isinstance(err, discord.HTTPException) and err.code == 10008
+                    else "edit_failed",
+                )
+                log.warning(
                     "turn.orphan_retire_failed",
+                    turn_id=orphan_turn_id,
                     thread_id=row.thread_id,
                     message_id=row.active_turn_message_id,
                     error=str(err),
