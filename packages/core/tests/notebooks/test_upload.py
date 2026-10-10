@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -55,17 +56,34 @@ def test_create_notebook_upload_permanent_namespaces_slug_and_builds_url() -> No
     assert payload["max_bytes"] == _settings().max_source_bytes, "source budget signed in"
 
 
-def test_create_notebook_upload_mints_random_slug_when_none() -> None:
+@pytest.mark.parametrize(
+    ("token", "expected_slug"),
+    [
+        ("A" * 22, "A" * 22),
+        ("-" + "A" * 21, "x-" + "A" * 21),
+    ],
+    ids=["ordinary-token", "leading-dash-token"],
+)
+def test_create_notebook_upload_mints_random_slug_when_none(
+    monkeypatch: pytest.MonkeyPatch, token: str, expected_slug: str
+) -> None:
+    requested_bytes: list[int] = []
+
+    def token_urlsafe(nbytes: int) -> str:
+        requested_bytes.append(nbytes)
+        return token if nbytes == 16 else "fixed-nonce"
+
+    monkeypatch.setattr("daimon.core.notebooks.publish.secrets.token_urlsafe", token_urlsafe)
     out = create_notebook_upload(
         slug=None, notebook_settings=_settings(), principal_key=None, now=_NOW
     )
     payload = _payload(out["upload_url"])
-    assert payload["op"] == "notebook", "notebook op signed in"
-    import re
 
-    assert re.fullmatch(r"[A-Za-z0-9_-]{22}", out["slug"]), (
-        "slug is a fresh 128-bit url-safe token (16 bytes → 22 chars)"
-    )
+    assert 16 in requested_bytes, "the slug keeps its 128-bit random source"
+    assert payload["op"] == "notebook", "notebook op signed in"
+    assert out["slug"] == expected_slug, "slug uses the expected normalization"
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", out["slug"]), "slug is URL-safe"
+    assert payload["slug"] == out["slug"], "upload URL signs the returned slug"
 
 
 def test_create_attachment_upload_signs_name_and_data_op() -> None:
