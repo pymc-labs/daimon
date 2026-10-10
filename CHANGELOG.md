@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord failures use plain copy instead of provider JSON, exception bodies, request IDs or tool details. Overloaded Claude requests ask for a retry in a minute. A failed reply allows for files still arriving, and the output sweep no longer claims a file was too large to attach after it was already posted in that turn.
 
 - On Discord, the first reply in Daimon's thread that doesn't @mention Daimon gets a 🔔 reaction, once per thread a day, as a hint that only a mention continues the conversation. The reply itself is still not answered. Turn it off with `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=false`.
+- Slack approval replies now appear in the same thread as the approval card.
 - Daimon no longer tells you an earlier message "never reached me" when it was answered in another thread or didn't mention Daimon. It now says it only sees messages that mention it and that other threads are separate conversations.
 - Daimon no longer tells you an earlier message "never reached me" when it was answered in another thread or wasn't addressed to Daimon. It now says the message may be in another thread or wasn't addressed to it, and that other threads are separate conversations. Conversations already under way get this too.
 - Slack now shows a file delivery failure in every affected thread, once per thread.
