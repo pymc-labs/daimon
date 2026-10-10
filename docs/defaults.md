@@ -204,6 +204,13 @@ toolset into each seeded agent, so an apply run without it produces agents
 that differ from a deployed one. Both are in
 [configuration.md](configuration.md).
 
+The seeded Daimon prompt keeps ordinary Discord replies under about 2,000
+characters. Longer analyses, reference guides and code listings are delivered
+as files with a short summary, unless the person explicitly asks for the
+long answer in chat. Applying this default updates the managed agent's system
+prompt; an existing thread replaces its session once to pick up that change.
+Custom agent prompts are unaffected.
+
 The seeded Daimon prompt describes opt-in Markdown tables in final replies: Discord renders
 them as PNG attachments and Slack uses native table blocks; Teams shows Markdown tables
 as they are, with no setting. Existing custom agent
