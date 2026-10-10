@@ -2490,3 +2490,20 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     else:
         assert after.last_error is None and len(ran) == 1
     await client.close()
+
+
+async def test_run_loops_without_a_usage_sweep_runs_ticks_alone() -> None:
+    """With the sweep switched off, ticks still run and stop cleanly."""
+    stop = asyncio.Event()
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async with asyncio.timeout(5):
+        await _run_loops(tick=tick, usage_sweep=None, interval_s=0.01, stop_event=stop)
+
+    assert ticks == 3, f"ticks run without a usage sweep, got {ticks}"
