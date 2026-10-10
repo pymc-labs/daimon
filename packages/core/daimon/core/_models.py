@@ -2616,6 +2616,7 @@ class GitHubConnectInvitation(Base):
     origin_ma_agent_id: Mapped[str | None] = mapped_column(Text)
     origin_responder_name: Mapped[str | None] = mapped_column(Text)
     requested_work: Mapped[str | None] = mapped_column(Text)
+    requested_repo: Mapped[str | None] = mapped_column(Text)
     encrypted_origin_followup: Mapped[bytes | None] = mapped_column(LargeBinary)
     origin_followup_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     connected_repos: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB)
@@ -2648,6 +2649,7 @@ class GitHubConnectClickIntent(Base):
     origin_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     origin_responder_name: Mapped[str] = mapped_column(Text, nullable=False)
     requested_work: Mapped[str | None] = mapped_column(Text)
+    requested_repo: Mapped[str | None] = mapped_column(Text)
     encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
