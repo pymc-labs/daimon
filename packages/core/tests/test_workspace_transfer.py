@@ -48,6 +48,7 @@ from daimon.core.checkpoint_prompt import (
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.workspace_transfer import (
+    CHECKPOINT_MAX_S,
     CHECKPOINT_REASON_CONFIGURATION_CHANGE,
     CHECKPOINT_REASON_HANDOFF,
     CHECKPOINT_REASON_MODEL_CHANGE,
@@ -57,6 +58,7 @@ from daimon.core.workspace_transfer import (
     TranscriptOnly,
     _checkpoint_reason,
     as_prepared_replacement,
+    bounded_checkpoint_deadline,
     transfer_workspace,
 )
 from daimon.testing.factories import make_tenant
@@ -841,7 +843,7 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
     )
 
     prompt = _checkpoint_instruction(state)
-    assert "diff HEAD > /root/uncommitted.patch" in prompt, "copy means capture the patch"
+    assert "diff --binary HEAD > /root/uncommitted.patch" in prompt, "copy means capture the patch"
 
     assert isinstance(outcome, FullHandoff)
     assert outcome.unpreserved == (), "nothing was left behind, so nothing is claimed to be"
@@ -1119,3 +1121,12 @@ def test_full_handoff_framing_names_the_normalised_mount_path() -> None:
     assert "tar xzf /daimon-handoff.tar.gz" not in framing_text, (
         "the requested (un-normalised) path must never be the extraction command"
     )
+
+
+def test_a_checkpoint_never_holds_the_answer_longer_than_its_own_ceiling() -> None:
+    """Prod checkpoints that packed a mounted checkout ran 2m12s-2m34s while the
+    person's answer waited; the checkpoint now gets at most CHECKPOINT_MAX_S."""
+    far = NOW + timedelta(minutes=15)
+    assert bounded_checkpoint_deadline(far, now=NOW) == NOW + timedelta(seconds=CHECKPOINT_MAX_S)
+    near = NOW + timedelta(seconds=30)
+    assert bounded_checkpoint_deadline(near, now=NOW) == near, "an earlier turn deadline wins"

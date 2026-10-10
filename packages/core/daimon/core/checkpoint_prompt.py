@@ -97,6 +97,15 @@ CHECKPOINT_EXCLUDED_GLOBS: tuple[str, ...] = (
 # ends up inside the archive it filters.
 _EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
 
+#: Where the git step saves what a fresh mount of the repository cannot give
+#: back: its remote, HEAD and branch, the commits on no remote
+#: (`local-commits.bundle`) and its untracked and ignored files
+#: (`files.tar`). The binary patch stays at `$HOME/uncommitted.patch`.
+REPO_STATE_DIR = "repo-state"
+
+# Untracked or ignored directories a successor rebuilds rather than carries.
+_REPRODUCIBLE_DIRS_PATTERN = r"(^|/)(node_modules|\.venv|__pycache__|\.cache|\.git)/"
+
 #: The third archived root, after ``$HOME`` and the outputs directory. Only this
 #: subdirectory of ``/tmp``: the base image ships ~60 MB of non-hidden browser
 #: and compile-cache trees directly under ``/tmp`` (observed on staging), which
@@ -147,10 +156,11 @@ def build_checkpoint_prompt(
 
     ``unsaved_work`` is what the person answered when asked about uncommitted
     changes in that repository, and only matters when one is mounted. The
-    default (and ``"copy"``) captures them: the patch, the untracked list, and
-    the checkout itself all travel in the archive. ``"leave"`` is the person
-    saying those changes stay where they are, so the prompt neither captures
-    them nor packs the checkout — the successor clones the repository fresh,
+    default (and ``"copy"``) captures everything a fresh mount of the
+    repository cannot give back: a binary patch, the commits on no remote and
+    the untracked and ignored files (`REPO_STATE_DIR`); the checkout itself is
+    never archived. ``"leave"`` is the person saying those changes stay where
+    they are, so the prompt does not capture them — the successor clones the repository fresh,
     and the copy that promises "the uncommitted changes stay in the old
     checkout" stays true.
     """
@@ -161,9 +171,13 @@ def build_checkpoint_prompt(
     home_root = _relative_to_root(home_dir)
     outputs_root = _relative_to_root(CHECKPOINT_OUTPUTS_DIR)
     scratch_root = _relative_to_root(CHECKPOINT_SCRATCH_DIR)
+    # The mounted repository is never archived: MA mounts it again for the
+    # successor, and packing the checkout carried every tracked file (368 MB on
+    # prod against the 20 MiB cap, minutes of compression, then every file
+    # lost). What a fresh mount cannot give back is captured under $HOME by the
+    # git step instead (`REPO_STATE_DIR`). Other git checkouts under the
+    # archived roots are not touched: their working files travel as before.
     roots = [home_root, outputs_root, scratch_root]
-    if repo_mount_path is not None and not leave_unsaved:
-        roots.append(_relative_to_root(repo_mount_path))
     roots_argument = " ".join(roots)
 
     excludes = [f"--exclude-from={_EXCLUDE_LIST_PATH}"]
@@ -183,6 +197,8 @@ def build_checkpoint_prompt(
     excludes += [f"--exclude='{_relative_to_root(path)}'" for path in CHECKPOINT_EXCLUDED_PATHS]
     excludes += [f"--exclude='*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS]
     excludes.append("--exclude='*.env'")
+    if repo_mount_path is not None:
+        excludes.append(f"--exclude='{_relative_to_root(repo_mount_path)}'")
     tar_command = "\n".join(
         [f"  tar czf {archive_path} \\"]
         + [f"    {exclude} \\" for exclude in excludes]
@@ -209,10 +225,10 @@ def build_checkpoint_prompt(
         f"{HANDOFF_FILENAME_PREFIX}. Do exactly the steps below, in order, and add no steps "
         "of your own. Do not open or read any image file.",
         "Only the task's own work travels: the non-hidden entries in "
-        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the outputs directory, and the working "
-        "repository if one is mounted. Credential mounts, hidden directories and language "
-        "toolchains and their caches stay behind. The commands below already exclude every one "
-        "of them; run them as written and add nothing.",
+        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the outputs directory, and the unsaved "
+        "work of the working repository if one is mounted. Credential mounts, hidden "
+        "directories and language toolchains and their caches stay behind. The commands "
+        "below already exclude every one of them; run them as written and add nothing.",
     ]
     steps.append(
         "\n".join(
@@ -235,19 +251,29 @@ def build_checkpoint_prompt(
             f"  git -C {repo_mount_path} status --porcelain",
         ]
         if not leave_unsaved:
+            state = f"{home_dir}/{REPO_STATE_DIR}"
+            repo = repo_mount_path
             git_commands += [
-                f"  git -C {repo_mount_path} diff HEAD > {home_dir}/uncommitted.patch",
-                f"  git -C {repo_mount_path} ls-files --others --exclude-standard"
-                f" > {home_dir}/untracked.txt",
+                f"  mkdir -p {state}",
+                f"  git -C {repo} remote get-url origin > {state}/remote.txt; "
+                f"git -C {repo} log -1 --format=%H > {state}/head.txt; "
+                f"git -C {repo} rev-parse --abbrev-ref HEAD > {state}/branch.txt",
+                f"  git -C {repo} diff --binary HEAD > {home_dir}/uncommitted.patch",
+                f"  git -C {repo} ls-files --others --exclude-standard > {home_dir}/untracked.txt",
+                f"  git -C {repo} bundle create {state}/local-commits.bundle HEAD --not"
+                " --remotes || true",
+                f"  git -C {repo} ls-files -z --others"
+                f" | grep -zvE '{_REPRODUCIBLE_DIRS_PATTERN}'"
+                f" | tar -C {repo} --null -T - -cf {state}/files.tar",
             ]
         disposition = (
             "The uncommitted changes in this checkout are deliberately being left behind: "
             "the person was asked and chose to leave them here, so do not save them to a "
             "file and do not copy them anywhere else."
             if leave_unsaved
-            else "The uncommitted work is captured as a patch on purpose."
+            else "The checkout is not archived; its unsaved work is captured instead."
         )
-        count = "two" if leave_unsaved else "four"
+        count = "two" if leave_unsaved else "eight"
         steps.append(
             "\n".join(
                 [

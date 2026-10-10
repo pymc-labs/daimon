@@ -1268,6 +1268,19 @@ old session itself from this thread (`authorize(READ_SESSION)`); otherwise the
 new session starts with nothing. A target its rules refuse here is refused by
 admission before any of this runs.
 
+The workspace transfer (`daimon.core.workspace_transfer`) spends one checkpoint
+turn on the old session, capped at `CHECKPOINT_MAX_S` (90 s) whatever the turn's
+own deadline; one that runs out falls back to the transcript and says the files
+did not come across. The checkpoint archives `$HOME`, `/tmp/work` and the outputs
+directory (`daimon.core.checkpoint_prompt`). The mounted repository's checkout is
+never archived, since Managed Agents mounts it again: its unsaved work is saved
+under `$HOME/repo-state/` instead -- a `git diff --binary` patch, a bundle of the
+commits on no remote, and a tar of its untracked and ignored files (minus
+`node_modules`, `.venv`, `__pycache__`, `.cache`). The successor restores that
+work only into a checkout of the same remote at the same commit, and otherwise
+says where it is. Any other checkout under the archived roots travels with its
+working files as before.
+
 ## Entry points that are not a chat message
 
 - **Agent setup picture controls** show the current agent picture in Details.

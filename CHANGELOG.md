@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
 - Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress. Unknown catalog kinds mark their scenario PENDING without blocking supported scenarios.
 
+- A workspace move no longer packs the mounted repository checkout into its archive: prod moves spent over two minutes packing a 368 MB checkout and then lost every file. The checkout is mounted again, and its unsaved work (binary patch, commits on no remote, untracked and ignored files) is carried and restored into a checkout of the same remote and commit. The checkpoint turn is capped at 90 s.
 - Rejected or failed MCP and GitHub token forms on Discord, Slack and Teams now show an error with a usable retry button. After 90 seconds the card says it is still saving and will update when finished; long skill imports continue until success or error.
 - A failed attempt to republish a report no longer disconnects the existing report.
 - Slack, Discord and Teams members now see only locally routed responders and agents explicitly allowed in their channel, across setup panels, agent tools, skill reads and routing explanations. Unrouted agents and agents belonging to other channels stay hidden; admin visibility and channel isolation are unchanged.

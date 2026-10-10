@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import uuid
+from pathlib import Path
 
+import pytest
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_EXCLUDED_GLOBS,
@@ -14,6 +18,7 @@ from daimon.core.checkpoint_prompt import (
     HANDOFF_FILENAME_PREFIX,
     HANDOFF_MAX_BYTES,
     HANDOFF_TOO_LARGE_MARKER,
+    REPO_STATE_DIR,
     build_checkpoint_prompt,
     checkpoint_head_lines,
     checkpoint_too_large_bytes,
@@ -76,9 +81,7 @@ def test_prompt_writes_an_oversize_exclude_list_before_tarring() -> None:
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=7
     )
-    find_index = prompt.index(
-        "find root mnt/session/outputs tmp/work mnt/repo/analytics -type f -size +7M"
-    )
+    find_index = prompt.index("find root mnt/session/outputs tmp/work -type f -size +7M")
     tar_index = prompt.index("tar czf")
     assert find_index < tar_index, "the exclude list must exist before tar reads it"
     exclude_list = prompt[find_index:].split(">", 1)[1].split("\n", 1)[0].strip()
@@ -111,16 +114,17 @@ def test_prompt_captures_repo_state_without_a_repo_omitting_the_git_steps() -> N
     for command in (
         f"git -C {REPO} rev-parse HEAD",
         f"git -C {REPO} status --porcelain",
-        f"git -C {REPO} diff HEAD > /root/uncommitted.patch",
+        f"git -C {REPO} diff --binary HEAD > /root/uncommitted.patch",
         f"git -C {REPO} ls-files --others --exclude-standard > /root/untracked.txt",
     ):
         assert command in with_repo, f"{command} is part of the repo-state step"
     assert with_repo.count(f"git -C {REPO} rev-parse HEAD") == 2, (
         "HEAD is echoed before and after the archive so a commit is detectable"
     )
-    assert "-C / root mnt/session/outputs tmp/work mnt/repo/analytics" in with_repo, (
-        "the repo mount is archived alongside $HOME, the outputs directory and /tmp"
+    assert "-C / root mnt/session/outputs tmp/work\n" in with_repo + "\n", (
+        "the repo mount is never a tar root: MA mounts it again"
     )
+    assert "--exclude='mnt/repo/analytics'" in with_repo, "and it is excluded wherever it is"
 
     without_repo = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
@@ -149,10 +153,10 @@ def test_prompt_honours_a_non_default_home_dir() -> None:
     )
     assert "/home/claude/HANDOFF.md" in prompt, "the note goes in the given home directory"
     assert "/home/claude/uncommitted.patch" in prompt, "so does the patch"
-    assert "-C / home/claude mnt/session/outputs tmp/work mnt/repo/analytics" in prompt, (
-        "the tar roots are the given home directory, the outputs directory, /tmp and the "
-        "repo, relative to /"
+    assert "-C / home/claude mnt/session/outputs tmp/work" in prompt, (
+        "the tar roots are the given home directory, the outputs directory and /tmp, relative to /"
     )
+    assert "/home/claude/repo-state/files.tar" in prompt, "repo state goes under that home"
     assert "--exclude='home/claude/.*'" in prompt, (
         "the dot-entry exclusion follows the home directory it was given"
     )
@@ -226,15 +230,14 @@ def test_prompt_captures_uncommitted_changes_when_the_answer_is_copy_or_absent()
             max_bundle_mib=20,
             unsaved_work=unsaved_work,
         )
-        assert f"git -C {REPO} diff HEAD > /root/uncommitted.patch" in prompt, (
+        assert f"git -C {REPO} diff --binary HEAD > /root/uncommitted.patch" in prompt, (
             f"unsaved_work={unsaved_work!r} means capture the work, so the patch step stays"
         )
         assert f"git -C {REPO} ls-files --others --exclude-standard" in prompt, (
             "untracked files are part of the work being captured"
         )
-        assert "-C / root mnt/session/outputs tmp/work mnt/repo/analytics" in prompt, (
-            "and the checkout itself travels"
-        )
+        assert "/root/repo-state/local-commits.bundle" in prompt, "local commits travel too"
+        assert "/root/repo-state/files.tar" in prompt, "and untracked and ignored files"
 
 
 def test_prompt_leaves_uncommitted_changes_behind_when_the_answer_is_leave() -> None:
@@ -315,7 +318,8 @@ def test_prompt_names_what_travels_and_what_stays_behind_in_words() -> None:
     )
     assert (
         "Only the task's own work travels: the non-hidden entries in /root and /tmp/work, the "
-        "outputs directory, and the working repository if one is mounted." in prompt
+        "outputs directory, and the unsaved work of the working repository if one is mounted."
+        in prompt
     ), "the prompt must name what travels, not only pass it to tar"
     assert (
         "Credential mounts, hidden directories and language toolchains and their caches "
@@ -378,7 +382,8 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
             "    --exclude='*/__pycache__' \\",
             "    --exclude='*/.cache' \\",
             "    --exclude='*.env' \\",
-            "    -C / root mnt/session/outputs tmp/work mnt/repo/analytics",
+            "    --exclude='mnt/repo/analytics' \\",
+            "    -C / root mnt/session/outputs tmp/work",
         ]
     )
     assert expected in prompt, "the generated tar command changed"
@@ -452,3 +457,90 @@ def test_prompt_archives_the_scratch_directory_minus_its_own_exclude_list() -> N
     assert "find root mnt/session/outputs tmp/work -type f -size +20M" in prompt, (
         "and the oversize scan covers every root it will tar"
     )
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_the_git_step_captures_everything_a_fresh_mount_cannot_give_back(
+    tmp_path: Path,
+) -> None:
+    """Review of #628, P1 2: with the mounted checkout no longer archived, its
+    work must still be restorable -- a modified tracked BINARY, a local commit
+    that is on no remote, untracked files and ignored task files. Runs the
+    prompt's own commands against a real repository, then restores into a
+    fresh clone the way the successor's framing says to."""
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    _git(tmp_path, "clone", "-q", str(origin), str(seed))
+    (seed / "model.bin").write_bytes(bytes(range(256)))
+    (seed / ".gitignore").write_text("generated.csv\nnode_modules/\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-q", "-m", "seed")
+    _git(seed, "push", "-q", "origin", "HEAD:main")
+
+    repo = tmp_path / "mnt" / "repo"
+    _git(tmp_path, "clone", "-q", str(origin), str(repo))
+    (repo / "notes.md").write_text("local commit\n")
+    _git(repo, "add", "notes.md")
+    _git(repo, "commit", "-q", "-m", "local only")
+    (repo / "model.bin").write_bytes(bytes(reversed(range(256))))
+    (repo / "data").mkdir()
+    (repo / "data" / "new.py").write_text("print('untracked')\n")
+    (repo / "generated.csv").write_text("a,b\n1,2\n")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "dep.js").write_text("reproducible\n")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID,
+        repo_mount_path=str(repo),
+        max_bundle_mib=20,
+        home_dir=str(home),
+    )
+    step = prompt.split("record the repository state.", 1)[1].split("NEVER RUN GIT", 1)[0]
+    commands = [line.strip() for line in step.splitlines() if line.startswith("  ")]
+    subprocess.run(["bash", "-c", "\n".join(commands)], check=True, cwd=tmp_path)
+    assert f"--exclude='{str(repo).strip('/')}'" in prompt, "the checkout itself never travels"
+
+    state = home / REPO_STATE_DIR
+    successor = tmp_path / "successor"
+    _git(tmp_path, "clone", "-q", str(origin), str(successor))  # a fresh mount
+    assert (state / "remote.txt").read_text().strip() == str(origin)
+    _git(successor, "fetch", "-q", str(state / "local-commits.bundle"), "HEAD")
+    _git(successor, "merge", "-q", "--ff-only", "FETCH_HEAD")
+    assert _git(successor, "rev-parse", "HEAD") == (state / "head.txt").read_text()
+    _git(successor, "apply", "--binary", str(home / "uncommitted.patch"))
+    subprocess.run(["tar", "xf", str(state / "files.tar")], cwd=successor, check=True)
+
+    assert (successor / "model.bin").read_bytes() == bytes(reversed(range(256)))
+    assert (successor / "notes.md").read_text() == "local commit\n"
+    assert (successor / "data" / "new.py").read_text() == "print('untracked')\n"
+    assert (successor / "generated.csv").read_text() == "a,b\n1,2\n", "ignored task files too"
+    assert not (successor / "node_modules").exists(), "reproducible dirs stay behind"
+
+
+def test_other_checkouts_under_the_archived_roots_still_travel() -> None:
+    """Review of #628, P1 1: only the MOUNTED checkout is left out (MA mounts it
+    again). A repository the agent cloned under $HOME keeps its working files in
+    the archive, transfer after transfer, exactly as before."""
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
+    )
+    tar = prompt[prompt.index("tar czf") :]
+    assert "-name .git" not in prompt, "no blanket exclusion of nested checkouts"
+    excluded = re.findall(r"--exclude='([^']+)'", tar)
+    assert [path for path in excluded if path.startswith("root/")] == ["root/.*"], (
+        "nothing under the home directory is excluded except its dot entries and caches"
+    )
+    assert "mnt/repo/analytics" in excluded, "the mounted checkout alone is left out"

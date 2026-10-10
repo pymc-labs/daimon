@@ -431,7 +431,10 @@ def test_framing_omits_the_transcript_sentence_when_there_is_no_transcript() -> 
 
 
 def test_framing_stays_under_the_word_budget() -> None:
-    assert len(system_text(framing_for("claude-sonnet-5")).split()) < 250, (
+    # 300, up from 250, to carry the repository-restore paragraph: the mounted
+    # checkout is no longer archived, so its unsaved work comes back only if
+    # the successor is told how and when to restore it.
+    assert len(system_text(framing_for("claude-sonnet-5")).split()) < 300, (
         "framing competes with the agent's own system prompt for attention"
     )
 

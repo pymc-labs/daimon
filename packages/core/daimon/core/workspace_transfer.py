@@ -98,6 +98,12 @@ _MIB = 1024 * 1024
 #: mount path under `/mnt/session/uploads/` regardless (P4.d).
 HANDOFF_MOUNT_PATH = "/daimon-handoff.tar.gz"
 
+#: Longest a checkpoint turn may run, whatever the turn's own deadline. The
+#: person's message waits behind it: prod checkpoints that packed a mounted
+#: checkout ran 2m12s-2m34s. One that runs out falls to the transcript rung,
+#: which says the files did not come across, instead of holding the answer.
+CHECKPOINT_MAX_S = 90.0
+
 #: Why the workspace is being replaced, as the checkpoint controls report it.
 #: Not a reason code: the model on the giving side reads it.
 CHECKPOINT_REASON_HANDOFF = "handoff"
@@ -213,6 +219,11 @@ def _utc_now() -> datetime:
 
 def _is_not_found(err: anthropic.APIStatusError) -> bool:
     return err.status_code == 404
+
+
+def bounded_checkpoint_deadline(turn_deadline: datetime, *, now: datetime) -> datetime:
+    """The checkpoint's deadline: the turn's, but never more than `CHECKPOINT_MAX_S` away."""
+    return min(turn_deadline, now + timedelta(seconds=CHECKPOINT_MAX_S))
 
 
 def _checkpoint_gap_reason(state: TurnState) -> GapReason | None:
@@ -459,7 +470,7 @@ async def transfer_workspace(
         # Nobody is watching this turn, so a tool call waiting for approval
         # would simply hang until the deadline.
         tool_confirmation=AutoApprove(),
-        deadline=checkpoint_deadline,
+        deadline=bounded_checkpoint_deadline(checkpoint_deadline, now=now()),
         # The checkpoint executes the old session: decided again right before.
         before_send=before_send,
     )

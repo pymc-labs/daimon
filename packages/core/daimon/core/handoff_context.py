@@ -221,9 +221,14 @@ def _framing_text(
             "task, the decisions taken and the working files. Put back what the task still "
             "needs, in place: `handoff/root/...` under /root/, "
             "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/, and "
-            "`handoff/tmp/work/...` under /tmp/work/. Anything restored "
-            "into the outputs directory may be delivered to this thread a second time, which "
-            "is expected and not a problem."
+            "`handoff/tmp/work/...` under /tmp/work/. Anything restored into the outputs "
+            "directory may be delivered to this thread a second time, which is expected.\n\n"
+            "If `handoff/root/repo-state/` exists, the mounted repository's checkout was not "
+            "archived, only its unsaved work. Restore it only into a checkout of the same remote "
+            "(`remote.txt`) at the same commit (`head.txt`): `git fetch` "
+            "`local-commits.bundle` if present and fast-forward to it, `git apply --binary "
+            "handoff/root/uncommitted.patch`, then `tar xf files.tar` in the checkout. Otherwise "
+            "restore nothing there and tell the person where that work is saved."
         )
     elif transfer_kind == "transcript":
         parts.append(
