@@ -899,7 +899,11 @@ hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 with action-specific copy and a Details control with plain labelled inputs.
 A pause shows one card per blocked call, and the driver sends one
-`user.tool_confirmation` event per call after its answer. An adapter that
+`user.tool_confirmation` event per call after its answer. File uploads into
+one notebook are the exception: the first upload card's Approve covers the
+turn's other files for that notebook, which then run without a card
+(`_one_card_per_notebook` in `packages/core/daimon/core/turn/approvals.py`);
+after a denial each file still asks. An adapter that
 passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep

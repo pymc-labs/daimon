@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Uploading several data files to one notebook asks once per request instead of once per file. The first upload card says that approving also lets the request add its other files to that notebook, and after Approve they go up without more cards. Publishing the notebook still has its own card, a file for another notebook gets its own card, and after a Deny the next file still asks.
 - The scheduler's headless usage sweep is off by default (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`). It listed every session in the shared Managed Agents workspace and drained its request rate limit, stalling admission. While it's off, headless MCP turns aren't metered and usage a live adapter missed isn't recovered; turning it back on backfills sessions still present in the workspace (and restores the full scan until the scoped sweep ships). `--once` honours the same switch.
 - Teams 👍/👎 are now emoji buttons beside Ask a person instead of Teams' built-in thumbs. Older answers keep the built-in thumbs, which still work.
 - Teams answers end like Discord and Slack ones: a card under the answer shows the summary line (`Ada  12s  $0.042 used  $41.20 left`) with 👍/👎 and, when support is set up, Ask a person, all in one place. A tool-only or failed turn's card shows the summary line too.

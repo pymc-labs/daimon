@@ -176,7 +176,10 @@ def prompt_for_tool_call(
         action = f'Upload "{name}" to {notebook}'
         title = f"{action}?"
         denied_action = f'"{name}" not uploaded'
-        consequence = "Anyone with the notebook's link can open this file."
+        consequence = (
+            "Anyone with the notebook's link can open this file. Approving also lets "
+            "this request add its other files to this notebook."
+        )
         detail_lines = (f"File: {_short(name)}", f"Notebook: {_short(slug)}")
     elif call.tool_name == "publish_report" and publishing:
         action = f'Publish report "{title_value}"'

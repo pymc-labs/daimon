@@ -20,6 +20,7 @@ that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 
@@ -301,10 +302,13 @@ def chat_tool_confirmation(
     if not policy.enabled and not asks_before_publishing:
         return RequireApproval()
     decide = (
-        interactive_decider(
-            policy,
-            requester_platform_user_id=requester_platform_user_id,
-            confirm=confirm if confirm is not None else no_confirmation_surface,
+        _one_card_per_notebook(
+            interactive_decider(
+                policy,
+                requester_platform_user_id=requester_platform_user_id,
+                confirm=confirm if confirm is not None else no_confirmation_surface,
+                trusted_servers=trusted_servers,
+            ),
             trusted_servers=trusted_servers,
         )
         if attended
@@ -313,6 +317,47 @@ def chat_tool_confirmation(
     if not policy.enabled:
         decide = _publish_only(decide, trusted_servers=trusted_servers)
     return PolicyApproval(decide=decide)
+
+
+_ATTACHMENT_UPLOAD = "create_attachment_upload_url"
+
+
+def _one_card_per_notebook(
+    decide: ToolCallDecider, *, trusted_servers: frozenset[str]
+) -> ToolCallDecider:
+    """One Approve covers a turn's file uploads into one notebook.
+
+    A notebook's data files go up one call each, and MA blocks them as one
+    batch: Decision.AI 2026-10-09 pressed Approve ten times in 8.5 minutes for
+    one notebook. Its upload card says approving covers the request's other
+    files for that notebook, so once the person approves one, the turn's other
+    uploads there run without a card. Uploads for one notebook wait for its
+    first answer; after a denial each still asks. Publishing the notebook
+    itself, and every other call, keeps its own card.
+    """
+    approved: set[str] = set()
+    locks: dict[str, asyncio.Lock] = {}
+
+    async def _decide(call: ToolCall) -> ToolConfirmationResult:
+        if call.tool_name != _ATTACHMENT_UPLOAD or not is_publish_call(call, trusted_servers):
+            return await decide(call)
+        slug = str(call.input.get("slug") or "")
+        async with locks.setdefault(slug, asyncio.Lock()):
+            if slug in approved:
+                log.info(
+                    "tool_safety.decided",
+                    tool=call.key,
+                    outcome="allow",
+                    reason="notebook_upload_approved",
+                    attended=True,
+                )
+                return ToolConfirmationResult(allow=True)
+            result = await decide(call)
+            if result.allow:
+                approved.add(slug)
+            return result
+
+    return _decide
 
 
 def _publish_only(decide: ToolCallDecider, *, trusted_servers: frozenset[str]) -> ToolCallDecider:
