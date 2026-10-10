@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -179,8 +180,10 @@ def test_a_notebooks_page_cannot_reach_another_notebook_in_a_real_browser(
     sync_api = pytest.importorskip("playwright.sync_api")
     urls: dict[str, str] = host["urls"]
     reached: list[str] = host["reached"]
-    b_origin = urls["b"].split("/n/b/", 1)[0]
-    a_origin = urls["a"].split("/n/a/", 1)[0]
+    b_url = urlsplit(urls["b"])
+    a_url = urlsplit(urls["a"])
+    b_origin = f"{b_url.scheme}://{b_url.netloc}"
+    a_origin = f"{a_url.scheme}://{a_url.netloc}"
     assert a_origin != b_origin and a_origin.endswith(".localhost:" + a_origin.rsplit(":", 1)[1])
 
     with sync_api.sync_playwright() as p:
@@ -189,6 +192,8 @@ def test_a_notebooks_page_cannot_reach_another_notebook_in_a_real_browser(
             context = browser.new_context()
             page_b = context.new_page()
             assert page_b.goto(urls["b"]).ok, "the viewer opens B's link; B's cookie is set"
+            assert page_b.url == f"{b_origin}/n/b/", "share redirects to a clean notebook URL"
+            assert "access_token=" not in urls["b"]
             own = page_b.evaluate(_OWN_SOCKET, b_origin.replace("http", "ws", 1))
             assert own == "open", "control: B's own page opens B's kernel socket"
 

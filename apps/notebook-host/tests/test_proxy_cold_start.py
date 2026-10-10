@@ -42,6 +42,7 @@ class _Proxy:
         self.tmp_path = tmp_path
         self.spawned: list[str] = []
         self.ready = True
+        self.cookie = False
         self.forwarded: list[httpx.Request] = []
 
         def spawner(slug: str, paths: SlugPaths, port: int, **_kw: Any) -> subprocess.Popen[bytes]:
@@ -62,7 +63,13 @@ class _Proxy:
 
         def handler(request: httpx.Request) -> httpx.Response:
             self.forwarded.append(request)
-            return httpx.Response(200, text="ok")
+            return httpx.Response(
+                200,
+                text="ok",
+                headers={"set-cookie": "session=x; Path=/n/pre-post/; HttpOnly"}
+                if self.cookie
+                else {},
+            )
 
         real_client = httpx.AsyncClient
 
@@ -238,3 +245,37 @@ def test_an_open_websocket_is_counted_until_it_closes(
 
     assert seen_open == [1], "an open session holds the notebook awake"
     assert p.state.processes["pre-ws"].open_sockets == 0, "and stops holding it once closed"
+
+
+def test_a_share_link_starts_a_stopped_notebook_without_a_raw_token_in_the_url(
+    tmp_path, monkeypatch
+):
+    from notebook_host.share import share_key
+
+    proxy = _Proxy(tmp_path, monkeypatch, origin_base=None)
+    proxy.register("pre-post")
+    proxy.cookie = True
+    result = proxy.client.get(f"/s/pre-post/{share_key('pre-post', 'tok')}", follow_redirects=False)
+    assert result.status_code == 303
+    assert result.headers["location"] == "/n/pre-post/"
+    assert proxy.spawned == ["pre-post"]
+    assert proxy.forwarded[0].headers["authorization"] == "Bearer tok"
+    assert not proxy.forwarded[0].url.query
+
+
+def test_an_invalid_share_link_cannot_start_a_notebook(tmp_path, monkeypatch):
+    proxy = _Proxy(tmp_path, monkeypatch, origin_base=None)
+    proxy.register("pre-post")
+    assert proxy.client.get("/s/pre-post/wrong").status_code == 404
+    assert proxy.spawned == []
+    assert proxy.forwarded == []
+
+
+def test_share_link_does_not_redirect_without_a_successful_cookie_handshake(tmp_path, monkeypatch):
+    from notebook_host.share import share_key
+
+    proxy = _Proxy(tmp_path, monkeypatch, origin_base=None)
+    proxy.register("pre-post")
+    result = proxy.client.get(f"/s/pre-post/{share_key('pre-post', 'tok')}", follow_redirects=False)
+    assert result.status_code == 503
+    assert "location" not in result.headers

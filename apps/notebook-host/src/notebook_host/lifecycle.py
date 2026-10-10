@@ -100,14 +100,15 @@ class NotebookProcess:
 
     @property
     def url(self) -> str:
+        from notebook_host.share import share_key
+
         if self.public_url_base is not None:
-            base = f"{self.public_url_base.rstrip('/')}/n/{self.slug}/"
+            base = self.public_url_base.rstrip("/")
         else:
-            base = f"http://{self.public_host}:{self.host_port}/n/{self.slug}/"
-        # marimo validates ``access_token`` on the first request, sets its
-        # session cookie and redirects to the bare path, so the token leaves
-        # the address bar after the first load.
-        return f"{base}?access_token={self.access_token}" if self.access_token else base
+            base = f"http://{self.public_host}:{self.host_port}"
+        if self.access_token:
+            return f"{base}/s/{self.slug}/{share_key(self.slug, self.access_token)}"
+        return f"{base}/n/{self.slug}/"
 
     @property
     def age_s(self) -> float:

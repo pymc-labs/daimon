@@ -1336,7 +1336,14 @@ If you add another, reuse `admit()` rather than re-deriving the gate order.
 
 `apps/notebook-host/` serves published marimo notebooks, spawning one
 marimo subprocess per notebook behind a reverse proxy. Each subprocess has
-its own access token, and scratch notebooks are read-only unless the
+its own access token. Published links use `/s/<slug>/<share-key>`; the host
+validates that notebook's share key, authenticates a local request to marimo,
+sets the browser's host-only session cookie, and redirects to `/n/<slug>/`.
+The raw marimo access token stays on the host. A share link grants access to
+that notebook, remains stable when it is re-published in the same mode, and
+is revoked when its token changes or the notebook is deleted. Share keys are
+redacted from access logs. Historic token-query links still open, but new
+publishes and listings return share links. Scratch notebooks are read-only unless the
 publisher asks for the editor and the operator allows it
 (`notebook.allow_editable` on the bot and `allow_editable` on the host). With
 `DAIMON_NOTEBOOK__ORIGIN_BASE` set, each notebook is served from its own origin

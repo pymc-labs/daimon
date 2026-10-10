@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Notebook links use a notebook-specific share link instead of exposing marimo's raw access token in a chat URL query. Opening one sets the browser cookie and redirects to the clean notebook URL. Share links remain stable across re-publishes and stop working when the notebook is deleted or its access token changes; their keys are redacted from host logs.
+
 - A rejected notebook re-publish keeps the previous source, so its link still opens the original notebook after an idle stop or host restart.
 - When a restart cuts an answer short, the card now reads "Daimon restarted before this request finished." and "@mention Daimon with your request to try again." in the same words on Discord, Slack and Teams. Teams used to say "Send a message to try again.", which does nothing in a channel.
 - Discord agent tools now check a caller's thread access and posting rights before sending, and split long messages when agent identity is unavailable.
