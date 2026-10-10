@@ -133,7 +133,7 @@ class Executor:
                 self.join_watchers(result)
                 for turn in result.turns:
                     if turn.ended_at is None:
-                        self.backend.collect(turn, self.backend.fallback_watch_s)
+                        self.collect(turn, self.backend.fallback_watch_s)
             except WatchTimeout:
                 # A silent/stuck bot is a failed observation, not missing coverage.
                 # Preserve the messages and evaluate latency/card assertions below.
@@ -253,9 +253,14 @@ class Executor:
 
     def watch(self, turn: Turn, started: threading.Event) -> None:
         started.set()
+        self.collect(turn, self.burst_timeout)
+
+    def collect(self, turn: Turn, timeout: float) -> None:
+        turn.settled = False
         try:
-            self.backend.collect(turn, self.burst_timeout)
+            self.backend.collect(turn, timeout)
         except WatchTimeout:
+            turn.settled = False
             turn.ended_at = turn.ended_at or utcnow()
             raise
 
@@ -383,7 +388,7 @@ class Executor:
             self.join_watchers(result)
             for turn in pending:
                 if turn.number not in watched:
-                    self.backend.collect(turn, step.timeout_s)
+                    self.collect(turn, step.timeout_s)
                 if any(v in {"over_cap", "provisioning"} for v in turn.verdicts):
                     raise Pending("load-shed or provisioning notice: retry after preflight")
                 if any(v in {"error", "cancelled"} for v in turn.verdicts):
@@ -399,7 +404,7 @@ class Executor:
                 step.emoji or "",
             )
             # Refresh evidence after the feedback action, including resulting reactions.
-            self.backend.collect(last, step.timeout_s)
+            self.collect(last, step.timeout_s)
         elif kind in {"admin", "restart_workers"}:
             self.backend.admin(step, channel)
         elif kind == "headless_interrupt":

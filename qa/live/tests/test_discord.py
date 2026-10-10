@@ -167,6 +167,7 @@ def test_collection_excludes_previous_turn_and_settles(
     assert turn.messages == [fresh]
     assert turn.thread_id == "thread"
     assert turn.ended_at and turn.done_s is not None
+    assert turn.settled
     assert not turn.parent_messages
     assert fingerprint(old) != fingerprint(fresh)
 
@@ -176,11 +177,12 @@ def test_queue_reaction_is_visible_without_terminal(
 ) -> None:
     backend.create_channel("qa-test")
     driver.trigger["reactions"] = [{"emoji": {"name": "⌛"}}]
-    turn = Turn(1, "123", "parent", utcnow())
+    turn = Turn(1, "123", "parent", utcnow(), settled=True)
     with pytest.raises(Pending, match="timed out"):
         backend.collect(turn, 0.01)
     assert turn.first_visible_s is not None
     assert turn.done_s is None
+    assert turn.ended_at and not turn.settled
     assert turn.trigger_reactions == driver.trigger["reactions"]
 
 

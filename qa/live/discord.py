@@ -348,6 +348,8 @@ class DiscordBackend:
         return message_id
 
     def collect(self, turn: Turn, timeout: float) -> None:
+        # An end timestamp bounds evidence; only terminal stability proves it complete.
+        turn.settled = False
         self._owned(turn.channel_id)
         self.driver.set_role("user")
         turn.guild_id = self.target.guild_id
@@ -468,6 +470,7 @@ class DiscordBackend:
                     stable_since = time.monotonic()
                 if time.monotonic() - stable_since >= self.config.settle_s:
                     turn.ended_at = utcnow()
+                    turn.settled = True
                     return
             else:
                 turn.done_s = None
