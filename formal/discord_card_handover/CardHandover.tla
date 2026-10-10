@@ -1,76 +1,128 @@
 --------------------------- MODULE CardHandover ---------------------------
-EXTENDS Naturals
+EXTENDS Naturals, FiniteSets
 
-CONSTANT SafeHandover
-VARIABLES phase, handovers, current, cards, editPending, editTarget, sendPending, repairNeeded
-vars == <<phase, handovers, current, cards, editPending, editTarget, sendPending, repairNeeded>>
+CONSTANT Mode
+VARIABLES phase, handovers, current, cards, edits, started, targets,
+          sendPending, sendUsed, terminalIssued, dirty, repairQueued
+vars == <<phase, handovers, current, cards, edits, started, targets,
+          sendPending, sendUsed, terminalIssued, dirty, repairQueued>>
+Lifecycles == {1, 2, 3}
 Cards == {1, 2, 3}
 
 Init == /\ phase = "old"
         /\ handovers = 0
         /\ current = 1
         /\ cards = [i \in Cards |-> IF i = 1 THEN "working" ELSE "absent"]
-        /\ editPending = FALSE
-        /\ editTarget = 0
+        /\ edits = {}
+        /\ started = {}
+        /\ targets = [i \in Lifecycles |-> 1]
         /\ sendPending = FALSE
-        /\ repairNeeded = FALSE
+        /\ sendUsed = FALSE
+        /\ terminalIssued = FALSE
+        /\ dirty = FALSE
+        /\ repairQueued = FALSE
 
-DeleteCard == /\ phase = "old" /\ cards[1] = "working"
-              /\ cards' = [cards EXCEPT ![1] = "deleted"]
-              /\ UNCHANGED <<phase, handovers, current, editPending, editTarget, sendPending, repairNeeded>>
+DeleteOriginal == /\ phase = "old" /\ cards[1] = "working"
+                  /\ cards' = [cards EXCEPT ![1] = "deleted"]
+                  /\ UNCHANGED <<phase, handovers, current, edits, started, targets,
+                                  sendPending, sendUsed, terminalIssued, dirty, repairQueued>>
 
-StartEdit == /\ phase = "old" /\ ~editPending /\ cards[current] = "working"
-             /\ editPending' = TRUE
-             /\ editTarget' = current
-             /\ UNCHANGED <<phase, handovers, current, cards, sendPending, repairNeeded>>
+StartEdit(l) == /\ l = handovers + 1
+                /\ phase \in {"old", "recovering"}
+                /\ l \notin started
+                /\ cards[current] \in {"working", "failure"}
+                /\ edits' = edits \cup {l}
+                /\ started' = started \cup {l}
+                /\ targets' = [targets EXCEPT ![l] = current]
+                /\ UNCHANGED <<phase, handovers, current, cards, sendPending,
+                                sendUsed, terminalIssued, dirty, repairQueued>>
 
-StartReplacement == /\ phase = "old" /\ cards[1] = "deleted" /\ ~sendPending
-                    /\ sendPending' = TRUE
-                    /\ UNCHANGED <<phase, handovers, current, cards, editPending, editTarget, repairNeeded>>
+StartSend == /\ phase = "old" /\ cards[1] = "deleted" /\ ~sendUsed
+             /\ sendPending' = TRUE
+             /\ sendUsed' = TRUE
+             /\ UNCHANGED <<phase, handovers, current, cards, edits, started,
+                             targets, terminalIssued, dirty, repairQueued>>
 
-TerminalFailure == /\ phase = "old"
+Failure == /\ phase \in {"old", "recovering"}
+           /\ phase' = "failing"
+           /\ current' = IF cards[current] = "deleted" THEN 3 ELSE current
+           /\ terminalIssued' = TRUE
+           /\ UNCHANGED <<handovers, cards, edits, started, targets, sendPending,
+                           sendUsed, dirty, repairQueued>>
+
+CompleteFailure == /\ phase = "failing"
                    /\ phase' = "failed"
-                   /\ current' = IF cards[current] = "deleted" THEN 3 ELSE current
-                   /\ cards' = [cards EXCEPT ![IF cards[current] = "deleted" THEN 3 ELSE current] = "failure"]
-                   /\ UNCHANGED <<handovers, editPending, editTarget, sendPending, repairNeeded>>
+                   /\ cards' = [cards EXCEPT ![current] = "failure"]
+                   /\ UNCHANGED <<handovers, current, edits, started, targets,
+                                   sendPending, sendUsed, terminalIssued, dirty, repairQueued>>
 
 Handover == /\ phase = "failed" /\ handovers < 2
             /\ phase' = "recovering"
             /\ handovers' = handovers + 1
-            /\ UNCHANGED <<current, cards, editPending, editTarget, sendPending, repairNeeded>>
-
-RecoverFailure == /\ phase = "recovering" /\ handovers < 2
-                  /\ phase' = "failed"
-                  /\ UNCHANGED <<handovers, current, cards, editPending, editTarget, sendPending, repairNeeded>>
+            /\ terminalIssued' = FALSE
+            /\ dirty' = FALSE
+            /\ repairQueued' = FALSE
+            /\ UNCHANGED <<current, cards, edits, started, targets,
+                            sendPending, sendUsed>>
 
 Answer == /\ phase = "recovering"
-          /\ phase' = "answered"
+          /\ phase' = "answering"
+          /\ terminalIssued' = TRUE
+          /\ dirty' = \E l \in edits : targets[l] = current
+                                     /\ (Mode # "successor" \/ l = 1)
+          /\ UNCHANGED <<handovers, current, cards, edits, started, targets,
+                          sendPending, sendUsed, repairQueued>>
+
+CompleteAnswer == /\ phase = "answering"
+                  /\ phase' = "ended"
+                  /\ cards' = [cards EXCEPT ![current] = "answer"]
+                  /\ repairQueued' = (repairQueued \/
+                       (dirty /\ edits = {} /\ ~sendPending))
+                  /\ UNCHANGED <<handovers, current, edits, started, targets,
+                                  sendPending, sendUsed, terminalIssued, dirty>>
+
+CompleteEdit(l) == /\ l \in edits
+                   /\ edits' = edits \ {l}
+                   /\ cards' = IF cards[targets[l]] = "deleted" THEN cards
+                               ELSE [cards EXCEPT ![targets[l]] = "working"]
+                   /\ dirty' = (dirty \/ (phase \in {"answering", "ended"}
+                                        /\ targets[l] = current
+                                        /\ Mode # "successor"))
+                   /\ repairQueued' = (repairQueued \/
+                        (phase = "ended" /\ ~sendPending /\ edits = {l}
+                         /\ (dirty \/ (targets[l] = current /\ Mode # "successor"))))
+                   /\ UNCHANGED <<phase, handovers, current, started, targets,
+                                   sendPending, sendUsed, terminalIssued>>
+
+CompleteSend == /\ sendPending
+                /\ sendPending' = FALSE
+                /\ cards' = [cards EXCEPT ![2] = IF phase = "old" \/ Mode = "stale"
+                                                  THEN "working" ELSE "retired"]
+                /\ current' = IF phase = "old" THEN 2 ELSE current
+                \* The old send's completion did not land on the current card.
+                \* The rejected gate therefore fails to queue an existing repair.
+                /\ repairQueued' = (repairQueued \/
+                     (phase = "ended" /\ dirty /\ Cardinality(edits) = 0 /\ Mode # "gate"))
+                /\ UNCHANGED <<phase, handovers, edits, started, targets,
+                                sendUsed, terminalIssued, dirty>>
+
+Repair == /\ phase = "ended" /\ repairQueued
           /\ cards' = [cards EXCEPT ![current] = "answer"]
-          /\ UNCHANGED <<handovers, current, editPending, editTarget, sendPending, repairNeeded>>
+          /\ repairQueued' = FALSE
+          /\ dirty' = FALSE
+          /\ UNCHANGED <<phase, handovers, current, edits, started, targets,
+                          sendPending, sendUsed, terminalIssued>>
 
-CompleteReplacement == /\ sendPending
-                       /\ sendPending' = FALSE
-                       /\ cards' = [cards EXCEPT ![2] = IF phase = "old" THEN "working"
-                                                         ELSE IF SafeHandover THEN "deleted" ELSE "working"]
-                       /\ current' = IF phase = "old" THEN 2 ELSE current
-                       /\ UNCHANGED <<phase, handovers, editPending, editTarget, repairNeeded>>
-
-CompleteEdit == /\ editPending
-                /\ editPending' = FALSE
-                /\ cards' = [cards EXCEPT ![editTarget] = IF (@ = "deleted") THEN @ ELSE "working"]
-                /\ repairNeeded' = (phase = "answered" /\ SafeHandover
-                                     /\ editTarget = current /\ cards[editTarget] # "deleted")
-                /\ UNCHANGED <<phase, handovers, current, editTarget, sendPending>>
-
-Repair == /\ phase = "answered" /\ repairNeeded
-          /\ cards' = [cards EXCEPT ![current] = "answer"]
-          /\ repairNeeded' = FALSE
-          /\ UNCHANGED <<phase, handovers, current, editPending, editTarget, sendPending>>
-
-Next == DeleteCard \/ StartEdit \/ StartReplacement \/ TerminalFailure \/ Handover
-        \/ RecoverFailure \/ Answer \/ CompleteReplacement \/ CompleteEdit \/ Repair
+Next == DeleteOriginal \/ (\E l \in Lifecycles : StartEdit(l)) \/ StartSend
+        \/ Failure \/ CompleteFailure \/ Handover \/ Answer \/ CompleteAnswer
+        \/ (\E l \in Lifecycles : CompleteEdit(l)) \/ CompleteSend \/ Repair
 Spec == Init /\ [][Next]_vars
 
-NoStaleReplacement == (phase = "answered" /\ current # 2) => cards[2] # "working"
-RepairOwned == (phase = "answered" /\ cards[current] = "working") => repairNeeded
+NoStaleReplacement ==
+    (phase = "ended" /\ current # 2 /\ ~sendPending) => cards[2] # "working"
+RepairQueuedWhenNeeded ==
+    ~(phase = "ended" /\ dirty /\ edits = {} /\ ~sendPending /\ ~repairQueued)
+SettledCards ==
+    (phase = "ended" /\ Cardinality(edits) = 0 /\ ~sendPending /\ ~repairQueued) =>
+        (\A i \in Cards : cards[i] \in {"absent", "deleted", "retired", "failure", "answer"})
 =============================================================================
