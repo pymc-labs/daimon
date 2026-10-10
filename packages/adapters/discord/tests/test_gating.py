@@ -241,14 +241,11 @@ def _hint_candidate(**overrides: object) -> bool:
     kwargs: dict[str, object] = {
         "enabled": True,
         "author_is_bot": False,
-        "author_id": HUMAN_ID,
         "author_is_webhook": False,
         "bot_mentioned": False,
         "in_bot_owned_thread": True,
         "mentions_someone_else": False,
         "is_plain_message": True,
-        "self_user_id": DAIMON_ID,
-        "qa_bot_user_ids": (QA_BOT_ID,),
     }
     kwargs.update(overrides)
     return is_unmentioned_reply_hint_candidate(**kwargs)  # pyright: ignore[reportArgumentType]
@@ -266,16 +263,15 @@ def test_hint_candidate_excludes_everything_else() -> None:
         "talking to someone else": {"mentions_someone_else": True},
         "system message": {"is_plain_message": False},
         "webhook": {"author_is_webhook": True},
-        "other bot": {"author_is_bot": True, "author_id": OTHER_BOT_ID},
-        "daimon itself": {"author_is_bot": True, "author_id": DAIMON_ID},
+        "bot": {"author_is_bot": True},
     }
     for reason, overrides in excluded.items():
         assert not _hint_candidate(**overrides), f"no hint: {reason}"
 
 
-def test_hint_candidate_admits_allow_listed_qa_bot() -> None:
-    assert _hint_candidate(author_is_bot=True, author_id=QA_BOT_ID), (
-        "an allow-listed QA driver stands in for a person"
+def test_hint_candidate_rejects_allow_listed_qa_bot() -> None:
+    assert not _hint_candidate(author_is_bot=True), (
+        "the QA allow-list admits addressed turns only; no bot ever gets the hint"
     )
 
 

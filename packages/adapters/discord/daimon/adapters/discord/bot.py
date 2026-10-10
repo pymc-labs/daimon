@@ -1771,8 +1771,9 @@ class DaimonBot(commands.Bot):
         silence as daimon ignoring them and re-mention it in the channel, which
         opens a sibling thread with none of this one's context. The reaction
         says "mention me to continue" without a message: once per thread per
-        cooldown, and not while the thread is followed, where the reply may
-        still be answered unprompted. Best effort: a failure is logged only.
+        cooldown, not while the thread is followed, where the reply may still
+        be answered unprompted, and not where the agent may not post. Best
+        effort: a failure is logged only, and never shows the hint.
         """
         discord_settings = self.runtime.settings.discord
         if discord_settings is None or self.user is None or message.guild is None:
@@ -1783,7 +1784,6 @@ class DaimonBot(commands.Bot):
         if not is_unmentioned_reply_hint_candidate(
             enabled=discord_settings.unmentioned_reply_hint,
             author_is_bot=message.author.bot,
-            author_id=str(message.author.id),
             author_is_webhook=isinstance(message.webhook_id, int),
             bot_mentioned=bot_mentioned,
             in_bot_owned_thread=thread.owner_id == self.user.id,
@@ -1794,8 +1794,6 @@ class DaimonBot(commands.Bot):
             ),
             is_plain_message=message.type
             in (discord.MessageType.default, discord.MessageType.reply),
-            self_user_id=str(self.user.id),
-            qa_bot_user_ids=discord_settings.qa_bot_user_ids,
         ):
             return
         thread_id = thread.id
@@ -1811,6 +1809,14 @@ class DaimonBot(commands.Bot):
             )
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
             if resolved.mode is ParticipationMode.ON:
+                self._unmentioned_hint_cooldown.release(thread_id)
+                return
+            # A reaction is a post: where the agent may not write (or that
+            # can't be established), it stays silent like every other notice.
+            post_state = await _channel_protection_state(
+                self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+            )
+            if not post_state.may_post:
                 self._unmentioned_hint_cooldown.release(thread_id)
                 return
             await message.add_reaction(UNMENTIONED_REPLY_HINT_EMOJI)

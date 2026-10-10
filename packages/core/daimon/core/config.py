@@ -389,13 +389,15 @@ class DiscordSettings(BaseModel):
         ),
     )
     unmentioned_reply_hint: bool = Field(
-        default=True,
+        default=False,
         description=(
             "React with 🔔 to a person's reply that does not @mention the bot in a thread the "
             "bot opened, as a hint that only mentions start a turn. The message itself is "
             "never answered. At most once per thread per unmentioned_reply_hint_cooldown_h, "
-            "never on a message that mentions someone else, never to bots, and never while "
-            "the thread is followed (thread participation on)."
+            "never on a message that mentions someone else, never to any bot, never where the "
+            "agent may not post, and never while the thread is followed (thread "
+            "participation on). Off by default: the cooldown is kept in memory, so each "
+            "restart allows one more hint per thread."
         ),
     )
     unmentioned_reply_hint_cooldown_h: float = Field(

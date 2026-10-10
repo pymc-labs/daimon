@@ -1253,6 +1253,17 @@ class TestDeliveryHint:
         assert "never say it did not reach you" in result
 
     @pytest.mark.asyncio
+    async def test_continuation_turn_explains_delivery(self) -> None:
+        trigger = _make_message(msg_id=20, content="<@999> did you get my earlier message?")
+        thread = _make_thread([trigger])
+
+        result, _ = await build_delta_xml(thread, trigger=trigger, after_message_id=10)
+
+        assert "<delivery hint=" in result, (
+            "a session that predates the note gets it on its next turn, with no replacement"
+        )
+
+    @pytest.mark.asyncio
     async def test_channel_mention_explains_delivery_outside_untrusted_history(self) -> None:
         trigger = _make_message(msg_id=10, content="<@999> did you see my last ping?")
         channel = _make_text_channel([trigger])

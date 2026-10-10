@@ -238,15 +238,16 @@ verdict runs an ordinary turn through `admit()` as the burst's newest author,
 with every notice withheld. Teams also counts a quote of the bot's message as
 a mention.
 
-On Discord, a person's first unmentioned reply in a thread the bot opened, in a
-thread that isn't followed, gets a 🔔 reaction and no turn: only a mention
-continues the conversation. The hint shows once per thread per
+With `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=true` (off by default), a person's
+first unmentioned reply in a thread the bot opened, in a thread that isn't
+followed, gets a 🔔 reaction and no turn: only a mention continues the
+conversation. The hint shows once per thread per
 `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H` (in memory, so a restart
-allows one more), never on a reply that mentions someone else and never to
-bots. `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=false` turns it off. A session's
-first turn carries a `<delivery>` element telling the agent that only mentions
-and replies to its posts reach it and that other threads are separate
-sessions, so it does not tell someone an earlier message never reached it.
+allows one more), never on a reply that mentions someone else, never to any
+bot, and never where the channel's protection state forbids posting. Every
+Discord thread turn carries a `<delivery>` element telling the agent what
+starts a turn and that other threads are separate sessions, so it does not
+tell someone an earlier message never reached it.
 
 Discord, Slack and Teams limit simultaneous chat turns per tenant, and Discord
 also has an optional process-wide limit (`DAIMON_DISCORD__MAX_CONCURRENT_TURNS`,

@@ -415,13 +415,14 @@ is answered with a visible error reply.
 
 ### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`
 
-`bool` · optional · default `True`
+`bool` · optional · default `False`
 
 React with 🔔 to a person's reply that does not @mention the bot in a thread the bot
 opened, as a hint that only mentions start a turn. The message itself is never answered.
 At most once per thread per unmentioned_reply_hint_cooldown_h, never on a message that
-mentions someone else, never to bots, and never while the thread is followed (thread
-participation on).
+mentions someone else, never to any bot, never where the agent may not post, and never
+while the thread is followed (thread participation on). Off by default: the cooldown is
+kept in memory, so each restart allows one more hint per thread.
 
 ### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H`
 

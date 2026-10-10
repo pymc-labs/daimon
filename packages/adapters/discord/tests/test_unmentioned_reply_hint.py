@@ -3,8 +3,8 @@
 Same bot/message fakes as `test_thread_participation_routing.py`, with
 `_handle_mention` stubbed so a turn that should not start is visible as a
 recorded call. The hint is a 🔔 reaction on the reply, once per thread per
-cooldown, only in threads daimon opened, and never while the thread is
-followed.
+cooldown, only in threads daimon opened, never to a bot, never where the
+agent may not post, and never while the thread is followed.
 """
 
 from __future__ import annotations
@@ -17,16 +17,19 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 import pytest_asyncio
+from daimon.adapters.discord import bot as bot_module
 from daimon.adapters.discord.bot import UNMENTIONED_REPLY_HINT_EMOJI, DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import McpSettings, ThreadParticipationSettings
+from daimon.core.config import DiscordSettings, McpSettings, ThreadParticipationSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import thread_participation as store
 from daimon.core.thread_participation import ParticipationMode, ParticipationScope
+from daimon.core.turn.protection import ProtectionState
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -174,13 +177,37 @@ async def test_no_hint_outside_daimons_threads_or_between_people(
     human_thread = _reply(_make_thread(owner_id=OTHER_HUMAN_ID))
     to_a_person = _reply(_make_thread(), mentions=(OTHER_HUMAN_ID,))
     other_bot = _reply(_make_thread(), author_id=444, author_is_bot=True)
-    for message in (human_thread, to_a_person, other_bot):
+    qa_bot = _reply(_make_thread(thread_id=THREAD_ID + 2), author_id=QA_BOT_ID, author_is_bot=True)
+    for message in (human_thread, to_a_person, other_bot, qa_bot):
         await bot.on_message(message)
 
     assert turns == [], "none of these start a turn"
     assert not _reacted(human_thread), "a thread daimon did not open gets no hint"
     assert not _reacted(to_a_person), "a reply addressed to another person gets no hint"
     assert not _reacted(other_bot), "a bot gets no hint"
+    assert not _reacted(qa_bot), "an allow-listed QA bot gets no hint either"
+
+
+@pytest.mark.parametrize("state", [ProtectionState.PROTECTED, ProtectionState.UNKNOWN])
+async def test_no_hint_where_the_agent_may_not_post(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    state: ProtectionState,
+) -> None:
+    async def _state(_sm: Any, *, tenant_id: uuid.UUID, channel: Any) -> ProtectionState:
+        return state
+
+    monkeypatch.setattr(bot_module, "_channel_protection_state", _state)
+    bot = make_bot(_make_runtime(db_session_factory))
+    turns = _stub_turn(bot)
+
+    message = _reply(_make_thread())
+    await bot.on_message(message)
+
+    assert turns == [] and not _reacted(message), (
+        f"a {state.value} thread gets no hint: a reaction is a post, and it fails closed"
+    )
 
 
 async def test_a_mention_in_daimons_thread_is_answered_once_without_a_hint(
@@ -229,4 +256,10 @@ async def test_no_hint_in_a_followed_thread(
 
     assert not _reacted(message), (
         "a followed thread may still answer unprompted, so 'mention me' would be wrong"
+    )
+
+
+def test_hint_is_off_by_default() -> None:
+    assert DiscordSettings.model_fields["unmentioned_reply_hint"].default is False, (
+        "off until the per-thread cooldown survives a restart"
     )
