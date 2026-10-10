@@ -7,6 +7,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -138,6 +139,7 @@ class DiscordBackend:
         self.parent = ""
         self.thread_parents: dict[str, str] = {}
         self.fallback_watch_s = config.fallback_watch_s
+        self.bindings: dict[str, str] = {}
 
     @property
     def driver(self) -> Driver:
@@ -147,6 +149,7 @@ class DiscordBackend:
 
     def context(self) -> dict[str, str]:
         return {
+            **self.bindings,
             "guild_id": self.target.guild_id,
             **{f"env.{key}": value for key, value in self.target.context.items()},
         }
@@ -439,6 +442,17 @@ class DiscordBackend:
                             "trigger_timestamp": trigger_at.isoformat(),
                             "elapsed_s": visible_s,
                         }
+            header_pattern = r"^-#\s+" + re.escape(self.target.qa_agent_name or "") + r"\s*$"
+            for message in messages if self.target.qa_agent_name else []:
+                for match in re.finditer(
+                    header_pattern, str(message.get("content") or ""), re.MULTILINE
+                ):
+                    header: Message = {
+                        "message_id": str(message.get("id")),
+                        "line": match[0].strip(),
+                    }
+                    if header not in turn.agent_subtext_headers:
+                        turn.agent_subtext_headers.append(header)
             turn.messages = messages
             turn.parent_messages = [m for m in messages if str(m.get("channel_id")) in self.owned]
             thread_ids = {
@@ -480,6 +494,33 @@ class DiscordBackend:
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
 
+    def channel_messages(self, turn: Turn) -> list[Message]:
+        self._owned(turn.channel_id)
+        if not turn.settled or turn.ended_at is None:
+            raise Pending("channel history requires a settled reference turn")
+        observation_start = turn.ended_at
+        reference_ids = {str(row.get("id")) for row in turn.messages}
+        observed: dict[str, Message] = {}
+        for channel in self.owned | self.threads:
+            self._owned(channel)
+            rows = self.driver.messages(channel, after=None, limit=100)
+            if len(rows) >= 100:
+                raise Pending("channel history exceeds bounded observation")
+            for row in rows:
+                created = message_created_at(row)
+                if (
+                    row.get("type", 0) in {0, 19}
+                    and (
+                        obj(row.get("author")).get("id") == self.target.daimon_id
+                        or str(row.get("application_id")) == self.target.daimon_id
+                    )
+                    and created is not None
+                    and created > observation_start
+                    and str(row.get("id")) not in reference_ids
+                ):
+                    observed[str(row.get("id"))] = row
+        return list(observed.values())
+
     def react(self, channel: str, message: str, emoji: str) -> None:
         self._owned(channel)
         self.driver.set_role("user")
@@ -513,6 +554,14 @@ class DiscordBackend:
         )
         if result.returncode:
             raise RuntimeError("configured staging admin hook failed")
+        if result.stdout.strip():
+            data = cast(JsonValue, json.loads(result.stdout))
+            bindings = obj(data).get("context", {})
+            if not isinstance(bindings, dict) or any(
+                not isinstance(v, str) for v in bindings.values()
+            ):
+                raise ValueError("admin hook context must be string bindings")
+            self.bindings.update(cast(dict[str, str], bindings))
 
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]:
         if not turn.thread_id or not turn.ended_at:

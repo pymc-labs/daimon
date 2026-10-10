@@ -92,6 +92,21 @@ class Ledger:
             pending[run_id] = {"ts": utcnow().isoformat(), "usd": usd}
             self._save_pending(pending)
 
+    def charged(self, run_ids: set[str]) -> float:
+        """Final receipts only; concurrent reservation releases are not credits."""
+        total = 0.0
+        if self.path.exists():
+            for line in self.path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                row = cast(dict[str, JsonValue], json.loads(line))
+                if str(row.get("run_id")) in run_ids:
+                    cost = float(str(row["usd"]))
+                    if not math.isfinite(cost) or cost < 0:
+                        raise ValueError("invalid final receipt cost")
+                    total += cost
+        return total
+
     def claim_schedule(self, mode: str, env: str) -> None:
         path = self.path.with_suffix(".schedule.json")
         with self.locked():

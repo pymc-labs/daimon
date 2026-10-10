@@ -295,3 +295,16 @@ def test_canary_approved_unimplemented_kind_remains_pending(
     values["assert"].append({"kind": "ledger_matches_usage", "turn": 1, "tol_pct": 2})
     (tmp_path / "canary.yaml").write_text(yaml.safe_dump(values))
     assert isinstance(load_catalog(tmp_path)[0], ProposedScenario)
+
+
+def test_charged_uses_only_final_run_receipts(tmp_path: Path) -> None:
+    from qa.live.cost import Ledger
+    from qa.live.types import Usage
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.reserve("manual", 0.2)
+    ledger.reserve("canary", 0.1)
+    ledger.receipt("canary", [Usage(usd=0.01, source="turn_outcomes")], 0.1)
+    assert ledger.charged({"canary"}) == pytest.approx(0.01)
+    ledger.receipt("manual", [Usage(usd=0.02, source="turn_outcomes")], 0.2)
+    assert ledger.charged({"canary"}) == pytest.approx(0.01)

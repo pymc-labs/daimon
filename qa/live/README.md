@@ -111,7 +111,7 @@ left by SIGKILL or host loss while protecting other QA workers' allocations.
 `wait_done` execute through the Discord backend. `thread_reply` accepts `mention: true` and `reply_to: turnN.chunkM`; a false or
 omitted `mention` posts without a mention. Reply references must resolve to an
 observed message in an owned conversation. A combined file and reply reference
-currently returns PENDING because the reused uploader cannot encode that reference. `burst` verifies the channel model once before its scheduled posts and starts a concurrent read-only watcher immediately after each trigger. Each post is scheduled from the burst start, so probes and earlier turns cannot delay later triggers. Watchers finish before channel cleanup. Message creation timestamps (or snowflakes) measure first visibility; edits measure reused cards. Timing evidence is retained in each turn. Text patterns match each content/embed component independently with `re.MULTILINE` (plain `^...$` uses a whole-component match; explicit `(?m)` permits per-line searches), so anchored answers are not concatenated with footers. `burst` posts mentions in the latest observed
+currently returns PENDING because the reused uploader cannot encode that reference. `burst` verifies the channel model once before its scheduled posts and starts a concurrent read-only watcher immediately after each trigger. Each post is scheduled from the burst start, so probes and earlier turns cannot delay later triggers. Watchers finish before channel cleanup. Message creation timestamps (or snowflakes) measure first visibility; edits measure reused cards. Timing evidence and observed `agent_subtext_headers` are retained per turn. Channel text checks read bounded bot-only history across owned channels and threads after the `since_turn` terminal answer, excluding that turn’s messages; incomplete history or empty absence evidence is PENDING. Text patterns match each content/embed component independently with `re.MULTILINE` (anchored answer patterns full-match after stripping a recorded leading QA agent subtext header), so anchored answers are not concatenated with footers. `burst` posts mentions in the latest observed
 thread, or the owned parent if there is no thread. Each trigger receives an index;
 queued triggers can share a composite answer. Fingerprints exclude previous turns'
 unchanged messages from follow-up evidence. The collector settles after terminal
@@ -272,3 +272,11 @@ The daily cap can refuse later hourly runs if estimates or other QA exhaust it.
 Production prerequisites and the separate approval are in [PROD-CANARY.md](PROD-CANARY.md).
 
 The handoff inbox file is the durable alert channel. Dedupe advances as soon as that file is written; tsend exit/status is retained there and in alert state. A busy composer (exit 1) is delivered-pending and does not halt a full pass or cause duplicate notices.
+
+Unmentioned channel-history seeds are recorded in `seed_messages`, without watching, model billing, or consuming a turn number. Assertions number actual agent turns; unmentioned replies to bot messages still count as turns.
+
+`http_check` supports unauthenticated GET status, MIME type and body-absence assertions. HTTP-only headless scenarios create no Discord channel or billed turn. GETs have a 15 s timeout and a bounded response body; unavailable contexts or truncated absence evidence stay PENDING.
+
+Configured staging admin hooks accept structured or quoted string args via JSON stdin; the runner never executes catalog strings as shell commands. Catalog `fixtures/` args resolve at load time and YAML/Markdown copies receive context substitution in a private temporary directory. Hook JSON responses may provide string `context` bindings (for example `fork.name`). Missing hooks/bindings remain PENDING.
+
+Timer and manual entrypoints must share `live_lock`; the default is `~/.local/state/daimon-qa/live-run.lock`. A held lock refuses a second session before any live action. File-only alerts use `alerts.command=[]` and a local `alerts.inbox`. `Ledger.charged(run_ids)` sums final receipts and excludes reservation changes from reported charges.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 from typing import Literal, Self, cast, get_args
 
@@ -46,7 +47,7 @@ class Step(Contract):
     timeout_s: float = Field(default=900, gt=0)
     interrupt_after_s: float | None = Field(default=None, ge=0)
     tool: str | None = None
-    args: dict[str, JsonValue] = Field(default_factory=dict)
+    args: dict[str, JsonValue] | str = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
@@ -89,8 +90,16 @@ class Assertion(Contract):
         "fences_balanced",
         "footer_on_last_message",
         "thread_name",
+        "channel_text_present",
+        "channel_text_absent",
+        "http_check",
     ]
     turn: int | None = Field(default=None, ge=1)
+    url: str | None = None
+    expect_status: int | None = Field(default=None, ge=100, le=599)
+    expect_content_type: str | None = None
+    body_absent: str | None = None
+    since_turn: int | None = Field(default=None, ge=1)
     maximum: float | None = Field(default=None, alias="max", ge=0)
     minimum: int = Field(default=0, alias="min", ge=0)
     as_turn: int | None = Field(default=None, ge=1)
@@ -115,7 +124,16 @@ class Assertion(Contract):
 
     @model_validator(mode="after")
     def required_arguments(self) -> Self:
-        if self.kind not in {"db_check", "interrupt_within_s"} and self.turn is None:
+        if self.kind in {"channel_text_present", "channel_text_absent"}:
+            if self.since_turn is None or self.turn is not None:
+                raise ValueError("channel_text assertions require since_turn, without turn")
+        elif self.since_turn is not None:
+            raise ValueError("since_turn requires channel_text assertion")
+        if (
+            self.kind not in {"db_check", "interrupt_within_s", "http_check"}
+            and self.turn is None
+            and self.since_turn is None
+        ):
             raise ValueError(f"{self.kind} requires turn")
         if (
             self.kind in {"reply_within_s", "done_within_s", "no_silent_drop", "interrupt_within_s"}
@@ -123,8 +141,14 @@ class Assertion(Contract):
         ):
             raise ValueError(f"{self.kind} requires max")
         for prefix, field in (("text_", self.pattern), ("log_", self.event)):
-            if self.kind.startswith(prefix) and not field:
+            if (
+                self.kind.startswith(prefix) or self.kind.startswith("channel_" + prefix)
+            ) and not field:
                 raise ValueError(f"{self.kind} requires {prefix} argument")
+        if self.kind == "http_check" and (
+            not self.url or not (self.expect_status or self.expect_content_type or self.body_absent)
+        ):
+            raise ValueError("http_check requires URL and an expectation")
         if self.kind == "same_thread" and self.as_turn is None:
             raise ValueError("same_thread requires as_turn")
         if self.kind == "progress_seen" and self.within_s is None:
@@ -147,7 +171,7 @@ class Assertion(Contract):
             and not self.maximum.is_integer()
         ):
             raise ValueError("message_count max must be an integer")
-        for pattern in (self.pattern, self.pattern_absent, self.name_pattern):
+        for pattern in (self.pattern, self.pattern_absent, self.name_pattern, self.body_absent):
             if pattern:
                 try:
                     re.compile(pattern)
@@ -200,7 +224,10 @@ class Scenario(ScenarioMetadata):
         triggers = sum(
             len(s.texts)
             if s.do == "burst"
-            else s.do in {"mention", "thread_reply", "channel_message", "dm", "headless_interrupt"}
+            else (
+                s.do in {"mention", "thread_reply", "dm", "headless_interrupt"}
+                or (s.do == "channel_message" and (s.mention or bool(s.reply_to)))
+            )
             for s in [*self.setup, *self.steps, *self.teardown]
         )
         if self.tier != "weekly" and any(
@@ -225,10 +252,7 @@ PROPOSED_ASSERTIONS = frozenset(
         "chunks_gap_max_s",
         "component_present",
         "card_text_now",
-        "channel_text_present",
-        "channel_text_absent",
         "cli_check",
-        "http_check",
         "any_of",
         "card_edits_min",
         "answer_length_chars",
@@ -244,7 +268,7 @@ PROPOSED_STEP_PARAMS = frozenset(
         "allow_fail",
     }
 )
-PROPOSED_ASSERT_PARAMS = frozenset({"target", "phase"})
+PROPOSED_ASSERT_PARAMS = frozenset({"target", "phase", "channel"})
 PLACEHOLDER = re.compile(r"\{[a-z][a-z0-9_]*(?:\.[a-z0-9_]+|:[A-Za-z0-9_]+)*\}")
 
 
@@ -283,10 +307,12 @@ class ProposedScenario(ScenarioMetadata):
             for param in PROPOSED_STEP_PARAMS.intersection(step):
                 features.add(f"step parameter {param}")
                 normalized.pop(param)
-            if kind == "admin" and isinstance(step.get("args"), str):
-                features.add("string admin arguments")
-                normalized["args"] = {}
-            Step.model_validate(normalized)
+            try:
+                Step.model_validate(normalized)
+            except ValidationError:
+                if self.tier == "canary":
+                    raise
+                features.add(f"invalid step contract: {kind}")
         for assertion in self.assertions:
             kind = assertion.get("kind")
             if isinstance(kind, str) and kind in PROPOSED_ASSERTIONS:
@@ -306,13 +332,19 @@ class ProposedScenario(ScenarioMetadata):
             if assertion.get("turn") == 0:
                 features.add("whole-run turn 0")
                 normalized["turn"] = 1
-            supported = Assertion.model_validate(normalized)
+            try:
+                supported = Assertion.model_validate(normalized)
+            except ValidationError:
+                if self.tier == "canary":
+                    raise
+                features.add(f"invalid assertion contract: {kind}")
+                continue
             if supported.pending_extension:
                 features.add(supported.pending_extension)
-        if PLACEHOLDER.search(str([self.setup, self.steps, self.assertions, self.teardown])):
-            features.add("catalog fixture/context placeholders")
         if not features:
-            raise ValueError("invalid scenario has no declared unimplemented proposal")
+            if self.tier == "canary":
+                raise ValueError("invalid scenario has no declared unimplemented proposal")
+            features.add("invalid scenario contract")
         self.unsupported = sorted(features)
         return self
 
@@ -351,6 +383,18 @@ def load_catalog(directory: Path) -> list[CatalogScenario]:
             raise ValueError(f"duplicate scenario id: {scenario.id}")
         if isinstance(scenario, Scenario):
             for step in [*scenario.setup, *scenario.steps, *scenario.teardown]:
+                if isinstance(step.args, str):
+                    tokens = shlex.split(step.args)
+                    base = root.parent if root.name == "scenarios" else directory
+                    for index, token in enumerate(tokens):
+                        if token.startswith("fixtures/"):
+                            asset = base / token
+                            if not asset.is_file():
+                                raise ValueError(
+                                    f"scenario {scenario.id}: fixture not found: {asset}"
+                                )
+                            tokens[index] = str(asset.resolve())
+                    step.args = shlex.join(tokens)
                 if step.file:
                     asset = Path(step.file).expanduser()
                     if not asset.is_absolute():

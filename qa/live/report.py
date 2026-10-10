@@ -23,6 +23,7 @@ class Result:
     env: str
     status: Status = "PENDING"
     checks: list[Check] = field(default_factory=list[Check])
+    seed_messages: list[Message] = field(default_factory=list[Message])
     turns: list[Turn] = field(default_factory=list[Turn])
     notes: list[str] = field(default_factory=list[str])
     channel_id: str | None = None
@@ -90,7 +91,11 @@ class Alerter:
             state[key] = prior
             self._save_state(state)
             return
-        if result.status in {"FAIL", "PENDING"} and prior.get("status") in {"FAIL", "PENDING"}:
+        if (
+            result.status in {"FAIL", "PENDING"}
+            and prior.get("status") in {"FAIL", "PENDING"}
+            and prior.get("ts")
+        ):
             previous = datetime.fromisoformat(prior["ts"])
             if (now - previous).total_seconds() < self.config.cooldown_s:
                 prior["pending_count"] = str(pending_count)
@@ -120,6 +125,10 @@ class Alerter:
             "delivery": "durable inbox written; tsend pending",
         }
         self._save_state(state)
+        if not self.config.command:
+            state[key]["delivery"] = "file-only; durable alert written"
+            self._save_state(state)
+            return
         try:
             delivery = subprocess.run(
                 [*self.config.command, line],

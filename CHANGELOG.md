@@ -10,10 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Plain words and spaced text for feedback, help, billing, memory, routines, and wizard panels across Discord, Slack, and Teams.
+- Add bounded unauthenticated HTTP checks without Discord setup or model spend.
+
+
 
 ### Added
 
 - Account deletion on Discord, Slack, and Teams privacy panels can be paused during an event with `DAIMON_PRIVACY__DELETE_ENABLED=false`; Policy and Export remain available.
+- **QA sessions:** Serialize timer and manual live runs with a shared lock; accept configured hook context and templated catalog fixture arguments.
+
+- **QA observations:** Support channel text checks and bounded unauthenticated HTTP probes; record agent header evidence per turn.
+
 - **More Discord assertions run in live QA.** Message counts, per-message balanced fences, cost-footer placement, thread-name readback, and filename-filtered attachment counts are supported.
 - **Haiku 5.5 can be picked as an agent model and is metered.** It is billed at Anthropic's list price by prompt length: $0.10 input and $0.50 output per million tokens up to a 100,000-token prompt, and five times that above it. Before this, turns on `claude-haiku-5-5` were recorded as free.
 
@@ -46,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With agent identity on, a routine result that Daimon posts for an agent on Slack or Discord now shows the agent's name and face. On Discord it reads `Result from the Friday routine at 17:00 Europe/London:` instead of naming the agent in the text; Slack keeps the agent's name in the text. The answer to a submitted Discord form also posts as the agent, like a mention reply.
 
 ### Fixed
+
+- **QA accounting and alerts:** Sum final run receipts rather than differences in shared reservations; support file-only alerts without external delivery.
+
+- **QA evidence:** Strip recorded agent headers before anchored answer full-matches, isolate invalid non-canary catalog contracts, and retain channel/thread observations.
+- **QA context:** Keep channel-history seeds unbilled, with actual turn numbering.
 
 - Turn cards on Discord, Slack, and Teams now add each Haiku 5.5 request's cost at its own prompt-length rate.
 - Judge and harness PENDINGs count toward the three-run alert threshold while individual unavailable runs stay silent; mixed burst timeouts retain their watch FAIL evidence.

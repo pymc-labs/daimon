@@ -168,3 +168,23 @@ def test_same_thread_progress_and_blank_failures(backend: FakeBackend, judge: Fa
         Assertion(kind="no_blank_message", turn=2),
     ]:
         assert evaluate(assertion, [first, second], backend, judge).status == "FAIL"
+
+
+def test_admin_string_fixture_is_substituted_without_shell(tmp_path: Path) -> None:
+    import shlex
+
+    original = tmp_path / "agent.yaml"
+    original.write_text("name: qa-{nonce}\n")
+    context = Context(
+        {"nonce": "abc12345", "fork.name": "qa-fork"},
+        Result("run", "qa", "staging"),
+        tmp_path / "resolved",
+    )
+    step = context.step(
+        Step(do="admin", tool="cli", args=shlex.join(["create", str(original), "{fork.name}"]))
+    )
+    assert isinstance(step.args, str)
+    args = shlex.split(step.args)
+    assert args[2] == "qa-fork"
+    assert Path(args[1]).read_text() == "name: qa-abc12345\n"
+    assert original.read_text() == "name: qa-{nonce}\n"
