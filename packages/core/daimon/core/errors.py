@@ -106,5 +106,8 @@ class SlackOAuthError(DaimonError):
     """Raised when Slack oauth.v2.access returns an ok:false payload."""
 
 
-class SessionRetired(DaimonError):
-    """History remains readable, but this session can no longer be mutated."""
+class SessionRetired(UserFacingError):
+    """History remains readable, but this session can no longer be mutated.
+
+    Every raise carries a sentence written for the person in the thread.
+    """

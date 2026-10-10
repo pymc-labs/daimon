@@ -20,7 +20,14 @@ from daimon.adapters.slack.errors import (
     surface_command_error,
 )
 from daimon.adapters.slack.setup_conversations import create_setup_conversation
-from daimon.core.errors import DaimonError, SpecError, StoreError, TurnError, UserFacingError
+from daimon.core.errors import (
+    DaimonError,
+    SessionRetired,
+    SpecError,
+    StoreError,
+    TurnError,
+    UserFacingError,
+)
 from daimon.core.turn.errors import SessionAgentMismatch
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -152,6 +159,13 @@ class TestRenderError:
     def test_user_facing_guidance_is_shown_escaped_with_the_ref(self) -> None:
         result = render_error(UserFacingError("Ask <@U123> & retry."), request_id=TEST_RID)
         assert result == f"Ask &lt;@U123&gt; &amp; retry.\n\n{REF}"
+
+    def test_a_retired_session_keeps_its_words_and_the_ref(self) -> None:
+        """A class whose every message is written for people subclasses UserFacingError."""
+        error = SessionRetired("This session was replaced. Continue in its successor.")
+        assert render_error(error, request_id=TEST_RID) == (
+            f"This session was replaced. Continue in its successor.\n\n{REF}"
+        )
 
     async def test_a_converted_setup_refusal_keeps_its_words_and_the_ref(self) -> None:
         """Opening setup outside a channel is authored copy, so it reaches chat as written."""

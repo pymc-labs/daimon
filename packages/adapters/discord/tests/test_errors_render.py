@@ -32,6 +32,7 @@ from daimon.core.errors import (
 from daimon.core.github_repo_auth import resolve_clone_token
 from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.setup_conversations import get_setup_responder
+from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.stores.domain import AgentRepoBindingRow
 from daimon.testing.ma import build_fake_anthropic
@@ -277,4 +278,13 @@ async def test_a_converted_core_refusal_keeps_its_words_and_the_ref() -> None:
         "No credential is authorized to clone acme/widgets. Re-bind this repo "
         "with a GitHub token that can read it, using request_repo_binding."
         f"\n\n{REF}"
+    )
+
+
+def test_an_unreadable_access_policy_keeps_its_words_and_the_ref() -> None:
+    """A class whose every message is written for people subclasses UserFacingError."""
+    error = AccessPolicyUnreadable(tenant_id=uuid.uuid4())
+    assert render_error(TurnError(kind="upstream", cause=error), request_id=TEST_RID) == (
+        "this workspace's access settings can't be read, so no turn was started; "
+        f"ask an admin to fix them\n\n{REF}"
     )
