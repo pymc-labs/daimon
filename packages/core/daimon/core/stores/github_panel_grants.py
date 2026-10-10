@@ -18,6 +18,7 @@ from daimon.core.stores.github_connect import (
     has_pending_connect_update,
     has_saved_github_state,
     require_app_eligible_agent,
+    uses_server_wide_repo,
 )
 from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.core.stores.security_audit import append_event
@@ -94,10 +95,18 @@ async def load_grants_panel(
     )
     rule = policy.agent_rules.get(agent_name) if policy is not None and agent_name else None
     pinned = rule is not None and rule.runs_in is not None
-    saved_state = pinned or (
+    # A pinned agent may use only its own repos; one still holding a
+    # server-wide grant needs the operator. A saved key a chat Connect is
+    # waiting to retire is managed here (`activate_grants` finishes it).
+    saved_state = (
+        pinned and await uses_server_wide_repo(session, tenant_id=tenant_id, agent_id=agent_id)
+    ) or (
         mode == "legacy"
         and await has_saved_github_state(session, tenant_id=tenant_id, agent_id=agent_id)
+        and not await has_pending_connect_update(session, tenant_id=tenant_id, agent_id=agent_id)
     )
+    if pinned:
+        authorized = [row for row in authorized if row.scope_agent_id == agent_id]
     binding = await agent_repo_binding.get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
     overlay = await agent_github_binding.get_agent_github_binding(session, agent_id=agent_id)
     repos = tuple(

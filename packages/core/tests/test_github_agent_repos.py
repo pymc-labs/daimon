@@ -17,7 +17,7 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.channel_admins import ChannelAdminCaller, GroupLookupFailed, GroupMembers
 from daimon.core.github_panel import can_manage_agent_github, requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
@@ -458,6 +458,8 @@ async def test_confirm_refuses_a_requester_who_lost_channel_admin(
             agent_name="TeamA",
             ma_agent_id="ma_team_a",
             default=DEFAULT,
+            is_daimon_managed=False,
+            members=None,
         )
 
     assert await manages()
@@ -493,6 +495,8 @@ async def test_confirm_refuses_a_requester_who_lost_channel_admin(
         agent_name="TeamA",
         ma_agent_id=None,
         default=DEFAULT,
+        is_daimon_managed=False,
+        members=None,
     )
 
 
@@ -726,3 +730,151 @@ async def test_pinned_agent_refuses_a_server_wide_grant_but_takes_its_own(
         repo_ids=(101,),
         manages=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_confirm_recheck_uses_live_roles_and_managed_status(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    # The channel admin holds #team-a only through a Discord role now.
+    await set_channel_admins(
+        db_session,
+        tenant_id=world.tenant_id,
+        platform="discord",
+        channel_id="team-a",
+        role_ids=["role-team-a"],
+        user_ids=[],
+        actor_account_id=None,
+    )
+    account = await db_session.get(Account, world.channel_admin_id)
+    assert account is not None
+    account.platform_role_ids = ["role-team-a"]
+    await db_session.flush()
+
+    async def holds(user_id: str) -> frozenset[str]:
+        return frozenset({"role-team-a"}) if user_id == "u1" else frozenset()
+
+    async def left(user_id: str) -> frozenset[str]:
+        return frozenset()
+
+    async def unreachable(user_id: str) -> frozenset[str]:
+        raise GroupLookupFailed("Discord did not answer")
+
+    async def manages(members: GroupMembers | None, managed: bool | None = False) -> bool:
+        return await requester_manages_agent(
+            db_session,
+            tenant_id=world.tenant_id,
+            account_id=world.channel_admin_id,
+            platform="discord",
+            platform_user_id="u1",
+            agent_name="TeamA",
+            ma_agent_id="ma_team_a",
+            default=DEFAULT,
+            is_daimon_managed=managed,
+            members=members,
+        )
+
+    assert await manages(holds)
+    # The stored role alone is not enough: no lookup, a lookup that fails, or
+    # a member who left the role is no.
+    assert not await manages(None)
+    assert not await manages(unreachable)
+    assert not await manages(left)
+    # Managed status must be known, and a managed agent is a server admin's.
+    assert not await manages(holds, managed=None)
+    assert not await manages(holds, managed=True)
+
+
+@pytest.mark.asyncio
+async def test_reconnecting_at_read_keeps_existing_write(db_session: AsyncSession) -> None:
+    world = await _world(db_session)
+    team_a = world.agent("ma_team_a")
+    for access in ("write", "read"):
+        assert await _connect(
+            db_session,
+            world,
+            requester_id=world.channel_admin_id,
+            agent_name="TeamA",
+            ma_agent_id="ma_team_a",
+            repo_ids=(101,),
+            manages=True,
+            access=access,
+        )
+    [grant] = await github_access.list_agent_grants(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a
+    )
+    assert (grant.baseline_access, grant.ceiling_access) == ("write", "write")
+    [row] = await _rows(db_session, world, 101)
+    assert row.max_access == "write"
+
+
+@pytest.mark.asyncio
+async def test_panel_manages_pinned_agents_own_repos_and_pending_saved_keys(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    team_a = world.agent("ma_team_a")
+    await _server_wide(db_session, world, 102)
+    assert await _connect(
+        db_session,
+        world,
+        requester_id=world.channel_admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101,),
+        manages=True,
+    )
+    panel = await load_grants_panel(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a, agent_name="TeamA"
+    )
+    # Pinned with only its own repos: the normal controls, and only its own repos.
+    assert not panel.saved_state
+    assert [repo.full_name for repo in panel.repos] == ["team-a/app"]
+
+    # A saved-key agent waiting on a chat Connect reaches the panel to finish it.
+    loose = world.agent("ma_loose")
+    await _saved_key_and_working_repo(db_session, world, loose)
+
+    async def loose_panel() -> bool:
+        return (
+            await load_grants_panel(
+                db_session, tenant_id=world.tenant_id, agent_id=loose, agent_name="Loose"
+            )
+        ).saved_state
+
+    assert await loose_panel()
+    pending = await _connect(
+        db_session,
+        world,
+        requester_id=world.admin_id,
+        agent_name="Loose",
+        ma_agent_id="ma_loose",
+        repo_ids=(102,),
+        manages=False,
+    )
+    assert pending is not None and pending.status == "update_pending"
+    assert not await loose_panel()
+
+
+@pytest.mark.asyncio
+async def test_panel_sends_a_pinned_agent_with_a_server_wide_grant_to_the_operator(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    team_a = world.agent("ma_team_a")
+    await _server_wide(db_session, world, 102)
+    db_session.add(
+        AgentGitHubGrant(
+            tenant_id=world.tenant_id,
+            agent_id=team_a,
+            repo_id=102,
+            baseline_access="read",
+            ceiling_access="read",
+        )
+    )
+    await db_session.flush()
+    panel = await load_grants_panel(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a, agent_name="TeamA"
+    )
+    assert panel.saved_state
