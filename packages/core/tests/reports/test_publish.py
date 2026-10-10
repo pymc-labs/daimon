@@ -35,7 +35,11 @@ from daimon.core.reports.publish import (
     publish_report,
 )
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.mcp_tokens import get_mcp_token, list_live_tokens_by_label
+from daimon.core.stores.mcp_tokens import (
+    get_mcp_token,
+    list_live_tokens_by_label,
+    list_mcp_tokens,
+)
 from daimon.testing.factories import make_account, make_mcp_token, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
@@ -434,6 +438,83 @@ async def test_publish_report_failed_host_registration_leaves_zero_live_tokens(
     async with db_session_factory() as session:
         rows = await list_live_tokens_by_label(session, tenant_id=tenant_id, label="report:q3")
     assert rows == [], "a failed host registration must leave zero live tokens for this report"
+
+
+async def test_failed_republish_keeps_previous_report_token_live(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A transient host failure must not disconnect an already published report."""
+    tenant_id, account_id = await _seed_tenant(db_session_factory)
+    source = _source_agent_dict(id_="ag_src", name="alpha", tenant_id=tenant_id)
+    router = _ma_router([source], tenant_id=tenant_id)
+    created: dict[str, Any] = {}
+    _add_create_route(router, created, reader_id="ag_reader")
+
+    def successful_host(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"slug": "q3", "links": []})
+
+    await publish_report(
+        anthropic=build_fake_anthropic(router.dispatch),
+        session_factory=db_session_factory,
+        http_client=_host_client(successful_host),
+        report_host_settings=_settings(),
+        jwt_secret=_JWT_SECRET,
+        max_bundle_bytes=_MAX_BUNDLE_BYTES,
+        default=DeploymentDefault(),
+        tenant_id=tenant_id,
+        account_id=account_id,
+        slug="q3",
+        title="first",
+        recipients=[],
+        cap_usd=Decimal("2.00"),
+        agent="alpha",
+        now=NOW,
+    )
+    async with db_session_factory() as session:
+        first_rows = await list_live_tokens_by_label(
+            session, tenant_id=tenant_id, label="report:q3"
+        )
+    assert len(first_rows) == 1
+    first_jti = first_rows[0].jti
+
+    reader = _reader_agent_dict(
+        id_="ag_reader",
+        name="alpha-reader",
+        tenant_id=tenant_id,
+        metadata=created["metadata"],
+    )
+    second_router = _ma_router([source, reader], tenant_id=tenant_id)
+
+    def failing_host(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="temporary failure")
+
+    with pytest.raises(ReportHostError):
+        await publish_report(
+            anthropic=build_fake_anthropic(second_router.dispatch),
+            session_factory=db_session_factory,
+            http_client=_host_client(failing_host),
+            report_host_settings=_settings(),
+            jwt_secret=_JWT_SECRET,
+            max_bundle_bytes=_MAX_BUNDLE_BYTES,
+            default=DeploymentDefault(),
+            tenant_id=tenant_id,
+            account_id=account_id,
+            slug="q3",
+            title="second",
+            recipients=[],
+            cap_usd=Decimal("2.00"),
+            agent="alpha",
+            now=NOW,
+        )
+
+    async with db_session_factory() as session:
+        rows = await list_mcp_tokens(session, now=NOW, tenant_id=tenant_id, include_inactive=True)
+    report_rows = [row for row in rows if row.label == "report:q3"]
+    assert len(report_rows) == 2
+    previous = next(row for row in report_rows if row.jti == first_jti)
+    attempted = next(row for row in report_rows if row.jti != first_jti)
+    assert previous.revoked_at is None, "the previous reader token must stay live"
+    assert attempted.revoked_at == NOW, "the failed attempt's token must be revoked"
 
 
 async def test_republish_reuses_reader_variant_and_mints_a_second_token(

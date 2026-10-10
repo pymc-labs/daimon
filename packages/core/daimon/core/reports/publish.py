@@ -30,7 +30,7 @@ from daimon.core import ma_identity
 from daimon.core.config import ReportHostSettings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_auth import mint_agent_mcp_token
+from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
 from daimon.core.notebooks.capability import mint_token
 from daimon.core.reader_agent import ensure_reader_variant
 from daimon.core.reports.host_client import (
@@ -218,6 +218,7 @@ async def publish_report(
             secret=jwt_secret,
             now=now,
         )
+    seam_jti = token_jti(seam_token)
 
     try:
         registered = await put_admin_report(
@@ -232,12 +233,10 @@ async def publish_report(
             recipients=recipients,
         )
     except ReportHostError:
-        # An orphaned live credential for a report that never registered is
-        # a secret nobody will ever clean up — revoke it before propagating.
+        # Revoke only this attempt's token. An earlier successful publish may
+        # still be live under the same label.
         async with session_factory() as session, session.begin():
-            live = await list_live_tokens_by_label(session, tenant_id=tenant_id, label=label)
-            for row in live:
-                await revoke_mcp_token(session, jti=row.jti, now=now)
+            await revoke_mcp_token(session, jti=seam_jti, now=now)
         raise
 
     capability = mint_token(
