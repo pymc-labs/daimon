@@ -3015,7 +3015,7 @@
     }),
     'github_connect': dict({
       'description': '''
-        Connect this agent to GitHub when someone asks to set up GitHub.
+        Give this agent token access to more repos through GitHub.
         <blank line>
         Show a single-use connection button bound to the selected agent to a
         server admin, or to a channel admin who manages that agent; repos
@@ -3026,6 +3026,12 @@
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
+        For 'give this agent access to owner/repo', first confirm in the thread:
+        'Give <Agent> read access to owner/repo?' Use write only if asked.
+        Then pass repo_name and confirmed=true. A connected repo is granted
+        directly when this person may grant it. Otherwise the single Connect
+        GitHub link lets them connect that repo in a browser. Connecting repos
+        gives token access; it does not put them all in the filesystem.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3041,6 +3047,10 @@
             ]),
             'default': None,
           }),
+          'confirmed': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'expected_ma_agent_id': dict({
             'anyOf': list([
               dict({
@@ -3055,6 +3065,17 @@
           'origin_context_id': dict({
             'type': 'string',
           }),
+          'repo_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'requested_work': dict({
             'anyOf': list([
               dict({
@@ -3065,6 +3086,14 @@
               }),
             ]),
             'default': None,
+          }),
+          'required_ability': dict({
+            'default': 'read',
+            'enum': list([
+              'read',
+              'write',
+            ]),
+            'type': 'string',
           }),
         }),
         'required': list([
@@ -4386,10 +4415,13 @@
     }),
     'request_github_access': dict({
       'description': '''
-        Ask for GitHub access needed to finish this person's current request.
+        Ask for token access to a repo needed for this agent's current request.
         <blank line>
         Use the active turn's origin ID and exactly one owner/repo. Give only the
         unfinished work, so the queued turn will not repeat completed steps.
+        The agent has at most one working repo in its filesystem; other granted
+        repos are reached by token and cloned by name when asked. Name only
+        repos this agent and the person may see.
         Never pass a repo name found in a DM or by the agent to another person.
         Return the message verbatim only when it is nonempty. A private card
         handles the admin's own request without a public status line.
@@ -5548,6 +5580,56 @@
         }),
         'required': list([
           'mode',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_working_repo': dict({
+      'description': '''
+        Choose the one repo in this agent's filesystem, or pass 'none' to clear it.
+        <blank line>
+        Ask once in plain words during agent setup. Use an owner/repo already on
+        this agent's list. Other repos have token access; clone one by name when
+        asked. Only a server admin or an admin for this non-managed agent's
+        channels may change this setting. Pass the current turn origin and the
+        selected agent's name and MA id. If the repo is not on its list, offer
+        the single Connect GitHub link.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'repo_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'repo_name',
         ]),
         'type': 'object',
       }),
