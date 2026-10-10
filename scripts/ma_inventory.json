@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2163,
+  "files_scanned": 2168,
   "parse_errors": [],
   "calls": [
     {
@@ -18745,6 +18745,15 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_user_message_event",
       "names": [
         "BetaManagedAgentsUserMessageEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/parity/test_qa_tool_parity.py",
+      "line": 20,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "test"
     },
