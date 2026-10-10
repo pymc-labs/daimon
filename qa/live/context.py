@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 from pydantic import JsonValue
@@ -43,13 +44,27 @@ class Context:
 
     def step(self, step: Step) -> Step:
         resolved = Step.model_validate(self.substitute(step.model_dump(mode="json", by_alias=True)))
-        if resolved.file and Path(resolved.file).suffix.lower() in {".yaml", ".yml", ".md"}:
-            original = Path(resolved.file)
-            contents = self.resolve(original.read_text())
-            self.fixtures.mkdir(parents=True, exist_ok=True)
-            folder = self.fixtures / str(len(list(self.fixtures.iterdir())))
-            folder.mkdir()
-            destination = folder / original.name
-            destination.write_text(contents)
-            resolved.file = str(destination)
+        if resolved.file:
+            resolved.file = self.fixture(resolved.file)
+        if isinstance(resolved.args, str):
+            resolved.args = shlex.join(
+                [
+                    self.fixture(token)
+                    if Path(token).is_absolute() and Path(token).is_file()
+                    else token
+                    for token in shlex.split(resolved.args)
+                ]
+            )
         return resolved
+
+    def fixture(self, filename: str) -> str:
+        original = Path(filename)
+        if original.suffix.lower() not in {".yaml", ".yml", ".md"}:
+            return filename
+        contents = self.resolve(original.read_text())
+        self.fixtures.mkdir(parents=True, exist_ok=True)
+        folder = self.fixtures / str(len(list(self.fixtures.iterdir())))
+        folder.mkdir()
+        destination = folder / original.name
+        destination.write_text(contents)
+        return str(destination)

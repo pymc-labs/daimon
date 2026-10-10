@@ -94,5 +94,6 @@
     "prod_canary_interval_s": 3600,
     "catalog_runs_per_day": 1,
     "catalog_budget_usd": 2
-  }
+  },
+  "live_lock": "~/.local/state/daimon-qa/live-run.lock"
 }

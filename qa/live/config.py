@@ -71,6 +71,7 @@ class Config(Contract):
         )
     )
     alerts: Alerts = Field(default_factory=Alerts)
+    live_lock: str = "~/.local/state/daimon-qa/live-run.lock"
     admin_hooks: dict[str, list[str]] = Field(default_factory=dict)
     poll_interval_s: float = Field(default=4, gt=0)
     settle_s: float = Field(default=6, gt=0)

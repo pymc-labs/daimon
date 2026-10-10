@@ -276,3 +276,7 @@ The handoff inbox file is the durable alert channel. Dedupe advances as soon as 
 Unmentioned channel-history seeds are recorded in `seed_messages`, without watching, model billing, or consuming a turn number. Assertions number actual agent turns; unmentioned replies to bot messages still count as turns.
 
 `http_check` supports unauthenticated GET status, MIME type and body-absence assertions. HTTP-only headless scenarios create no Discord channel or billed turn. GETs have a 15 s timeout and a bounded response body; unavailable contexts or truncated absence evidence stay PENDING.
+
+Configured staging admin hooks accept structured or quoted string args via JSON stdin; the runner never executes catalog strings as shell commands. Catalog `fixtures/` args resolve at load time and YAML/Markdown copies receive context substitution in a private temporary directory. Hook JSON responses may provide string `context` bindings (for example `fork.name`). Missing hooks/bindings remain PENDING.
+
+Timer and manual entrypoints must share `live_lock`; the default is `~/.local/state/daimon-qa/live-run.lock`. A held lock refuses a second session before any live action. File-only alerts use `alerts.command=[]` and a local `alerts.inbox`. `Ledger.charged(run_ids)` sums final receipts and excludes reservation changes from reported charges.

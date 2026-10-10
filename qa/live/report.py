@@ -91,7 +91,11 @@ class Alerter:
             state[key] = prior
             self._save_state(state)
             return
-        if result.status in {"FAIL", "PENDING"} and prior.get("status") in {"FAIL", "PENDING"}:
+        if (
+            result.status in {"FAIL", "PENDING"}
+            and prior.get("status") in {"FAIL", "PENDING"}
+            and prior.get("ts")
+        ):
             previous = datetime.fromisoformat(prior["ts"])
             if (now - previous).total_seconds() < self.config.cooldown_s:
                 prior["pending_count"] = str(pending_count)
@@ -121,6 +125,10 @@ class Alerter:
             "delivery": "durable inbox written; tsend pending",
         }
         self._save_state(state)
+        if not self.config.command:
+            state[key]["delivery"] = "file-only; durable alert written"
+            self._save_state(state)
+            return
         try:
             delivery = subprocess.run(
                 [*self.config.command, line],

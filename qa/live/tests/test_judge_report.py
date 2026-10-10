@@ -293,6 +293,7 @@ def test_catalog_continues_after_alert_inbox_error(
     from qa.live.tests.conftest import FakeBackend, FakeJudge
 
     config = Config(
+        live_lock=str(tmp_path / "live.lock"),
         pricing=Pricing(per_turn_usd=0.01, judge_input_per_million=1, judge_output_per_million=5),
         staging=Target(enabled=True),
     )
@@ -344,3 +345,23 @@ def test_catalog_continues_after_alert_inbox_error(
     )
     assert cli.main() == 0
     assert calls == ["QA-D1-TEST1", "QA-D1-TEST2"]
+
+
+def test_file_only_alert_never_invokes_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qa.live.config import Alerts
+    from qa.live.report import Alerter, Result
+    from qa.live.types import Check
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("file-only alert attempted external delivery")
+
+    monkeypatch.setattr("qa.live.report.subprocess.run", forbidden)
+    alerts = Alerts(inbox=str(tmp_path / "alerts"), command=[])
+    result = Result(
+        "run", "QA-FILE-ALERT", "staging", checks=[Check("text", "FAIL", "offline failure")]
+    )
+    result.finalize()
+    Alerter(alerts, tmp_path / "state.json").notify(result, tmp_path / "evidence.json")
+    assert len(list((tmp_path / "alerts").glob("qa-canary-FAIL-*.md"))) == 1

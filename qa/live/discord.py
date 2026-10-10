@@ -139,6 +139,7 @@ class DiscordBackend:
         self.parent = ""
         self.thread_parents: dict[str, str] = {}
         self.fallback_watch_s = config.fallback_watch_s
+        self.bindings: dict[str, str] = {}
 
     @property
     def driver(self) -> Driver:
@@ -148,6 +149,7 @@ class DiscordBackend:
 
     def context(self) -> dict[str, str]:
         return {
+            **self.bindings,
             "guild_id": self.target.guild_id,
             **{f"env.{key}": value for key, value in self.target.context.items()},
         }
@@ -552,6 +554,14 @@ class DiscordBackend:
         )
         if result.returncode:
             raise RuntimeError("configured staging admin hook failed")
+        if result.stdout.strip():
+            data = cast(JsonValue, json.loads(result.stdout))
+            bindings = obj(data).get("context", {})
+            if not isinstance(bindings, dict) or any(
+                not isinstance(v, str) for v in bindings.values()
+            ):
+                raise ValueError("admin hook context must be string bindings")
+            self.bindings.update(cast(dict[str, str], bindings))
 
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]:
         if not turn.thread_id or not turn.ended_at:

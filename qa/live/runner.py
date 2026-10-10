@@ -439,6 +439,8 @@ class Executor:
             self.collect(last, step.timeout_s)
         elif kind in {"admin", "restart_workers"}:
             self.backend.admin(step, channel)
+            if self.context:
+                self.context.values.update(self.backend.context())
         elif kind == "headless_interrupt":
             raise Pending("headless interrupt hook is not implemented")
         elif kind == "dm":
