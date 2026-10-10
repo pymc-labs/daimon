@@ -156,7 +156,7 @@ from daimon.core.stores.channel_admins import (
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access_requests import list_asker_requests
-from daimon.core.stores.github_connected_repos import summary as connected_summary
+from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.github_links import account_link_status
 from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -243,9 +243,18 @@ async def github_home_view(
     user_id: str,
     is_admin: bool,
 ) -> dict[str, Any]:
-    """Rebuild the complete GitHub home after a modal action."""
+    """Rebuild the complete GitHub home: every agent here with its repo count."""
     async with runtime.sessionmaker() as session:
-        home = await connected_summary(session, tenant_id=tenant_id) if is_admin else None
+        roster = await load_panel_roster(
+            session,
+            runtime.anthropic,
+            tenant_id=tenant_id,
+            channel_id=meta.channel_id,
+            thread_id=None,
+            default=runtime.deployment_default,
+            is_admin=is_admin,
+        )
+        repos = await agent_repo_summary(session, tenant_id=tenant_id)
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
         )
@@ -255,15 +264,16 @@ async def github_home_view(
         linked = await account_link_status(session, account_id=principal.account_id)
     return panel_views.build_github_home_view(
         dataclasses.replace(meta, github_step="pick"),
-        public_base_url=str(runtime.settings.mcp.app_root_url or ""),
-        connected_count=home.count if home else 0,
-        is_admin=is_admin,
-        owners=home.owners if home else (),
-        agent_count=home.agent_count if home else 0,
-        pending_url=(
-            await github_pending_url(runtime, tenant_id=tenant_id, user_id=user_id)
-            if is_admin
-            else None
+        agent_counts=tuple(
+            (
+                row.name,
+                len(
+                    repos.by_agent.get(
+                        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.ma_agent_id), ()
+                    )
+                ),
+            )
+            for row in roster.rows
         ),
         linked_login=linked,
         own_waiting_count=len(own),
@@ -350,34 +360,8 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
             )
 
         if payload.get("command") == "/github":
-            async with runtime.sessionmaker() as session:
-                home = await connected_summary(session, tenant_id=tenant_id) if is_admin else None
-                principal = await get_or_create_platform_principal(
-                    session, tenant_id=tenant_id, platform="slack", external_id=user_id
-                )
-                own_waiting = await list_asker_requests(
-                    session, tenant_id=tenant_id, account_id=principal.account_id
-                )
-            pending_url = (
-                await github_pending_url(runtime, tenant_id=tenant_id, user_id=user_id)
-                if is_admin
-                else None
-            )
-            rendered = panel_views.build_github_home_view(
-                meta,
-                public_base_url=str(runtime.settings.mcp.app_root_url or ""),
-                connected_count=home.count if home else 0,
-                is_admin=is_admin,
-                owners=home.owners if home else (),
-                agent_count=home.agent_count if home else 0,
-                pending_url=pending_url,
-                linked_login=await github_personal_login(
-                    runtime, tenant_id=tenant_id, user_id=user_id
-                ),
-                own_waiting_count=len(own_waiting),
-                can_choose_agent=await github_can_choose_agent(
-                    runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-                ),
+            rendered = await github_home_view(
+                runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=is_admin
             )
         else:
             rendered = build_agents_view(
@@ -481,6 +465,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         github_repos_view.ACTION_CONFIRM_TURN_OFF,
         github_repos_view.ACTION_CANCEL_CONFIRM,
         github_repos_view.ACTION_ADD_OPEN,
+        github_repos_view.ACTION_ADD_FOR,
         github_repos_view.ACTION_BACK,
         github_repos_view.ACTION_SETTINGS,
         github_repos_view.ACTION_SETTINGS_CHOICE,
@@ -977,12 +962,7 @@ async def _dispatch_panel_action(
                 )
         if action_id == panel_views.ACTION_GITHUB_UNLINK:
             next_meta = dataclasses.replace(meta, github_step="personal_unlink")
-            view = panel_views.build_github_home_view(
-                next_meta,
-                connected_count=0,
-                is_admin=is_admin,
-                public_base_url=str(runtime.settings.mcp.app_root_url or ""),
-            )
+            view = panel_views.build_github_home_view(next_meta)
         else:
             view = await github_home_view(
                 runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=is_admin

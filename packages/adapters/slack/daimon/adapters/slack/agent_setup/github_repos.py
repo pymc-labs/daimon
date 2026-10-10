@@ -8,6 +8,15 @@ from typing import Any, Final
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.github_connect_cards import (
+    ADD_REPOS_LABEL,
+    DETAILS_LABEL,
+    AgentRepoLine,
+    agent_repos_title,
+    agent_section_lines,
+    remove_label,
+    repo_detail_lines,
+)
 from daimon.core.github_panel import GrantsPanel
 from daimon.core.stores.github_connect import CLIENT_AGENT_MESSAGE
 
@@ -26,6 +35,8 @@ ACTION_ADD_OPEN: Final = "agent_setup__github_add_open"
 ACTION_SETTINGS: Final = "agent_setup__github_settings"
 ACTION_SETTINGS_CHOICE: Final = "agent_setup__github_settings_choice"
 ACTION_BACK: Final = "agent_setup__github_back"
+ACTION_ADD_FOR: Final = "agent_setup__github_add_for"
+"""[Add repos] beside one agent on the GitHub home; the value is the agent name."""
 
 
 def _button(action: str, label: str, value: str | None = None) -> dict[str, Any]:
@@ -50,7 +61,7 @@ def build_confirm_view(meta: PanelMetadata, panel: GrantsPanel, *, choice: str) 
             "Chats that already used it keep what was said."
         )
         action = ACTION_CONFIRM_REMOVE
-        label = "Remove repo"
+        label = remove_label(name)[:75]
     elif choice == "turn_off":
         message = f"Turn off GitHub for {name}? It loses access to all its repos."
         action = ACTION_CONFIRM_TURN_OFF
@@ -74,8 +85,28 @@ def build_confirm_view(meta: PanelMetadata, panel: GrantsPanel, *, choice: str) 
     )
 
 
-def build_view(meta: PanelMetadata, panel: GrantsPanel) -> dict[str, Any]:
-    """Render the connected repo set and controls for the selected agent."""
+def live_repo_lines(panel: GrantsPanel) -> tuple[AgentRepoLine, ...]:
+    """The repos the agent uses now, as the section lists them."""
+    return tuple(
+        AgentRepoLine(full_name=repo.full_name, access=repo.live_ceiling)
+        for repo in panel.repos
+        if repo.live_ceiling is not None
+    )
+
+
+def _text(text: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def build_view(
+    meta: PanelMetadata,
+    panel: GrantsPanel,
+    *,
+    detail_lines: tuple[AgentRepoLine, ...] | None = None,
+) -> dict[str, Any]:
+    """The agent's repos: the list, who can use them, then Add, Remove and Details."""
+    name = meta.agent_name or "Agent"
+    live = live_repo_lines(panel)
     page_count = max(1, (len(panel.repos) + 19) // 20)
     page = min(meta.page, page_count - 1)
     page_repos = panel.repos[page * 20 : (page + 1) * 20]
@@ -89,29 +120,41 @@ def build_view(meta: PanelMetadata, panel: GrantsPanel) -> dict[str, Any]:
         return finish_modal(
             title="GitHub repos",
             blocks=[
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": escape_mrkdwn(CLIENT_AGENT_MESSAGE)},
-                },
+                _text(escape_mrkdwn(CLIENT_AGENT_MESSAGE)),
                 {"type": "actions", "elements": [_button(ACTION_BACK, "◀ Back")]},
             ],
             private_metadata=encode_panel_metadata(metadata),
             callback_id="agent_setup__github_repos",
         )
-    rows: list[dict[str, Any]] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": escape_mrkdwn(line)}}
-        for line in panel.text(meta.agent_name or "Agent", page=page).splitlines()[:30]
-    ]
-    if meta.github_settings and meta.github_step == "pick":
-        rows.append(
-            {
-                "type": "actions",
-                "elements": [
-                    _button(ACTION_SETTINGS_CHOICE, "Change what it can do", "ability"),
-                    _button(ACTION_SETTINGS_CHOICE, "Remove repos", "remove"),
-                ],
-            }
-        )
+    details = meta.github_settings and meta.github_step == "pick"
+    rows: list[dict[str, Any]] = [_text(f"*{escape_mrkdwn(agent_repos_title(name))}*")]
+    if details:
+        for repo in (detail_lines if detail_lines is not None else live)[:20]:
+            rows.append(
+                _text(
+                    "\n".join(
+                        (
+                            f"*{escape_mrkdwn(repo.full_name)}*",
+                            *map(_keep_mention, repo_detail_lines(repo)),
+                        )
+                    )
+                )
+            )
+    else:
+        body = agent_section_lines(name, live)
+        if live:
+            rows.append(
+                _text(
+                    "\n".join(
+                        escape_mrkdwn(repo.full_name) for repo in live[page * 20 : (page + 1) * 20]
+                    )
+                )
+            )
+            if len(live) > 20:
+                rows.append(_text(f"Page {page + 1} of {(len(live) + 19) // 20}"))
+        rows.append(_text(escape_mrkdwn(body[-1])))
+        if panel.has_pending:
+            rows.append(_text("Changes waiting to be saved."))
     if meta.github_settings and meta.github_step.startswith("settings_") and panel.repos:
         options = [
             {"text": {"type": "plain_text", "text": r.full_name[:75]}, "value": str(r.repo_id)}
@@ -142,13 +185,13 @@ def build_view(meta: PanelMetadata, panel: GrantsPanel) -> dict[str, Any]:
                     "fields": [
                         {
                             "type": "mrkdwn",
-                            "text": (
-                                "*Read and write*\nPush branches, open issues and pull requests."
-                            ),
+                            "text": "*Read only*\nRead code, issues and pull requests.",
                         },
                         {
                             "type": "mrkdwn",
-                            "text": "*Read only*\nRead code, issues and pull requests.",
+                            "text": (
+                                "*Read and write*\nPush branches, open issues and pull requests."
+                            ),
                         },
                     ],
                 }
@@ -157,35 +200,42 @@ def build_view(meta: PanelMetadata, panel: GrantsPanel) -> dict[str, Any]:
                 {
                     "type": "actions",
                     "elements": [
-                        _button(ACTION_STAGE, "Read and write", "ceiling:write"),
                         _button(ACTION_STAGE, "Read only", "ceiling:read"),
+                        _button(ACTION_STAGE, "Read and write", "ceiling:write"),
                     ],
                 }
             )
         elif meta.github_step == "settings_remove":
-            rows.append({"type": "actions", "elements": [_button(ACTION_REMOVE, "Remove repos")]})
-    if panel.mode == "legacy":
-        controls: list[dict[str, Any]] = []
-        controls.append(_button(ACTION_ADD_OPEN, "Add repos"))
-        if panel.has_pending and meta.github_settings:
-            controls.append(_button(ACTION_ACTIVATE, "Save changes"))
-    else:
-        controls = [_button(ACTION_ADD_OPEN, "Add repos")]
-        if panel.has_pending and meta.github_settings:
-            controls.append(_button(ACTION_ACTIVATE, "Save changes"))
-        if meta.github_settings and meta.github_step == "pick":
-            controls.append(
-                _button(ACTION_DEACTIVATE, f"Turn off GitHub for {meta.agent_name}"[:75])
+            rows.append(
+                {"type": "actions", "elements": [_button(ACTION_REMOVE, remove_label(name)[:75])]}
             )
-    if not meta.github_settings and any(r.live_ceiling is not None for r in panel.repos):
-        controls.append(_button(ACTION_SETTINGS, "Settings"))
+    controls: list[dict[str, Any]] = []
+    if not meta.github_settings:
+        controls.append(_button(ACTION_ADD_OPEN, ADD_REPOS_LABEL))
+        if live:
+            controls.append(_button(ACTION_SETTINGS_CHOICE, remove_label(name)[:75], "remove"))
+            controls.append(_button(ACTION_SETTINGS, DETAILS_LABEL))
+    if details and live:
+        controls.append(_button(ACTION_SETTINGS_CHOICE, "Change access", "ability"))
+    if panel.has_pending and meta.github_settings:
+        controls.append(_button(ACTION_ACTIVATE, "Save changes"))
+    if panel.mode == "app" and details:
+        controls.append(_button(ACTION_DEACTIVATE, f"Turn off GitHub for {meta.agent_name}"[:75]))
     controls.append(_button(ACTION_BACK, "◀ Back"))
     rows.append({"type": "divider"})
     rows.append({"type": "actions", "elements": controls})
-    rows.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return finish_modal(
         title="GitHub repos",
         blocks=rows,
         private_metadata=encode_panel_metadata(metadata),
         callback_id="agent_setup__github_repos",
     )
+
+
+def _keep_mention(line: str) -> str:
+    """Escape a detail line but keep its `<@U…>` mention working."""
+    head, mention, tail = line.partition("<@")
+    if not mention:
+        return escape_mrkdwn(line)
+    user, _, rest = tail.partition(">")
+    return f"{escape_mrkdwn(head)}<@{user}>{escape_mrkdwn(rest)}"

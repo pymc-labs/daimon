@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
@@ -17,22 +18,73 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.github_connect_cards import (
+    ADD_REPOS_LABEL,
+    DETAILS_LABEL,
+    AgentRepoLine,
+    agent_repos_title,
+    agent_section_lines,
+    ask_manager_line,
+    load_agent_repo_lines,
+    remove_label,
+    repo_detail_lines,
+    resolve_connect_card,
+)
 from daimon.core.github_panel import (
     GrantsPanel,
     activate_grants,
+    connect_link,
     load_grants_panel,
-    remove_panel_grant,
     safe_github_error,
     stage_panel_grant,
+    sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.roster import RosterAgent
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.github_access import deactivate_agent
+from daimon.core.stores.github_access import deactivate_agent, remove_agent_repo
 from daimon.core.stores.github_connect import CLIENT_AGENT_MESSAGE
 
 import discord
+
+PAGE_SIZE = 20
+
+
+def live_repo_lines(panel: GrantsPanel) -> tuple[AgentRepoLine, ...]:
+    """The repos the agent uses now, as the section lists them."""
+    return tuple(
+        AgentRepoLine(full_name=repo.full_name, access=repo.live_ceiling)
+        for repo in panel.repos
+        if repo.live_ceiling is not None
+    )
+
+
+def section_text(agent_name: str, panel: GrantsPanel, *, page: int = 0) -> str:
+    """The agent's GitHub section: title, its repos, and who can use them."""
+    live = live_repo_lines(panel)
+    shown = live[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+    lines = [f"## {agent_repos_title(agent_name)}"]
+    body = agent_section_lines(agent_name, live)
+    if live:
+        lines.extend(repo.full_name for repo in shown)
+    else:
+        lines.extend(body)
+    if len(live) > PAGE_SIZE:
+        lines.append(f"Page {page + 1} of {(len(live) + PAGE_SIZE - 1) // PAGE_SIZE}")
+    if live:
+        lines.append(f"\n{body[-1]}")
+    if panel.has_pending:
+        lines.append("Changes waiting to be saved.")
+    return "\n".join(lines)
+
+
+def details_text(agent_name: str, repos: tuple[AgentRepoLine, ...]) -> str:
+    """[Details]: who added each repo, when, its access, and whether it is shared."""
+    blocks = [f"## {agent_repos_title(agent_name)}"]
+    for repo in repos[:PAGE_SIZE]:
+        blocks.append("\n".join((f"**{repo.full_name}**", *repo_detail_lines(repo))))
+    return "\n\n".join(blocks)
 
 
 class GitHubReposView(PanelViewBase):
@@ -50,6 +102,7 @@ class GitHubReposView(PanelViewBase):
         settings: bool = False,
         settings_choice: Literal["ability", "remove"] | None = None,
         confirmation: Literal["remove", "turn_off"] | None = None,
+        detail_lines: tuple[AgentRepoLine, ...] | None = None,
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
         self.agent = agent
@@ -80,7 +133,7 @@ class GitHubReposView(PanelViewBase):
                     f"Remove {repo_name} from {agent.name}? It stops using it in new requests. "
                     "Chats that already used it keep what was said."
                 )
-                label = "Remove repo"
+                label = remove_label(agent.name)[:80]
             container.add_item(discord.ui.TextDisplay(message))
             confirmation_actions: EmbedActionRow = EmbedActionRow()
             confirm: discord.ui.Button[GitHubReposView] = discord.ui.Button(
@@ -96,18 +149,25 @@ class GitHubReposView(PanelViewBase):
             container.add_item(confirmation_actions)
             self.add_item(container)
             return
-        container.add_item(discord.ui.TextDisplay(panel.text(agent.name, page=start // 20)))
+        self.detail_lines = detail_lines
+        live = live_repo_lines(panel)
         if settings and settings_choice is None:
-            menu: EmbedActionRow = EmbedActionRow()
-            for choice, label in (
-                ("ability", "Change what it can do"),
-                ("remove", "Remove repos"),
-            ):
-                button: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                    label=label, style=discord.ButtonStyle.secondary
+            container.add_item(
+                discord.ui.TextDisplay(
+                    details_text(agent.name, detail_lines if detail_lines is not None else live)
                 )
-                button.callback = self._choose_settings(choice)  # type: ignore[method-assign]
-                menu.add_item(button)
+            )
+        else:
+            container.add_item(
+                discord.ui.TextDisplay(section_text(agent.name, panel, page=start // 20))
+            )
+        if settings and settings_choice is None and live:
+            menu: EmbedActionRow = EmbedActionRow()
+            change: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label="Change access", style=discord.ButtonStyle.secondary
+            )
+            change.callback = self._choose_settings("ability")  # type: ignore[method-assign]
+            menu.add_item(change)
             container.add_item(menu)
         if settings and settings_choice is not None and panel.repos:
             if settings_choice == "ability":
@@ -132,7 +192,7 @@ class GitHubReposView(PanelViewBase):
             container.add_item(EmbedActionRow(select))
             ceiling: EmbedActionRow = EmbedActionRow()
             for level in ("write", "read") if settings_choice == "ability" else ():
-                button = discord.ui.Button(
+                button: discord.ui.Button[GitHubReposView] = discord.ui.Button(
                     label="Read only" if level == "read" else "Read and write",
                     style=discord.ButtonStyle.secondary,
                 )
@@ -140,7 +200,7 @@ class GitHubReposView(PanelViewBase):
                 ceiling.add_item(button)
             if settings_choice == "remove":
                 remove: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                    label="Remove repos", style=discord.ButtonStyle.danger
+                    label=remove_label(agent.name)[:80], style=discord.ButtonStyle.danger
                 )
                 remove.callback = self._on_remove  # type: ignore[method-assign]
                 ceiling.add_item(remove)
@@ -164,34 +224,33 @@ class GitHubReposView(PanelViewBase):
                 paging.add_item(following)
                 container.add_item(paging)
         actions: EmbedActionRow = EmbedActionRow()
-        add_repos: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-            label="Add repos", style=discord.ButtonStyle.primary
-        )
-        add_repos.callback = self._on_add_repos  # type: ignore[method-assign]
-        actions.add_item(add_repos)
-        if panel.mode == "legacy":
-            if panel.has_pending and settings:
-                activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                    label="Save changes", style=discord.ButtonStyle.primary
-                )
-                activate.callback = self._on_activate  # type: ignore[method-assign]
-                actions.add_item(activate)
-        else:
-            if panel.has_pending and settings:
-                activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                    label="Save changes", style=discord.ButtonStyle.primary
-                )
-                activate.callback = self._on_activate  # type: ignore[method-assign]
-                actions.add_item(activate)
-            if settings and settings_choice is None:
-                deactivate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                    label=f"Turn off GitHub for {agent.name}"[:80], style=discord.ButtonStyle.danger
-                )
-                deactivate.callback = self._on_deactivate  # type: ignore[method-assign]
-                actions.add_item(deactivate)
-        if not settings and any(repo.live_ceiling is not None for repo in panel.repos):
+        if not settings:
+            add_repos: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label=ADD_REPOS_LABEL, style=discord.ButtonStyle.primary
+            )
+            add_repos.callback = self._on_add_repos  # type: ignore[method-assign]
+            actions.add_item(add_repos)
+        if not settings and live:
+            remove_button: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label=remove_label(agent.name)[:80], style=discord.ButtonStyle.secondary
+            )
+            remove_button.callback = self._on_remove_start  # type: ignore[method-assign]
+            actions.add_item(remove_button)
+        if panel.has_pending and settings:
+            activate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label="Save changes", style=discord.ButtonStyle.primary
+            )
+            activate.callback = self._on_activate  # type: ignore[method-assign]
+            actions.add_item(activate)
+        if panel.mode == "app" and settings and settings_choice is None:
+            deactivate: discord.ui.Button[GitHubReposView] = discord.ui.Button(
+                label=f"Turn off GitHub for {agent.name}"[:80], style=discord.ButtonStyle.danger
+            )
+            deactivate.callback = self._on_deactivate  # type: ignore[method-assign]
+            actions.add_item(deactivate)
+        if not settings and live:
             settings_button: discord.ui.Button[GitHubReposView] = discord.ui.Button(
-                label="Settings", style=discord.ButtonStyle.secondary
+                label=DETAILS_LABEL, style=discord.ButtonStyle.secondary
             )
             settings_button.callback = self._on_settings  # type: ignore[method-assign]
             actions.add_item(settings_button)
@@ -250,6 +309,9 @@ class GitHubReposView(PanelViewBase):
             panel = await load_grants_panel(
                 session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
             )
+            detail_lines = await load_agent_repo_lines(
+                session, tenant_id=tenant_id, agent_id=agent_id, platform="discord"
+            )
         await self.swap_to(
             interaction,
             GitHubReposView(
@@ -261,14 +323,21 @@ class GitHubReposView(PanelViewBase):
                 page=self.page,
                 settings=self.settings,
                 settings_choice=self.settings_choice,
+                detail_lines=detail_lines,
             ),
         )
 
     async def _on_settings(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot change this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
+            return
+        self.settings = True
+        self.settings_choice = None
+        await self._refresh_panel(interaction)
+
+    async def _on_remove_start(self, interaction: discord.Interaction) -> None:
+        if not await self.allowed(interaction):
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         await self.swap_to(
             interaction,
@@ -280,6 +349,7 @@ class GitHubReposView(PanelViewBase):
                 panel=self.panel,
                 page=self.page,
                 settings=True,
+                settings_choice="remove",
             ),
         )
 
@@ -305,9 +375,7 @@ class GitHubReposView(PanelViewBase):
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot view this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         selected = next(
             (item for item in self.walk_children() if isinstance(item, discord.ui.Select)), None
@@ -322,18 +390,14 @@ class GitHubReposView(PanelViewBase):
 
     async def _on_previous(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot view this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         self.page = max(0, (self.page // 20 - 1) * 20)
         await self._refresh_panel(interaction)
 
     async def _on_next(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot view this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         self.page = min(len(self.panel.repos) - 1, (self.page // 20 + 1) * 20)
         await self._refresh_panel(interaction)
@@ -341,9 +405,7 @@ class GitHubReposView(PanelViewBase):
     def _setter(self, level: Literal["read", "write"]):
         async def callback(interaction: discord.Interaction) -> None:
             if not await self.allowed(interaction):
-                await interaction.followup.send(
-                    "You cannot change this agent's GitHub repos.", ephemeral=True
-                )
+                await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
                 return
             if self.repo_id is None:
                 return
@@ -406,9 +468,7 @@ class GitHubReposView(PanelViewBase):
 
     async def _on_confirm(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot change this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         tenant_id, agent_id = self._ids()
         try:
@@ -416,21 +476,13 @@ class GitHubReposView(PanelViewBase):
                 if self.confirmation == "remove":
                     if self.repo_id is None:
                         return
-                    await remove_panel_grant(
+                    await remove_agent_repo(
                         session,
                         tenant_id=tenant_id,
                         agent_id=agent_id,
                         repo_id=self.repo_id,
                         account_id=self.state.account_id,
                     )
-                    if self.panel.mode == "app":
-                        await activate_grants(
-                            session,
-                            tenant_id=tenant_id,
-                            agent_id=agent_id,
-                            account_id=self.state.account_id,
-                            agent_name=self.agent.name,
-                        )
                 elif self.confirmation == "turn_off":
                     await deactivate_agent(
                         session,
@@ -445,28 +497,15 @@ class GitHubReposView(PanelViewBase):
 
     async def _on_add_repos(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot change this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
-        from daimon.adapters.discord.agent_setup.github_add_repos import GitHubAddReposView
-
-        await self.swap_to(
-            interaction,
-            GitHubAddReposView(
-                self.state,
-                runtime=self.runtime,
-                allowed_user_id=self.allowed_user_id,
-                agent=self.agent,
-                panel=self.panel,
-            ),
+        await send_agent_connect_link(
+            interaction, runtime=self.runtime, state=self.state, agent=self.agent
         )
 
     async def _on_activate(self, interaction: discord.Interaction) -> None:
         if not await self.allowed(interaction):
-            await interaction.followup.send(
-                "You cannot change this agent's GitHub repos.", ephemeral=True
-            )
+            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
             return
         tenant_id, agent_id = self._ids()
         try:
@@ -495,18 +534,10 @@ class GitHubReposView(PanelViewBase):
         if self.settings:
             if not await self.allowed(interaction):
                 return
-            await self.swap_to(
-                interaction,
-                GitHubReposView(
-                    self.state,
-                    runtime=self.runtime,
-                    allowed_user_id=self.allowed_user_id,
-                    agent=self.agent,
-                    panel=self.panel,
-                    page=self.page,
-                    settings=self.settings_choice is not None,
-                ),
-            )
+            # Change access returns to Details; Remove and Details return to the section.
+            self.settings = self.settings_choice == "ability"
+            self.settings_choice = None
+            await self._refresh_panel(interaction)
             return
         from daimon.adapters.discord.agent_setup.details_view import DetailsView
 
@@ -519,3 +550,68 @@ class GitHubReposView(PanelViewBase):
                 agent=self.agent,
             ),
         )
+
+
+async def send_agent_connect_link(
+    interaction: discord.Interaction,
+    *,
+    runtime: DiscordRuntime,
+    state: PanelState,
+    agent: RosterAgent,
+) -> None:
+    """Send the private link that adds repos to one agent.
+
+    The caller has deferred the interaction and checked that the person manages
+    the agent; the repos they tick on GitHub are for this agent only.
+    """
+    from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
+    from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView
+
+    admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
+    try:
+        async with runtime.sessionmaker.begin() as session:
+            if admin:
+                await sync_connect_admin(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    platform_user_id=str(interaction.user.id),
+                    verified_tenant_admin=True,
+                )
+            url = await connect_link(
+                session,
+                settings=runtime.settings,
+                tenant_id=tenant_id,
+                platform="discord",
+                platform_user_id=str(interaction.user.id),
+                verified_tenant_admin=admin,
+                verified_agent_manager=True,
+                workspace_label=interaction.guild.name if interaction.guild else None,
+                requester_label=interaction.user.display_name,
+                agent_id=agent_id,
+                agent_name=agent.name,
+                agent_ma_id=agent.ma_agent_id,
+                origin_parent_channel_id=str(interaction.channel_id),
+                origin_thread_id=str(interaction.channel_id),
+                origin_followup_token=f"{interaction.application_id}:{interaction.token}",
+                origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+            )
+    except ValueError as error:
+        await interaction.followup.send(safe_github_error(error), ephemeral=True)
+        return
+    card = await resolve_connect_card(
+        runtime.sessionmaker,
+        runtime.settings,
+        tenant_id=tenant_id,
+        platform="discord",
+        workspace_id=str(state.guild_id),
+        agent_name=agent.name,
+    )
+    await interaction.followup.send(
+        embed=connect_embed(card),
+        view=GitHubLinkView(url),
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )

@@ -142,7 +142,11 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 return
             async with runtime.sessionmaker() as session:
                 await require_app_eligible_agent(
-                    session, tenant_id=tenant_id, agent_id=agent_id, agent_name=target_name
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    agent_name=target_name,
+                    switch_saved_key=True,
                 )
             async with runtime.sessionmaker.begin() as session:
                 principal = await get_or_create_platform_principal(
@@ -160,6 +164,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     requester_platform_user_id=str(interaction.user.id),
                     agent_id=agent_id,
                     agent_name=target_name,
+                    agent_ma_id=target_ma_id,
                     origin_platform="discord",
                     origin_parent_channel_id=str(interaction.channel_id),
                     origin_thread_id=str(interaction.channel_id),

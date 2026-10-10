@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
@@ -11,22 +10,28 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
 from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
-from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
+from daimon.adapters.discord.agent_setup.github_repos import (
+    GitHubReposView,
+    send_agent_connect_link,
+)
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_identity import identity_enabled_for
-from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, build_connect_card
+from daimon.core.github_connect_cards import (
+    CONNECT_GITHUB_EMOJI,
+    ask_manager_line,
+    audience_line,
+    build_connect_card,
+    picker_title,
+)
 from daimon.core.github_panel import (
     GrantsPanel,
     RepoChoice,
     activate_grants,
-    connect_link,
     load_grants_panel,
     safe_github_error,
     stage_panel_grant,
     suggested_repo,
-    sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.roster import RosterAgent
@@ -49,7 +54,7 @@ class GitHubAddReposView(PanelViewBase):
         agent: RosterAgent,
         panel: GrantsPanel,
         selected_ids: frozenset[int] | None = None,
-        ability: Literal["read", "write"] = "write",
+        ability: Literal["read", "write"] = "read",
         page: int = 0,
         step: Step = "pick",
     ) -> None:
@@ -72,7 +77,11 @@ class GitHubAddReposView(PanelViewBase):
             return
         if step == "pick":
             container.add_item(
-                discord.ui.TextDisplay(f"## Repos {agent.name} uses\nCan: {self._ability_label()}")
+                discord.ui.TextDisplay(
+                    f"## {picker_title(agent.name)}\n"
+                    f"{audience_line(agent.name, write=self.ability == 'write')}\n"
+                    f"Access: {self._ability_label()}"
+                )
             )
             page_repos = panel.repos[page * 20 : (page + 1) * 20]
             if page_repos:
@@ -101,10 +110,6 @@ class GitHubAddReposView(PanelViewBase):
                 )
                 suggested.callback = self._add_suggestion(suggestion.repo_id)  # type: ignore[method-assign]
                 container.add_item(EmbedActionRow(suggested))
-            if not state.is_admin:
-                container.add_item(
-                    discord.ui.TextDisplay("Repo missing? Ask a server admin to connect it.")
-                )
             actions: EmbedActionRow = EmbedActionRow()
             change: discord.ui.Button[GitHubAddReposView] = discord.ui.Button(
                 label="Change", style=discord.ButtonStyle.secondary
@@ -117,18 +122,15 @@ class GitHubAddReposView(PanelViewBase):
                 )
                 add.callback = self._on_add  # type: ignore[method-assign]
                 actions.add_item(add)
-            if state.is_admin:
-                connect: discord.ui.Button[GitHubAddReposView] = discord.ui.Button(
-                    label="Connect more repos" if panel.repos else "Connect GitHub",
-                    emoji=CONNECT_GITHUB_EMOJI if not panel.repos else None,
-                    style=(
-                        discord.ButtonStyle.secondary
-                        if panel.repos
-                        else discord.ButtonStyle.primary
-                    ),
-                )
-                connect.callback = self._on_connect_more  # type: ignore[method-assign]
-                actions.add_item(connect)
+            connect: discord.ui.Button[GitHubAddReposView] = discord.ui.Button(
+                label="Connect GitHub",
+                emoji=CONNECT_GITHUB_EMOJI,
+                style=(
+                    discord.ButtonStyle.secondary if panel.repos else discord.ButtonStyle.primary
+                ),
+            )
+            connect.callback = self._on_connect_more  # type: ignore[method-assign]
+            actions.add_item(connect)
             self._add_back(actions)
             container.add_item(actions)
             if len(panel.repos) > 20:
@@ -171,12 +173,7 @@ class GitHubAddReposView(PanelViewBase):
             self._add_back(back_actions, target="pick")
             container.add_item(back_actions)
         self.add_item(container)
-        if (
-            step == "pick"
-            and state.is_admin
-            and not panel.repos
-            and runtime.settings.mcp.app_root_url
-        ):
+        if step == "pick" and not panel.repos and runtime.settings.mcp.app_root_url:
             from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 
             enabled = identity_enabled_for(runtime.settings, "discord", state.guild_id)
@@ -216,9 +213,7 @@ class GitHubAddReposView(PanelViewBase):
         )
         if await gate.allowed(interaction):
             return True
-        await interaction.followup.send(
-            "You cannot change this agent's GitHub repos.", ephemeral=True
-        )
+        await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
         return False
 
     async def _swap(self, interaction: discord.Interaction, **changes: object) -> None:
@@ -274,58 +269,10 @@ class GitHubAddReposView(PanelViewBase):
             await self._swap(interaction, step="change")
 
     async def _on_connect_more(self, interaction: discord.Interaction) -> None:
-        if interaction.guild_id != self.state.guild_id or not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
-            await interaction.response.send_message(
-                "Only a server admin can connect repos.", ephemeral=True
+        if await self._authorized(interaction):
+            await send_agent_connect_link(
+                interaction, runtime=self.runtime, state=self.state, agent=self.agent
             )
-            return
-        from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
-        from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView
-        from daimon.core.github_connect_cards import resolve_connect_card
-
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
-        agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            async with self.runtime.sessionmaker.begin() as session:
-                await sync_connect_admin(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
-                )
-                url = await connect_link(
-                    session,
-                    settings=self.runtime.settings,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
-                    requester_label=interaction.user.display_name,
-                    agent_id=agent_id,
-                    agent_name=self.agent.name,
-                    origin_parent_channel_id=str(interaction.channel_id),
-                    origin_thread_id=str(interaction.channel_id),
-                    origin_followup_token=f"{interaction.application_id}:{interaction.token}",
-                    origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
-                )
-        except ValueError as error:
-            await interaction.followup.send(safe_github_error(error), ephemeral=True)
-            return
-        card = await resolve_connect_card(
-            self.runtime.sessionmaker,
-            self.runtime.settings,
-            tenant_id=tenant_id,
-            platform="discord",
-            workspace_id=str(self.state.guild_id),
-            agent_name=self.agent.name,
-        )
-        await interaction.followup.send(
-            embed=connect_embed(card),
-            view=GitHubLinkView(url),
-            ephemeral=True,
-        )
 
     def _choose_ability(self, choice: str):
         async def callback(interaction: discord.Interaction) -> None:
