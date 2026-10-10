@@ -33,6 +33,7 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
     tenant = await make_tenant(db_session)
     migration = _load_migration()
     panel_migration = _load_migration("0066_github_panel_notices")
+    agent_repos_migration = _load_migration("0079_github_agent_repos")
     conn = await db_session.connection()
 
     def run(migration_module: object, step: str) -> Callable[[Connection], None]:
@@ -42,6 +43,7 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
 
         return inner
 
+    await conn.run_sync(run(agent_repos_migration, "downgrade"))
     await conn.run_sync(run(panel_migration, "downgrade"))
     await conn.run_sync(run(migration, "downgrade"))
     gone = await db_session.scalar(
@@ -50,6 +52,7 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
     assert gone is None
     await conn.run_sync(run(migration, "upgrade"))
     await conn.run_sync(run(panel_migration, "upgrade"))
+    await conn.run_sync(run(agent_repos_migration, "upgrade"))
     restored = await db_session.scalar(
         text("SELECT to_regclass(current_schema() || '.tenant_github_repos')")
     )
