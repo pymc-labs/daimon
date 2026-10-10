@@ -107,6 +107,8 @@ def main() -> int:
                 path = report(result, args.results)
                 if result.run_id in notified_ids:
                     return
+                # Interrupted snapshots are silent. Leave the id eligible so a
+                # same-image restore can notify its final, normal verdict once.
                 if not (result.deployment and result.deployment.interrupted):
                     notified_ids.add(result.run_id)
                 try:

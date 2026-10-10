@@ -301,8 +301,8 @@ images. Missing, mixed, or unavailable workers remain PENDING before any trigger
 
 Results record start/end images, scoped draining and orphan-retirement events,
 and restart cards under `deployment`. A verified start followed by a missing or
-mixed end probe also counts as an active rollout. Changed images or restart evidence affecting
-the observed turn force `deploy-interrupted` PENDING, preserving original checks
+mixed end probe also counts as an active rollout. Changed images, or restart evidence
+without matching verified images, force `deploy-interrupted` PENDING, preserving original checks
 for triage. These attempts never alert or change the pending-alert streak.
 The CLI retries once with a fresh backend and judge after all worker images stay
 equal for 30 seconds (bounded to five minutes), within the remaining pass and daily
@@ -317,4 +317,9 @@ An end probe that was PENDING records `end_probe_pending` in JSON and the five-l
 summary. If the settle check recovers the starting SHA, restore the original
 verdict and alert policy without spending on a retry. This read-only recovery
 check runs even when the retry budget is exhausted. A recovered matching image
-does not excuse a product failure as a deployment.
+does not excuse a product failure as a deployment. Restart evidence with matching
+verified images produces an alertable failure, regardless of end-probe timing.
+Image evidence cannot distinguish an environment-only redeploy on the same image;
+that case follows the same alertable policy. A failed event-log read remains a
+separate `events_error` and restores a PENDING observation check, so image recovery
+never proves a PASS with missing logs.

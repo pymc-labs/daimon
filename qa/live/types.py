@@ -97,6 +97,7 @@ class DeploymentEvidence:
     interrupted: bool = False
     end_probe_pending: bool = False
     settled_image: str | None = None
+    events_error: str | None = None
     error: str | None = None
 
 

@@ -55,7 +55,8 @@ def finish_observation(result: Result, backend: Backend) -> None:
             backend.deployment_events(observation.started_at, observation.ended_at, result.turns)
         )
     except Exception as exc:
-        observation.error = "deployment observation unavailable: " + type(exc).__name__
+        observation.events_error = "deployment observation unavailable: " + type(exc).__name__
+        observation.error = observation.events_error
         result.notes.append(redact(observation.error))
     observation.interrupted = bool(
         observation.end_probe_pending
@@ -64,12 +65,30 @@ def finish_observation(result: Result, backend: Backend) -> None:
             and observation.end_image
             and observation.start_image != observation.end_image
         )
-        or any(event.get("affects_turn") is True for event in observation.events)
+        or (
+            any(event.get("affects_turn") is True for event in observation.events)
+            and not (observation.start_image and observation.start_image == observation.end_image)
+        )
     )
+    append_observation_checks(result)
+
+
+def append_observation_checks(result: Result) -> None:
+    """Retain missing log evidence even after an image probe recovers."""
+    observation = result.deployment
+    if observation is None:
+        return
     if observation.interrupted:
         result.checks.append(Check("deployment", "PENDING", "deploy-interrupted"))
-    elif observation.error:
-        result.checks.append(Check("deployment", "PENDING", observation.error))
+        return
+    matching_images = bool(
+        observation.start_image and observation.start_image == observation.end_image
+    )
+    error = observation.events_error or (observation.error if not matching_images else None)
+    if error:
+        result.checks.append(Check("deployment", "PENDING", error))
+    if matching_images and any(event.get("affects_turn") is True for event in observation.events):
+        result.checks.append(Check("deployment", "FAIL", "worker restarted on the same image"))
 
 
 def wait_for_stable_deployment(
@@ -131,6 +150,7 @@ def run_with_deploy_retry(
             result.notes.append(
                 "end_probe_pending: recovered starting image; normal verdict restored"
             )
+            append_observation_checks(result)
             result.finalize()
             on_result(result)
             break

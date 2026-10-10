@@ -44,7 +44,7 @@ class RollingBackend(FakeBackend):
             turn.verdicts = ["other_embed"]
 
 
-@pytest.mark.parametrize("changed,restart", [(True, False), (False, True)])
+@pytest.mark.parametrize("changed,restart", [(True, False), (True, True)])
 def test_changed_image_or_restart_preserves_checks_but_never_product_fails(
     changed: bool, restart: bool, scenario: Scenario, ledger: Ledger, pricing: Pricing
 ) -> None:
@@ -286,11 +286,15 @@ def test_restart_logs_are_scoped_to_turn_and_active_window(monkeypatch: pytest.M
 
 
 @pytest.mark.parametrize("budget", [True, False])
+@pytest.mark.parametrize("probe_pending", [True, False])
+@pytest.mark.parametrize("restart", [True, False])
 def test_same_image_probe_recovery_restores_alertable_failure_without_retry(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     budget: bool,
+    probe_pending: bool,
+    restart: bool,
     scenario: Scenario,
     ledger: Ledger,
     pricing: Pricing,
@@ -306,11 +310,11 @@ def test_same_image_probe_recovery_restores_alertable_failure_without_retry(
     class CrashingBackend(RollingBackend):
         def deployment_image(self) -> str:
             self.probes += 1
-            if self.probes == 2:
+            if probe_pending and self.probes == 2:
                 raise Pending("worker not ready")
             return "a" * 40
 
-    backend = CrashingBackend()
+    backend = CrashingBackend(restart=restart)
     backend.verdict = "error"
     state = tmp_path / "state.json"
     state.write_text(json.dumps({f"staging:{scenario.id}": {"pending_count": "2"}}))
@@ -330,17 +334,77 @@ def test_same_image_probe_recovery_restores_alertable_failure_without_retry(
     results = run_with_deploy_retry(scenario, factory, persist, retry_allowed=lambda: budget)
     assert len(results) == len(instances) == 1
     result = results[0]
-    assert snapshots == ["PENDING", "FAIL"]
+    assert snapshots == (["PENDING", "FAIL"] if probe_pending else ["FAIL"])
     assert result.status == "FAIL"
     assert result.deployment and not result.deployment.interrupted
-    assert result.deployment.end_probe_pending
-    assert (
-        result.deployment.start_image
-        == result.deployment.end_image
-        == result.deployment.settled_image
-        == "a" * 40
-    )
+    assert result.deployment.end_probe_pending is probe_pending
+    assert result.deployment.start_image == result.deployment.end_image == "a" * 40
+    assert result.deployment.settled_image == ("a" * 40 if probe_pending else None)
+    if restart:
+        assert any(c.reason == "worker restarted on the same image" for c in result.checks)
     assert len(list((tmp_path / "alerts").glob("qa-canary-FAIL-*.md"))) == 1
     assert json.loads(state.read_text())[f"staging:{scenario.id}"]["pending_count"] == "0"
-    assert "end_probe_pending" in capsys.readouterr().out
+    assert ("end_probe_pending" in capsys.readouterr().out) is probe_pending
+    assert ledger.charged({result.run_id}) == 0.04
+
+
+@pytest.mark.parametrize("logs_down", [True, False])
+@pytest.mark.parametrize("product_failure", [True, False])
+def test_same_image_restore_retains_original_observation_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    logs_down: bool,
+    product_failure: bool,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+) -> None:
+    class RecoveringBackend(RollingBackend):
+        def deployment_image(self) -> str:
+            self.probes += 1
+            if self.probes == 2:
+                raise Pending("mixed workers")
+            return "a" * 40
+
+        def deployment_events(self, start: object, end: object, turns: list[Turn]) -> list[Message]:
+            if logs_down:
+                raise Pending("logging unavailable")
+            return []
+
+    backend = RecoveringBackend()
+    if product_failure:
+        backend.verdict = "error"
+    monkeypatch.setattr("qa.live.deployment.wait_for_stable_deployment", lambda backend: "a" * 40)
+    snapshots: list[str] = []
+    instances: list[Executor] = []
+
+    def factory() -> Executor:
+        executor = Executor(backend, FakeJudge(), ledger, pricing, "staging")
+        instances.append(executor)
+        return executor
+
+    attempts = run_with_deploy_retry(
+        scenario,
+        factory,
+        lambda result: snapshots.append(result.status),
+        retry_allowed=lambda: False,
+    )
+    assert len(attempts) == len(instances) == 1
+    result = attempts[0]
+    expected = "FAIL" if product_failure else ("PENDING" if logs_down else "PASS")
+    assert snapshots == ["PENDING", expected]
+    assert result.status == expected
+    assert result.deployment and not result.deployment.interrupted
+    assert result.deployment.events_error == (
+        "deployment observation unavailable: Pending" if logs_down else None
+    )
+    assert (
+        any(
+            c.kind == "deployment"
+            and c.status == "PENDING"
+            and c.reason == result.deployment.events_error
+            for c in result.checks
+        )
+        is logs_down
+    )
+    assert not any(c.reason == "deploy-interrupted" for c in result.checks)
     assert ledger.charged({result.run_id}) == 0.04
