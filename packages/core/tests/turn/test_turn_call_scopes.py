@@ -36,7 +36,9 @@ def test_prepared_turn_binds_the_real_account_on_both_paths(
     monkeypatch: pytest.MonkeyPatch, path: Literal["legacy", "mux"]
 ) -> None:
     monkeypatch.setenv("DAIMON_TURN__PATH", "legacy")
-    admission = cast(Admission, SimpleNamespace(account_id=ACCOUNT, grant=None))
+    admission = cast(
+        Admission, SimpleNamespace(account_id=ACCOUNT, grant=None, backend_revision=None)
+    )
     deps = cast(TurnDeps, SimpleNamespace(turn_path=path, backend=None))
     args = _turn_port_kwargs(deps, admission, "session", tenant_id=TENANT)
     assert args.get("scope") == SCOPE

@@ -35,6 +35,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -85,26 +86,66 @@ class _TurnPortKwargs(TypedDict, total=False):
     backend: ManagedAgents
     scope: Scope
     session_ref: ResourceRef
+    profile: str
+    backend_request: TurnBackendRequest
 
 
 def _turn_port_kwargs(
-    deps: TurnDeps, admission: Admission, session_id: str, *, tenant_id: uuid.UUID
+    deps: TurnDeps,
+    admission: Admission,
+    session_id: str,
+    *,
+    tenant_id: uuid.UUID,
+    provider_backend: ManagedAgents | None = None,
+    provider_session: ResourceRef | None = None,
 ) -> _TurnPortKwargs:
     """Derive a real tenant scope from the existing admitted operation."""
     selected = deps.turn_path or load_turn_settings().path
     scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id)
+    profile = (
+        admission.backend_revision.profile
+        if admission.backend_revision is not None
+        else "anthropic.managed_agents"
+    )
     if selected == "legacy":
+        if profile != "anthropic.managed_agents":
+            # Forward the explicit selection so the driver refuses native
+            # legacy I/O rather than silently routing it to Anthropic.
+            return {"path": "legacy", "scope": scope, "profile": profile}
         return (
             {"path": "legacy", "scope": scope}
             if load_turn_settings().path != "legacy"
             else {"scope": scope}
         )
     result: _TurnPortKwargs = {"path": "mux", "scope": scope}
-    if deps.backend is not None:
+    if profile != "anthropic.managed_agents":
+        result["profile"] = profile
+    if provider_backend is not None:
+        result["backend"] = provider_backend
+    elif deps.backend is not None:
         if deps.backend_session_ref is None:
             raise ScopeViolation(session_id, "an injected backend requires a session ref resolver")
         result["backend"] = deps.backend
         result["session_ref"] = deps.backend_session_ref(session_id, scope)
+    if provider_session is not None:
+        result["session_ref"] = provider_session
+    injected = result.get("backend")
+    if injected is not None and injected.capabilities().profile_id != profile:
+        raise ScopeViolation(session_id, "injected backend differs from the admitted profile")
+    if profile != "anthropic.managed_agents":
+        native = result.get("session_ref")
+        if native is None:
+            raise ScopeViolation(session_id, "provider turn has no authorized native binding")
+        result["backend_request"] = TurnBackendRequest(
+            profile=profile,
+            client=deps.anthropic,
+            scope=scope,
+            session_id=session_id,
+            deps=deps,
+            config=admission.backend_revision,
+            session=native,
+            runtime=deps.turn_runtimes.get(profile),
+        )
     return result
 
 
@@ -776,7 +817,14 @@ async def run_prepared_turn_impl(
 
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
         state = await run_turn(
-            **_turn_port_kwargs(deps, prepared.admission, ma_session_id, tenant_id=tenant_id),
+            **_turn_port_kwargs(
+                deps,
+                prepared.admission,
+                ma_session_id,
+                tenant_id=tenant_id,
+                provider_backend=prepared.backend,
+                provider_session=prepared.session_ref,
+            ),
             anthropic=deps.anthropic,
             session_id=ma_session_id,
             user_message=_with_prefix(prefix, user_message),
@@ -791,7 +839,14 @@ async def run_prepared_turn_impl(
             send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
         )
 
-        if not (_is_dead_session(state) and mapping_id is not None):
+        if not (
+            _is_dead_session(state)
+            and mapping_id is not None
+            and (
+                prepared.admission.backend_revision is None
+                or prepared.admission.backend_revision.profile == "anthropic.managed_agents"
+            )
+        ):
             await first_attempt.flush_held_failure()
             return RunOutcome(
                 state=state,

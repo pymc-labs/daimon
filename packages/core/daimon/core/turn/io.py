@@ -25,7 +25,9 @@ from anthropic.types.beta.sessions import (
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S, replay_events, send_interrupt_and_wait
+from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from mux.contracts.actions import InputEvent, NativeInput, UserMessage, UserToolConfirmation
+from mux.contracts.config import ConfigRevision
 from mux.contracts.events import ContentPart, Event, ImagePart, TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope
@@ -67,6 +69,31 @@ class TurnIO(Protocol):
 
 class TurnConnectionLost(Exception):
     """A neutral connection failure; reconnect by replay, never resend input."""
+
+
+@dataclass(frozen=True)
+class TurnCodecRequest:
+    backend: ManagedAgents
+    scope: Scope
+    session: ResourceRef
+    read_timeout_s: float = 120.0
+    config: ConfigRevision | None = None
+    runtime: TurnRuntime | None = None
+
+    @property
+    def model(self) -> str | None:
+        return self.config.model if self.config is not None else None
+
+
+TurnCodecFactory = Callable[[TurnCodecRequest], TurnIO]
+_TURN_CODECS: dict[str, TurnCodecFactory] = {}
+
+
+def register_turn_codec(profile: str, factory: TurnCodecFactory) -> None:
+    """Provider modules register their host compatibility codec at startup."""
+    if profile in _TURN_CODECS:
+        raise ValueError(f"turn codec already registered: {profile}")
+    _TURN_CODECS[profile] = factory
 
 
 async def _native_error_edge[T](call: Awaitable[T]) -> T:
@@ -371,29 +398,17 @@ def default_mux_turn_io(
     N5 owns registration of Sessions in the composable factory. No lifecycle
     implementation, credential lookup or provider I/O belongs here.
     """
-    from mux.drivers.anthropic import AnthropicManagedAgents
-    from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-    from mux.drivers.anthropic.turn import AnthropicEvents
+    bound = turn_backend(
+        TurnBackendRequest("anthropic.managed_agents", client, scope, session_id, read_timeout_s)
+    )
+    return MuxTurnIO(bound.backend, scope, bound.session)
 
-    workspace = str(uuid4())
-    authorization = ResourceAuthorization(scope, frozenset({("session", session_id)}))
-    backend = AnthropicManagedAgents(
-        client,
-        account_scope_id=workspace,
-        authorization=authorization,
-        events=AnthropicEvents(
-            client, workspace, authorization, stream_read_timeout_s=read_timeout_s
-        ),
-    )
-    ref = ResourceRef(
-        id=session_id,
-        kind="session",
-        provider="anthropic",
-        account_scope_id=workspace,
-        tenant_id=scope.tenant_id,
-        account_id=scope.account_id,
-    )
-    return MuxTurnIO(backend, scope, ref)
+
+def _anthropic_turn_codec(request: TurnCodecRequest) -> TurnIO:
+    return MuxTurnIO(request.backend, request.scope, request.session)
+
+
+register_turn_codec("anthropic.managed_agents", _anthropic_turn_codec)
 
 
 def turn_io(
@@ -405,15 +420,72 @@ def turn_io(
     scope: Scope | None = None,
     session_ref: ResourceRef | None = None,
     read_timeout_s: float = 120.0,
+    profile: str | None = None,
+    backend_request: TurnBackendRequest | None = None,
 ) -> TurnIO:
     """Bind every turn helper to the same authorized session as its driver."""
+    if profile is None and backend_request is not None:
+        profile = backend_request.profile
     selected = path if path is not None else load_turn_settings().path
     if selected == "legacy":
+        if profile not in (None, "anthropic.managed_agents"):
+            raise UnsupportedCapability(("mux_turn_path",), profile)
         return LegacyTurnIO(client, session_id, scope=scope)
     if scope is None:
         raise ScopeViolation(session_id, "mux turns require the caller's authorized scope")
+    selected_profile = profile or (
+        backend.capabilities().profile_id if backend is not None else "anthropic.managed_agents"
+    )
+    codec = _TURN_CODECS.get(selected_profile)
+    if codec is None:
+        raise UnsupportedCapability(("host_turn_codec",), selected_profile)
+    if backend_request is not None and (
+        backend_request.profile != selected_profile
+        or backend_request.scope != scope
+        or backend_request.session_id != session_id
+        or backend_request.client is not client
+        or backend_request.read_timeout_s != read_timeout_s
+        or (
+            backend_request.config is not None
+            and (
+                backend_request.config.profile != selected_profile
+                or backend_request.config.channel.tenant_id != scope.tenant_id
+            )
+        )
+    ):
+        raise ScopeViolation(session_id, "backend request differs from this turn")
     if backend is None:
-        return default_mux_turn_io(client, scope, session_id, read_timeout_s=read_timeout_s)
+        request = backend_request or TurnBackendRequest(
+            selected_profile, client, scope, session_id, read_timeout_s, session=session_ref
+        )
+        bound = turn_backend(request)
+        backend, session_ref = bound.backend, bound.session
     if session_ref is None or session_ref.id != session_id:
         raise ScopeViolation(session_id, "an injected backend requires the bound session ref")
-    return MuxTurnIO(backend, scope, session_ref)
+    if backend_request is not None and (
+        backend_request.session is not None and backend_request.session != session_ref
+    ):
+        raise ScopeViolation(session_id, "codec differs from the authorized native binding")
+    capabilities = backend.capabilities()
+    if capabilities.profile_id != selected_profile or (
+        session_ref.kind != "session"
+        or session_ref.provider != capabilities.provider
+        or (
+            not (scope.is_platform or scope.is_legacy_host_authorized)
+            and (
+                session_ref.tenant_id != scope.tenant_id
+                or session_ref.account_id != scope.account_id
+            )
+        )
+    ):
+        raise ScopeViolation(session_id, "turn codec differs from the admitted profile or session")
+    return codec(
+        TurnCodecRequest(
+            backend,
+            scope,
+            session_ref,
+            read_timeout_s,
+            backend_request.config if backend_request is not None else None,
+            backend_request.runtime if backend_request is not None else None,
+        )
+    )

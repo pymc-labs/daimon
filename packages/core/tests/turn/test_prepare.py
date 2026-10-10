@@ -586,6 +586,8 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "reused",
         "session_account_id",
         "continuity",
+        "backend",
+        "session_ref",
     }, "PreparedTurn must expose exactly the documented public fields"
 
 

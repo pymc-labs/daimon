@@ -72,6 +72,7 @@ from anthropic.types.beta.sessions import (
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
 from daimon.core.ma import terminal_stop_reason
+from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.approvals import (
     build_confirmation_events,
@@ -519,6 +520,8 @@ async def run_turn(
     backend: ManagedAgents | None = None,
     scope: Scope | None = None,
     session_ref: ResourceRef | None = None,
+    profile: str | None = None,
+    backend_request: TurnBackendRequest | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
@@ -580,6 +583,8 @@ async def run_turn(
         scope=scope,
         session_ref=session_ref,
         read_timeout_s=stream_read_timeout_s,
+        profile=profile,
+        backend_request=backend_request,
     )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
@@ -657,7 +662,13 @@ async def run_turn(
         except _SessionAwaitingConfirmations as stuck:
             log.warning("turn.session_awaiting_confirmations", session_id=session_id)
             if selected_path == "mux":
-                if backend is not None:
+                recovery_profile = profile or (
+                    backend_request.profile if backend_request is not None else None
+                )
+                if backend is not None or recovery_profile not in (
+                    None,
+                    "anthropic.managed_agents",
+                ):
                     # No SDK authorization for an arbitrary injected backend.
                     # Finalize the original refusal without opening more I/O.
                     unwedge_failure[0] = stuck.__cause__
