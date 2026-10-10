@@ -20,6 +20,7 @@ unchanged.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -212,6 +213,8 @@ class _HostServedMcp:
     ) -> None:
         self.script, self.manifest, self.gate_url, self.mcp = script, manifest, gate_url, mcp
         self.authorizations: list[str] = []
+        # (server_label, authorization) for every MCP tool in every session POST.
+        self.posted_mcp: list[tuple[str, str | None]] = []
         self.results: dict[str, Object] = {}
         self.gate_statuses: list[int] = []
 
@@ -224,6 +227,11 @@ class _HostServedMcp:
         from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
 
         tools: list[Any] = list(object_json(body["agent"])["tools"])  # type: ignore[arg-type]
+        for tool in tools:
+            if tool.get("type") == "mcp":
+                auth = object_json(tool.get("transport") or {}).get("authorization")
+                label = str(tool.get("server_label"))
+                self.posted_mcp.append((label, None if auth is None else str(auth)))
         (server,) = [tool for tool in tools if tool.get("type") == "mcp"]
         transport = object_json(server["transport"])
         assert transport["server_url"] == MCP_URL
@@ -327,7 +335,9 @@ def _database_url() -> str:
     return url
 
 
-async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(tmp_path: Path) -> None:
+async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_host, cleanup, serve
 
     manifest = _manifest()
@@ -335,6 +345,8 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(tmp_pa
     qa = await build_host(database_url=database_url, port=0, root=tmp_path)
     manifest_path = qa.manifest.path(tmp_path)
     recorder = Recorder()
+    caplog.set_level(logging.DEBUG, logger="openai")
+    caplog.set_level(logging.DEBUG, logger="httpx")
     try:
         async with serve(qa) as gate_url, httpx.AsyncClient(timeout=30) as mcp:
             f2 = _F2Factory(manifest, gate_url, qa.bearer.token, mcp)
@@ -349,6 +361,10 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(tmp_pa
             # MCP was really served, by the real host, under the run bearer.
             assert served.authorizations == [f"Bearer {qa.bearer.token}"]
             assert served.gate_statuses == [200, 200, 200]
+            # Only the bound attachment carries an authorization into the session
+            # POST, and it is exactly the resolved run bearer: no other, unbound
+            # authorization is copied in.
+            assert served.posted_mcp == [("daimon-mcp", f"Bearer {qa.bearer.token}")]
             assert f2.resolutions == [(SCOPE, CREDENTIAL, MCP_URL)]
             assert "qa-agent" in json.dumps(served.results["describe_agent"])
             assert QA_SESSION_ID in json.dumps(served.results["list_my_sessions"])
@@ -362,6 +378,9 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(tmp_pa
             Audit(()).audit(json.loads(tape.read_text()))
             for text in (tape.read_text(), manifest_path.read_text(), repr(deployed)):
                 assert qa.bearer.token not in text
+        # Nor does any credential reach the SDK's or httpx's debug logs.
+        assert qa.bearer.token not in caplog.text
+        assert "Bearer " not in caplog.text
         assert qa.manifest.refused_egress == []
     finally:
         await qa.engine.dispose()
