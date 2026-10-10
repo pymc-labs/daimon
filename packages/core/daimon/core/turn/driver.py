@@ -413,6 +413,9 @@ class _InterruptedDuringRecovery(Exception):
         self.phase: InterruptPhase = phase
 
 
+InterruptedDuringRecovery = _InterruptedDuringRecovery
+
+
 class _InterruptInConsume(Exception):
     """User interrupt observed while consuming the live SSE stream.
 

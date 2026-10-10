@@ -177,6 +177,7 @@ class OpenAIEvents:
             raise self._c.unsupported("session_not_accepting_input")
         raw: Object = {
             "status": "in_progress" if current.state == "running" else current.state,
+            "active_root_turn": current.active_root_turn,
             "required_actions": [dict(action.payload) for action in current.required_actions],
         }
         inputs = translate(events, raw, self._c.profile_id)

@@ -451,3 +451,32 @@ The host persistence context exposes fenced `record_many(session, events,
 cursor=...)` over the existing atomic StateStore append. Provider recovery
 collects all pages before publication; it does not need a private host fence or
 an independent lease. Empty snapshots can checkpoint their explicit cursor.
+
+### Explicit OpenAI host turns
+
+Daimon's explicit channel mux path registers `openai.persistent_workspace` for
+caller-private `gpt-6-luna` threads. Both `channel_backends` and `path=mux` must be
+enabled, and the host must inject `OpenAIHostRuntime` with a scoped provisioned
+native session plan, private transport factory, resource authorization, small
+container, native integer-cent spend cap, durable recovery/revision adapters,
+and accounting context. Missing injection refuses before transport/key access.
+No unconfigured/default client, backend or Anthropic request bytes change.
+
+Preparation claims creation once, publishes the actual native binding and
+reuses its hosted workspace. Lost acknowledgements never permit another POST.
+Model overrides use the documented session `agent.model` field and every
+session read verifies the admitted model. Native conditional revision pins are
+not claimed. Changed bound configuration/plans, shared threads, sealed/read-only policy,
+publishing restrictions, scoped Slack execution contexts and workspace transfer refuse until a native continuity policy is available.
+
+The codec journals before display, preserves message/tool/result identities,
+routes only current-root browser-origin confirmations, and keeps browser
+credentials separate. Recovery publishes completed history atomically through
+A4, restores the durable pre-input root baseline, and displays saved items
+before their terminal. Cancellation completes only after observed native stop;
+unknown EOF records a recoverable gap. Post-run accounting retains nullable
+current-root turn usage and excludes earlier turns and unattributed children.
+Usage revisions persist under the same slot lease across process restart.
+Verified dated prices plus measured container cost can settle; missing evidence
+stays pending without a zero-cost fallback or an Anthropic meter. Authenticated
+remote MCP and paid host certification ship separately.

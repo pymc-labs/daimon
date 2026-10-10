@@ -9,8 +9,10 @@ newest one applies.
 A configured channel is checked at admission, after the config cascade and
 before any provider call: its profile must meet what the configuration
 requires (`mux.contracts.admission.admit`), and this release must be able to
-run it. Today that is Anthropic Managed Agents with the agent's own model,
-per caller or shared (`daimon.core.shared_threads`); anything else is refused visibly as
+run it. Anthropic Managed Agents uses the agent's own model, per caller or
+shared (`daimon.core.shared_threads`). Explicit OpenAI persistent-workspace
+channels use gpt-6-luna per caller and require an injected native host runtime;
+anything else is refused visibly as
 `backend_unsupported` rather than quietly run on Anthropic.
 """
 
@@ -39,7 +41,9 @@ class BackendUnsupported(DaimonError):
     """
 
 
-RUNNABLE_PROFILES: frozenset[str] = frozenset({"anthropic.managed_agents"})
+RUNNABLE_PROFILES: frozenset[str] = frozenset(
+    {"anthropic.managed_agents", "openai.persistent_workspace"}
+)
 """Profiles this release's turn path can run. Widened as drivers are wired in."""
 
 
@@ -85,6 +89,12 @@ async def clear_channel_backend(session: AsyncSession, channel: ChannelRef) -> C
 
 def check_backend(revision: ConfigRevision) -> BackendAdmission:
     """Admit `revision`, or raise `BackendUnsupported`."""
+    if revision.profile == "openai.persistent_workspace":
+        # Lazy owner registration leaves the unconfigured/default path untouched.
+        from daimon.core.turn import openai_host
+
+        openai_host.register_host()
+
     try:
         admission = admit(revision, get_profile(revision.profile))
     except (UnsupportedCapability, InvalidConfig) as err:
@@ -103,6 +113,10 @@ def check_backend(revision: ConfigRevision) -> BackendAdmission:
             else bool(revision.model and revision.model.strip())
         )
         and revision.thread_mode in ("per_caller", "shared")
+        and (
+            revision.backend != "openai"
+            or (revision.model == "gpt-6-luna" and revision.thread_mode == "per_caller")
+        )
     )
     if not runnable:
         log.info(
