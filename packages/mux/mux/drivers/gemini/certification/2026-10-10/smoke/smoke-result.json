@@ -1,0 +1,72 @@
+{
+  "smoke_status": "completed",
+  "head": "185c3dba0",
+  "smoke_receipt": {
+    "version": 2,
+    "run_id": "61d8b183fba2431db25e79bd708b9efb",
+    "provider": "gemini",
+    "model": "gemini-3.8-flash",
+    "fixture_id": "C07",
+    "timestamp": "2026-10-10T07:38:20.204582Z",
+    "status": "completed",
+    "tokens": {
+      "input_tokens": 3527,
+      "output_tokens": 41,
+      "input_cached_tokens": 0,
+      "input_cache_write_tokens": 0,
+      "input_cache_write_5m_tokens": null,
+      "input_cache_write_1h_tokens": null
+    },
+    "reserved_usd": "0.147456",
+    "cost_estimate_usd": "0.002799",
+    "actual_usd": "0.002799",
+    "held_usd": "0",
+    "accounting_status": "actual",
+    "price": {
+      "input": "0.75",
+      "cached_input": "0.075",
+      "cache_write_input": "0.75",
+      "output": "3.75",
+      "cache_write_5m_input": null,
+      "effective_from": "2026-10-10",
+      "effective_until": "2027-01-01",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "short_prompt": null,
+      "actual_input_limit": null,
+      "pricing_basis": "standard-global"
+    },
+    "limits": {
+      "input_tokens": 32768,
+      "output_tokens": 32768
+    },
+    "container_allowance": null,
+    "session_prices": [],
+    "actual_evidence": {
+      "requests": [
+        {
+          "id": "09bb891d09ba5504093f8435252985a6143abf5d2648fdceebdf911260d0bd10",
+          "observed_at": "2026-10-10T07:38:20.195604Z",
+          "tokens": {
+            "input_tokens": 3527,
+            "output_tokens": 41,
+            "input_cached_tokens": 0,
+            "input_cache_write_tokens": 0,
+            "input_cache_write_5m_tokens": null,
+            "input_cache_write_1h_tokens": null
+          },
+          "pricing_basis": "standard-global"
+        }
+      ],
+      "containers": [],
+      "usage_complete": true
+    },
+    "token_usd": "0.002799",
+    "container_usd": "0",
+    "reconcile": null,
+    "reason": "settled"
+  },
+  "result": {
+    "status": "pending"
+  },
+  "certified": false
+}

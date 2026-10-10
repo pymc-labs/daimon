@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "call": 7,
+  "model": "gemini-3.8-flash",
+  "method": "DELETE",
+  "http_status": 200,
+  "price_review_date": "2026-10-10",
+  "usageMetadata": {
+    "source": "interactions.usage",
+    "promptTokenCount": null,
+    "candidatesTokenCount": null,
+    "cachedContentTokenCount": null,
+    "thoughtsTokenCount": null
+  },
+  "usage_observation_sha256": null,
+  "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
+  "interaction_status": null
+}

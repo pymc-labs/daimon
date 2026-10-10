@@ -1,0 +1,283 @@
+{
+  "version": 1,
+  "provider": "gemini",
+  "model": "gemini-3.8-flash",
+  "matrix": [
+    {
+      "fixture_id": "C01",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Multi-human admission/batching host scenario and conformance hook are absent."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Multi-human admission/batching host scenario and conformance hook are absent.",
+      "recording": "C01.json",
+      "receipt": "C01-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C02",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Snapshot bytes implemented; clock-driven expiry and unexpected-loss proof absent."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Snapshot bytes implemented; clock-driven expiry and unexpected-loss proof absent.",
+      "recording": "C02.json",
+      "receipt": "C02-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C03",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Live acknowledged/lost-acceptance fault and restart scenario not connected; no deterministic acceptance timeout is fabricated."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Live acknowledged/lost-acceptance fault and restart scenario not connected; no deterministic acceptance timeout is fabricated.",
+      "recording": "C03.json",
+      "receipt": "C03-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C04",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Ambiguous accepted POST reconciliation is absent; provider offers no idempotency lookup."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Ambiguous accepted POST reconciliation is absent; provider offers no idempotency lookup.",
+      "recording": "C04.json",
+      "receipt": "C04-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C05",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Live stream-gap/child-first fixture with exact saved done/result identities is unavailable; smoke does not certify scripted faults."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Live stream-gap/child-first fixture with exact saved done/result identities is unavailable; smoke does not certify scripted faults.",
+      "recording": "C05.json",
+      "receipt": "C05-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C06",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Live pre/post-cancel observation barrier and root alias adapter unavailable; native cancellation response is not falsified."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Live pre/post-cancel observation barrier and root alias adapter unavailable; native cancellation response is not falsified.",
+      "recording": "C06.json",
+      "receipt": "C06-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C07",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Native interaction usage is demonstrated by smoke; controlled 100\u2192120\u2192110 usage correction and overlapping-grain fixture is unavailable."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Native interaction usage is demonstrated by smoke; controlled 100\u2192120\u2192110 usage correction and overlapping-grain fixture is unavailable.",
+      "recording": "C07.json",
+      "receipt": "C07-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C08",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Driver next-turn tool/mount update port is not implemented."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Driver next-turn tool/mount update port is not implemented.",
+      "recording": "C08.json",
+      "receipt": "C08-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C09",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (capability_unavailable): Binary snapshots are proved; provider vault API and session-delete receipt are unavailable."
+      ],
+      "pending_kind": "capability_unavailable",
+      "pending_detail": "Binary snapshots are proved; provider vault API and session-delete receipt are unavailable.",
+      "recording": "C09.json",
+      "receipt": "C09-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C10",
+      "status": "pass",
+      "origin": "driver_contract_no_provider_io",
+      "evidence": [
+        "unknown/unsupported requirements and foreign refs refused before mutation",
+        "invalid extension version refused"
+      ],
+      "pending_kind": null,
+      "pending_detail": null,
+      "recording": "C10.json",
+      "receipt": "C10-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C11",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Conformance bridge for interaction-time inline skill deployment is absent."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Conformance bridge for interaction-time inline skill deployment is absent.",
+      "recording": "C11.json",
+      "receipt": "C11-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C12",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Gemini host ledger/outbox recovery scenario has not been connected to the accounting hook."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Gemini host ledger/outbox recovery scenario has not been connected to the accounting hook.",
+      "recording": "C12.json",
+      "receipt": "C12-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C13",
+      "status": "pass",
+      "origin": "driver_contract_no_provider_io",
+      "evidence": [
+        "parallel unbound-slot contenders adopt one durable CAS winner"
+      ],
+      "pending_kind": null,
+      "pending_detail": null,
+      "recording": "C13.json",
+      "receipt": "C13-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C14",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Existing/new-thread backend selection host scenario and conformance hook are absent."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Existing/new-thread backend selection host scenario and conformance hook are absent.",
+      "recording": "C14.json",
+      "receipt": "C14-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C15",
+      "status": "pass",
+      "origin": "driver_contract_no_provider_io",
+      "evidence": [
+        "migration typed unsupported, binding unchanged, no provider writes"
+      ],
+      "pending_kind": null,
+      "pending_detail": null,
+      "recording": "C15.json",
+      "receipt": "C15-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C16",
+      "status": "pass",
+      "origin": "driver_contract_no_provider_io",
+      "evidence": [
+        "no public raw handle, undeclared namespace/native-input bypass refused before writes"
+      ],
+      "pending_kind": null,
+      "pending_detail": null,
+      "recording": "C16.json",
+      "receipt": "C16-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C17",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Host wake generation/lease fencing scenario and conformance hook are absent."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Host wake generation/lease fencing scenario and conformance hook are absent.",
+      "recording": "C17.json",
+      "receipt": "C17-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    },
+    {
+      "fixture_id": "C18",
+      "status": "pending",
+      "origin": "live_adapter_pending",
+      "evidence": [
+        "adapter pending (adapter_dependency): Gemini host termination outcome persistence scenario and conformance hook are absent."
+      ],
+      "pending_kind": "adapter_dependency",
+      "pending_detail": "Gemini host termination outcome persistence scenario and conformance hook are absent.",
+      "recording": "C18.json",
+      "receipt": "C18-receipt.json",
+      "actual_usd": "0",
+      "held_usd": "0",
+      "provider_calls": 0
+    }
+  ],
+  "provider_calls": 0,
+  "actual_usd": "0",
+  "held_usd": "0",
+  "certified": false,
+  "scope": "Four zero-I/O driver/state contract passes; fourteen honest live PENDING. Native execution evidence is the separately recorded smoke only."
+}
