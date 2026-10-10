@@ -55,9 +55,10 @@ their snapshots. Selecting a target does not change who answers or routing.
    it posts the Connect GitHub link for browser setup. Connecting more repos
    gives token access, separate from the working repo. A member who may not
    manage the agent gets `Ask an admin`. For a public repo named for a legacy
-   agent by URL, `bind_public_repo` can still bind it directly. Use the
-   `request_repo_binding` private PAT form only if the person explicitly asks
-   for that fallback. Connecting repos does not silently replace an existing
+   agent by URL, `bind_public_repo` can still bind it directly. Connect GitHub
+   is the only way to give an agent private repos: never ask for, suggest or
+   mention a GitHub token, personal access token or pasted credential.
+   Connecting repos does not silently replace an existing
    saved key; the admin confirms **Update and restart chats** first.
    If the person asks to remove a repo from this agent, call `remove_repo`
    with the selected agent and owner/repo. Ask its returned question, “Remove
@@ -167,8 +168,7 @@ agents and built-in Daimon. They do not inherit the direct-edit admin or fork
 gates: `request_mcp_token` can collect a bearer token and attach its server
 through the private form without an admin handoff, and `request_mcp_oauth`
 does the same through a browser sign-in. `detach_mcp_server` undoes either: an
-admin can disconnect a server from any agent, built-in Daimon included. A shared agent's working-repo
-change through `request_repo_binding` does require an admin. Keep these paths
+admin can disconnect a server from any agent, built-in Daimon included. Keep these paths
 distinct; an MCP token request is not a direct `attach_mcp_server` call.
 
 When the operation needs an admin and the caller is not one, do not attempt
@@ -190,8 +190,8 @@ successful half of a partial result.
 
 ## Keys and tokens stay in private forms
 
-Use `request_agent_key`, `request_mcp_token`, `request_skill_repo_token`, or
-`request_repo_binding` in the current conversation. These tools collect no
+Use `request_agent_key`, `request_mcp_token` or `request_skill_repo_token` in
+the current conversation. GitHub repos never use a form: offer Connect GitHub. These tools collect no
 secret value in their arguments; the requester enters it in a private form.
 Always pass the current `origin_context_id` and target `expected_ma_agent_id`.
 The control tools obtain their posting location from that trusted origin;

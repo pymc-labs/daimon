@@ -845,7 +845,7 @@ async def test_set_repo_binding_no_github_credential_hint(
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity()
 
-    with pytest.raises(ToolError, match="request_repo_binding"):
+    with pytest.raises(ToolError, match="Connect GitHub"):
         await _set_repo_binding_impl(
             runtime, auth, repo_url="https://github.com/o/r", default_branch="main"
         )

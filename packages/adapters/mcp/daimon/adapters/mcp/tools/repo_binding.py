@@ -160,8 +160,8 @@ async def _bind_public_repo_impl(
     if not public:
         raise ToolError(
             f"{owner_repo} is not a public GitHub repo, or it does not exist, so it cannot "
-            "be connected without access. Tell the caller that, and use request_repo_binding "
-            "to collect access to a private repo privately. Nothing was changed."
+            "be connected without access. Tell the caller that, and call github_connect "
+            "to post the Connect GitHub link. Nothing was changed."
         )
 
     async with runtime.session_factory() as session:
@@ -248,8 +248,8 @@ def register_repo_binding_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         github.com/owner/project", "point it at our open-source repository".
 
         Only for a repository that needs no token to clone; this checks, and
-        refuses otherwise. When a token is needed, use ``request_repo_binding``,
-        which collects one privately.
+        refuses otherwise. For a private repo, use ``github_connect`` (the
+        Connect GitHub link); never suggest a token.
 
         The agent checks it out and works in it from your next message here, and
         anyone who talks to it works in it too. Files already open in this

@@ -66,8 +66,7 @@ async def _post_app_install_link_impl(
     if slug is None:
         raise ToolError(
             "this deployment has no GitHub App install link configured — "
-            "tell the user an operator must configure it; a working GitHub token "
-            "can still be supplied privately through request_repo_binding"
+            "tell the user an operator must configure it"
         )
     post_button = {
         "slack": _post_slack_app_install_button_impl,
@@ -97,12 +96,11 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         For requests to set up or hook up GitHub for an agent, use
         ``github_connect`` instead.
-        For a private repo with a working token, use ``request_repo_binding`` instead.
-        A token remains the fallback and existing bound tokens keep being used.
+        Never suggest a GitHub token; existing bound tokens keep being used.
 
         Posts a link button in this channel opening GitHub's install page. It cannot
         tell whether installation happened. Installing alone neither verifies this
-        tenant's access nor binds a working repo; use ``request_repo_binding`` and
+        tenant's access nor binds a working repo; use ``github_connect`` and
         verify access through the requested operation afterwards."""
         return await _post_app_install_link_impl(
             runtime,

@@ -173,7 +173,7 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear or GitHub through an MCP endpoint with a bearer token, not browser OAuth. |
-| `request_repo_binding` | Discord callers, Slack callers, Teams callers | Let an agent read a GitHub working repo or repository, public or private. |
+| `request_repo_binding` | Discord callers, Slack callers, Teams callers | Legacy: save a GitHub token for an agent that already uses one. |
 | `request_skill_repo_token` | Discord callers, Slack callers, Teams callers | The skills repo is private: collect a GitHub token to import its skills. |
 
 ## `enable_files`
@@ -210,7 +210,7 @@ Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos through GitHub. |
+| `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos, such as a private GitHub repo. |
 
 ## `github_remove_repo`
 

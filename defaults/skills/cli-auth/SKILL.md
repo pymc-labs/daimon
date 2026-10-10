@@ -35,9 +35,9 @@ The tool requires:
   that agent's token. Ordinary chat currently uses account-only identity, so
   `request_repo_binding` saving a target agent's token does not make it
   available to this tool. A GitHub App installation alone does not supply it
-  either. If access is missing, call `github_connect` to offer the private
-  agent-bound App setup link. Use a private PAT form only if the person asks
-  for that fallback; do not repeatedly ask them for a token.
+  either. If access is missing, call `github_connect` to post the Connect
+  GitHub link. Never ask for, suggest or mention a GitHub token, personal
+  access token or pasted credential.
 - For `gcloud`: the operator must configure deployment Google access and bind
   the agent to a Google identity with `daimon agents bind-google <agent>
   <email> --scopes <scope>`, repeating `--scopes` for additional scopes.

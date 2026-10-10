@@ -216,7 +216,7 @@ async def test_bind_public_repo_refuses_a_private_repo_without_writing(
             role=Role.USER,
         ) as origin,
     ):
-        with pytest.raises(ToolError, match="request_repo_binding") as refusal:
+        with pytest.raises(ToolError, match="github_connect") as refusal:
             await _bind_public_repo_impl(
                 runtime,
                 auth,
