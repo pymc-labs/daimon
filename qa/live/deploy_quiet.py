@@ -154,7 +154,11 @@ class QuietGate:
 
     def wait(self, *, timeout_s: float = 900) -> Message:
         deadline = time.monotonic() + timeout_s
-        self.deadline = deadline
+        # A snapshot begun near the wait deadline must retain enough budget
+        # to finish its evidence read. Transport/auth outages still raise
+        # ordinary Pending; a confirmed busy snapshot past the wait deadline
+        # reaches DeployNotQuiet below. The extra query budget is bounded.
+        self.deadline = deadline + 60
         snapshot: Message
         while True:
             try:

@@ -372,4 +372,6 @@ Missing tools, authentication, or deployment history fail fast as harness PENDIN
 HTTP-only staging results retain the gate evidence under `deployment.quiet`.
 
 A known busy deploy that outlasts the quiet wait remains a silent not-quiet
-outcome; the expired wait never starts a subprocess with no evidence budget.
+outcome. A snapshot begun near the wait deadline has a separate, bounded
+60-second query grace budget; the quiet wait remains 15 minutes and genuine
+GitHub transport or authentication failures remain alertable harness PENDING.

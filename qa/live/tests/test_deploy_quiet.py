@@ -199,8 +199,14 @@ def test_unavailable_evidence_fails_fast_without_polling(monkeypatch: pytest.Mon
     assert calls == [1]
 
 
+@pytest.mark.parametrize("duration, wait_s", [(0, 65), (2, 55)])
 def test_real_query_busy_deploy_outlasts_wait_without_harness_error(
-    monkeypatch: pytest.MonkeyPatch, scenario: Scenario, ledger: Ledger, pricing: Pricing
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Scenario,
+    ledger: Ledger,
+    pricing: Pricing,
+    duration: int,
+    wait_s: int,
 ) -> None:
     clock = [0.0]
     budgets: list[float] = []
@@ -217,6 +223,10 @@ def test_real_query_busy_deploy_outlasts_wait_without_harness_error(
         budget = kwargs["timeout"]
         assert isinstance(budget, (float, int)) and budget > 0
         budgets.append(float(budget))
+        if budget < duration:
+            clock[0] += float(budget)
+            raise subprocess.TimeoutExpired(args, float(budget))
+        clock[0] += duration
         if args[1:3] == ["run", "list"]:
             rows = [{"databaseId": 1, "status": "completed"}]
             if "--status" in args:
@@ -243,7 +253,7 @@ def test_real_query_busy_deploy_outlasts_wait_without_harness_error(
     monkeypatch.setattr("qa.live.deploy_quiet.time.sleep", sleep)
     monkeypatch.setattr(subprocess, "run", command)
     backend = FakeBackend()
-    monkeypatch.setattr(backend, "deployment_quiet", lambda: QuietGate().wait(timeout_s=65))
+    monkeypatch.setattr(backend, "deployment_quiet", lambda: QuietGate().wait(timeout_s=wait_s))
     results = run_with_deploy_retry(
         scenario,
         lambda: Executor(backend, FakeJudge(), ledger, pricing, "staging"),
@@ -254,5 +264,43 @@ def test_real_query_busy_deploy_outlasts_wait_without_harness_error(
     assert results[0].deployment and results[0].deployment.interrupted
     assert not results[0].errors and not backend.events
     assert ledger.charged({results[0].run_id}) == 0
-    assert sleeps == [30, 30, 5] and min(budgets) == 5
-    assert clock[0] == 65
+    assert 0 < min(budgets) <= max(budgets) <= 30
+    assert wait_s <= clock[0] <= wait_s + 60
+    if duration:
+        # Deadline lies inside the second real snapshot, not a sleep.
+        assert sleeps == [30] and clock[0] == 60
+    else:
+        assert sleeps == [30, 30, 5] and clock[0] == 65
+
+
+def test_real_github_outage_during_query_grace_is_alertable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    gate = QuietGate()
+    snapshots = [0]
+    monkeypatch.setattr("qa.live.deploy_quiet.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "qa.live.deploy_quiet.time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+
+    def snapshot() -> dict[str, bool]:
+        snapshots[0] += 1
+        if snapshots[0] == 1:
+            clock[0] = 10
+            return {"quiet": False}
+        clock[0] = 56
+        # This is an actual authenticated transport query, not a mocked
+        # exhausted-budget Pending. It retains grace despite the wait expiring.
+        gate.query(["run", "list"])
+        pytest.fail("GitHub auth error must refuse the observation")
+
+    def command(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 30
+        return subprocess.CompletedProcess(args, 4, "", "authentication required")
+
+    monkeypatch.setattr(gate, "snapshot", snapshot)
+    monkeypatch.setattr(subprocess, "run", command)
+    with pytest.raises(Pending, match="GitHub deployment evidence unavailable") as exc:
+        gate.wait(timeout_s=55)
+    assert not isinstance(exc.value, DeployNotQuiet)
