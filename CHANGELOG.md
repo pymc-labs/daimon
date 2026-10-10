@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist prepared mux turns through binding-owned StateStore leases, claimed operations and normalized journals; keep legacy turns free of these reads and writes.
 
 - Pin Gemini live smoke to 3.8 Flash with create-503-only Flash fallbacks, dated reviewed prices, separate attempt receipts and nullable per-call usage capture; retain unverified alias holds.
+- Preserve revisioned Gemini interaction and OpenAI turn/session usage in host accounting and outcomes; settle verified dated prices plus actual infrastructure atomically, retaining unknown spend for reconciliation.
 - Register the real Anthropic driver with the offline C01–C18 conformance runner using actual SDK wire scripts; report sixteen typed provider/host gaps and withhold certification.
 - Refuse a default-capability turn whose running record omits or mismatches its declared root identity, or whose records name another root before or after running.
 - Route responder-identity reads through scoped native session ports, preserving SDK null metadata and reuse of the observed response for snapshot backfill.

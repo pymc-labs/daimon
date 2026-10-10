@@ -103,7 +103,7 @@ from daimon.core.turn.posture import (
     ToolConfirmation,
     ToolConfirmationResult,
 )
-from daimon.core.turn.reducers import apply
+from daimon.core.turn.reducers import apply, apply_usage_observation
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import (
     TerminationReason,
@@ -112,8 +112,10 @@ from daimon.core.turn.termination import (
     stop_termination_reason,
     termination_reason,
 )
+from daimon.core.usage_billing import ObservationBilled
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic.transport import LegacyTurnTransport
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
@@ -187,6 +189,10 @@ async def _retire_unsent(
 #: best-effort deny) may take before it is abandoned. Module-level so a test
 #: can shorten it.
 CLEANUP_BUDGET_S: float = 3.0
+
+# Explicit alternate providers must finish post-run reconciliation within a
+# bound, including when the parent turn has already failed or been cancelled.
+USAGE_RECONCILIATION_TIMEOUT_S: float = 30.0
 
 
 async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
@@ -598,6 +604,8 @@ async def run_turn(
     )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
+    if isinstance(billing, ObservationBilled) and not callable(getattr(io, "replay_usage", None)):
+        raise ValueError("a billed provider codec must implement replay_usage before sending")
 
     # A session can be left waiting on tool confirmations no turn will answer:
     # a restart cancelled the turn that owned them before its denials went
@@ -703,7 +711,31 @@ async def run_turn(
             # "idle": the retried pump runs the turn normally.
             return await _new_pump()
 
-    pump_coro = _pump_unwedging() if persistence is None else persistence.run(_pump_unwedging)
+    async def _pump_metered() -> TurnState:
+        if not isinstance(billing, ObservationBilled):
+            return await _pump_unwedging()
+        try:
+            final = await _pump_unwedging()
+        except BaseException:
+            # The codec's bounded post-run fetch retains pending unknown usage
+            # on interrupted/failed runs too. Its callback is transactionally
+            # idempotent, including observations already consumed live.
+            try:
+                await _replay_usage(io, billing, [TurnState()], set())
+            except Exception as error:
+                log.warning(
+                    "turn.usage_reconciliation_failed",
+                    session_id=session_id,
+                    error_class=type(error).__name__,
+                )
+            raise
+        final_cell = [final]
+        await _replay_usage(io, billing, final_cell, set())
+        return final_cell[0]
+
+    # Native usage reconciliation remains inside the admitted binding lease.
+    pump = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
+    pump_coro = pump() if persistence is None else persistence.run(pump)
     if deadline is None:
         return await pump_coro
 
@@ -1006,6 +1038,7 @@ async def _pump(
                     # suffix onto the monotonic in-memory state instead.
                     await _bill_replayed(billing, current_turn_events, billed_event_ids)
                     state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
+                    await _replay_usage(io, billing, state_cell, billed_event_ids)
                     folded = state_cell[0]
                     if (
                         status == "terminated"
@@ -1348,8 +1381,23 @@ async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: s
     database as well; the set keeps the recorder (and its attribution) from
     running twice. Exceptions propagate (fail-closed).
     """
+    if isinstance(event, UsageObservation):
+        key = repr((event.session, event.id, event.revision))
+        if key in billed_event_ids:
+            return
+        if isinstance(billing, Billed):
+            raise ValueError("provider observations require the neutral billing recorder")
+        if isinstance(billing, ObservationBilled):
+            if await billing.record(observation=event) is False:
+                return  # durable pending; allow same-revision post-run retries
+        elif (outcome := current_outcome.get()) is not None:
+            outcome.note_usage(event, metered=False)
+        billed_event_ids.add(key)
+        return
     if not isinstance(event, BetaManagedAgentsSpanModelRequestEndEvent):
         return
+    if isinstance(billing, ObservationBilled):
+        raise ValueError("alternate-provider billing cannot consume a synthetic Anthropic meter")
     if event.id in billed_event_ids:
         return
     if (observation := current_outcome.get()) is not None:
@@ -1377,6 +1425,22 @@ async def _bill_replayed(
     """
     for event in events:
         await _bill_once(billing, event, billed_event_ids)
+
+
+async def _replay_usage(
+    io: TurnIO, billing: BillingPosture, state_cell: list[TurnState], billed_event_ids: set[str]
+) -> None:
+    """Alternate codecs retain real usage beside their compatibility replay."""
+    replay = getattr(io, "replay_usage", None)
+    if replay is None:
+        if isinstance(billing, ObservationBilled):
+            raise ValueError("a billed provider codec must implement replay_usage")
+        return
+    async with asyncio.timeout(USAGE_RECONCILIATION_TIMEOUT_S):
+        values = await cast(Callable[[], Awaitable[Sequence[UsageObservation]]], replay)()
+    for usage in values:
+        await _bill_once(billing, usage, billed_event_ids)
+        state_cell[0] = apply_usage_observation(state_cell[0], usage)
 
 
 async def _consume_with_reconnect(
@@ -1450,6 +1514,7 @@ async def _consume_with_reconnect(
             _note_accepted(replayed, accepted_tool_use_ids)
             _note_requires_action_ids(current_turn_events, seen_requires_action_event_ids)
             state_cell[0] = functools.reduce(apply, current_turn_events, state_cell[0])
+            await _replay_usage(io, billing, state_cell, billed_event_ids)
             log.info(
                 "turn.reconnect.completed",
                 session_id=session_id,
@@ -1525,6 +1590,13 @@ async def _consume_with_reconnect(
                 # `_CONNECTION_LOST` retry budget). The `finally` below
                 # closes the abandoned stream.
                 raise _EventlessCycle(reason="read_timeout") from None
+            if item.usage is not None and item.usage.session.provider != "anthropic":
+                await _bill_once(billing, item.usage, billed_event_ids)
+                state_cell[0] = apply_usage_observation(state_cell[0], item.usage)
+            if event is None:
+                # Usage-only native frames have no display event to decode.
+                # N4's codec edge owns the optional native field declaration.
+                continue
             if event.id not in delivered_event_ids:
                 # D-06: the one inline I/O the consume loop is allowed to do.
                 # A local Postgres write, correctness not delivery -- unlike the
@@ -1534,7 +1606,13 @@ async def _consume_with_reconnect(
                 await lifecycle.on_sse_event(event)
                 delivered_event_ids.add(event.id)
             _note_accepted((event,), accepted_tool_use_ids)
-            state_cell[0] = apply(state_cell[0], event, usage=item.usage)
+            state_cell[0] = apply(
+                state_cell[0],
+                event,
+                usage=item.usage
+                if item.usage is None or item.usage.session.provider == "anthropic"
+                else None,
+            )
             events_folded_cell[0] += 1
             normalized = item.normalized
             if normalized is not None:

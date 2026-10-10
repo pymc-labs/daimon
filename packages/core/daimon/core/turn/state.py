@@ -104,6 +104,19 @@ class UsageTotals:
 
     def add_observation(self, usage: UsageObservation) -> UsageTotals:
         """Sum reported request stages; unknown buckets add no measurement."""
+        if usage.session.provider != "anthropic":
+            from daimon.core.usage_totals import ProviderUsageTotals
+
+            if any(
+                (
+                    self.input_tokens,
+                    self.output_tokens,
+                    self.cache_creation_input_tokens,
+                    self.cache_read_input_tokens,
+                )
+            ):
+                raise ValueError("cannot mix legacy and alternate-provider usage totals")
+            return ProviderUsageTotals().add_observation(usage)
         if usage.grain != "model_request" or usage.basis != "increment":
             raise ValueError("turn totals require disjoint model-request increments")
         uncached = uncached_input_tokens(usage)

@@ -383,6 +383,7 @@ replay/cancel truth and compatibility display records. Transport and durable
 journal/usage dependencies are injected in `TurnRuntime`; mux still imports no
 host package. Channel admission enables a profile separately, after its host
 implementation exists. The default Anthropic path and generic ports are unchanged.
+
 Live probe receipts separate `actual_usd`, `held_usd` and `accounting_status`.
 Complete token observations under a dated, pinned price card plus measured
 container/session time settle immediately; unknown evidence remains an
@@ -393,6 +394,7 @@ Anthropic MA settlement requires a session allowance and measured runtime;
 missing or empty measurements retain the hold. Known request bounds still
 detect overruns when other usage is missing and block subsequent dispatch.
 See `mux/conformance/README.md` for the offline settlement and approval API.
+
 ### OpenAI session resource controls
 
 The opt-in OpenAI driver accepts driver-owned `SessionControls` for an explicit
@@ -416,3 +418,11 @@ Claimed Anthropic mutations suppress SDK retries only during their delivery
 call, so losing an acknowledgement leaves an unknown outcome for reconciliation
 instead of a second native POST. Read operations and legacy requests retain the
 injected client's retry budget; the shared client is never modified.
+
+Host codecs carry native `UsageObservation` values separately from display
+events and expose an async `replay_usage()` walk for interrupted, failed and
+completed turns. The host's `ObservationBilled` posture records those snapshots
+through its durable accounting outbox; it never constructs an Anthropic meter.
+Consumers bind one billing grain, the authorized session/model, verified dated
+prices and actual infrastructure cost. Unknown actual remains pending. SDK
+display-event deduplication does not suppress higher observation revisions.

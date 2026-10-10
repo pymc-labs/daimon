@@ -76,6 +76,7 @@ async def project_revision(
     observation: UsageObservation,
     initial: bool,
     channel_id: str | None,
+    projected_tokens: UsageTokens | None = None,
 ) -> None:
     """Project complete effective counts, preserving the original row identity.
 
@@ -86,7 +87,7 @@ async def project_revision(
     if observation.model is None:
         raise ValueError("a billable usage observation requires a model")
     model = observation.model.id
-    tokens = usage_tokens(observation)
+    tokens = projected_tokens if projected_tokens is not None else usage_tokens(observation)
     where = (
         UsageEvent.managed_session_id == observation.session.id,
         UsageEvent.event_id == observation.id,

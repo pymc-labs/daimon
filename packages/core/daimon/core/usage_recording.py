@@ -26,7 +26,7 @@ from typing import Literal
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.core.pricing import ModelRates, cost_of, usage_tokens
+from daimon.core.pricing import ModelRates, ProviderPrice, cost_of, usage_tokens
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_compat import event_observation
@@ -155,6 +155,76 @@ async def record_turn_usage(
             # lands inside the timed promo window the call was made in.
             occurred_at=event_time.processed_at,
         )
+
+
+async def record_provider_usage(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding_id: str,
+    observation: UsageObservation,
+    tenant_id: uuid.UUID | None,
+    platform_user_id: str | None,
+    provider_price: ProviderPrice | None,
+    infrastructure_usd: Decimal | None = None,
+    billing_grain: Literal["model_request", "turn", "session"],
+    managed_session_id: str | None = None,
+    model_id: str | None = None,
+    markup: Decimal = Decimal("1"),
+    reason: TurnLedgerReason = "turn_debit",
+    channel_id: str | None = None,
+) -> bool:
+    """Persist real provider usage and settle verified actual cost atomically.
+
+    False can mean durable pending usage; it never means an unknown charge
+    was settled for zero. Retry the same snapshot after fetching actual time
+    cost, or supply its higher revision after post-run usage reconciliation.
+    Callers retain attribution, binding and the dated price context.
+    """
+    from daimon.core.accounting_outbox import record_observation_usage
+    from daimon.core.turn.outcomes import current_outcome
+
+    if tenant_id is None:
+        return False
+    if observation.session.kind != "session" or observation.session.tenant_id != str(tenant_id):
+        raise ValueError("provider usage requires the authorized tenant session")
+    if managed_session_id is not None and observation.session.id != managed_session_id:
+        raise ValueError("usage observation belongs to another session")
+    if provider_price is not None and observation.session.provider != provider_price.provider:
+        raise ValueError("usage observation belongs to another provider")
+    if observation.model is not None and model_id is not None and observation.model.id != model_id:
+        raise ValueError("usage observation belongs to another model")
+    if observation.model is None:
+        if model_id is None and observation.thread_id is None and provider_price is not None:
+            model_id = provider_price.model  # explicitly bound root/session model
+        if model_id is not None:
+            observation = observation.model_copy(
+                update={"model": ModelRef(provider=observation.session.provider, id=model_id)}
+            )
+        else:
+            provider_price = None  # unknown attribution is durable, not guessed from the parent
+    async with sessionmaker() as session, session.begin():
+        settled = await record_observation_usage(
+            session,
+            binding_id=binding_id,
+            observation=observation,
+            tenant_id=tenant_id,
+            platform_user_id=platform_user_id,
+            pricing=None,
+            provider_price=provider_price,
+            infrastructure_usd=infrastructure_usd,
+            billing_grain=billing_grain,
+            markup=markup,
+            reason=reason,
+            channel_id=channel_id,
+        )
+    if (outcome := current_outcome.get()) is not None:
+        outcome.note_usage(
+            observation,
+            metered=True,
+            provider_price=provider_price,
+            infrastructure_usd=infrastructure_usd,
+        )
+    return settled
 
 
 async def _record_tool_model_usage(

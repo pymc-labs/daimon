@@ -716,3 +716,12 @@ Its complete session inventory uses an explicitly authorized workspace scope
 and preserves native pagination and session snapshots. The host validates
 tenant metadata before span reads and preserves historical
 event IDs, debit keys, timestamps, markup and absorbed-spend log totals.
+
+Explicit alternate backends retain native usage observations at their selected
+interaction, turn or session grain. Cumulative corrections replace prior totals;
+turn and session aggregates cannot both charge the same work. Settlement uses
+verified dated model prices and explicitly measured infrastructure cost, with
+signed corrections applied once in the usage and ledger transaction. Missing
+usage, unknown model attribution or unverified actual infrastructure leaves the
+observation pending for reconciliation. A known inapplicable cache-write bucket
+does not erase uncached input spend. Anthropic keeps its existing metering path.
