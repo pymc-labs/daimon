@@ -45,3 +45,41 @@ need both turns, tool effects, checksums and terminal observations. Outputs reta
 backend/profile, each repetition's scores, pass counts, rubric/task/transcript
 hashes, the pinned judge model and grading date. Same-family judge bias for OpenAI
 recordings remains subject to the lead's ~20% Opus spot check (QUESTIONS Q30).
+
+`catalog_runner.py` maps an external QA catalog to headless invocation plans,
+without executing its commands, HTTP requests, test jobs or provider turns:
+
+```sh
+uv run python tests/judge/catalog_runner.py /path/to/catalog \
+  --integration-sha <40-character-integration-head> --run-id qa-fixture \
+  --output plans.json
+```
+
+The catalog supplies `scenarios/*.yaml`, `SCHEMA.md`, `PROPOSED-KINDS.md` and
+`TARGET-53.txt`. Exactly 53 distinct frozen targets produce the scored denominator
+of 159 across Anthropic, OpenAI and Gemini. Other scenarios are retained as
+unscored extras. Missing targets refuse the matrix; an unknown kind or malformed
+scenario affects only that scenario. Source, schema, target and attached fixture
+hashes pin the inputs for replay. Setup, steps, assertions, human instructions
+and teardown remain in the source snapshot. The Discord set-A global assertions
+are included separately for every catalog turn.
+
+Each scenario has a portability classification and explicit gaps. Text, terminal
+timing, host lifecycle finalization, artifact and trace assertions map to host
+observations; platform layout, reactions, UI and manual checklists require an
+adapter surface. CLI/SQL/HTTP jobs, administrative fixtures and unknown extensions
+require additional bindings. A classification does not certify execution: every
+plan has `evidence_status="pending"` until host fixtures and an outcome oracle
+are bound. Nothing earns a PASS in this planning slice.
+
+Channel revisions explicitly name the provider/profile. The requested agent
+models are Haiku 5.5, Luna and Gemini 3.8 Flash. Anthropic retains `model=None` in
+its channel revision because the agent supplies its model; the host fixture must
+verify the requested agent model. Non-Anthropic channel admission remains an
+explicit integration gap until its host wiring lands, with no provider fallback.
+Turn numbering includes context-only messages and every burst text. Mentioned
+follow-ups reuse their channel's planned thread; unmentioned replies, burst
+concurrency and reply-to-chunk routing retain adapter gaps. Placeholders expand
+only from explicitly supplied values, once; no environment variable is read.
+
+Focused verification: `uv run pytest tests/judge/test_catalog_runner.py`.

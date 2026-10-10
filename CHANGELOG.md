@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Map the frozen 53-scenario QA catalog across three explicit channel backends, preserving replay inputs and reporting adapter/capability gaps separately from unscored extras.
+
 - Add explicit OpenAI Agents hosted container-size and integer-cent session spend controls; refresh the driver contract audit against official documentation fetched on 2026-10-10.
 - Alias opaque Gemini probe identities before recording and settle the latest interaction usage revision, including export failures.
 - Alias opaque Gemini probe identities before the unchanged recorder and project captured status into a closed vocabulary.
