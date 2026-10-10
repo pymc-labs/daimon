@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -66,6 +67,10 @@ class Executor:
         self.created: list[str] = []
         self.context: Context | None = None
         self.trigger_attempted = False
+        self.watchers: dict[int, Future[None]] = {}
+        self.watch_pool: ThreadPoolExecutor | None = None
+        self.burst_timeout = backend.fallback_watch_s
+        self.burst_workers = 0
 
     def run(self, scenario: CatalogScenario) -> Result:
         run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
@@ -116,8 +121,16 @@ class Executor:
                 self.channels["default"] = channel
                 self.context.values["channel_id"] = channel
             try:
-                for step in [*scenario.setup, *scenario.steps]:
+                steps = [*scenario.setup, *scenario.steps]
+                self.burst_workers = sum(len(s.texts) for s in steps if s.do == "burst")
+                for index, step in enumerate(steps):
+                    if step.do == "burst":
+                        self.burst_timeout = next(
+                            (s.timeout_s for s in steps[index + 1 :] if s.do == "wait_done"),
+                            self.backend.fallback_watch_s,
+                        )
                     self.step(step, result, channel)
+                self.join_watchers(result)
                 for turn in result.turns:
                     if turn.ended_at is None:
                         self.backend.collect(turn, self.backend.fallback_watch_s)
@@ -156,6 +169,24 @@ class Executor:
                 Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
             )
         finally:
+            # Finish read-only watchers before deleting their owned channels.
+            for future in self.watchers.values():
+                try:
+                    future.result()
+                except WatchTimeout:
+                    result.checks.append(
+                        Check("watch", "FAIL", "watch ended without terminal proof")
+                    )
+                except BaseException as exc:
+                    harness_failed = True
+                    result.errors.append(exception_evidence(exc, "watcher"))
+                    result.checks.append(
+                        Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
+                    )
+            self.watchers.clear()
+            if self.watch_pool:
+                self.watch_pool.shutdown(wait=True)
+                self.watch_pool = None
             result.errors.extend(self.judge.errors)
             if channel:
                 for step in scenario.teardown:
@@ -220,6 +251,31 @@ class Executor:
         result.finalize()
         return result
 
+    def watch(self, turn: Turn, started: threading.Event) -> None:
+        started.set()
+        self.backend.collect(turn, self.burst_timeout)
+
+    def join_watchers(self, result: Result) -> None:
+        errors: list[BaseException] = []
+        for future in self.watchers.values():
+            try:
+                future.result()
+            except BaseException as exc:
+                errors.append(exc)
+        self.watchers.clear()
+        if errors:
+            # Prefer harness exceptions to a timeout so an unavailable watcher
+            # cannot be mistaken for a silent product failure. Preserve every
+            # other execution traceback too, not only the first future's error.
+            primary = next((e for e in errors if not isinstance(e, WatchTimeout)), errors[0])
+            for exc in errors:
+                if exc is not primary and not isinstance(exc, Pending):
+                    result.errors.append(exception_evidence(exc, "watcher"))
+                    result.checks.append(
+                        Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
+                    )
+            raise primary
+
     def step(self, step: Step, result: Result, channel: str) -> None:
         if self.context:
             step = self.context.step(step)
@@ -281,32 +337,43 @@ class Executor:
             destination = next(
                 (t.thread_id for t in reversed(result.turns) if t.thread_id), channel
             )
+            # One pin preflight before the burst; remote probes must not
+            # serialize its posts. Every completed turn still verifies its model.
+            self.backend.verify_model(destination)
+            if self.watch_pool is None:
+                self.watch_pool = ThreadPoolExecutor(
+                    max_workers=max(self.burst_workers, len(step.texts))
+                )
+            schedule = time.monotonic()
             for i, text in enumerate(step.texts):
-                if i:
-                    time.sleep(step.interval_s)
-                self.backend.verify_model(destination)
+                time.sleep(max(0, schedule + i * step.interval_s - time.monotonic()))
                 started_at = utcnow()
                 self.trigger_attempted = True
                 trigger = self.backend.send(
                     destination, Step(do="mention", text=text), mention=True
                 )
-                result.turns.append(
-                    Turn(
-                        len(result.turns) + 1,
-                        trigger,
-                        destination,
-                        started_at,
-                        thread_id=destination if destination != channel else None,
-                    )
+                turn = Turn(
+                    len(result.turns) + 1,
+                    trigger,
+                    destination,
+                    started_at,
+                    thread_id=destination if destination != channel else None,
                 )
+                result.turns.append(turn)
+                started = threading.Event()
+                self.watchers[turn.number] = self.watch_pool.submit(self.watch, turn, started)
+                started.wait()
         elif kind == "wait":
             time.sleep(step.s or 0)
         elif kind == "wait_done":
-            pending = [t for t in result.turns if t.ended_at is None]
+            pending = [t for t in result.turns if t.ended_at is None or t.number in self.watchers]
             if not pending:
                 raise Pending("wait_done requires an unfinished turn")
+            watched = set(self.watchers)
+            self.join_watchers(result)
             for turn in pending:
-                self.backend.collect(turn, step.timeout_s)
+                if turn.number not in watched:
+                    self.backend.collect(turn, step.timeout_s)
                 if any(v in {"over_cap", "provisioning"} for v in turn.verdicts):
                     raise Pending("load-shed or provisioning notice: retry after preflight")
                 if any(v in {"error", "cancelled"} for v in turn.verdicts):

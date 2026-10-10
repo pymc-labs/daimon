@@ -38,7 +38,19 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
             elif kind in {"text_present", "text_absent"}:
                 if not turn.messages:
                     raise Pending("no messages: text absence is unproven")
-                match = bool(re.search(assertion.pattern or "", turn.text))
+                # Match each content/embed component independently. Anchored
+                # answers must not be joined to another message or its footer.
+                components = [str(m.get("content") or "") for m in turn.messages]
+                for message in turn.messages:
+                    for embed in objects(message.get("embeds")):
+                        components.extend(str(embed.get(k) or "") for k in ("title", "description"))
+                        components.append(str(obj(embed.get("footer")).get("text") or ""))
+                        for field in objects(embed.get("fields")):
+                            components.extend(str(field.get(k) or "") for k in ("name", "value"))
+                match = any(
+                    re.search(assertion.pattern or "", component, re.MULTILINE)
+                    for component in components
+                )
                 passed = match if kind == "text_present" else not match
                 reason = f"regex {assertion.pattern!r}; matched={match}"
             elif kind == "in_thread":

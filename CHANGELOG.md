@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Turn cards on Discord, Slack, and Teams now add each Haiku 5.5 request's cost at its own prompt-length rate.
+- Live QA burst posts follow their declared cadence with concurrent per-trigger watchers; first-response latency uses Discord creation/edit timestamps, and anchored text checks keep content separate from embed footers.
+
 - Live QA records private redacted tracebacks for harness errors, reports them as PENDING without root alerts, and retries a transient read-only model-probe failure once before refusing a trigger.
 - Live QA suppresses alerts only for judge execution failures, preserves other PENDING streaks, and records the sanitized exception type/status in run notes.
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING without root alerts; failed verdicts still fail and alert.

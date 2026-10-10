@@ -54,6 +54,7 @@ class Turn:
     started_at: datetime
     ended_at: datetime | None = None
     first_visible_s: float | None = None
+    first_visible_evidence: Message = field(default_factory=dict[str, JsonValue])
     done_s: float | None = None
     thread_id: str | None = None
     progress_seen_s: float | None = None

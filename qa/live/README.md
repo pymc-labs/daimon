@@ -111,7 +111,7 @@ left by SIGKILL or host loss while protecting other QA workers' allocations.
 `wait_done` execute through the Discord backend. `thread_reply` accepts `mention: true` and `reply_to: turnN.chunkM`; a false or
 omitted `mention` posts without a mention. Reply references must resolve to an
 observed message in an owned conversation. A combined file and reply reference
-currently returns PENDING because the reused uploader cannot encode that reference. `burst` posts mentions in the latest observed
+currently returns PENDING because the reused uploader cannot encode that reference. `burst` verifies the channel model once before its scheduled posts and starts a concurrent read-only watcher immediately after each trigger. Each post is scheduled from the burst start, so probes and earlier turns cannot delay later triggers. Watchers finish before channel cleanup. Message creation timestamps (or snowflakes) measure first visibility; edits measure reused cards. Timing evidence is retained in each turn. Text patterns match each content/embed component independently with `re.MULTILINE`, so anchored answers are not concatenated with footers. `burst` posts mentions in the latest observed
 thread, or the owned parent if there is no thread. Each trigger receives an index;
 queued triggers can share a composite answer. Fingerprints exclude previous turns'
 unchanged messages from follow-up evidence. The collector settles after terminal

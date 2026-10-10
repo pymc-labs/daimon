@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 import urllib.parse
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -90,6 +91,35 @@ def fingerprint(message: Message) -> str:
         },
         sort_keys=True,
     )
+
+
+def message_created_at(message: Message) -> datetime | None:
+    timestamp = message.get("timestamp")
+    if isinstance(timestamp, str):
+        created = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            raise ValueError("Discord timestamp lacks a timezone")
+        return created
+    identity = str(message.get("id", ""))
+    if identity.isdigit() and int(identity) >= 1 << 22:
+        return datetime.fromtimestamp(((int(identity) >> 22) + 1420070400000) / 1000, UTC)
+    return None
+
+
+def message_visible_at(message: Message, trigger_at: datetime) -> tuple[datetime, str] | None:
+    created = message_created_at(message)
+    # Allow the legacy driver's documented 5s cross-worker snowflake skew.
+    # A reused card predating this trigger needs an edit from this turn.
+    if created and (created - trigger_at).total_seconds() >= -5:
+        return created, "message_created"
+    edited = message.get("edited_timestamp")
+    if isinstance(edited, str):
+        timestamp = datetime.fromisoformat(edited.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("Discord edit timestamp lacks a timezone")
+        if (timestamp - trigger_at).total_seconds() >= -5:
+            return timestamp, "card_edited"
+    return None
 
 
 class DiscordBackend:
@@ -316,6 +346,7 @@ class DiscordBackend:
         self._owned(turn.channel_id)
         self.driver.set_role("user")
         turn.guild_id = self.target.guild_id
+        trigger_at = message_created_at({"id": turn.trigger_id}) or turn.started_at
         deadline = time.monotonic() + timeout
         stable_since: float | None = None
         previous = ""
@@ -340,7 +371,7 @@ class DiscordBackend:
                 )
                 if any(u.get("id") == self.target.daimon_id for u in users):
                     turn.trigger_reactions.append(reaction)
-            reaction_elapsed = (utcnow() - turn.started_at).total_seconds()
+            reaction_elapsed = max(0, (utcnow() - trigger_at).total_seconds())
             turn.trigger_reaction_history.append(
                 {
                     "elapsed_s": reaction_elapsed,
@@ -349,6 +380,10 @@ class DiscordBackend:
             )
             if turn.trigger_reactions and turn.first_visible_s is None:
                 turn.first_visible_s = reaction_elapsed
+                turn.first_visible_evidence = {
+                    "source": "reaction_observed",
+                    "elapsed_s": reaction_elapsed,
+                }
             candidates = self.driver.turn_messages(
                 turn.channel_id,
                 after=turn.trigger_id,
@@ -379,8 +414,20 @@ class DiscordBackend:
                 if fingerprint(m) not in self.baselines.get(turn.trigger_id, set())
             ]
             elapsed = (utcnow() - turn.started_at).total_seconds()
-            if messages and turn.first_visible_s is None:
-                turn.first_visible_s = elapsed
+            for message in messages:
+                event = message_visible_at(message, trigger_at)
+                if event:
+                    timestamp, source = event
+                    visible_s = max(0, (timestamp - trigger_at).total_seconds())
+                    if turn.first_visible_s is None or visible_s < turn.first_visible_s:
+                        turn.first_visible_s = visible_s
+                        turn.first_visible_evidence = {
+                            "source": source,
+                            "message_id": str(message.get("id", "")),
+                            "timestamp": timestamp.isoformat(),
+                            "trigger_timestamp": trigger_at.isoformat(),
+                            "elapsed_s": visible_s,
+                        }
             turn.messages = messages
             turn.parent_messages = [m for m in messages if str(m.get("channel_id")) in self.owned]
             thread_ids = {
