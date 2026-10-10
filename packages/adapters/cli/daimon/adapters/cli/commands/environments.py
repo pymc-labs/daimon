@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated
 
 import typer
 from anthropic import APIStatusError
-from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
-from daimon.adapters.cli.mux_compat import delete_environment, retrieve_environment
+from daimon.adapters.cli.mux_compat import (
+    create_environment_ignored,
+    delete_environment,
+    retrieve_environment,
+)
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
@@ -332,12 +335,14 @@ async def environments_fork(
     source_cfg = source_ma.config.model_dump(mode="json")
     allowed = ("type", "networking", "packages")
     fork_cfg = {k: source_cfg[k] for k in allowed if k in source_cfg}
-    # Await the driver's explicit-null environment create support before moving
-    # this call: fork preserves a null source description in the SDK request.
-    await rt.anthropic.beta.environments.create(
-        name=dst,
-        config=cast(BetaCloudConfigParams, fork_cfg),
-        description=source_ma.description,
-        metadata=build_metadata(tenant_id=tenant_id, name=dst),
+    await create_environment_ignored(
+        rt.anthropic,
+        {
+            "name": dst,
+            "config": fork_cfg,
+            "description": source_ma.description,
+            "metadata": build_metadata(tenant_id=tenant_id, name=dst),
+        },
+        scope=resource_scope(tenant_id=str(tenant_id)),
     )
     console.print(f"[green]✓ forked environment {src!r} → {dst!r}[/green]")

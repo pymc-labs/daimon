@@ -70,6 +70,8 @@ class ClosedAppSession(BaseModel):
     session_id: str
     vault_id: str | None
     is_mcp: bool = False
+    tenant_id: uuid.UUID | None = None
+    account_id: uuid.UUID | None = None
 
 
 async def erase_requester_identity(session: AsyncSession, *, account_id: uuid.UUID) -> None:
@@ -643,7 +645,13 @@ async def closed_app_session_for_id(
             return None
         if mapping is None and row.created_at > now - timedelta(minutes=1):
             return None
-    return ClosedAppSession(session_id=row.session_id, vault_id=row.vault_id, is_mcp=row.is_mcp)
+    return ClosedAppSession(
+        session_id=row.session_id,
+        vault_id=row.vault_id,
+        is_mcp=row.is_mcp,
+        tenant_id=row.tenant_id,
+        account_id=row.account_id,
+    )
 
 
 async def list_closed_app_sessions(

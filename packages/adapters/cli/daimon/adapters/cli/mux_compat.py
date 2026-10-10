@@ -4,13 +4,29 @@ Remove SDK decoding after the M0 host migration (sprint FOLLOWUPS.md).
 The caller supplies the tenant and IDs established by its existing lookup.
 """
 
+from collections.abc import Mapping
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, SkillRetrieveResponse
 from daimon.core.mux_backend import managed_agents, resource_ref
-from daimon.core.mux_compat import legacy_call, sdk_environment, sdk_skill
+from daimon.core.mux_compat import environment_spec, legacy_call, sdk_environment, sdk_skill
 from mux.contracts.ids import Scope
+from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.drivers.anthropic.resources.environments import (
+    create_environment_ignored as native_create_environment_ignored,
+)
+
+
+async def create_environment_ignored(
+    client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
+) -> None:
+    """Keep ignored create replies as permissive as the original SDK call."""
+    await legacy_call(
+        native_create_environment_ignored(
+            client, scope, environment_spec(payload), authorization=ResourceAuthorization(scope)
+        )
+    )
 
 
 async def retrieve_environment(

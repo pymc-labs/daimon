@@ -13,6 +13,8 @@ from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import list_memory_entries, read_memory
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.domain import Platform
 from pydantic import BaseModel
@@ -70,8 +72,12 @@ async def memory_list_impl(
         console.print("No memories yet.")
         return
     rows: list[_MemoryPathRow] = []
-    page = await rt.anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
-    async for item in page:
+    scope = resource_scope(
+        tenant_id=str(
+            derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=workspace)
+        )
+    )
+    async for item in list_memory_entries(rt.anthropic, store_id, path_prefix="/", scope=scope):
         if item.type == "memory":
             rows.append(_MemoryPathRow(path=item.path))
     if not rows:
@@ -98,12 +104,14 @@ async def memory_show_impl(
     store_id = await _resolve_store_id(rt, platform=platform, workspace=workspace, agent=agent)
     if store_id is None:
         raise DaimonError("agent has no memory store")
-    page = await rt.anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
-    async for item in page:
+    scope = resource_scope(
+        tenant_id=str(
+            derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=workspace)
+        )
+    )
+    async for item in list_memory_entries(rt.anthropic, store_id, path_prefix="/", scope=scope):
         if item.type == "memory" and item.path == path:
-            mem = await rt.anthropic.beta.memory_stores.memories.retrieve(
-                item.id, memory_store_id=store_id, view="full"
-            )
+            mem = await read_memory(rt.anthropic, store_id, item.id, scope=scope)
             # untrusted agent-written text — never interpret as Rich markup
             console.print(mem.content or "", markup=False, highlight=False)
             return

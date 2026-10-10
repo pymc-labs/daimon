@@ -77,7 +77,7 @@ from daimon.core.ma_resolver import (
     resolve_environment,
 )
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import retrieve_agent
+from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
@@ -99,6 +99,7 @@ from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
+from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
@@ -138,6 +139,7 @@ from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import UsageSweepWatermark, sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
+from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -707,12 +709,17 @@ async def _retire_mcp_app_session(
     *,
     fernet: MultiFernet,
 ) -> None:
-    await anthropic_client.beta.sessions.archive(item.session_id)
+    scope = session_scope(
+        tenant_id=item.tenant_id,
+        account_id=item.account_id,
+        call_site="scheduler:retire_mcp_app_session",
+    )
+    await archive_session(anthropic_client, item.session_id, scope=scope)
     async with sm.begin() as session:
         await finish_headless_app_session(session, session_id=item.session_id)
     async with httpx.AsyncClient() as github:
         await revoke_session_tokens(sm, github, session_id=item.session_id, fernet=fernet)
-    await archive_app_vault(anthropic_client, vault_id=item.vault_id)
+    await archive_app_vault(anthropic_client, vault_id=item.vault_id, scope=scope)
     async with sm.begin() as session:
         await mark_headless_app_session_closed(session, session_id=item.session_id)
 
@@ -766,14 +773,21 @@ async def _refresh_github_app_sessions(
                     fernet=fernet,
                 )
                 if desired_urls != snapshot.repo_urls and not active_turn:
-                    await anthropic_client.beta.sessions.archive(session_id)
+                    scope = session_scope(
+                        tenant_id=item.mapping.tenant_id,
+                        account_id=item.mapping.account_id,
+                        call_site="scheduler:refresh_github_app_sessions",
+                    )
+                    await archive_session(anthropic_client, session_id, scope=scope)
                     async with sm.begin() as session:
                         await mark_dead(session, id=item.mapping.id)
                     async with httpx.AsyncClient() as github:
                         await revoke_session_tokens(
                             sm, github, session_id=session_id, fernet=fernet
                         )
-                    await archive_app_vault(anthropic_client, vault_id=snapshot.vault_id)
+                    await archive_app_vault(
+                        anthropic_client, vault_id=snapshot.vault_id, scope=scope
+                    )
                     _app_refresh_failures.pop(session_id, None)
                     continue
                 level = {"none": 0, "read": 1, "write": 2}
@@ -834,7 +848,15 @@ async def _refresh_github_app_sessions(
                 if current is None:
                     continue
                 try:
-                    observed = await anthropic_client.beta.sessions.retrieve(current.session_id)
+                    observed = await retrieve_session_record(
+                        anthropic_client,
+                        current.session_id,
+                        scope=session_scope(
+                            tenant_id=current.tenant_id,
+                            account_id=current.account_id,
+                            call_site="scheduler:refresh_mcp_app_sessions",
+                        ),
+                    )
                 except anthropic.NotFoundError:
                     async with sm.begin() as session:
                         await finish_headless_app_session(session, session_id=current.session_id)
@@ -948,10 +970,17 @@ async def _close_github_app_sessions(
                         )
                     if current is None:
                         continue
+                    if current.tenant_id is None:
+                        raise ScopeViolation(item.session_id, "closed app session has no tenant")
+                    scope = session_scope(
+                        tenant_id=current.tenant_id,
+                        account_id=current.account_id,
+                        call_site="scheduler:close_github_app_sessions",
+                    )
                     if current.is_mcp:
                         try:
-                            observed = await anthropic_client.beta.sessions.retrieve(
-                                item.session_id
+                            observed = await retrieve_session_record(
+                                anthropic_client, item.session_id, scope=scope
                             )
                         except anthropic.NotFoundError:
                             observed = None
@@ -973,7 +1002,9 @@ async def _close_github_app_sessions(
                             sm, github, session_id=item.session_id, fernet=fernet
                         )
                     if current.vault_id is not None:
-                        await archive_app_vault(anthropic_client, vault_id=current.vault_id)
+                        await archive_app_vault(
+                            anthropic_client, vault_id=current.vault_id, scope=scope
+                        )
                     async with sm.begin() as session:
                         await mark_headless_app_session_closed(session, session_id=item.session_id)
             except Exception:
