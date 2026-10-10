@@ -15,6 +15,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
+from unittest.mock import MagicMock
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
@@ -50,6 +51,72 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _SENTINEL_REF = object()  # opaque message reference
 
 
+@pytest.mark.parametrize("replacement_source", ["missing", "transport"])
+async def test_terminal_waits_for_missing_card_replacement_across_handover(
+    replacement_source: str,
+) -> None:
+    """A replacement send cannot appear after the recovered answer."""
+    send_started, release_send = asyncio.Event(), asyncio.Event()
+    cards: dict[int, dict[str, Any]] = {}
+    refs: list[Any] = []
+
+    async def send(**kwargs: Any) -> Any:
+        ref = MagicMock(spec=discord.Message)
+        ref.id = 1000 + len(refs)
+        refs.append(ref)
+        if ref.id == 1001:
+            send_started.set()
+            await release_send.wait()
+        cards[ref.id] = dict(kwargs)
+        return ref
+
+    async def edit(ref: Any, **kwargs: Any) -> Any:
+        if replacement_source == "transport" and ref.id == 1000 and ref.id not in cards:
+            return await send(**kwargs)
+        if ref.id not in cards:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="gone"),
+                {"code": 10008, "message": "gone"},
+            )
+        cards[ref.id].update(kwargs)
+        return ref
+
+    async def delete(ref: Any) -> None:
+        cards.pop(ref.id, None)
+
+    old = DiscordTurnLifecycle(
+        send=send, edit=edit, delete=delete, agent_name="test", model_id="m", cancel_view="STOP"
+    )
+    await old.post_initial()
+    del cards[1000]
+    old._last_flush = -100
+    tick = asyncio.create_task(old.on_render(_running_tool_turn()))
+    await asyncio.wait_for(send_started.wait(), 1)
+    tick.cancel()
+    await asyncio.gather(tick, return_exceptions=True)
+    pending = set(old._progress_edits)
+    finish = asyncio.create_task(old.on_terminal_failure(TurnState(), RuntimeError("retry")))
+    await asyncio.sleep(0.02)
+    assert not finish.done(), "the failure card must wait for the replacement send"
+    release_send.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    await asyncio.wait_for(finish, 1)
+    successor = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        delete=delete,
+        agent_name="test",
+        model_id="m",
+        adopt_message_ref=old.release_message_ref(),
+        adopt_pending_progress=old,
+    )
+    await successor.on_terminal_success(_make_success_state("Recovered answer"))
+    assert len(cards) == 1
+    card = next(iter(cards.values()))
+    assert card["content"] == "Recovered answer"
+    assert card["view"] is None
+
+
 @pytest.mark.parametrize("extra_render", [False, True])
 @pytest.mark.parametrize(
     "ending", ["answer", "long_answer", "stopped", "failure", "external", "recovered"]
@@ -59,8 +126,8 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
 ) -> None:
     """Both #628 review races: timeout, and a second edit after cancellation.
 
-    Hold edits past answer delivery and release in reverse order. The answer
-    stays bounded, the final embeds/view survive, and repair never posts.
+    Hold a progress edit while terminal delivery queues behind it. The final
+    card is only applied after that older request has completed.
     """
     monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
     releases = [asyncio.Event(), asyncio.Event()]
@@ -97,10 +164,10 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
     with pytest.raises(asyncio.CancelledError):
         await tick
     if extra_render:
-        # An adapter must still account for an older edit if another caller
-        # starts an edit before the stop hook (the reviewed final-render race).
+        # A second render queues behind the first edit.
         tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
-        await asyncio.wait_for(started[1].wait(), 1)
+        await asyncio.sleep(0)
+        assert progress_count == 1
         tick.cancel()
         with pytest.raises(asyncio.CancelledError):
             await tick
@@ -111,13 +178,18 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
     if ending == "stopped":
         state = TurnState(termination=TerminationReason.INTERRUPTED)
     await lc.on_render(state)  # guarded final render must not start another edit
-    assert progress_count == (2 if extra_render else 1)
+    assert progress_count == 1
     if ending in {"failure", "recovered"}:
-        await asyncio.wait_for(lc.on_terminal_failure(state, RuntimeError("failed")), 1)
+        finish = asyncio.create_task(lc.on_terminal_failure(state, RuntimeError("failed")))
     elif ending == "external":
-        await asyncio.wait_for(lc.end_card("Outer turn failure"), 1)
+        finish = asyncio.create_task(lc.end_card("Outer turn failure"))
     else:
-        await asyncio.wait_for(lc.on_terminal_success(state), 1)
+        finish = asyncio.create_task(lc.on_terminal_success(state))
+    await asyncio.sleep(0.02)
+    assert not finish.done(), "terminal delivery must wait for the on-wire progress edit"
+    releases[0].set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    await asyncio.wait_for(finish, 1)
     if ending == "recovered":
         successor = DiscordTurnLifecycle(
             send=send,
@@ -125,6 +197,7 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
             agent_name="test",
             model_id="m",
             adopt_message_ref=lc.release_message_ref(),
+            adopt_pending_progress=lc,
         )
         assert successor.message_ref is _SENTINEL_REF
     final_embeds = current.get("embeds", [])
@@ -132,21 +205,18 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
         final_embeds = [current["embed"]] if current["embed"] else []
     final_content = current.get("content")
     post_count = len(sends)
-    if extra_render:
-        releases[1].set()
-        # The first request is still outstanding: repair must wait for it too.
-        await asyncio.sleep(0)
-    releases[0].set()
-    await asyncio.wait_for(asyncio.gather(*pending), 1)
     if lc._terminal_reassert_task is not None:
         await asyncio.wait_for(lc._terminal_reassert_task, 1)
     if ending == "recovered":
-        assert lc._terminal_reassert_task is None, "old lifecycle must not repaint the adopted card"
+        assert lc._terminal_reassert_task is None or lc._terminal_reassert_task.done()
         await successor.on_terminal_success(_make_success_state("Recovered answer"))
         assert current.get("content") == "Recovered answer"
         assert len(sends) == post_count
         return
-    assert current["embeds"] == final_embeds
+    if "embed" in current:
+        assert current["embed"] is None
+    else:
+        assert current["embeds"] == final_embeds
     assert current["view"] is None
     assert current.get("content") == final_content
     assert len(sends) == post_count
@@ -191,10 +261,15 @@ async def test_progress_settled_before_terminal_or_missing_needs_no_repair(
         # It finishes during the settle window, before any terminal edit.
         release.set()
         await asyncio.wait_for(asyncio.gather(*pending), 1)
-    await lc.on_terminal_success(_make_success_state("Answer"))
     if missing:
+        finish = asyncio.create_task(lc.on_terminal_success(_make_success_state("Answer")))
+        await asyncio.sleep(0.02)
+        assert not finish.done()
         release.set()
         await asyncio.wait_for(asyncio.gather(*pending), 1)
+        await asyncio.wait_for(finish, 1)
+    else:
+        await lc.on_terminal_success(_make_success_state("Answer"))
     assert lc._terminal_reassert_task is None
     assert edit_count == 3, "one progress edit, terminal summary, answer; no repair"
 

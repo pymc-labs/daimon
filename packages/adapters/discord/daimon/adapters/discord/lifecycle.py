@@ -28,7 +28,6 @@ from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.discord.embed import (
     EmbedData,
     EmbedEvent,
-    EmbedState,
     TurnPhase,
     format_termination_notice,
     to_embed_data,
@@ -46,6 +45,7 @@ from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import is_stuck_session, render_termination_notice
@@ -75,6 +75,143 @@ _PROGRESS_SETTLE_S = 5.0
 # ephemeral draft on the status card. Calibrated on real sessions: the
 # largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
+
+
+class _CardWriteSequencer:
+    """Order card writes across all lifecycles of one recovered turn.
+
+    Every request for one message waits for the preceding request to finish.
+    The lock follows that message through a recovery handover.
+    """
+
+    def __init__(self, owner: DiscordTurnLifecycle) -> None:
+        self.owner = owner
+        self.epoch = 0
+        self.card_ids: set[int] = set()
+        self.locks: dict[int, asyncio.Lock] = {}
+        self.inflight: dict[int, set[object]] = {}
+        self.terminal: dict[int, dict[str, Any]] = {}
+        self.terminal_version: dict[int, int] = {}
+        self.terminal_tokens: dict[object, tuple[int, int, int]] = {}
+        self.terminal_ready: set[int] = set()
+        self.dirty: set[int] = set()
+        self.repair_task: asyncio.Task[None] | None = None
+        self.repair_id: int | None = None
+
+    @staticmethod
+    def key(message: discord.Message) -> int:
+        # Tests and injected transports may use an opaque message reference.
+        return getattr(message, "id", id(message))
+
+    def handover(self, owner: DiscordTurnLifecycle) -> None:
+        self.epoch += 1
+        self.owner = owner
+        # The successor may show progress while recovering from the old error.
+        self.terminal.clear()
+        self.terminal_version.clear()
+        self.terminal_ready.clear()
+        self.dirty.clear()
+
+    def track(self, message: discord.Message) -> None:
+        self.card_ids.add(self.key(message))
+
+    def lock_for(self, message: discord.Message) -> asyncio.Lock:
+        return self.locks.setdefault(self.key(message), asyncio.Lock())
+
+    def begin(
+        self, message: discord.Message, *, epoch: int, terminal: bool, kwargs: dict[str, Any]
+    ) -> object | None:
+        message_id = self.key(message)
+        if epoch != self.epoch:
+            return None
+        if terminal:
+            render = dict(kwargs)
+            render.pop("_allow_replacement", None)
+            if "embed" in render:
+                embed = render.pop("embed")
+                render["embeds"] = [embed] if embed is not None else []
+            self.terminal[message_id] = render
+            self.terminal_version[message_id] = self.terminal_version.get(message_id, 0) + 1
+            self.terminal_ready.discard(message_id)
+            token = object()
+            self.terminal_tokens[token] = (message_id, epoch, self.terminal_version[message_id])
+            return token
+        if message_id in self.terminal:
+            return None
+        token = object()
+        self.inflight.setdefault(message_id, set()).add(token)
+        return token
+
+    def complete(self, message: discord.Message, token: object, *, terminal: bool) -> None:
+        message_id = self.key(message)
+        if terminal:
+            _, epoch, version = self.terminal_tokens.pop(token)
+            if epoch == self.epoch and version == self.terminal_version.get(message_id):
+                self.terminal_ready.add(message_id)
+            elif message_id in self.terminal:
+                # A previous terminal request can also finish after a successor
+                # or a newer answer has issued its own render.
+                self.dirty.add(message_id)
+        else:
+            pending = self.inflight.get(message_id)
+            if pending is not None:
+                pending.discard(token)
+                if not pending:
+                    del self.inflight[message_id]
+            if message_id in self.terminal_ready:
+                self.dirty.add(message_id)
+        self.queue_repair()
+
+    def queue_repair(self) -> None:
+        owner = self.owner
+        message = owner._card_message_ref  # pyright: ignore[reportPrivateUsage]
+        if message is None or self.inflight or self.repair_task is not None:
+            return
+        message_id = self.key(message)
+        if message_id not in self.dirty or message_id not in self.terminal_ready:
+            return
+        self.dirty.discard(message_id)
+        log.info(
+            "turn.card_repair_scheduled",
+            turn_id=str(owner._turn_id),  # pyright: ignore[reportPrivateUsage]
+            message_id=str(message_id),
+            epoch=self.epoch,
+        )
+        self.repair_id = message_id
+        self.repair_task = asyncio.create_task(
+            self._repair(
+                message,
+                dict(self.terminal[message_id]),
+                self.epoch,
+                self.terminal_version[message_id],
+            ),
+            name="discord.terminal_reassert",
+        )
+        owner._terminal_reassert_task = self.repair_task  # pyright: ignore[reportPrivateUsage]
+
+    async def _repair(
+        self, message: discord.Message, kwargs: dict[str, Any], epoch: int, version: int
+    ) -> None:
+        try:
+            async with self.lock_for(message):
+                if epoch == self.epoch and version == self.terminal_version.get(self.key(message)):
+                    await self.owner._edit(  # pyright: ignore[reportPrivateUsage]
+                        message, _allow_replacement=False, **kwargs
+                    )
+        except Exception:
+            log.warning("turn.terminal_card_reassert_failed", exc_info=True)
+        finally:
+            self.repair_task = None
+            self.repair_id = None
+            current = self.owner._card_message_ref  # pyright: ignore[reportPrivateUsage]
+            message_id = self.key(message)
+            if (
+                current is not None
+                and self.key(current) == message_id
+                and (epoch != self.epoch or version != self.terminal_version.get(message_id))
+            ):
+                self.dirty.add(message_id)
+            self.queue_repair()
 
 
 def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
@@ -149,6 +286,7 @@ class DiscordTurnLifecycle:
         agent_name: str,
         fallback_active: Callable[[], bool] | None = None,
         model_id: str,
+        turn_id: uuid.UUID | None = None,
         markup: Decimal = Decimal(1),
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
@@ -158,6 +296,7 @@ class DiscordTurnLifecycle:
         render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
+        adopt_pending_progress: DiscordTurnLifecycle | None = None,
         delete: DeleteFn | None = None,
         unprompted: bool = False,
         on_first_post: Callable[[discord.Message], Awaitable[None]] | None = None,
@@ -169,6 +308,7 @@ class DiscordTurnLifecycle:
         alert_webhook_url: SecretStr | None = None,
     ) -> None:
         self._requester_id = requester_id
+        self._turn_id = turn_id
         self._trigger_message = trigger_message
         self._notify_on_completion = notify_on_completion
         self._acknowledgment_managed = acknowledgment_managed
@@ -206,6 +346,11 @@ class DiscordTurnLifecycle:
         # into the real answer, so a recovered turn looks like a normal one.
         self._message_ref: discord.Message | None = adopt_message_ref
         self._card_message_ref: discord.Message | None = adopt_message_ref
+        self._initial_card_message_ref: discord.Message | None = (
+            adopt_pending_progress._initial_card_message_ref
+            if adopt_pending_progress is not None
+            else adopt_message_ref
+        )
         self._terminal_embed: discord.Embed | None = None
         # The answer message that carries the summary, once there is one. The
         # vote emoji and the turn's files go on it too.
@@ -220,9 +365,34 @@ class DiscordTurnLifecycle:
         self._progress_edits: set[asyncio.Task[None]] = set()
         self._progress_settled = asyncio.Event()
         self._progress_settled.set()
-        self._terminal_delivered = asyncio.Event()
+        self._replacement_lock = asyncio.Lock()
+        self._card_writes = _CardWriteSequencer(self)
+        if adopt_pending_progress is not None:
+            # Shielded edits may outlive the failed turn. Share their settle
+            # state and route their completion to this lifecycle's final card.
+            self._progress_edits = adopt_pending_progress._progress_edits
+            self._progress_settled = adopt_pending_progress._progress_settled
+            self._replacement_lock = adopt_pending_progress._replacement_lock
+            self._card_writes = adopt_pending_progress._card_writes
+            self._card_writes.handover(self)
+            old_repair = adopt_pending_progress._terminal_reassert_task
+            if old_repair is not None and not old_repair.done():
+                self._progress_edits.add(old_repair)
+                self._progress_settled.clear()
+                old_repair.add_done_callback(self._handover_write_done)
+        self._card_epoch = self._card_writes.epoch
+        if adopt_message_ref is not None:
+            self._card_writes.track(adopt_message_ref)
+        if adopt_pending_progress is not None:
+            log.info(
+                "turn.card_recovery_handover",
+                turn_id=str(self._turn_id),
+                message_id=str(self._card_writes.key(adopt_message_ref))
+                if adopt_message_ref is not None
+                else None,
+                epoch=self._card_epoch,
+            )
         self._terminal_card_embeds: list[discord.Embed] | None = None
-        self._progress_reassert_needed = False
         self._terminal_reassert_task: asyncio.Task[None] | None = None
         # A terminal render reached Discord (or there was by design nothing to
         # show), so the card is no longer a pending card with a Stop button.
@@ -270,7 +440,8 @@ class DiscordTurnLifecycle:
         return self._message_ref
 
     def release_message_ref(self) -> discord.Message | None:
-        """Give recovery the card, retiring this lifecycle's deferred repairs."""
+        """Give recovery the card; its constructor must adopt pending progress."""
+        self.on_render_stopped()
         self._card_message_ref = None
         return self._message_ref
 
@@ -326,6 +497,7 @@ class DiscordTurnLifecycle:
         """Finish a card from the adapter's outer exception/ceiling boundary."""
         try:
             await self._settle_progress()
+            self._terminal = True
             await self._edit_message(
                 self._message_ref,
                 content=text,
@@ -338,19 +510,98 @@ class DiscordTurnLifecycle:
             self._terminal_shown = True
         finally:
             self._mark_ended()
-            self._terminal_delivered.set()
-            self._queue_terminal_reassert()
+            self._card_writes.queue_repair()
 
     async def _edit_message(
         self,
         message: discord.Message | None,
         *,
         progress: bool = False,
+        terminal_override: bool = False,
         recover_missing: bool = True,
         missing_is_error: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> bool:
         assert message is not None
+        original_message = message
+        card_write = self._card_writes.key(message) in self._card_writes.card_ids
+        terminal = terminal_override or (self._terminal and not progress)
+        token: object | None = None
+        write_id = str(uuid.uuid4()) if card_write else None
+        fields = {
+            "turn_id": str(self._turn_id),
+            "message_id": str(self._card_writes.key(original_message)),
+            "write_id": write_id,
+            "kind": "terminal" if terminal else "progress",
+            "epoch": self._card_epoch,
+        }
+        if card_write:
+            token = self._card_writes.begin(
+                message, epoch=self._card_epoch, terminal=terminal, kwargs=kwargs
+            )
+            if token is None:
+                log.info("turn.card_write_dropped", reason="sealed_or_stale", **fields)
+                return False
+            log.info("turn.card_write_issued", **fields)
+        try:
+            if card_write:
+                async with self._card_writes.lock_for(message):
+                    if self._card_epoch != self._card_writes.epoch:
+                        log.info("turn.card_write_dropped", reason="handover", **fields)
+                        return False
+                    if progress and (
+                        self._card_writes.key(message) in self._card_writes.terminal
+                        or self._message_ref is not message
+                    ):
+                        log.info("turn.card_write_dropped", reason="overtaken", **fields)
+                        return False
+                    if terminal and self._message_ref is not None:
+                        message = self._message_ref
+                    log.info("turn.card_write_dispatched", **fields)
+                    result = await self._perform_edit_message(
+                        message,
+                        progress=progress,
+                        recover_missing=recover_missing,
+                        missing_is_error=missing_is_error,
+                        **kwargs,
+                    )
+            else:
+                result = await self._perform_edit_message(
+                    message,
+                    progress=progress,
+                    recover_missing=recover_missing,
+                    missing_is_error=missing_is_error,
+                    **kwargs,
+                )
+            if card_write:
+                log.info(
+                    "turn.card_write_completed" if result else "turn.card_write_dropped",
+                    resolved_message_id=str(self._card_writes.key(self._message_ref))
+                    if self._message_ref is not None
+                    else None,
+                    **fields,
+                )
+                if terminal and result:
+                    log.info("turn.card_terminal_applied", **fields)
+            return result
+        except Exception as err:
+            if card_write:
+                log.info("turn.card_write_dropped", reason=type(err).__name__, **fields)
+            raise
+        finally:
+            if token is not None:
+                self._card_writes.complete(original_message, token, terminal=terminal)
+
+    async def _perform_edit_message(
+        self,
+        message: discord.Message,
+        *,
+        progress: bool,
+        recover_missing: bool,
+        missing_is_error: bool,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> bool:
+        may_outlive_terminal = progress or not self._terminal
         if self._terminal and not progress and message is self._card_message_ref:
             if "embeds" in kwargs:
                 self._terminal_card_embeds = kwargs["embeds"]
@@ -378,18 +629,79 @@ class DiscordTurnLifecycle:
                     send_kwargs.pop(key, None)
             if self._terminal_embed is not None and not {"embed", "embeds"} & kwargs.keys():
                 send_kwargs["embeds"] = [self._terminal_embed]
-            replacement = await self._send_message(**send_kwargs)
-            self._message_ref = replacement
-            if self._on_replacement is not None:
-                await self._on_replacement(replacement)
-            return True
+
+            async def send_replacement() -> bool:
+                # Another missing-card edit may already have replaced this ref.
+                if may_outlive_terminal and (self._terminal or self._message_ref is not message):
+                    return False
+                replacement = await self._send_message(**send_kwargs)
+                if may_outlive_terminal and await self._reconcile_late_replacement(
+                    replacement, message
+                ):
+                    return False
+                self._message_ref = replacement
+                if message is self._card_message_ref:
+                    self._card_message_ref = replacement
+                    self._card_writes.track(replacement)
+                if self._on_replacement is not None:
+                    await self._on_replacement(replacement)
+                return True
+
+            if may_outlive_terminal:
+                async with self._replacement_lock:
+                    return await send_replacement()
+            return await send_replacement()
         edited_at = getattr(replacement, "edited_at", None)
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
         if isinstance(replacement, discord.Message) and replacement.id != message.id:
+            if may_outlive_terminal and await self._reconcile_late_replacement(
+                replacement, message
+            ):
+                return False
             self._message_ref = replacement
+            if message is self._card_message_ref:
+                self._card_message_ref = replacement
+                self._card_writes.track(replacement)
             if self._on_replacement is not None:
                 await self._on_replacement(replacement)
+        return True
+
+    async def _reconcile_late_replacement(
+        self, replacement: discord.Message, previous: discord.Message
+    ) -> bool:
+        """Retire a progress card created after terminal delivery or handover.
+
+        A replacement send can outlive the progress edit that requested it. It
+        must not take ownership back from a terminal render or its successor.
+        """
+        owner = self._card_writes.owner
+        if owner is self and not self._terminal and self._message_ref is previous:
+            return False
+        if owner._delete is not None:
+            try:
+                await owner._delete(replacement)
+                return True
+            except discord.NotFound as err:
+                if err.code == 10008:
+                    return True
+                log.warning("turn.stale_replacement_delete_failed", exc_info=True)
+            except Exception:
+                log.warning("turn.stale_replacement_delete_failed", exc_info=True)
+        # The adapter may lack delete permission. At least remove the pending
+        # control; a terminal render is preferable when one is available.
+        try:
+            self._card_writes.track(replacement)
+            await owner._edit_message(
+                replacement,
+                terminal_override=True,
+                recover_missing=False,
+                _allow_replacement=False,
+                embeds=owner._terminal_card_embeds or [],
+                view=None,
+            )
+        except Exception:
+            log.warning("turn.stale_replacement_reconcile_failed", exc_info=True)
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
@@ -409,6 +721,8 @@ class DiscordTurnLifecycle:
             )
             self._message_ref = message
             self._card_message_ref = message
+            self._card_writes.track(message)
+            self._initial_card_message_ref = message
             self._last_flush = now
             if self._on_first_post is not None:
                 # Persist the returned message ID before the turn proceeds. If
@@ -444,11 +758,16 @@ class DiscordTurnLifecycle:
         if not task.cancelled():
             task.exception()
 
+    def _handover_write_done(self, task: asyncio.Task[None]) -> None:
+        self._progress_edits.discard(task)
+        if not self._progress_edits:
+            self._progress_settled.set()
+        self._card_writes.queue_repair()
+
     async def _edit_progress(self, message: discord.Message, embeds: list[discord.Embed]) -> None:
-        landed = False
         try:
             if not self._terminal:
-                landed = await self._edit_message(
+                await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
         except Exception:
@@ -461,40 +780,10 @@ class DiscordTurnLifecycle:
             last_edit = not self._progress_edits
             if last_edit:
                 self._progress_settled.set()
-            if landed and self._terminal and self._terminal_card_embeds is not None:
-                self._progress_reassert_needed = True
-                self._queue_terminal_reassert()
-                if last_edit and self._terminal_reassert_task is not None:
-                    await asyncio.shield(self._terminal_reassert_task)
-
-    def _queue_terminal_reassert(self) -> None:
-        # Network completion never waits indefinitely for a terminal hook:
-        # an outer exception may bypass it. Either completion can enqueue the
-        # repair once BOTH terminal delivery and every progress edit settle.
-        if (
-            self._card_message_ref is not None
-            and self._terminal_delivered.is_set()
-            and not self._progress_edits
-            and self._progress_reassert_needed
-            and self._terminal_card_embeds is not None
-            and self._terminal_reassert_task is None
-        ):
-            self._terminal_reassert_task = asyncio.create_task(
-                self._reassert_terminal_card(), name="discord.terminal_reassert"
-            )
-
-    async def _reassert_terminal_card(self) -> None:
-        if self._card_message_ref is None:
-            return
-        try:
-            await self._edit_message(
-                self._card_message_ref,
-                recover_missing=False,
-                embeds=self._terminal_card_embeds,
-                view=None,
-            )
-        except Exception:
-            log.warning("turn.terminal_card_reassert_failed", exc_info=True)
+            self._card_writes.queue_repair()
+            repair = self._card_writes.repair_task
+            if last_edit and repair is not None:
+                await asyncio.shield(repair)
 
     async def _settle_progress(self) -> None:
         self.on_render_stopped()
@@ -547,6 +836,8 @@ class DiscordTurnLifecycle:
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
+            self._card_writes.track(self._message_ref)
+            self._initial_card_message_ref = self._message_ref
         else:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
         self._terminal_shown = True
@@ -604,8 +895,7 @@ class DiscordTurnLifecycle:
             await self._deliver_success(state)
         finally:
             self._mark_ended()
-            self._terminal_delivered.set()
-            self._queue_terminal_reassert()
+            self._card_writes.queue_repair()
 
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)
@@ -784,7 +1074,7 @@ class DiscordTurnLifecycle:
     @property
     def turn_window(self) -> tuple[int, int] | None:
         """Message ids bounding the turn's own posts: after its card, before its end."""
-        card = self._card_message_ref
+        card = self._initial_card_message_ref
         if card is None or self._ended_before is None:
             return None
         return card.id, self._ended_before
@@ -834,8 +1124,7 @@ class DiscordTurnLifecycle:
             await self._deliver_failure(state, err)
         finally:
             self._mark_ended()
-            self._terminal_delivered.set()
-            self._queue_terminal_reassert()
+            self._card_writes.queue_repair()
 
     async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
         await self._persist_sealed_responses(state)
@@ -966,7 +1255,8 @@ class DiscordTurnLifecycle:
     @property
     def card_message_id(self) -> str | None:
         """Original status card ID, used to retire its durable intent."""
-        return str(self._card_message_ref.id) if self._card_message_ref is not None else None
+        card = self._initial_card_message_ref
+        return str(card.id) if card is not None else None
 
     @property
     def card_discard_failed(self) -> bool:

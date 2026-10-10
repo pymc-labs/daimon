@@ -1198,6 +1198,14 @@ class DaimonBot(commands.Bot):
         for row in orphans:
             if row.active_turn_message_id is None:  # pragma: no cover - filtered by the query
                 continue
+            orphan_turn_id = next(
+                (
+                    str(intent.id)
+                    for intent in self._boot_turn_card_intents or ()
+                    if intent.message_id == row.active_turn_message_id
+                ),
+                None,
+            )
             try:
                 channel = self.get_channel(int(row.thread_id)) or await self.fetch_channel(
                     int(row.thread_id)
@@ -1212,24 +1220,44 @@ class DaimonBot(commands.Bot):
                         title="Daimon restarted before this request finished.",
                         description="@mention Daimon with your request to try again.",
                     )
+                    log.info(
+                        "turn.card_orphan_retirement_issued",
+                        turn_id=orphan_turn_id,
+                        session_id=str(row.id),
+                        message_id=row.active_turn_message_id,
+                    )
+                    edited = False
                     if transport._destination() is not None:  # pyright: ignore[reportPrivateUsage]
                         await transport.edit(
                             message, embed=embed, view=None, _allow_replacement=False
                         )
+                        edited = True
                     elif not isinstance(message.webhook_id, int):
                         await message.edit(embed=embed, view=None)
+                        edited = True
+                    if edited:
+                        log.info(
+                            "turn.orphan_retired",
+                            turn_id=orphan_turn_id,
+                            session_id=str(row.id),
+                            thread_id=row.thread_id,
+                            message_id=row.active_turn_message_id,
+                            # How long the user stared at a spinner. The only place
+                            # this is visible -- the turn's own logs died with its
+                            # container.
+                            frozen_for_s=(
+                                (datetime.now(UTC) - row.active_turn_started_at).total_seconds()
+                                if row.active_turn_started_at is not None
+                                else None
+                            ),
+                        )
                     log.info(
-                        "turn.orphan_retired",
-                        thread_id=row.thread_id,
+                        "turn.card_orphan_retirement_completed"
+                        if edited
+                        else "turn.card_orphan_retirement_dropped",
+                        turn_id=orphan_turn_id,
+                        session_id=str(row.id),
                         message_id=row.active_turn_message_id,
-                        # How long the user stared at a spinner. The only place
-                        # this is visible -- the turn's own logs died with its
-                        # container.
-                        frozen_for_s=(
-                            (datetime.now(UTC) - row.active_turn_started_at).total_seconds()
-                            if row.active_turn_started_at is not None
-                            else None
-                        ),
                     )
             except (discord.HTTPException, discord.ClientException, ValueError) as err:
                 log.warning(
@@ -2730,6 +2758,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
@@ -2852,6 +2881,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=int(row.requester_external_user_id),
@@ -2859,6 +2889,7 @@ class DaimonBot(commands.Bot):
                     turn_id=turn_card_intent.id,
                 ),
                 adopt_message_ref=lifecycle.release_message_ref(),
+                adopt_pending_progress=lifecycle,
                 unprompted=False,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_card_intent.id
@@ -3325,6 +3356,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id, cancel=cancel, turn_id=turn_id
@@ -3783,6 +3815,7 @@ class DaimonBot(commands.Bot):
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
                 model_id=agent.model.id,
+                turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=message.author.id,
@@ -3793,6 +3826,7 @@ class DaimonBot(commands.Bot):
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
                 adopt_message_ref=lifecycle.release_message_ref(),
+                adopt_pending_progress=lifecycle,
                 unprompted=unprompted,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_card_intent.id
