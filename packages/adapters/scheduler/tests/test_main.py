@@ -32,6 +32,7 @@ from daimon.adapters.scheduler.main import (
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # MCP token renewal
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
+    _sweep_privacy_deletes,  # pyright: ignore[reportPrivateUsage]  # privacy retry boundary
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
@@ -88,6 +89,18 @@ _TEST_BILLING = BillingConfig(
     success_url="http://test/success",
     cancel_url="http://test/cancel",
 )
+
+
+async def test_privacy_sweep_boundary_retries_after_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sweep = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
+    monkeypatch.setattr("daimon.adapters.scheduler.main.sweep_privacy_session_deletes", sweep)
+    client = unittest.mock.Mock()
+    sm = unittest.mock.Mock()
+    await _sweep_privacy_deletes(client, sm)
+    await _sweep_privacy_deletes(client, sm)
+    assert sweep.await_count == 2
 
 
 async def test_app_vault_archive_retries_after_failure(
@@ -1929,7 +1942,13 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
             raise
 
     async with asyncio.timeout(5):
-        await _run_loops(tick=tick, usage_sweep=endless_pass, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=tick,
+            usage_sweep=endless_pass,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert ticks == 3, f"ticks continue while the usage pass runs, got {ticks}"
     assert pass_cancelled, "stopping cancels the usage pass in flight"
@@ -1952,7 +1971,13 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
             third_pass.set()
 
     async with asyncio.timeout(5):
-        await _run_loops(tick=slow_tick, usage_sweep=usage_pass, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=slow_tick,
+            usage_sweep=usage_pass,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert passes >= 3, f"usage passes repeat while the first tick is still running, got {passes}"
 
@@ -1970,7 +1995,11 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
     async with asyncio.timeout(5):
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
-                tick=tick, usage_sweep=crashing_pass, interval_s=0.01, stop_event=asyncio.Event()
+                tick=tick,
+                usage_sweep=crashing_pass,
+                privacy_sweep=unittest.mock.AsyncMock(),
+                interval_s=0.01,
+                stop_event=asyncio.Event(),
             )
 
     assert raised.group_contains(RuntimeError, match="unexpected sweep failure"), (
@@ -1998,6 +2027,7 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
             await _run_loops(
                 tick=crashing_tick,
                 usage_sweep=endless_pass,
+                privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
             )
@@ -2006,6 +2036,41 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         "the tick's error propagates out of the loops"
     )
     assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
+async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
+    stop = asyncio.Event()
+    upstream_started = asyncio.Event()
+    ticks = 0
+    cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await upstream_started.wait()
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def slow_privacy() -> None:
+        nonlocal cancelled
+        upstream_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            usage_sweep=unittest.mock.AsyncMock(),
+            privacy_sweep=slow_privacy,
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3
+    assert cancelled
 
 
 @pytest.mark.parametrize(
@@ -2536,21 +2601,34 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     await client.close()
 
 
-async def test_run_loops_without_a_usage_sweep_runs_ticks_alone() -> None:
-    """With the sweep switched off, ticks still run and stop cleanly."""
+async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> None:
+    """With the usage sweep switched off, ticks and privacy deletion retries still run."""
     stop = asyncio.Event()
     ticks = 0
+    privacy_passes = 0
 
     async def tick() -> None:
         nonlocal ticks
         ticks += 1
+        await asyncio.sleep(0)
         if ticks == 3:
             stop.set()
 
+    async def privacy_sweep() -> None:
+        nonlocal privacy_passes
+        privacy_passes += 1
+
     async with asyncio.timeout(5):
-        await _run_loops(tick=tick, usage_sweep=None, interval_s=0.01, stop_event=stop)
+        await _run_loops(
+            tick=tick,
+            usage_sweep=None,
+            privacy_sweep=privacy_sweep,
+            interval_s=0.01,
+            stop_event=stop,
+        )
 
     assert ticks == 3, f"ticks run without a usage sweep, got {ticks}"
+    assert privacy_passes >= 1, "a pending erasure must not wait on the usage sweep switch"
 
 
 @pytest.mark.parametrize(("enabled", "expected"), [(False, 0), (True, 1)])

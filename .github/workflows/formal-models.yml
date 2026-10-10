@@ -18,6 +18,9 @@ on:
       - "packages/core/daimon/core/turn/reducers.py"
       - "packages/core/daimon/core/turn/render.py"
       - "packages/core/daimon/core/scheduler.py"
+      - "packages/core/daimon/core/purge.py"
+      - "packages/core/daimon/core/ma.py"
+      - "packages/core/daimon/core/stores/privacy_session_deletes.py"
       - "packages/core/daimon/core/stores/routines.py"
       - "packages/adapters/scheduler/daimon/adapters/scheduler/main.py"
       - "packages/core/daimon/core/session_preparation.py"
@@ -121,6 +124,9 @@ on:
       - "packages/core/daimon/core/turn/prepare.py"
       # scheduler/
       - "packages/core/daimon/core/scheduler.py"
+      - "packages/core/daimon/core/purge.py"
+      - "packages/core/daimon/core/ma.py"
+      - "packages/core/daimon/core/stores/privacy_session_deletes.py"
       - "packages/core/daimon/core/stores/routines.py"
       - "packages/adapters/scheduler/daimon/adapters/scheduler/main.py"
       # session_preparation/

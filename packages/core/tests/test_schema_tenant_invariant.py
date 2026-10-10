@@ -45,6 +45,11 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "account_github_links": "keyed by account_id (globally unique, maps to one tenant)",
     "github_access_request_deliveries": "keyed by request_id (globally unique FK to a tenant-scoped request); store reads verify that request's tenant",
     "github_connect_flows": "keyed by random state hash and bound by FK to a tenant-scoped invitation",
+    # A privacy deletion work item outlives the account it erases and may span
+    # every tenant the account was linked to, so it lists its tenant ids rather
+    # than belonging to one. Only the privacy purge writes it and only the
+    # scheduler's erasure sweep reads it; nothing tenant-facing queries it.
+    "privacy_session_deletes": "one erasure job per deleted account; lists every linked tenant in tenant_ids",
     # Push delivery receipts and jobs are deployment-wide GitHub metadata, not
     # tenant data. Resync resolves each tenant's bindings and scoped credentials
     # at execution time from the canonical repository/ref.

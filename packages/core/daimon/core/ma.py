@@ -425,6 +425,9 @@ async def delete_sessions_for_account(
     *,
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
+    pending_session_ids: set[str] | None = None,
+    on_discovered: Callable[[set[str]], Awaitable[None]] | None = None,
+    on_deleted: Callable[[str], Awaitable[None]] | None = None,
 ) -> SessionDeletionReport:
     """Hard-delete every MA session tagged for `account_id` under `tenant_id`.
 
@@ -447,15 +450,23 @@ async def delete_sessions_for_account(
             if session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(account_id):
                 target_ids.add(session.id)
 
+    if on_discovered is not None and target_ids:
+        await on_discovered(target_ids)
+    target_ids.update(pending_session_ids or ())
+
     deleted = 0
     failed = 0
     for session_id in target_ids:
         try:
             await client.beta.sessions.delete(session_id)
             deleted += 1
+            if on_deleted is not None:
+                await on_deleted(session_id)
         except APIStatusError as err:
             if err.status_code == 404:
                 deleted += 1
+                if on_deleted is not None:
+                    await on_deleted(session_id)
             else:
                 failed += 1
 
