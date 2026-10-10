@@ -167,9 +167,17 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 messages = answers(turn, backend)
                 if not messages:
                     raise Pending("no answer messages: delivery gaps are unavailable")
+                running_card_ids = {
+                    str(sample["message_id"])
+                    for sample in turn.card_history
+                    if sample.get("phase") == "running" and sample.get("message_id")
+                }
                 events = [
                     message_visible_at(
-                        m, turn.started_at, reused=str(m.get("id")) in turn.baseline_message_ids
+                        m,
+                        turn.started_at,
+                        reused=str(m.get("id"))
+                        in running_card_ids | set(turn.baseline_message_ids),
                     )
                     for m in messages
                 ]

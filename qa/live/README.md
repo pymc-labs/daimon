@@ -334,6 +334,9 @@ The frozen Discord batch also supports whole-run `answers_total` and
 `threads_created` upper bounds, three-valued nested `any_of`, nested component
 labels, current card refreshes after a wait, distinct running card-edit timestamps,
 and answer chunk gaps from answer-bearing edits or message creation times.
+Cards observed running during the same turn use their answer edit time for chunk
+delivery, as do cards reused from before the trigger. Missing edit evidence stays
+PENDING; later edits on ordinary answer messages do not change their delivery time.
 An incomplete observation cannot prove a count or gap upper bound. Expected CLI
 failures require matching declared refusal text and the hook's JSON `exit_code`;
 a transport failure remains a harness error. `new_channel.guild` must resolve to the configured approved QA
