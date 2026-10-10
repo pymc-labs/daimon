@@ -5430,6 +5430,7 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     body = notices[0].kwargs["json"]
     assert body["channel"] == "C_TEST"
     assert body["user"] == "U_OTHER"
+    assert "thread_ts" not in body
     assert "started this turn" in body["text"]
 
 
@@ -5462,6 +5463,19 @@ async def test_handle_block_action_when_status_ts_not_in_registry_tells_clicker_
     body = notices[0].kwargs["json"]
     assert body["user"] == "U_AUTHOR"
     assert "already finished" in body["text"]
+
+
+async def test_finished_cancel_button_refusal_stays_in_its_parent_thread() -> None:
+    app = _make_app()
+    client = MagicMock()
+    client.chat_postEphemeral = AsyncMock()
+    payload = _make_block_actions_payload(message_ts="2.1")
+    payload["message"] = {"ts": "2.1", "thread_ts": "1.1"}
+    with patch("daimon.adapters.slack.app.resolve_web_client", new_callable=AsyncMock) as resolve:
+        resolve.return_value = client
+        await app._handle_block_action(payload)
+
+    assert client.chat_postEphemeral.await_args.kwargs["thread_ts"] == "1.1"
 
 
 async def test_handle_block_action_refusal_notice_failure_does_not_raise() -> None:

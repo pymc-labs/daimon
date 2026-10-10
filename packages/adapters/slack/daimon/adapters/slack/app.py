@@ -1356,6 +1356,8 @@ class SlackApp:
         channel_info: dict[str, Any] = payload.get("channel") or {}
         container: dict[str, Any] = payload.get("container") or {}
         channel = str(channel_info.get("id") or container.get("channel_id") or "")
+        message: dict[str, Any] = payload.get("message") or {}
+        parent_thread_ts = message.get("thread_ts")
         if not (team_id and channel and clicker):
             return
         try:
@@ -1366,6 +1368,7 @@ class SlackApp:
                 channel=channel,
                 user=clicker,
                 text=text,
+                **({"thread_ts": parent_thread_ts} if parent_thread_ts else {}),
             )
         except (SlackApiError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.cancel_refusal_notice_failed", team_id=team_id, exc_info=exc)
