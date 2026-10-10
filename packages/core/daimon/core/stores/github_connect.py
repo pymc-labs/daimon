@@ -227,6 +227,7 @@ class Invitation(BaseModel):
     origin_ma_agent_id: str | None
     origin_responder_name: str | None
     requested_work: str | None
+    requested_repo: str | None
     encrypted_origin_followup: bytes | None
     origin_followup_expires_at: datetime | None
     connected_repos: list[dict[str, str]] | None
@@ -271,6 +272,7 @@ async def mint_invitation(
     origin_ma_agent_id: str | None = None,
     origin_responder_name: str | None = None,
     requested_work: str | None = None,
+    requested_repo: str | None = None,
     encrypted_origin_followup: bytes | None = None,
     origin_followup_expires_at: datetime | None = None,
 ) -> str:
@@ -321,6 +323,7 @@ async def mint_invitation(
                 requested_work.strip()[:500] if requested_work else None,
                 echoes=tuple(name for name in (agent_name, origin_responder_name) if name),
             ),
+            requested_repo=requested_repo,
             encrypted_origin_followup=encrypted_origin_followup,
             origin_followup_expires_at=origin_followup_expires_at,
             expires_at=datetime.now(UTC) + timedelta(days=7),
@@ -954,6 +957,7 @@ async def create_discord_connect_intent(
     origin_ma_agent_id: str,
     origin_responder_name: str,
     requested_work: str | None,
+    requested_repo: str | None = None,
     agent_ma_id: str | None = None,
 ) -> uuid.UUID:
     await session.execute(
@@ -976,6 +980,7 @@ async def create_discord_connect_intent(
             origin_ma_agent_id=origin_ma_agent_id,
             origin_responder_name=origin_responder_name,
             requested_work=requested_work,
+            requested_repo=requested_repo,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
     )
@@ -1058,6 +1063,7 @@ async def bind_discord_connect_click(
             origin_ma_agent_id=intent.origin_ma_agent_id,
             origin_responder_name=intent.origin_responder_name,
             requested_work=intent.requested_work,
+            requested_repo=intent.requested_repo,
         )
         encrypted_token = encrypt_token(fernet, token)
         intent.encrypted_token = encrypted_token

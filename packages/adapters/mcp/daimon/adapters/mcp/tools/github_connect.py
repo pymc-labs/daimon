@@ -176,6 +176,7 @@ async def _github_connect_impl(
         location_channel_id=origin_channel_id(origin),
     )
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
+    requested_repo: str | None = None
     async with runtime.session_factory.begin() as session:
         try:
             await require_app_eligible_agent(
@@ -358,6 +359,7 @@ async def _github_connect_impl(
                 origin_ma_agent_id=origin.responder_ma_agent_id,
                 origin_responder_name=origin.responder_name,
                 requested_work=requested_work,
+                requested_repo=requested_repo,
                 agent_ma_id=str(agent.id),
             )
         else:
@@ -377,6 +379,7 @@ async def _github_connect_impl(
                 origin_ma_agent_id=origin.responder_ma_agent_id,
                 origin_responder_name=origin.responder_name,
                 requested_work=requested_work,
+                requested_repo=requested_repo,
             )
             await set_invitation_encrypted_token(
                 session, token=token, encrypted_token=encrypt_token(runtime.fernet, token)

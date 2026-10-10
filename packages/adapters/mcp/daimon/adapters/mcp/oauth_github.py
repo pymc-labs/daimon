@@ -469,6 +469,7 @@ def _confirmation_page(
     selection_error: str | None = None,
     already_added: frozenset[int] = frozenset(),
     needed: Mapping[int, bool] | None = None,
+    requested_repo: str | None = None,
 ) -> Response:
     """Render the same picker used by the live route and screenshot capture.
 
@@ -540,7 +541,17 @@ def _confirmation_page(
             parts.append(
                 f'<label class="gh-choice repo-choice{" is-added" if added else ""}">'
                 f'<input type="checkbox" name="repo" value="{repo.id}"'
-                + (" checked disabled" if added else " checked" if repo.id in needed else "")
+                + (
+                    " checked disabled"
+                    if added
+                    else " checked"
+                    if repo.id in needed
+                    or (
+                        requested_repo is not None
+                        and repo.full_name.casefold() == requested_repo.casefold()
+                    )
+                    else ""
+                )
                 + ">"
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
                 f'<span class="gh-repo-name">{html.escape(name)}</span>'
@@ -1034,6 +1045,7 @@ def build_oauth_github_routes(
                     selection_error=selection_error,
                     already_added=already_added,
                     needed=needed,
+                    requested_repo=invitation.requested_repo,
                 )
             visible = {
                 repo.id: repo for install in installations for repo in install.repos if repo.admin
@@ -1253,6 +1265,7 @@ def build_oauth_github_routes(
             agent_name=invitation.agent_name,
             already_added=already_added,
             needed=needed,
+            requested_repo=invitation.requested_repo,
         )
 
     return connect, callback, setup, confirm

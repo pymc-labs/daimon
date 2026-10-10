@@ -88,9 +88,11 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
         origin_ma_agent_id="ma-agent",
         origin_responder_name="CallingBot",
         requested_work="Review the issue",
+        requested_repo="Team/Requested",
     )
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
+    assert invitation.requested_repo == "Team/Requested"
     row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
     assert row is not None
     row.used_at = datetime.now(UTC)
@@ -285,7 +287,10 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
         origin_ma_agent_id="ma-agent",
         origin_responder_name="CallingBot",
         requested_work=None,
+        requested_repo="Team/Requested",
     )
+    stored_intent = await db_session.get(GitHubConnectClickIntent, intent_id)
+    assert stored_intent is not None and stored_intent.requested_repo == "Team/Requested"
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     args = dict(
         intent_id=intent_id,
@@ -321,6 +326,7 @@ async def test_discord_connect_button_reveals_only_to_requester_in_origin_thread
     token = github_connect.decrypt_token(fernet, first[0])
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None
+    assert invitation.requested_repo == "Team/Requested"
     assert invitation.encrypted_origin_followup == b"encrypted-interaction"
     account = await db_session.get(Account, admin_id)
     assert account is not None
