@@ -1320,8 +1320,13 @@ admission before any of this runs.
   GitHub admin access before authorizing tenant repositories. These routes
   are absent when GitHub connection is unconfigured.
   Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
-  expose connected repos, agent grants, personal links, waiting requests, and
-  disconnects.
+  list each agent with its repo count and an **Add repos** button, plus
+  personal links and waiting requests. An agent's GitHub section ("<Agent>'s
+  repos") lists its repos, says who can use them, and offers **Add repos**,
+  **Remove from <Agent>** and **Details** (who added each repo, when, and its
+  access). **Add repos** sends whoever manages the agent a link for that
+  agent; anyone else is told to ask whoever manages it. The shared words live
+  in `daimon.core.github_connect_cards`.
   Connect links appear as buttons where the person asked. Discord slash
   commands answer ephemerally; a conversational mention posts a requester-bound
   button in the thread and mints the single-use invitation only when that
@@ -1334,7 +1339,15 @@ admission before any of this runs.
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
   The connection page offers a searchable repo picker and confirms each repo
-  against the signed-in GitHub account. The same browser can safely repeat a
+  against the signed-in GitHub account. For one agent it is titled "Add repos
+  to <Agent>", shows repos the agent already has ticked and greyed, defaults
+  to Read only for the repos added now, and counts only new repos on its
+  button. The done page says how many repos were added and, only once the
+  switch to the GitHub App has finished, that the agent no longer uses its old
+  GitHub token; while it waits on a missing working or skill repo it names
+  that repo instead. Setting an agent as a default in more places adds
+  "<Agent>'s repos come too." to `set_agent_default`'s confirmation when the
+  agent has repos. The same browser can safely repeat a
   successful submission; a signed invitation receipt also handles concurrent
   submissions. New installation repos appear in the GitHub setup panel after
   the UTC day closes. Confirmed installation removal cancels affected requests
