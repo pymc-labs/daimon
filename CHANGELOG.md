@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
 
-- Prepare an explicit Gemini SDK smoke and recorded offline conformance harness, with a private MockTransport dry-run and the $30/$24 live admission guard.
+- Prepare an explicit Gemini SDK smoke and recorded offline conformance harness, with a private MockTransport dry-run, the $30/$24 live admission guard and an exact Flash-Lite model pin before credential access.
 
 - Persist Gemini stream gaps in history and reconciliation, prove C05 offline with documented saved-step identities, and retain ten typed provider/host dependencies.
 - Record a partial OpenAI live matrix with three shared-fixture passes, fifteen typed gaps, normalized metadata tapes and offline replay checks; preserve unknown billing and failed-attempt receipts.
