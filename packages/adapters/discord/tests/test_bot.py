@@ -2450,6 +2450,7 @@ async def test_startup_scan_replays_unseen_addressed_messages_through_live_gates
     bot = make_bot(runtime)
     bot._handle_mention = AsyncMock()
     bot._maybe_participate = AsyncMock()
+    bot._maybe_hint_unmentioned_reply = AsyncMock()
     base = discord.utils.time_snowflake(datetime.now(UTC))
     old = _make_channel_message(guild_id=int(guild_id))
     old.id = base
@@ -2483,6 +2484,7 @@ async def test_startup_scan_replays_unseen_addressed_messages_through_live_gates
         missed, guild_id, tenant.tenant_id, created_thread_ids=[]
     )
     bot._maybe_participate.assert_not_awaited()
+    bot._maybe_hint_unmentioned_reply.assert_not_awaited()
     assert channel.history.call_args.kwargs["limit"] == 100
     assert channel.history.call_args.kwargs["oldest_first"]
 

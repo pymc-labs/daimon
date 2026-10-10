@@ -2099,7 +2099,8 @@ class DaimonBot(commands.Bot):
                 guild_id=str(message.guild.id) if message.guild else None,
             ):
                 await self._maybe_participate(message)
-            await self._maybe_hint_unmentioned_reply(message, bot_mentioned=bot_mentioned)
+            if not startup_replay:
+                await self._maybe_hint_unmentioned_reply(message, bot_mentioned=bot_mentioned)
             return
         assert message.guild is not None
         guild = message.guild
