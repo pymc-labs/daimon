@@ -9,6 +9,7 @@ confirmation card, sending `allow` only after the answer.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -662,19 +663,22 @@ async def test_ma_repeating_the_pause_while_the_card_is_up_does_not_end_the_turn
     ]
 
 
-async def test_three_uploads_get_separate_cards_and_answers() -> None:
+async def _upload_turn(
+    files: list[tuple[str, str]], answer: Callable[[ConfirmationPrompt], ConfirmationAnswer]
+) -> tuple[list[ConfirmationPrompt], list[dict[str, object]]]:
+    """One turn whose model uploads `files` ((name, notebook slug)) in one blocked
+    batch, as MA pauses on them; `answer` presses each card shown."""
     fa = FakeAnthropic()
-    names = ["cg_meme.csv", "launch_features.csv", "launch_curves.csv"]
     events = [
         YieldEvent(
             make_mcp_tool_use(
                 event_id=f"tu_{index}",
                 name="create_attachment_upload_url",
                 mcp_server_name=DAIMON_SERVER_NAME,
-                input={"name": name, "slug": "memecoin-scan"},
+                input={"name": name, "slug": slug},
             )
         )
-        for index, name in enumerate(names)
+        for index, (name, slug) in enumerate(files)
     ]
     events.extend(
         [
@@ -682,7 +686,7 @@ async def test_three_uploads_get_separate_cards_and_answers() -> None:
                 make_status_idle(
                     event_id="pause",
                     stop_reason=make_requires_action(
-                        event_ids=[f"tu_{index}" for index in range(3)]
+                        event_ids=[f"tu_{index}" for index in range(len(files))]
                     ),
                 )
             ),
@@ -696,7 +700,7 @@ async def test_three_uploads_get_separate_cards_and_answers() -> None:
     async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
         prompts.append(prompt)
         assert _confirmations(fa) == []
-        return "denied" if "launch_features.csv" in prompt.title else "approved"
+        return answer(prompt)
 
     final = await run_turn(
         anthropic=_cast(fa),
@@ -715,12 +719,51 @@ async def test_three_uploads_get_separate_cards_and_answers() -> None:
         ),
     )
     assert final.error is None
-    assert len(prompts) == 3
-    assert {prompt.title for prompt in prompts} == {
-        f'Upload "{name}" to notebook "memecoin-scan"?' for name in names
-    }
-    assert [event["tool_use_id"] for event in _confirmations(fa)] == ["tu_0", "tu_1", "tu_2"]
-    assert [event["result"] for event in _confirmations(fa)] == ["allow", "deny", "allow"]
+    return prompts, _confirmations(fa)
+
+
+_FILES = ["cg_meme.csv", "launch_features.csv", "launch_curves.csv"]
+
+
+async def test_one_approve_covers_a_turns_uploads_into_one_notebook() -> None:
+    """Decision.AI 2026-10-09: ten cards for ten files of one notebook. The first
+    card's Approve covers the rest of that notebook's files in the turn."""
+    prompts, sent = await _upload_turn(
+        [(name, "memecoin-scan") for name in _FILES], lambda _prompt: "approved"
+    )
+
+    assert [prompt.title for prompt in prompts] == [
+        'Upload "cg_meme.csv" to notebook "memecoin-scan"?'
+    ]
+    assert "add its other files to this notebook" in str(prompts[0].consequence)
+    assert [event["tool_use_id"] for event in sent] == ["tu_0", "tu_1", "tu_2"]
+    assert [event["result"] for event in sent] == ["allow", "allow", "allow"]
+
+
+async def test_after_a_denied_upload_the_next_file_still_asks() -> None:
+    prompts, sent = await _upload_turn(
+        [(name, "memecoin-scan") for name in _FILES],
+        lambda prompt: "denied" if "cg_meme.csv" in prompt.title else "approved",
+    )
+
+    assert [prompt.title for prompt in prompts] == [
+        'Upload "cg_meme.csv" to notebook "memecoin-scan"?',
+        'Upload "launch_features.csv" to notebook "memecoin-scan"?',
+    ]
+    assert [event["result"] for event in sent] == ["deny", "allow", "allow"]
+
+
+async def test_each_notebook_gets_its_own_upload_card() -> None:
+    prompts, sent = await _upload_turn(
+        [("a.csv", "first"), ("b.csv", "second"), ("c.csv", "first")],
+        lambda _prompt: "approved",
+    )
+
+    assert sorted(prompt.title for prompt in prompts) == [
+        'Upload "a.csv" to notebook "first"?',
+        'Upload "b.csv" to notebook "second"?',
+    ]
+    assert [event["result"] for event in sent] == ["allow", "allow", "allow"]
 
 
 async def test_stop_retires_an_approved_card_before_its_allow_is_sent() -> None:

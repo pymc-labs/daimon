@@ -191,7 +191,8 @@ async def test_pending_confirmations_expire() -> None:
             "create_attachment_upload_url",
             {"name": "cg_meme.csv", "slug": "memecoin-scan"},
             'Upload "cg_meme.csv" to notebook "memecoin-scan"?',
-            "Anyone with the notebook's link can open this file.",
+            "Anyone with the notebook's link can open this file. Approving also lets "
+            "this request add its other files to this notebook.",
             '"cg_meme.csv" not uploaded',
         ),
         (
