@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refused Slack Stop clicks in a thread now show their explanation in that thread.
 - Discord acknowledges mentions with 👀 before resolving agents and environments, and clears it when the turn settles. Queued follow-up ⌛ markers and Slack 👀 markers also clear on completion, failure or cancellation, regardless of completion pings.
 - Routine digests now deliver the full final reply across Discord, Slack and Teams messages, including creator fallbacks. The saved last-output preview shows the actual tail and marks truncation.
+- Replies and error messages to threaded Slack DMs now stay in the same thread.
 - Discord failures use plain copy instead of provider JSON, exception bodies, request IDs or tool details. Overloaded Claude requests ask for a retry in a minute. A failed reply allows for files still arriving, and the output sweep no longer claims a file was too large to attach after it was already posted in that turn.
 
 - On Discord, the first reply in Daimon's thread that doesn't @mention Daimon gets a 🔔 reaction, once per thread a day, as a hint that only a mention continues the conversation. The reply itself is still not answered. Turn it off with `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=false`.
