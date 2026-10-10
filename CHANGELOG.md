@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route MCP repository credentials, vault summaries, bundle uploads, hosted charts, hub sessions and skill-version counts through scoped mux resource ports while preserving native request bytes and existing host policy.
 - Refuse manual live probes outside the fixed cheapest-model allowlist before invocation, even when another model has configured prices.
 - Add a supplementary offline default-agent capability scenario with eleven skill uploads and pins, adapter-mapped tools, MCP checks and normalized Anthropic replay; report unavailable mappings and atomic revision gaps explicitly.
+- Add an explicitly selected offline Gemini default-capability adapter with typed deferral for complete binary skill deployment and authenticated MCP/session seams; map all six logical builtins to native code execution and prove their normalized replay.
 
 - A channel can carry its own agent backend configuration (backend, profile,
   model, required capabilities, thread mode), read at admission only when
