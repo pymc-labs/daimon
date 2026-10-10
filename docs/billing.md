@@ -92,6 +92,15 @@ selectable by an agent. Every agent-model row is the provider's list price.
 Put any margin in `DAIMON_BILLING__MARKUP` (below), not in the table, because
 reports read the table as provider cost.
 
+A lookup for a dated snapshot id such as `claude-haiku-4-5-20251001` (Managed
+Agents echoes these) falls back to its alias row (`claude-haiku-4-5`) when the
+id itself has no row: only an eight-digit `-YYYYMMDD` suffix is stripped, an
+id whose alias is not priced still prices at `None`, and agent selection still
+reads `AGENT_MODEL_PRICING` keys only, so snapshot ids do not become
+selectable. Before this fallback, turns on a snapshot id recorded no cost and
+debited nothing; usage reports and cap reads now price those saved rows, but
+the zero ledger debits and null turn outcomes already written are not repaired.
+
 Opus 5.5 is priced at $4 input, $20 output, $5 five-minute cache write, and
 $0.20 cache read per million tokens; Sonnet 5.5 at $2, $10, $2.50 and $0.10.
 `AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
