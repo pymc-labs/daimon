@@ -330,3 +330,30 @@ Gemini F1 maps bash, read, edit, grep, glob and write through its native
 `code_execution` tool. Native scripted records exercise each route in normalized
 replay; missing calls fail. The complete default remains typed PENDING for binary
 skill deployment and authenticated MCP/session adapters.
+### Offline Anthropic C01–C18 registration
+
+The test adapter in `tests/drivers/anthropic/conformance_adapter.py` explicitly
+registers `anthropic.offline` with the shared conformance `Registry`. It creates
+fresh, unmodified `AnthropicManagedAgents` drivers using the real Anthropic SDK
+and `daimon.testing.ma_transport.ScriptedTransport`. The adapter stays in the
+test tree so production mux does not depend on `daimon.testing`. It does not
+load credentials, discover providers or fall back to a network transport.
+
+From the workspace root, run the whole matrix with:
+
+```sh
+uv run python packages/mux/tests/drivers/anthropic/conformance_adapter.py
+uv run pytest -q packages/mux/tests/drivers/anthropic/test_conformance.py
+```
+
+The JSON report includes every C01–C18 result and typed reasons for PENDING
+entries. C15 (migration refusal) and C16 (extension/raw-handle isolation) pass
+through the actual SDK. The other sixteen remain PENDING: host attribution,
+continuity, operation/journal/lease recovery, root occupancy, usage corrections,
+preparation, deployment, billing, binding adoption, selection, wake fencing and
+outcome persistence are not bridged; hard session deletion is unavailable.
+C10 specifically assumes `memory_stores` must be refused, while Anthropic's real
+profile declares it native. The adapter preserves that profile and reports the
+missing provider-appropriate scenario. Native cancellation and foreign-scope
+checks have separate regression proofs; they do not promote a partial scenario
+to a matrix pass. This report is partial evidence, not an all-pass certificate.
