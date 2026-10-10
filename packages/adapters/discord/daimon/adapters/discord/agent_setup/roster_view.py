@@ -29,7 +29,7 @@ from daimon.adapters.discord.agent_setup.hydrate import (
     load_details_for,
 )
 from daimon.adapters.discord.agent_setup.navigation import STALE_PANEL_MESSAGE, PanelViewBase
-from daimon.adapters.discord.agent_setup.state import PanelState, WebhookBlock
+from daimon.adapters.discord.agent_setup.state import DenyingRole, PanelState, WebhookBlock
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -148,17 +148,26 @@ def _thread_line(state: PanelState) -> str | None:
     return f"-# In this thread **{responder}** answers while setting up **{context.target_name}**"
 
 
-def _denied_by(block: WebhookBlock) -> str:
-    """Who the channel's overwrite denies, as the subject of the note's sentence."""
+def _role_label(role: DenyingRole) -> str:
+    if role.name is None:
+        return f"a role (id {role.id})"
+    return f"the '{role.name}' role"
+
+
+def _denial(block: WebhookBlock) -> str:
+    """Which overwrite denies the permission, as the reason in the note's sentence."""
     if block.denied_by == "@everyone":
-        return "@everyone is"
+        return "@everyone is denied Manage Webhooks there"
     if block.denied_by == "member":
-        return "Daimon is"
-    first = f"the '{block.role_names[0]}' role"
-    others = len(block.role_names) - 1
+        return "Daimon's own permissions deny Manage Webhooks there"
+    first = _role_label(block.roles[0])
+    others = len(block.roles) - 1
     if others == 0:
-        return f"{first} is"
-    return f"{first} and {others} other role{'s' if others > 1 else ''} are"
+        return f"{first} is denied Manage Webhooks there"
+    return (
+        f"{first} and {others} other role{'s' if others > 1 else ''} "
+        "are denied Manage Webhooks there"
+    )
 
 
 def _webhook_fix_line(state: PanelState) -> str | None:
@@ -176,8 +185,9 @@ def _webhook_fix_line(state: PanelState) -> str | None:
     if not state.webhook_blocks:
         return None
     lines = [
-        f"In #{block.channel_name} agents answer as Daimon because {_denied_by(block)} "
-        "denied Manage Webhooks there. Allow it for Daimon in that channel's permissions."
+        f"In #{block.channel_name} Daimon can't manage webhooks because {_denial(block)}, "
+        "so new agent posts there may show as Daimon. "
+        "Allow it for Daimon in that channel's permissions."
         for block in state.webhook_blocks[:_WEBHOOK_BLOCK_LINES]
     ]
     hidden = len(state.webhook_blocks) - _WEBHOOK_BLOCK_LINES

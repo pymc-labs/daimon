@@ -109,9 +109,12 @@ default) posts with no override, so it keeps the app's own name and icon.
   effective permission in up to 10 channels: the one the panel was opened in
   (a thread's parent), channels with their own setting, then channels named
   by agent rules. Each channel whose overwrites deny Manage Webhooks gets a
-  line naming the overwrite to change: a role Daimon holds, `@everyone`, or
-  Daimon's own member entry. A role allow beats a role deny and a member
-  allow beats both, so those channels are left out. At most 5 channels are
+  line saying new agent posts there may show as Daimon (a webhook Daimon
+  already holds keeps posting), naming the overwrite to change: a role
+  Daimon holds, `@everyone`, or Daimon's own member entry. A role missing
+  from discord.py's cache is named by id. A role allow beats a role deny and
+  a member allow beats both, so those channels are left out, as are
+  channels Daimon can't see. At most 5 channels are
   listed, then a count of the rest. The lines share one text block, so the
   panel's component count is unchanged. The check reads discord.py's cache
   and makes no API call. Members don't see it, and nothing is posted in

@@ -20,7 +20,12 @@ from daimon.adapters.discord.agent_setup.scope_default import (
     list_guild_propagations,
     resolve_account_display,
 )
-from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext, WebhookBlock
+from daimon.adapters.discord.agent_setup.state import (
+    DenyingRole,
+    PanelState,
+    ThreadContext,
+    WebhookBlock,
+)
 from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
@@ -154,6 +159,11 @@ def _webhook_channel(
     return None
 
 
+def _role_position(guild: discord.Guild, role_id: int) -> int:
+    role = guild.get_role(role_id)
+    return role.position if role is not None else -1
+
+
 def _webhook_denial(
     channel: discord.TextChannel | discord.ForumChannel, me: discord.Member
 ) -> WebhookBlock | None:
@@ -162,22 +172,35 @@ def _webhook_denial(
     Discord applies @everyone, then every role's denies, then every role's
     allows, then the member entry, so a role allow beats a role deny and a
     member allow beats everything. None when no overwrite explains the loss.
+
+    Roles are read from the member's raw role ids, as `permissions_for` reads
+    them: `me.roles` drops a role missing from the cache, but its overwrite
+    still applies.
     """
     member = channel.overwrites_for(me).manage_webhooks
     if member is not None:
         return None if member else WebhookBlock(channel_name=channel.name, denied_by="member")
-    roles = sorted(
-        (role for role in me.roles if not role.is_default()),
-        key=lambda role: role.position,
+    guild = channel.guild
+    role_ids = [rid for rid in me._roles if rid != guild.id]  # pyright: ignore[reportPrivateUsage]  # no public raw-id path
+    settings = [
+        (rid, guild.get_role(rid), channel.overwrites_for(discord.Object(rid)).manage_webhooks)
+        for rid in role_ids
+    ]
+    if any(allowed for _, _, allowed in settings):
+        return None
+    # Highest cached role first; a role missing from the cache sorts last.
+    denying = sorted(
+        (
+            DenyingRole(id=rid, name=role.name if role is not None else None)
+            for rid, role, allowed in settings
+            if allowed is False
+        ),
+        key=lambda denied: _role_position(guild, denied.id),
         reverse=True,
     )
-    settings = [(role, channel.overwrites_for(role).manage_webhooks) for role in roles]
-    if any(allowed for _, allowed in settings):
-        return None
-    denying = tuple(role.name for role, allowed in settings if allowed is False)
     if denying:
-        return WebhookBlock(channel_name=channel.name, denied_by="roles", role_names=denying)
-    if channel.overwrites_for(channel.guild.default_role).manage_webhooks is False:
+        return WebhookBlock(channel_name=channel.name, denied_by="roles", roles=tuple(denying))
+    if channel.overwrites_for(guild.default_role).manage_webhooks is False:
         return WebhookBlock(channel_name=channel.name, denied_by="@everyone")
     return None
 
@@ -187,6 +210,8 @@ def webhook_blocks(guild: discord.Guild, channel_ids: Sequence[str]) -> tuple[We
 
     `permissions_for` reads the cached overwrites, so this makes no API call.
     A channel Daimon cannot see is left out: agents don't answer there at all.
+    A cached webhook can still post after the permission is denied, so a block
+    means new agent posts there may fall back, not that every one does.
     """
     me = guild.me
     channels: dict[int, discord.TextChannel | discord.ForumChannel] = {}

@@ -24,7 +24,12 @@ from daimon.adapters.discord.agent_setup.navigation import (
     STALE_PANEL_MESSAGE,
 )
 from daimon.adapters.discord.agent_setup.roster_view import RosterView, roster_rows
-from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext, WebhookBlock
+from daimon.adapters.discord.agent_setup.state import (
+    DenyingRole,
+    PanelState,
+    ThreadContext,
+    WebhookBlock,
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.config import Settings
@@ -444,22 +449,36 @@ def test_a_channel_block_names_the_channel_and_the_denying_role() -> None:
     state = _state(agents=(answering,), answering=answering, is_admin=True)
     state.webhook_blocks = (
         WebhookBlock(
-            channel_name="insighta-client", denied_by="roles", role_names=("insighta client",)
+            channel_name="insighta-client",
+            denied_by="roles",
+            roles=(DenyingRole(id=1, name="insighta client"),),
         ),
         WebhookBlock(channel_name="general", denied_by="@everyone"),
         WebhookBlock(channel_name="ops", denied_by="member"),
-        WebhookBlock(channel_name="sales", denied_by="roles", role_names=("a", "b", "c")),
+        WebhookBlock(
+            channel_name="sales",
+            denied_by="roles",
+            roles=tuple(DenyingRole(id=index, name=name) for index, name in enumerate("abc")),
+        ),
+        WebhookBlock(
+            channel_name="lab", denied_by="roles", roles=(DenyingRole(id=2999, name=None),)
+        ),
     )
 
     text = _text(RosterView(state, runtime=MagicMock(), allowed_user_id=42))
 
     assert (
-        "In #insighta-client agents answer as Daimon because the 'insighta client' role is "
-        "denied Manage Webhooks there. Allow it for Daimon in that channel's permissions."
+        "In #insighta-client Daimon can't manage webhooks because the 'insighta client' role "
+        "is denied Manage Webhooks there, so new agent posts there may show as Daimon. "
+        "Allow it for Daimon in that channel's permissions."
     ) in text
-    assert "In #general agents answer as Daimon because @everyone is denied" in text
-    assert "In #ops agents answer as Daimon because Daimon is denied" in text
+    assert "In #general Daimon can't manage webhooks because @everyone is denied" in text
+    assert "In #ops Daimon can't manage webhooks because Daimon's own permissions deny" in text
     assert "because the 'a' role and 2 other roles are denied" in text
+    assert "In #lab Daimon can't manage webhooks because a role (id 2999) is denied" in text
+    assert "agents answer as Daimon" not in text, (
+        "a cached webhook keeps posting after the deny, so the note claims only new posts"
+    )
     assert "Re-authorize" not in text, "the server grants the permission, so no link"
 
 

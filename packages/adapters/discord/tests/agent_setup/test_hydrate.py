@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord import post_transport
 from daimon.adapters.discord.agent_setup.hydrate import (
     BOT_INSTALL_PERMISSIONS,
     WEBHOOK_CHECK_LIMIT,
@@ -19,7 +20,7 @@ from daimon.adapters.discord.agent_setup.hydrate import (
     webhook_blocks,
     webhook_fix_url,
 )
-from daimon.adapters.discord.agent_setup.state import PanelState, WebhookBlock
+from daimon.adapters.discord.agent_setup.state import DenyingRole, PanelState, WebhookBlock
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.config import Settings
@@ -194,12 +195,14 @@ def _role(role_id: int, name: str, *, position: int, permissions: int = 0) -> di
     }
 
 
-def _overwrite(target: int, *, allow: bool, member: bool = False) -> dict[str, Any]:
+def _overwrite(
+    target: int, *, allow: bool, member: bool = False, permissions: str = WEBHOOKS
+) -> dict[str, Any]:
     return {
         "id": str(target),
         "type": 1 if member else 0,
-        "allow": WEBHOOKS if allow else "0",
-        "deny": "0" if allow else WEBHOOKS,
+        "allow": permissions if allow else "0",
+        "deny": "0" if allow else permissions,
     }
 
 
@@ -238,8 +241,12 @@ def _guild(
     *channels: dict[str, Any],
     server_grant: bool = True,
     threads: tuple[dict[str, Any], ...] = (),
+    uncached_role_ids: tuple[int, ...] = (),
 ) -> discord.Guild:
-    """A cached guild where Daimon holds the 'insighta client' and 'Daimon' roles."""
+    """A cached guild where Daimon holds the 'insighta client' and 'Daimon' roles.
+
+    `uncached_role_ids` are roles Daimon holds that the guild's role cache lacks.
+    """
     state = MagicMock()
     state.self_id = BOT_ID
     state.user.id = BOT_ID
@@ -271,7 +278,11 @@ def _guild(
                             "avatar": None,
                             "bot": True,
                         },
-                        "roles": [str(CLIENT_ROLE_ID), str(BOT_ROLE_ID)],
+                        "roles": [
+                            str(CLIENT_ROLE_ID),
+                            str(BOT_ROLE_ID),
+                            *(str(rid) for rid in uncached_role_ids),
+                        ],
                         "joined_at": None,
                         "deaf": False,
                         "mute": False,
@@ -302,7 +313,9 @@ def test_a_role_overwrite_that_denies_webhooks_names_the_channel_and_role() -> N
 
     assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
         WebhookBlock(
-            channel_name="insighta-client", denied_by="roles", role_names=("insighta client",)
+            channel_name="insighta-client",
+            denied_by="roles",
+            roles=(DenyingRole(id=CLIENT_ROLE_ID, name="insighta client"),),
         ),
     ), "the server grant is undone by the 'insighta client' role's deny in that channel"
 
@@ -347,6 +360,70 @@ def test_an_overriding_allow_leaves_the_channel_out(
     guild = _guild(_channel(CHANNEL_ID, "general", *overwrites))
 
     assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (), reason
+
+
+def test_a_member_deny_beats_a_role_allow() -> None:
+    guild = _guild(
+        _channel(
+            CHANNEL_ID,
+            "general",
+            _overwrite(BOT_ROLE_ID, allow=True),
+            _overwrite(BOT_ID, allow=False, member=True),
+        )
+    )
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
+        WebhookBlock(channel_name="general", denied_by="member"),
+    ), "the member entry is applied last, so its deny wins over any role allow"
+
+
+def test_a_role_missing_from_the_cache_is_named_by_id() -> None:
+    uncached = 2999
+    guild = _guild(
+        _channel(CHANNEL_ID, "general", _overwrite(uncached, allow=False)),
+        uncached_role_ids=(uncached,),
+    )
+    assert guild.get_role(uncached) is None and guild.me.roles == [
+        guild.default_role,
+        guild.get_role(BOT_ROLE_ID),
+        guild.get_role(CLIENT_ROLE_ID),
+    ], "the role is held but not cached, so `me.roles` drops it"
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
+        WebhookBlock(
+            channel_name="general", denied_by="roles", roles=(DenyingRole(id=uncached, name=None),)
+        ),
+    ), "permissions_for applies the uncached role's deny, so the note must name it"
+
+
+def test_a_channel_daimon_cannot_see_is_left_out() -> None:
+    hidden = str(discord.Permissions(view_channel=True).value)
+    guild = _guild(
+        _channel(
+            CHANNEL_ID,
+            "private",
+            _overwrite(GUILD_ID, allow=False, permissions=hidden),
+            _overwrite(CLIENT_ROLE_ID, allow=False),
+        )
+    )
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (), (
+        "agents don't answer where Daimon can't read"
+    )
+
+
+def test_a_cached_webhook_does_not_hide_the_denied_permission() -> None:
+    guild = _guild(_channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
+    post_transport._webhooks[CHANNEL_ID] = {77: MagicMock(spec=discord.Webhook)}  # pyright: ignore[reportPrivateUsage]
+    try:
+        blocks = webhook_blocks(guild, [str(CHANNEL_ID)])
+    finally:
+        post_transport._webhooks.pop(CHANNEL_ID, None)  # pyright: ignore[reportPrivateUsage]
+
+    assert [block.channel_name for block in blocks] == ["insighta-client"], (
+        "the cached webhook still posts, but a restart or a new channel webhook cannot be "
+        "found or created, so the permission fact is reported either way"
+    )
 
 
 def test_a_thread_is_checked_through_its_parent_channel() -> None:
@@ -430,7 +507,9 @@ async def test_an_admin_panel_in_a_thread_reports_the_parents_blocking_overwrite
     assert state.webhook_fix_url is None, "the server grants Manage Webhooks"
     assert state.webhook_blocks == (
         WebhookBlock(
-            channel_name="insighta-client", denied_by="roles", role_names=("insighta client",)
+            channel_name="insighta-client",
+            denied_by="roles",
+            roles=(DenyingRole(id=CLIENT_ROLE_ID, name="insighta client"),),
         ),
     ), "the panel opened in a thread checks the parent channel"
 

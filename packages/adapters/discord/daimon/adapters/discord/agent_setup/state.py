@@ -50,17 +50,29 @@ class ThreadContext:
 
 
 @dataclasses.dataclass(frozen=True)
+class DenyingRole:
+    """A role Daimon holds whose channel overwrite denies Manage Webhooks.
+
+    `name` is None when the role is missing from discord.py's cache; the
+    overwrite still applies, so the role is named by id instead.
+    """
+
+    id: int
+    name: str | None
+
+
+@dataclasses.dataclass(frozen=True)
 class WebhookBlock:
-    """One channel whose own permissions keep agents answering as Daimon.
+    """One channel whose own permissions deny Daimon Manage Webhooks.
 
     The server grants Manage Webhooks but an overwrite in this channel takes
     it away. `denied_by` is the overwrite to change: "@everyone", "member"
-    (Daimon's own entry) or "roles", with `role_names` highest role first.
+    (Daimon's own entry) or "roles", with `roles` highest cached role first.
     """
 
     channel_name: str
     denied_by: Literal["@everyone", "roles", "member"]
-    role_names: tuple[str, ...] = ()
+    roles: tuple[DenyingRole, ...] = ()
 
 
 @dataclasses.dataclass
