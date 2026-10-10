@@ -16166,6 +16166,15 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/test_shared_threads.py",
+      "line": 25,
+      "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
+      "names": [
+        "BetaManagedAgentsSpanModelRequestEndEvent"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/test_smoke.py",
       "line": 24,
       "module": "anthropic",
