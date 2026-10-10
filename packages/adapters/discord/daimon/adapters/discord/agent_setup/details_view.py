@@ -429,7 +429,10 @@ class DetailsView(PanelViewBase):
         self.add_item(container)
 
     async def _on_github_repos(self, interaction: discord.Interaction) -> None:
-        from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
+        from daimon.adapters.discord.agent_setup.github_repos import (
+            GitHubReposView,
+            mint_agent_connect_url,
+        )
         from daimon.core.github_panel import GrantsPanel, load_grants_panel
         from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 
@@ -453,6 +456,12 @@ class DetailsView(PanelViewBase):
             panel = await load_grants_panel(
                 session, tenant_id=tenant_id, agent_id=agent_id, agent_name=self.agent.name
             )
+        try:
+            connect_url = await mint_agent_connect_url(
+                interaction, runtime=self.runtime, state=self.state, agent=self.agent
+            )
+        except ValueError:
+            connect_url = None
         await self.swap_to(
             interaction,
             GitHubReposView(
@@ -461,6 +470,7 @@ class DetailsView(PanelViewBase):
                 allowed_user_id=self.allowed_user_id,
                 agent=self.agent,
                 panel=panel,
+                connect_url=connect_url,
             ),
         )
 

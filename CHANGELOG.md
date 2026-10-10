@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Staging QA records deployment images and restart evidence, keeps deploy-interrupted runs silent and PENDING, and retries once after workers settle within the pass budget.
+- GitHub setup sections on Discord, Slack, and Teams show repos and the working repo without grant-editing controls. Ask the agent in chat to change repos; Connect GitHub remains available.
+
 - Plain words and spaced text for feedback, help, billing, memory, routines, and wizard panels across Discord, Slack, and Teams.
 - Add bounded unauthenticated HTTP checks without Discord setup or model spend.
 - QA CLI readback passes validated argv, bounds UTF-8 bytes, and keeps unavailable hooks or malformed resolved expectations PENDING without stopping other checks.

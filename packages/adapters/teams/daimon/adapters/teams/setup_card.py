@@ -20,6 +20,7 @@ from daimon.core.agent_detail_lists import (
 )
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
+from daimon.core.github_panel import GrantsPanel
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -211,6 +212,7 @@ def details_card(
     here: str,
     page: int,
     coding_tools: bool,
+    github_panel: GrantsPanel | None = None,
     expanded: DetailListName | None = None,
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here."""
@@ -230,6 +232,16 @@ def details_card(
         repo = normalize_owner_repo(details.repo.repo_url)
         body.append(_text(f"**Repository:** {repo} ({state.replace('_', ' ')})"))
         body.append(_text(f"**Branch:** `{details.repo.default_branch}`"))
+    if github_panel is not None:
+        repos = [repo.full_name for repo in github_panel.repos if repo.live_ceiling is not None]
+        lines = [f"**{details.name}'s repos**", *(repos or ["No repos"])]
+        lines.append(
+            f"Working repo: {github_panel.working_repo}"
+            if github_panel.working_repo
+            else "No working repo"
+        )
+        lines.append(f"To change repos, ask {details.name} in chat.")
+        body.append(_text("\n".join(lines)))
     body += _detail_lists(details, page=page, expanded=expanded)
     actions: list[Action] = []
     if not details.daimon_managed:

@@ -1328,14 +1328,13 @@ admission before any of this runs.
   `/oauth/github/confirm`. The browser flow checks the confirming person's
   GitHub admin access before authorizing tenant repositories. These routes
   are absent when GitHub connection is unconfigured.
-  Discord `/github home` and Slack `/github`, plus `/agent-setup` on both,
-  list each agent with its repo count and an **Add repos** button, plus
-  personal links and waiting requests. An agent's GitHub section ("<Agent>'s
-  repos") lists its repos, says who can use them, and offers **Add repos**,
-  **Remove from <Agent>** and **Details** (who added each repo, when, and its
-  access). **Add repos** sends whoever manages the agent a link for that
-  agent; anyone else is told to ask whoever manages it. The shared words live
-  in `daimon.core.github_connect_cards`.
+  Discord `/github home` and Slack `/github`, plus agent setup on Discord,
+  Slack, and Teams, show GitHub repositories without grant controls. Each agent's
+  section lists one repo per line, names its working repo (or says there is none),
+  and directs changes to the setup conversation. Server-admin GitHub home screens
+  list agents and repo counts without grant controls. The Connect GitHub browser
+  link remains available; `github_connect` and `set_working_repo` in the setup
+  conversation make grant and working-repo changes.
   Connect links appear as buttons where the person asked. Discord slash
   commands answer ephemerally; a conversational mention posts a requester-bound
   button in the thread and mints the single-use invitation only when that

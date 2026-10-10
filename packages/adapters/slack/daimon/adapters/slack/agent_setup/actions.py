@@ -55,7 +55,7 @@ import contextlib
 import dataclasses
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import aiohttp
@@ -67,13 +67,10 @@ from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
 )
-from daimon.adapters.slack.agent_setup import github_add_repos as github_add_repos_view
+from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup import (
-    github_manage,
-    github_waiting,
     panel_views,
 )
-from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
     load_environment_picker,
@@ -137,8 +134,12 @@ from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
-from daimon.core.github_connect_cards import resolve_connect_card
-from daimon.core.github_panel import connect_link, pending_connect_link, safe_github_error
+from daimon.core.github_panel import (
+    connect_link,
+    pending_connect_link,
+    safe_github_error,
+    sync_connect_admin,
+)
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
@@ -147,18 +148,16 @@ from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.accounts import get_account
 from daimon.core.stores.channel_admins import (
     get_channel_admins,
     list_administered_channel_ids,
     list_channel_admins,
 )
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access_requests import list_asker_requests
 from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.github_links import account_link_status
-from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -443,33 +442,11 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_EXPAND_CONNECTIONS,
         panel_views.ACTION_NEW,
         panel_views.ACTION_GITHUB_CONNECT,
-        panel_views.ACTION_GITHUB_START,
-        panel_views.ACTION_GITHUB_CHOOSE_AGENT,
         panel_views.ACTION_GITHUB_BACK,
-        panel_views.ACTION_GITHUB_MANAGE,
         panel_views.ACTION_GITHUB_PERSONAL_LINK,
-        panel_views.ACTION_GITHUB_UNLINK,
-        panel_views.ACTION_GITHUB_UNLINK_CONFIRM,
-        panel_views.ACTION_GITHUB_UNLINK_BACK,
-        *github_manage.ACTIONS,
-        *github_waiting.ACTIONS,
         github_repos_view.ACTION_OPEN,
-        github_repos_view.ACTION_SELECT,
-        github_repos_view.ACTION_STAGE,
-        github_repos_view.ACTION_REMOVE,
-        github_repos_view.ACTION_ACTIVATE,
-        github_repos_view.ACTION_DEACTIVATE,
-        github_repos_view.ACTION_PREVIOUS,
-        github_repos_view.ACTION_NEXT,
-        github_repos_view.ACTION_CONFIRM_REMOVE,
-        github_repos_view.ACTION_CONFIRM_TURN_OFF,
-        github_repos_view.ACTION_CANCEL_CONFIRM,
-        github_repos_view.ACTION_ADD_OPEN,
-        github_repos_view.ACTION_ADD_FOR,
         github_repos_view.ACTION_BACK,
-        github_repos_view.ACTION_SETTINGS,
-        github_repos_view.ACTION_SETTINGS_CHOICE,
-        *github_add_repos_view.ACTIONS,
+        github_repos_view.ACTION_CONNECT_LINK,
         panel_views.ACTION_CODING_TOOLS,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_REVOKE_TOKEN,
@@ -862,28 +839,6 @@ async def _dispatch_panel_action(
         )
         return
 
-    if await github_manage.handle(
-        runtime,
-        client,
-        payload,
-        action=action,
-        meta=meta,
-        team_id=team_id,
-        user_id=user_id,
-    ):
-        return
-
-    if await github_waiting.handle(
-        runtime,
-        client,
-        payload,
-        action=action,
-        meta=meta,
-        team_id=team_id,
-        user_id=user_id,
-    ):
-        return
-
     if await handle_github_repos(
         runtime,
         client,
@@ -896,79 +851,48 @@ async def _dispatch_panel_action(
         return
 
     if action_id == panel_views.ACTION_GITHUB_PERSONAL_LINK:
-        root = runtime.settings.mcp.app_root_url
-        if root is None:
+        if not is_admin:
             await post_ephemeral(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="GitHub didn't answer. Try again in a minute.",
+                text="Ask a workspace admin to connect GitHub.",
             )
             return
-        async with runtime.sessionmaker.begin() as session:
-            principal = await get_or_create_platform_principal(
-                session, tenant_id=tenant_id, platform="slack", external_id=user_id
-            )
-            url = await mint_link(
-                session,
-                tenant_id=tenant_id,
-                account_id=principal.account_id,
-                platform="slack",
-                platform_user_id=user_id,
-                root_url=str(root),
-            )
-        card_text = "Link GitHub to your account."
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-            channel=meta.channel_id or user_id,
-            user=user_id,
-            text=card_text,
-            blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text": card_text}},
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "action_id": "github_personal__open",
-                            "text": {"type": "plain_text", "text": "Link GitHub"},
-                            "url": url,
-                        }
-                    ],
-                },
-            ],
-        )
-        return
-
-    if action_id in (
-        panel_views.ACTION_GITHUB_UNLINK,
-        panel_views.ACTION_GITHUB_UNLINK_CONFIRM,
-        panel_views.ACTION_GITHUB_UNLINK_BACK,
-    ):
-        from daimon.core.stores.github_links import unlink_verified_identity
-
-        if action_id == panel_views.ACTION_GITHUB_UNLINK_CONFIRM:
-            if meta.github_step != "personal_unlink":
-                return
+        try:
             async with runtime.sessionmaker.begin() as session:
-                principal = await get_or_create_platform_principal(
-                    session, tenant_id=tenant_id, platform="slack", external_id=user_id
-                )
-                await unlink_verified_identity(
+                await sync_connect_admin(
                     session,
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    account_id=principal.account_id,
+                    verified_tenant_admin=True,
                 )
-        if action_id == panel_views.ACTION_GITHUB_UNLINK:
-            next_meta = dataclasses.replace(meta, github_step="personal_unlink")
-            view = panel_views.build_github_home_view(next_meta)
-        else:
-            view = await github_home_view(
-                runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=is_admin
+                url = await connect_link(
+                    session,
+                    settings=runtime.settings,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    platform_user_id=user_id,
+                    verified_tenant_admin=True,
+                    origin_parent_channel_id=meta.channel_id or None,
+                    origin_thread_id=meta.thread_id,
+                )
+        except ValueError as error:
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=safe_github_error(error),
             )
-        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=view_id, view=view
+            return
+        await send_link(
+            client,
+            channel_id=meta.channel_id or user_id,
+            thread_id=meta.thread_id,
+            user_id=user_id,
+            url=url,
+            app_root_url=str(runtime.settings.mcp.app_root_url),
         )
         return
 
@@ -989,103 +913,12 @@ async def _dispatch_panel_action(
         )
         return
 
-    if action_id in (
-        panel_views.ACTION_GITHUB_CHOOSE_AGENT,
-        panel_views.ACTION_GITHUB_BACK,
-    ):
-        choose_allowed = await github_can_choose_agent(
-            runtime, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-        )
-        if action_id == panel_views.ACTION_GITHUB_CHOOSE_AGENT and not choose_allowed:
-            return
+    if action_id == panel_views.ACTION_GITHUB_BACK:
         roster_view = await load_agents_view(
             runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
         )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id, view=roster_view
-        )
-        return
-
-    if action_id == panel_views.ACTION_GITHUB_START:
-        if not is_admin:
-            return
-        async with runtime.sessionmaker() as session:
-            roster = await load_panel_roster(
-                session,
-                runtime.anthropic,
-                tenant_id=tenant_id,
-                channel_id=meta.channel_id or None,
-                thread_id=None,
-                default=runtime.deployment_default,
-                is_admin=is_admin,
-            )
-        agent = roster.answering or (roster.rows[0] if len(roster.rows) == 1 else None)
-        if agent is None and roster.rows:
-            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-                view_id=view_id,
-                view=await load_agents_view(
-                    runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
-                ),
-            )
-            return
-        team_data = cast("dict[str, Any]", payload.get("team") or {})
-        user_data = cast("dict[str, Any]", payload.get("user") or {})
-        try:
-            async with runtime.sessionmaker.begin() as session:
-                principal = await get_or_create_platform_principal(
-                    session, tenant_id=tenant_id, platform="slack", external_id=user_id
-                )
-                await set_role(session, principal.account_id, Role.ADMIN)
-                url = await connect_link(
-                    session,
-                    settings=runtime.settings,
-                    tenant_id=tenant_id,
-                    platform="slack",
-                    platform_user_id=user_id,
-                    verified_tenant_admin=True,
-                    workspace_label=str(team_data.get("name") or "") or None,
-                    requester_label=str(user_data.get("name") or "") or None,
-                    start_over=await github_pending_url(
-                        runtime, tenant_id=tenant_id, user_id=user_id
-                    )
-                    is not None,
-                    agent_id=(
-                        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
-                        if agent is not None
-                        else None
-                    ),
-                    agent_name=agent.name if agent is not None else None,
-                    origin_parent_channel_id=meta.channel_id or None,
-                    origin_thread_id=meta.thread_id,
-                    origin_followup_token=str(payload.get("response_url") or "") or None,
-                    origin_followup_expires_at=(
-                        datetime.now(UTC) + timedelta(minutes=30)
-                        if payload.get("response_url")
-                        else None
-                    ),
-                )
-        except ValueError as error:
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text=safe_github_error(error),
-            )
-            return
-        await send_link(
-            client,
-            channel_id=meta.channel_id or user_id,
-            thread_id=meta.thread_id,
-            user_id=user_id,
-            url=url,
-            card=await resolve_connect_card(
-                runtime.sessionmaker,
-                runtime.settings,
-                tenant_id=tenant_id,
-                platform="slack",
-                workspace_id=meta.team_id,
-                agent_name=agent.name if agent is not None else None,
-            ),
         )
         return
 

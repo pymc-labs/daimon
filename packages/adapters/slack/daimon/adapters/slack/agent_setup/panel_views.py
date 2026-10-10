@@ -44,7 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
-from daimon.core.github_connect_cards import ADD_REPOS_LABEL, repo_count
+from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
@@ -131,18 +131,10 @@ ACTION_EXPAND_SKILLS: Final = "agent_setup__expand:skills"
 ACTION_EXPAND_CONNECTIONS: Final = "agent_setup__expand:connections"
 ACTION_NEW: Final = "agent_setup__new"
 ACTION_GITHUB_CONNECT: Final = "agent_setup__github_connect"
-ACTION_GITHUB_START: Final = "agent_setup__github_start"
-ACTION_GITHUB_CHOOSE_AGENT: Final = "agent_setup__github_choose_agent"
 ACTION_GITHUB_BACK: Final = "agent_setup__github_step_back"
-ACTION_GITHUB_MANAGE: Final = "agent_setup__github_manage"
 ACTION_GITHUB_REPOS: Final = "agent_setup__github_repos"
 ACTION_GITHUB_PERSONAL_LINK: Final = "agent_setup__github_personal_link"
-ACTION_GITHUB_UNLINK: Final = "agent_setup__github_unlink"
-ACTION_GITHUB_UNLINK_CONFIRM: Final = "agent_setup__github_unlink_confirm"
-ACTION_GITHUB_UNLINK_BACK: Final = "agent_setup__github_unlink_back"
-ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"
-ACTION_GITHUB_ADD_FOR: Final = "agent_setup__github_add_for"
-"""[Add repos] beside one agent on the GitHub home; the value is the agent name."""
+ACTION_GITHUB_WAITING: Final = "agent_setup__github_waiting_open"  # stale panel only
 GITHUB_HOME_AGENT_LIMIT: Final = 20
 
 
@@ -154,34 +146,13 @@ def build_github_home_view(
     can_choose_agent: bool = False,
     own_waiting_count: int = 0,
 ) -> dict[str, Any]:
-    """Every agent with how many repos it has, each with its own [Add repos]."""
-    if meta.github_step == "personal_unlink":
-        return finish_modal(
-            title="GitHub",
-            blocks=[
-                _section("Unlink GitHub from your account?"),
-                {
-                    "type": "actions",
-                    "elements": [
-                        _button(action_id=ACTION_GITHUB_UNLINK_CONFIRM, label="Unlink"),
-                        _button(action_id=ACTION_GITHUB_UNLINK_BACK, label="◀ Back"),
-                    ],
-                },
-            ],
-            private_metadata=encode_panel_metadata(meta.with_view("github_home")),
-            callback_id="agent_setup__github_home",
-        )
+    """Read-only list of agents and their repository counts."""
     blocks: list[dict[str, Any]] = [
         _section("Each agent uses its own repos." if agent_counts else "No agents here yet.")
     ]
     for name, count in agent_counts[:GITHUB_HOME_AGENT_LIMIT]:
         line = f"{name}: {repo_count(count)}" if count else f"{name}: no repos yet"
-        row = _section(line)
-        if can_choose_agent:
-            row["accessory"] = _button(
-                action_id=ACTION_GITHUB_ADD_FOR, label=ADD_REPOS_LABEL, value=name
-            )
-        blocks.append(row)
+        blocks.append(_section(line))
     if len(agent_counts) > GITHUB_HOME_AGENT_LIMIT:
         blocks.append(
             {
@@ -207,22 +178,11 @@ def build_github_home_view(
     actions: list[dict[str, Any]] = [
         _button(
             action_id=ACTION_GITHUB_PERSONAL_LINK,
-            label="Use another account" if linked_login else "Link GitHub",
+            label="Connect GitHub",
         )
     ]
-    if linked_login:
-        actions.append(_button(action_id=ACTION_GITHUB_UNLINK, label="Unlink"))
-    if len(agent_counts) > GITHUB_HOME_AGENT_LIMIT and can_choose_agent:
-        actions.append(_button(action_id=ACTION_GITHUB_CHOOSE_AGENT, label="Choose agent"))
     actions.append(_button(action_id=ACTION_GITHUB_BACK, label="◀ Back"))
     blocks.append({"type": "actions", "elements": actions})
-    if can_choose_agent or own_waiting_count:
-        blocks.append(
-            {
-                "type": "actions",
-                "elements": [_button(action_id=ACTION_GITHUB_WAITING, label="Requests waiting")],
-            }
-        )
     return finish_modal(
         title="GitHub",
         blocks=blocks,
