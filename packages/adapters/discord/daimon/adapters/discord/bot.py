@@ -2853,7 +2853,7 @@ class DaimonBot(commands.Bot):
                     cancel=cancel_event,
                     turn_id=turn_card_intent.id,
                 ),
-                adopt_message_ref=lifecycle.message_ref,
+                adopt_message_ref=lifecycle.release_message_ref(),
                 unprompted=False,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_card_intent.id
@@ -3803,7 +3803,7 @@ class DaimonBot(commands.Bot):
                 # Take over the failed attempt's message so its upstream-error
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
-                adopt_message_ref=lifecycle.message_ref,
+                adopt_message_ref=lifecycle.release_message_ref(),
                 unprompted=unprompted,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_card_intent.id

@@ -235,7 +235,9 @@ final embeds and removes its Stop button while preserving text and attachments.
 Completed progress tasks do not wait for a terminal hook that an outer exception
 may bypass; the bot's outer error boundary finishes the card through the same
 lifecycle. Repairs edit the existing card without another answer post, and long
-answers keep their summary on the last chunk.
+answers keep their summary on the last chunk. Failure delivery persists sealed
+answer text from the final render window before editing the error card. Once a
+recovered turn adopts the card, the previous lifecycle stops deferred repairs.
 
 A Discord Unknown Message (10008) while editing a turn card posts a fresh
 message if the answer has not arrived yet. Once an answer is delivered, a

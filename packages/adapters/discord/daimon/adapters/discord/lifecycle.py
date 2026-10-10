@@ -272,6 +272,11 @@ class DiscordTurnLifecycle:
         """
         return self._message_ref
 
+    def release_message_ref(self) -> discord.Message | None:
+        """Give recovery the card, retiring this lifecycle's deferred repairs."""
+        self._card_message_ref = None
+        return self._message_ref
+
     async def post_initial(self) -> None:
         """Post the initial thinking embed immediately, before the turn starts.
 
@@ -347,7 +352,7 @@ class DiscordTurnLifecycle:
         recover_missing: bool = True,
         missing_is_error: bool = False,
         **kwargs: Any,  # noqa: ANN401
-    ) -> None:
+    ) -> bool:
         assert message is not None
         if self._terminal and not progress and message is self._card_message_ref:
             if "embeds" in kwargs:
@@ -362,11 +367,11 @@ class DiscordTurnLifecycle:
             if not recover_missing or (progress and self._terminal):
                 if missing_is_error:
                     raise
-                return
+                return False
             delivered = self._revealed_first_chunk is not None or self._summary_ref is not None
             log.info("turn.message_missing", message_id=str(message.id), delivered=delivered)
             if delivered:
-                return  # a stale edit must not turn a delivered answer into an error
+                return False  # a stale edit must not turn a delivered answer into an error
             send_kwargs = dict(kwargs)
             attachments = send_kwargs.pop("attachments", None)
             if attachments:
@@ -380,7 +385,7 @@ class DiscordTurnLifecycle:
             self._message_ref = replacement
             if self._on_replacement is not None:
                 await self._on_replacement(replacement)
-            return
+            return True
         edited_at = getattr(replacement, "edited_at", None)
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
@@ -388,6 +393,7 @@ class DiscordTurnLifecycle:
             self._message_ref = replacement
             if self._on_replacement is not None:
                 await self._on_replacement(replacement)
+        return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, tool lines and the latest draft."""
@@ -442,9 +448,10 @@ class DiscordTurnLifecycle:
             task.exception()
 
     async def _edit_progress(self, message: discord.Message, embeds: list[discord.Embed]) -> None:
+        landed = False
         try:
             if not self._terminal:
-                await self._edit_message(
+                landed = await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
         except Exception:
@@ -457,7 +464,7 @@ class DiscordTurnLifecycle:
             last_edit = not self._progress_edits
             if last_edit:
                 self._progress_settled.set()
-            if self._terminal:
+            if landed and self._terminal and self._terminal_card_embeds is not None:
                 self._progress_reassert_needed = True
                 self._queue_terminal_reassert()
                 if last_edit and self._terminal_reassert_task is not None:
@@ -468,7 +475,8 @@ class DiscordTurnLifecycle:
         # an outer exception may bypass it. Either completion can enqueue the
         # repair once BOTH terminal delivery and every progress edit settle.
         if (
-            self._terminal_delivered.is_set()
+            self._card_message_ref is not None
+            and self._terminal_delivered.is_set()
             and not self._progress_edits
             and self._progress_reassert_needed
             and self._terminal_card_embeds is not None
@@ -479,6 +487,8 @@ class DiscordTurnLifecycle:
             )
 
     async def _reassert_terminal_card(self) -> None:
+        if self._card_message_ref is None:
+            return
         try:
             await self._edit_message(
                 self._card_message_ref,
@@ -838,6 +848,7 @@ class DiscordTurnLifecycle:
             self._queue_terminal_reassert()
 
     async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
+        await self._persist_sealed_responses(state)
         self._state = update_activity(self._state, state)
         if (limit := spend_limit_error(err)) is not None:
             log.error(

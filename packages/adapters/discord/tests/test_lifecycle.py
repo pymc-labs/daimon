@@ -51,7 +51,9 @@ _SENTINEL_REF = object()  # opaque message reference
 
 
 @pytest.mark.parametrize("extra_render", [False, True])
-@pytest.mark.parametrize("ending", ["answer", "long_answer", "stopped", "failure", "external"])
+@pytest.mark.parametrize(
+    "ending", ["answer", "long_answer", "stopped", "failure", "external", "recovered"]
+)
 async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
     monkeypatch: pytest.MonkeyPatch, extra_render: bool, ending: str
 ) -> None:
@@ -110,12 +112,21 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
         state = TurnState(termination=TerminationReason.INTERRUPTED)
     await lc.on_render(state)  # guarded final render must not start another edit
     assert progress_count == (2 if extra_render else 1)
-    if ending == "failure":
+    if ending in {"failure", "recovered"}:
         await asyncio.wait_for(lc.on_terminal_failure(state, RuntimeError("failed")), 1)
     elif ending == "external":
         await asyncio.wait_for(lc.end_card("Outer turn failure"), 1)
     else:
         await asyncio.wait_for(lc.on_terminal_success(state), 1)
+    if ending == "recovered":
+        successor = DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            agent_name="test",
+            model_id="m",
+            adopt_message_ref=lc.release_message_ref(),
+        )
+        assert successor.message_ref is _SENTINEL_REF
     final_embeds = current.get("embeds", [])
     if "embed" in current:
         final_embeds = [current["embed"]] if current["embed"] else []
@@ -129,11 +140,63 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
     await asyncio.wait_for(asyncio.gather(*pending), 1)
     if lc._terminal_reassert_task is not None:
         await asyncio.wait_for(lc._terminal_reassert_task, 1)
+    if ending == "recovered":
+        assert lc._terminal_reassert_task is None, "old lifecycle must not repaint the adopted card"
+        await successor.on_terminal_success(_make_success_state("Recovered answer"))
+        assert current.get("content") == "Recovered answer"
+        assert len(sends) == post_count
+        return
     assert current["embeds"] == final_embeds
     assert current["view"] is None
     assert current.get("content") == final_content
     assert len(sends) == post_count
     assert not lc._progress_edits
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_progress_settled_before_terminal_or_missing_needs_no_repair(
+    missing: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
+    started, release = asyncio.Event(), asyncio.Event()
+    edit_count = 0
+
+    async def send(**kwargs: Any) -> object:
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        nonlocal edit_count
+        edit_count += 1
+        if edit_count == 1:
+            started.set()
+            await release.wait()
+            if missing:
+                raise discord.NotFound(
+                    types.SimpleNamespace(status=404, reason="Not Found"),
+                    {"code": 10008, "message": "Unknown Message"},
+                )
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await lc.post_initial()
+    lc._last_flush = time.monotonic() - 11
+    tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
+    await asyncio.wait_for(started.wait(), 1)
+    pending = set(lc._progress_edits)
+    lc.on_render_stopped()
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    if not missing:
+        # It finishes during the settle window, before any terminal edit.
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*pending), 1)
+    await lc.on_terminal_success(_make_success_state("Answer"))
+    if missing:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*pending), 1)
+    assert lc._terminal_reassert_task is None
+    assert edit_count == 3, "one progress edit, terminal summary, answer; no repair"
 
 
 async def test_abandoned_render_does_not_leave_a_progress_task_waiting_for_terminal() -> None:
@@ -890,6 +953,39 @@ class TestSealedResponsePersistence:
         assert replace_edit[1].get("content") == "I've delivered the full diagnosis above.", (
             "final recap still replaces the embed"
         )
+
+    @pytest.mark.parametrize("already_flushed", [False, True])
+    async def test_terminal_failure_persists_sealed_text_before_error_card(
+        self, already_flushed: bool
+    ) -> None:
+        """Review #655: reproduce stop -> final render -> failure from the driver."""
+        operations: list[tuple[str, dict[str, Any]]] = []
+
+        async def send(**kwargs: Any) -> object:
+            operations.append(("send", kwargs))
+            return _SENTINEL_REF
+
+        async def edit(ref: Any, **kwargs: Any) -> None:
+            operations.append(("edit", kwargs))
+
+        lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+        await lc.post_initial()
+        answer = "y" * 600
+        state = _sealed_state(answer)
+        if already_flushed:
+            await lc.on_render(state)
+        lc.on_render_stopped()
+        await lc.on_render(state)
+        err = TurnError(kind="upstream", message="boom")
+        state = dataclasses.replace(state, error=err)
+        await lc.on_terminal_failure(state, err)
+        sealed = [
+            index for index, (_, kwargs) in enumerate(operations) if kwargs.get("content") == answer
+        ]
+        assert len(sealed) == 1, "last-window sealed answer posts once even on failure"
+        assert sealed[0] < len(operations) - 1
+        assert operations[-1][0] == "edit"
+        assert operations[-1][1]["embeds"][0].to_dict()["color"] == COLOR_RED
 
     async def test_terminal_success_does_not_repost_already_flushed_answer(self) -> None:
         """A sealed answer posted by on_render is not re-posted at terminal."""
