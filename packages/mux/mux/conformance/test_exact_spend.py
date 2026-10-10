@@ -253,14 +253,78 @@ def test_haiku_price_tier_is_chosen_per_request(incoming: int, rate: str) -> Non
     assert haiku_price().actual(tokens, AT) == Decimal(incoming) * Decimal(rate) / 1_000_000
 
 
-def test_anthropic_normalizer_settles_cache_duration_and_inclusive_input(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "tokens,expected",
+    [
+        (TokenUsage(input_cached_tokens=200, input_cache_write_5m_tokens=40), ".000007"),
+        (
+            TokenUsage(
+                input_tokens=1050,
+                input_cached_tokens=200,
+                input_cache_write_tokens=50,
+                input_cache_write_5m_tokens=40,
+                input_cache_write_1h_tokens=10,
+            ),
+            ".000089",
+        ),
+        (
+            TokenUsage(input_tokens=100_001, input_cached_tokens=0, input_cache_write_tokens=0),
+            ".0500005",
+        ),
+        (TokenUsage(input_cached_tokens=100_001, input_cache_write_tokens=0), ".00500005"),
+        (TokenUsage(input_tokens=1000), ".00001"),
+    ],
+)
+def test_partial_usage_prices_only_proven_components(tokens: TokenUsage, expected: str) -> None:
+    price = haiku_price()
+    assert price.actual(tokens, AT) is None
+    assert price.minimum_charge(tokens, AT) == Decimal(expected)
+
+
+def test_cache_duration_bounds_do_not_double_count_or_exceed_inclusive_input() -> None:
+    tokens = TokenUsage(input_cached_tokens=200, input_cache_write_5m_tokens=40)
+    assert tokens.minimum_input_tokens == 240
+    with pytest.raises(ValidationError, match="inclusive input"):
+        TokenUsage(input_tokens=220, input_cached_tokens=200, input_cache_write_5m_tokens=40)
+    with pytest.raises(ValidationError, match="exceed write total"):
+        TokenUsage(input_cache_write_tokens=20, input_cache_write_5m_tokens=40)
+
+
+def anthropic_session_guard(tmp_path: Path) -> BudgetGuard:
     guard = dated_guard(tmp_path, "anthropic")
     config = json.loads(guard.config_path.read_text())
     config["providers"]["anthropic"]["models"]["claude-haiku-5-5"] = json.loads(
         haiku_price().model_dump_json()
     )
+    config["providers"]["anthropic"]["session_prices"] = [
+        {
+            "meter": "agent_session",
+            "memory_gb": None,
+            "unit_seconds": 3600,
+            "billing": "proportional",
+            "usd_per_unit": ".08",
+            "effective_from": "2026-10-10",
+            "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        }
+    ]
     guard.config_path.write_text(json.dumps(config))
-    plan = smoke_plan("anthropic", hosted=False)
+    return guard
+
+
+@pytest.mark.parametrize(
+    "runtime", ["measured", "zero", "missing", "empty", "foreign", "ambiguous"]
+)
+def test_anthropic_normalizer_settles_cache_duration_and_inclusive_input(
+    tmp_path: Path, runtime: str
+) -> None:
+    guard = anthropic_session_guard(tmp_path)
+    plan = smoke_plan("anthropic", hosted=False).model_copy(
+        update={
+            "container_allowance": ContainerAllowance(
+                meter="agent_session", memory_gb=None, seconds_per_session=90
+            ),
+        }
+    )
     held = guard.reserve(plan)
     events: list[dict[str, JsonValue]] = [
         {
@@ -281,19 +345,173 @@ def test_anthropic_normalizer_settles_cache_duration_and_inclusive_input(tmp_pat
     session = ResourceRef(
         provider="anthropic", account_scope_id="qa", kind="session", id="session-1"
     )
+    measurement = ContainerUsage(
+        id="session-1",
+        meter="agent_session",
+        memory_gb=None,
+        seconds=Decimal(0) if runtime == "zero" else Decimal("4.005"),
+        started_at=AT,
+    )
+    containers: tuple[ContainerUsage, ...] | None = (measurement,)
+    if runtime == "missing":
+        containers = None
+    elif runtime == "empty":
+        containers = ()
+    elif runtime == "foreign":
+        containers = measured().containers
+    elif runtime == "ambiguous":
+        containers = (measurement, measurement.model_copy(update={"id": "session-2"}))
     receipt = settle_anthropic_events(
         guard,
         held,
         events,
         session,
         observed_at=AT,
-        containers=(),
+        containers=containers,
         usage_complete=True,
         pricing_basis="standard-global",
     )
     assert receipt.tokens is not None and receipt.tokens.input_tokens == 1050
-    assert receipt.actual_usd == Decimal(".000139") and receipt.held_usd == 0
+    assert receipt.token_usd == Decimal(".000139")
+    if runtime in ("measured", "zero"):
+        charge = Decimal(".000089") if runtime == "measured" else Decimal(0)
+        assert receipt.container_usd == charge
+        assert receipt.actual_usd == Decimal(".000139") + charge and receipt.held_usd == 0
+        assert receipt.accounting_status == "actual"
+    else:
+        assert receipt.actual_usd is None and receipt.container_usd is None
+        assert receipt.held_usd == held.receipt.held_usd
+        assert receipt.accounting_status == "estimated_unverified"
+        assert receipt.actual_evidence is not None and receipt.actual_evidence.containers is None
     assert "native_meter" not in guard.spend_path.read_text()
+
+
+@pytest.mark.parametrize("hosted", [False, True])
+def test_anthropic_settlement_refuses_missing_or_foreign_session_allowance(
+    tmp_path: Path, hosted: bool
+) -> None:
+    guard = dated_guard(tmp_path, "anthropic")
+    held = guard.reserve(smoke_plan("anthropic", hosted=hosted))
+    before = guard.spend_path.read_bytes()
+    with pytest.raises(BudgetLedgerError, match="agent_session allowance"):
+        settle_anthropic_events(
+            guard,
+            held,
+            (),
+            ResourceRef(
+                provider="anthropic", account_scope_id="qa", kind="session", id="session-1"
+            ),
+            observed_at=AT,
+            containers=(),
+            usage_complete=True,
+        )
+    assert guard.spend_path.read_bytes() == before
+    assert guard.report() == (held.receipt,)
+
+
+def mixed_overrun(case: str) -> tuple[ActualSpend, Decimal]:
+    first = TokenUsage(
+        input_tokens=0, output_tokens=0, input_cached_tokens=0, input_cache_write_tokens=0
+    )
+    second = first
+    containers: tuple[ContainerUsage, ...] = ()
+    if case == "input":
+        first = first.model_copy(update={"input_tokens": 60_000})
+        second = second.model_copy(update={"input_tokens": None})
+        charge = Decimal(".0085")
+    elif case == "cache":
+        first = first.model_copy(update={"input_tokens": 15_000})
+        second = second.model_copy(update={"input_tokens": None, "input_cached_tokens": 12_000})
+        charge = Decimal(".004375")
+    elif case == "output":
+        first = first.model_copy(update={"output_tokens": 6000})
+        second = second.model_copy(update={"output_tokens": None})
+        charge = Decimal(".0055")
+    else:
+        second = second.model_copy(update={"input_tokens": None})
+        known = ContainerUsage(id="known", memory_gb=1, seconds=Decimal(1), started_at=AT)
+        unknown = ContainerUsage(id="unknown", memory_gb=4, seconds=Decimal(1), started_at=AT)
+        containers = (known, unknown) if case == "charges" else (unknown, known)
+        charge = Decimal(".03")
+    return ActualSpend(
+        requests=tuple(
+            MeasuredRequest(
+                id=f"request-{index}",
+                observed_at=AT,
+                pricing_basis="standard-global",
+                tokens=tokens,
+            )
+            for index, tokens in enumerate((first, second))
+        ),
+        containers=containers,
+        usage_complete=True,
+    ), charge
+
+
+@pytest.mark.parametrize("case", ["input", "cache", "output", "charges", "charges_reversed"])
+def test_known_request_lower_bounds_detect_mixed_overrun(tmp_path: Path, case: str) -> None:
+    guard = dated_guard(tmp_path)
+    plan = smoke_plan(hosted=False)
+    held = guard.reserve(plan)
+    evidence, charge = mixed_overrun(case)
+    receipt = guard.settle(held, status="completed", limits=plan.limits, actual=evidence)
+    assert receipt.status == receipt.reason == "overrun"
+    assert receipt.tokens is not None
+    assert getattr(receipt.tokens, "output_tokens" if case == "output" else "input_tokens") is None
+    assert receipt.actual_usd is None and receipt.token_usd is None
+    assert receipt.held_usd == charge > held.receipt.reserved_usd
+    assert receipt.accounting_status == "estimated_unverified"
+    assert guard.report() == (receipt,)
+    with pytest.raises(BudgetRefused):
+        guard.reserve(
+            ProbePlan.create_only(provider="openai", model="gpt-6-luna", fixture_id="C06")
+        )
+    assert receipts(guard)[-1].status == "blocked" and receipts(guard)[-1].reason == "budget"
+
+
+@pytest.mark.parametrize("case", ["input", "cache", "output", "charges", "charges_reversed"])
+def test_mixed_overrun_blocks_dispatch_under_optimized_python(tmp_path: Path, case: str) -> None:
+    guard = dated_guard(tmp_path)
+    held = guard.reserve(smoke_plan(hosted=False))
+    evidence, charge = mixed_overrun(case)
+    script = """
+import sys
+from pathlib import Path
+from decimal import Decimal
+from mux.conformance.budget import ActualSpend, BudgetGuard, BudgetRefused, ProbePlan, Reservation
+from mux.conformance.test_budget import receipts
+g = BudgetGuard(Path(sys.argv[1]), Path(sys.argv[2]))
+r = Reservation.model_validate_json(sys.argv[3])
+a = ActualSpend.model_validate_json(sys.argv[4])
+row = g.settle(r, status='completed', limits=r.receipt.limits, actual=a)
+if (row.status != 'overrun' or row.reason != 'overrun' or row.actual_usd is not None
+    or row.held_usd != Decimal(sys.argv[5]) or row.accounting_status != 'estimated_unverified'):
+    raise SystemExit('mixed evidence lost its proven overrun under -O')
+try:
+    g.reserve(ProbePlan.create_only(provider='openai', model='gpt-6-luna', fixture_id='C06'))
+except BudgetRefused:
+    blocked = receipts(g)[-1]
+    if blocked.status != 'blocked' or blocked.reason != 'budget':
+        raise SystemExit('dispatch refused for an unrelated reason')
+else:
+    raise SystemExit('dispatch admitted after a mixed-evidence overrun under -O')
+"""
+    subprocess.run(
+        [
+            sys.executable,
+            "-O",
+            "-c",
+            script,
+            str(guard.config_path),
+            str(guard.spend_path),
+            held.model_dump_json(),
+            evidence.model_dump_json(),
+            str(charge),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
 
 
 def test_duplicate_and_inconsistent_cache_evidence_refuses() -> None:

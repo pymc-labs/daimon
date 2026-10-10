@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Keep unknown Anthropic session runtime held and detect live-probe overruns from known request bounds even when other usage is missing.
+
 - Separate live probe actual spend from held dollars, settle complete dated token/runtime evidence, size default holds to short probes, and require lead-approved append-only reconciliation for historical holds.
 
 - Restrict live budget admission to Haiku 5.5, Gemini 3.8 Flash and its approved 503 fallback IDs, and GPT-6 Luna; reviewed prices remain required and fallback enforcement stays in the Gemini harness.

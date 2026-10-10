@@ -115,16 +115,23 @@ class TokenUsage(ProbeModel):
     def minimum_input_tokens(self) -> int:
         return max(
             self.input_tokens or 0,
-            (self.input_cached_tokens or 0) + (self.input_cache_write_tokens or 0),
+            (self.input_cached_tokens or 0)
+            + max(
+                self.input_cache_write_tokens or 0,
+                (self.input_cache_write_5m_tokens or 0) + (self.input_cache_write_1h_tokens or 0),
+            ),
         )
 
     @model_validator(mode="after")
     def subsets(self) -> TokenUsage:
-        if self.input_tokens is not None:
-            known = (self.input_cached_tokens or 0) + (self.input_cache_write_tokens or 0)
-            if known > self.input_tokens:
-                raise ValueError("cached/write tokens exceed inclusive input")
+        if self.input_tokens is not None and self.minimum_input_tokens > self.input_tokens:
+            raise ValueError("cached/write tokens exceed inclusive input")
         durations = (self.input_cache_write_5m_tokens, self.input_cache_write_1h_tokens)
+        if (
+            self.input_cache_write_tokens is not None
+            and sum(v or 0 for v in durations) > self.input_cache_write_tokens
+        ):
+            raise ValueError("cache-write durations exceed write total")
         if (
             all(v is not None for v in durations)
             and sum(v or 0 for v in durations) != self.input_cache_write_tokens
@@ -230,6 +237,73 @@ class ModelPrice(ProbeModel):
                 + cached * rate.cached_input
                 + write_cost
                 + (usage.output_tokens or 0) * rate.output
+            ) / Decimal(1_000_000)
+
+    def minimum_charge(self, usage: TokenUsage, at: datetime) -> Decimal:
+        """Price known components as lower bounds, without claiming an actual total.
+
+        Unknown categories use the cheapest compatible reviewed rate. An unknown
+        prompt size uses the cheaper tier; known long prompts use the long tier.
+        Undated/out-of-window evidence contributes no proven dollar lower bound.
+        """
+        if (
+            at.tzinfo is None
+            or self.effective_from is None
+            or self.source is None
+            or at.astimezone(UTC).date() < self.effective_from
+            or self.effective_until is not None
+            and at.astimezone(UTC).date() >= self.effective_until
+            or self.actual_input_limit is not None
+            and usage.minimum_input_tokens > self.actual_input_limit
+        ):
+            return Decimal(0)
+        rate = (
+            self.short_prompt
+            if self.short_prompt is not None
+            and usage.minimum_input_tokens <= self.short_prompt.through_input_tokens
+            else self
+        )
+        five = (
+            rate.cache_write_5m_input
+            if rate.cache_write_5m_input is not None
+            else rate.cache_write_input
+        )
+        input_rate, cached_rate, write_rate, output_rate = (
+            rate.input,
+            rate.cached_input,
+            rate.cache_write_input,
+            rate.output,
+        )
+        if usage.input_tokens is None and rate is not self:
+            input_rate = min(input_rate, self.input)
+            cached_rate = min(cached_rate, self.cached_input)
+            write_rate = min(write_rate, self.cache_write_input)
+            five = min(
+                five,
+                self.cache_write_5m_input
+                if self.cache_write_5m_input is not None
+                else self.cache_write_input,
+            )
+            output_rate = min(output_rate, self.output)
+        cached = usage.input_cached_tokens or 0
+        five_count = usage.input_cache_write_5m_tokens or 0
+        hour_count = usage.input_cache_write_1h_tokens or 0
+        written = max(usage.input_cache_write_tokens or 0, five_count + hour_count)
+        # When both cache totals are known, the remainder is uncached input.
+        remainder_rate = (
+            input_rate
+            if usage.input_cached_tokens is not None and usage.input_cache_write_tokens is not None
+            else min(input_rate, cached_rate, write_rate, five)
+        )
+        with localcontext() as context:
+            context.prec = 80
+            return (
+                (usage.minimum_input_tokens - cached - written) * remainder_rate
+                + cached * cached_rate
+                + five_count * five
+                + hour_count * write_rate
+                + (written - five_count - hour_count) * min(five, write_rate)
+                + (usage.output_tokens or 0) * output_rate
             ) / Decimal(1_000_000)
 
     def reserve(self, limits: TokenLimits, *, usage: TokenUsage | None = None) -> Decimal:
@@ -922,7 +996,7 @@ class BudgetGuard:
     @staticmethod
     def _measured(
         original: SpendReceipt, actual: ActualSpend
-    ) -> tuple[TokenUsage, Decimal | None, Decimal | None]:
+    ) -> tuple[TokenUsage, Decimal | None, Decimal | None, TokenUsage, Decimal]:
         actual = ActualSpend.model_validate(actual.model_dump())
         if any(
             sensitive_identifier(name)
@@ -945,10 +1019,19 @@ class BudgetGuard:
                 else sum(value or 0 for value in values)
             )
         tokens = TokenUsage.model_validate(totals)
+        # Disjoint requests retain their proven bounds even if another request
+        # makes the corresponding actual aggregate unknown.
+        lower_tokens = TokenUsage(
+            input_tokens=sum(request.tokens.minimum_input_tokens for request in actual.requests),
+            output_tokens=sum(request.tokens.output_tokens or 0 for request in actual.requests),
+        )
+        known_cost = Decimal(0)
         token_cost: Decimal | None = (
             Decimal(0) if actual.usage_complete and original.price is not None else None
         )
         for request in actual.requests:
+            if original.price is not None and request.pricing_basis == original.price.pricing_basis:
+                known_cost += original.price.minimum_charge(request.tokens, request.observed_at)
             cost = (
                 original.price.actual(request.tokens, request.observed_at)
                 if original.price is not None
@@ -978,9 +1061,12 @@ class BudgetGuard:
             )
             if price is None:
                 container_cost = None
-            elif container_cost is not None:
-                container_cost += price.cost(container.seconds)
-        return tokens, token_cost, container_cost
+            else:
+                cost = price.cost(container.seconds)
+                known_cost += cost
+                if container_cost is not None:
+                    container_cost += cost
+        return tokens, token_cost, container_cost, lower_tokens, known_cost
 
     def settle(
         self,
@@ -1006,8 +1092,12 @@ class BudgetGuard:
             raise BudgetLedgerError("provide one non-overlapping usage source")
         token_cost: Decimal | None = None
         container_cost: Decimal | None = None
+        lower_tokens = usage
+        known_cost = Decimal(0)
         if actual is not None:
-            usage, token_cost, container_cost = self._measured(original, actual)
+            usage, token_cost, container_cost, lower_tokens, known_cost = self._measured(
+                original, actual
+            )
         estimate = reservation.price.estimate(usage) if usage is not None else None
         measured = (
             token_cost + container_cost
@@ -1016,7 +1106,7 @@ class BudgetGuard:
         )
         reason: Literal["settled", "probe_error", "unknown_usage", "overrun"] = "settled"
         terminal: Literal["completed", "uncertain", "failed", "cancelled", "overrun"] = status
-        known_cost = (token_cost or Decimal(0)) + (container_cost or Decimal(0))
+        known_cost = max(known_cost, (token_cost or Decimal(0)) + (container_cost or Decimal(0)))
         container_exceeded = (
             actual is not None
             and original.container_allowance is not None
@@ -1033,10 +1123,10 @@ class BudgetGuard:
         exceeded = (
             container_exceeded
             or known_cost > original.reserved_usd
-            or usage is not None
+            or lower_tokens is not None
             and (
-                usage.minimum_input_tokens > limits.input_tokens
-                or (usage.output_tokens or 0) > limits.output_tokens
+                lower_tokens.minimum_input_tokens > limits.input_tokens
+                or (lower_tokens.output_tokens or 0) > limits.output_tokens
                 or (measured is not None and measured > original.reserved_usd)
                 or (actual is None and estimate is not None and estimate > original.reserved_usd)
             )
@@ -1060,8 +1150,8 @@ class BudgetGuard:
             charged = estimate
         if terminal == "overrun" and measured is None:
             charged = max(charged, original.reserved_usd, known_cost)
-            if usage is not None:
-                charged = max(charged, reservation.price.reserve(limits, usage=usage))
+            if lower_tokens is not None:
+                charged = max(charged, reservation.price.reserve(limits, usage=lower_tokens))
         receipt = SpendReceipt.model_validate(
             {
                 **original.model_dump(),
@@ -1123,6 +1213,9 @@ class BudgetGuard:
 
         No private key, provider key, caller boolean, deletion or ledger rewrite.
         Config is trusted operator state, as for existing caps/initialization.
+        A reserved run may be reconciled for lead-approved crash recovery. This
+        fences any later worker settlement as already settled; do not reconcile
+        a run whose worker is still expected to finish.
         """
         proposal = Reconciliation.model_validate(proposal.model_dump())
         with self._locked() as (file, lock, checkpoint, runs, config):

@@ -81,11 +81,20 @@ def settle_anthropic_events(
     pricing_basis: str | None = None,
     status: Literal["completed", "failed", "cancelled"] = "completed",
 ) -> SpendReceipt:
-    """Use the driver's actual normalizer; only fixed token evidence is persisted."""
+    """Normalize MA tokens with a reserved and explicitly measured session.
+
+    Missing, empty or ambiguous session measurements leave runtime unknown;
+    an empty tuple never proves zero running time on this session path.
+    """
     from mux.drivers.anthropic.usage import observation_from_event
 
     if reservation.receipt.provider != "anthropic" or session.provider != "anthropic":
         raise BudgetLedgerError("Anthropic settlement requires an Anthropic run")
+    allowance = reservation.receipt.container_allowance
+    if allowance is None or allowance.meter != "agent_session":
+        raise BudgetLedgerError("Anthropic settlement requires an agent_session allowance")
+    if containers is None or len(containers) != 1 or containers[0].meter != "agent_session":
+        containers = None
     requests: list[MeasuredRequest] = []
     for event in events:
         observation = observation_from_event(

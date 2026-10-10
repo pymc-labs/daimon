@@ -357,6 +357,10 @@ matching the reviewed rate card (e.g. `standard-global`). Only a complete walk
 of disjoint requests qualifies. Unknown counts, cache-write duration, processing
 basis or container time keep `actual_usd=None`. An empty walk requires explicit
 complete evidence; null runtime is not an empty container list.
+Unknown actual aggregates do not erase known usage: disjoint requests contribute
+independent inclusive-input, output and dated-charge lower bounds. A proven
+overrun enlarges the conservative hold and blocks the provider's next dispatch,
+including a zero-token plan, while actual dollars remain nullable.
 
 Model price entries carry `effective_from`, optional exclusive `effective_until`
 and the official `source`. Rates are pinned into the reservation; later config
@@ -375,6 +379,10 @@ increments only, rejecting foreign models, duplicate IDs and overlapping
 turn/session totals. The caller resolves revisions and proves the walk complete.
 `settle_anthropic_events` calls the actual Anthropic `observation_from_event`
 normalizer, retaining only fixed token fields, including cache-write durations.
+It refuses a reservation without an `agent_session` allowance. Runtime requires
+exactly one measured `agent_session`; missing, empty, foreign or ambiguous
+measurements remain unknown and retain the hold. An explicitly measured zero
+running duration is distinct from an empty measurement list.
 It makes no provider calls. `ProbeOutcome(actual=..., result=...)` wires this
 same evidence through `run_probe`.
 
@@ -397,8 +405,10 @@ when calculated from usage, and token/runtime components. The lead signs by
 pinning that exact `proposal.digest` in the trusted config's
 `approved_reconciliations` list. `guard.reconcile(proposal)` refuses unsigned,
 changed, foreign, stale or repeated proposals and appends a `reconciled` receipt,
-releasing the held balance without deleting any prior row. This is operator
-approval through trusted config, not a cryptographic identity service. A fresh
+releasing the held balance without deleting any prior row. A still-`reserved`
+run can be reconciled for crash recovery: this fences a later worker settlement
+as already settled, so the lead must first stop that worker. Approval uses
+trusted operator config, not a cryptographic identity service. A fresh
 lead approval is needed for every immutable proposal. Unknown historical usage
 must be obtained or remain `estimated_unverified`; no synthetic zero is applied.
 Upgrade all ledger consumers before the first version-2 receipt; old pinned

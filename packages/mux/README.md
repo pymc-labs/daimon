@@ -381,4 +381,7 @@ container/session time settle immediately; unknown evidence remains an
 unverified hold. Default plans reserve 20k input/2k output tokens, create-only
 plans zero, and hosted sessions add an explicit runtime allowance. Lead-approved
 reconciliation appends a new receipt and preserves the full ledger history.
+Anthropic MA settlement requires a session allowance and measured runtime;
+missing or empty measurements retain the hold. Known request bounds still
+detect overruns when other usage is missing and block subsequent dispatch.
 See `mux/conformance/README.md` for the offline settlement and approval API.
