@@ -34,6 +34,10 @@ class Step(Contract):
     ]
     ref: str | None = None
     channel: str | None = None
+    guild: str | None = None
+    allow_fail: bool = False
+    allow_fail_pattern: str | None = None
+    allow_fail_exit_codes: list[int] = Field(default_factory=lambda: [1])
     mention: bool = False
     reply_to: str | None = Field(default=None, pattern=r"^turn[1-9][0-9]*\.chunk[1-9][0-9]*$")
     text: str | None = None
@@ -63,6 +67,25 @@ class Step(Contract):
             raise ValueError("headless_interrupt requires text and interrupt_after_s")
         if self.do == "admin" and not self.tool:
             raise ValueError("admin requires tool")
+        if self.guild is not None and self.do != "new_channel":
+            raise ValueError("guild requires new_channel")
+        if self.allow_fail and (self.do != "admin" or self.tool != "cli"):
+            raise ValueError("allow_fail requires admin cli")
+        if self.allow_fail:
+            if not self.allow_fail_pattern:
+                raise ValueError("allow_fail requires an explicit expected refusal pattern")
+            try:
+                compiled = re.compile(self.allow_fail_pattern)
+            except re.error as exc:
+                raise ValueError("expected refusal pattern is invalid") from exc
+            if compiled.search(""):
+                raise ValueError("expected refusal pattern must not match empty output")
+            if not self.allow_fail_exit_codes or any(
+                code <= 0 for code in self.allow_fail_exit_codes
+            ):
+                raise ValueError("allow_fail requires positive expected exit codes")
+        elif self.allow_fail_pattern is not None:
+            raise ValueError("expected refusal pattern requires allow_fail")
         return self
 
 
@@ -94,6 +117,13 @@ class Assertion(Contract):
         "channel_text_absent",
         "http_check",
         "cli_check",
+        "answers_total",
+        "threads_created",
+        "any_of",
+        "component_present",
+        "card_text_now",
+        "card_edits_min",
+        "chunks_gap_max_s",
     ]
     turn: int | None = Field(default=None, ge=1)
     url: str | None = None
@@ -119,6 +149,9 @@ class Assertion(Contract):
     sql: str | None = None
     expect: JsonValue = None
     rubric: str | None = None
+    label_pattern: str | None = None
+    during: Literal["running"] | None = None
+    alternatives: list[Assertion] = Field(default_factory=list["Assertion"], alias="of")
 
     @property
     def pending_extension(self) -> str | None:
@@ -134,7 +167,16 @@ class Assertion(Contract):
         elif self.since_turn is not None:
             raise ValueError("since_turn requires channel_text assertion")
         if (
-            self.kind not in {"db_check", "interrupt_within_s", "http_check", "cli_check"}
+            self.kind
+            not in {
+                "db_check",
+                "interrupt_within_s",
+                "http_check",
+                "cli_check",
+                "answers_total",
+                "threads_created",
+                "any_of",
+            }
             and self.turn is None
             and self.since_turn is None
         ):
@@ -172,17 +214,42 @@ class Assertion(Contract):
             raise ValueError("judge requires rubric")
         if self.kind == "thread_name" and not (self.pattern or self.pattern_absent or self.max_len):
             raise ValueError("thread_name requires pattern, pattern_absent or max_len")
-        if self.kind != "thread_name" and (
-            self.pattern_absent is not None or self.max_len is not None
+        if self.kind not in {"thread_name", "card_text_now"} and self.pattern_absent is not None:
+            raise ValueError("pattern_absent requires thread_name or card_text_now")
+        if self.kind != "thread_name" and self.max_len is not None:
+            raise ValueError("max_len requires thread_name")
+        if (
+            self.kind in {"answers_total", "threads_created", "chunks_gap_max_s"}
+            and self.maximum is None
         ):
-            raise ValueError("pattern_absent and max_len require thread_name")
+            raise ValueError(f"{self.kind} requires max")
+        if self.kind in {"answers_total", "threads_created", "any_of"} and self.turn is not None:
+            raise ValueError(f"{self.kind} is a whole-run assertion")
+        if self.kind == "any_of" and not self.alternatives:
+            raise ValueError("any_of requires nonempty of")
+        if self.alternatives and self.kind != "any_of":
+            raise ValueError("of requires any_of")
+        if self.kind == "component_present" and not self.label_pattern:
+            raise ValueError("component_present requires label_pattern")
+        if self.kind == "card_text_now" and not (self.pattern or self.pattern_absent):
+            raise ValueError("card_text_now requires a pattern expectation")
+        if self.kind == "card_edits_min" and self.during != "running":
+            raise ValueError("card_edits_min requires during=running")
+        if self.during and self.kind != "card_edits_min":
+            raise ValueError("during requires card_edits_min")
         if (
             self.kind == "message_count"
             and self.maximum is not None
             and not self.maximum.is_integer()
         ):
             raise ValueError("message_count max must be an integer")
-        for pattern in (self.pattern, self.pattern_absent, self.name_pattern, self.body_absent):
+        for pattern in (
+            self.pattern,
+            self.pattern_absent,
+            self.name_pattern,
+            self.body_absent,
+            self.label_pattern,
+        ):
             if pattern:
                 try:
                     re.compile(pattern)
@@ -258,13 +325,6 @@ PROPOSED_ASSERTIONS = frozenset(
         "footer_cost_matches_ledger",
         "ledger_debits",
         "ledger_matches_usage",
-        "answers_total",
-        "threads_created",
-        "chunks_gap_max_s",
-        "component_present",
-        "card_text_now",
-        "any_of",
-        "card_edits_min",
         "answer_length_chars",
         "answer_part_gap_s",
         "reaction_absent",
@@ -273,9 +333,7 @@ PROPOSED_ASSERTIONS = frozenset(
 )
 PROPOSED_STEP_PARAMS = frozenset(
     {
-        "guild",
         "during_downtime",
-        "allow_fail",
     }
 )
 PROPOSED_ASSERT_PARAMS = frozenset({"target", "phase", "channel"})

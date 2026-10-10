@@ -25,6 +25,13 @@ from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
 
 CHANNEL_MARKER = "daimon-live-qa"
+TRANSPORT_FAILURE = re.compile(
+    r"connection\s+(?:refused|reset)|econn\w*|errno\s+1\d\d|"
+    r"timed?\s*out|timeout|operationalerror|connecterror|could not connect|"
+    r"dns|name or service not known|name resolution|tls|ssl|"
+    r"\b5\d\d\b|\b5xx\b|traceback|unhandled exception",
+    re.IGNORECASE,
+)
 
 
 def log_scope(field: str, value: str) -> str:
@@ -399,6 +406,7 @@ class DiscordBackend:
                 after=turn.trigger_id,
                 daimon_id=self.target.daimon_id,
             )
+            turn.baseline_message_ids = sorted(self.baseline_ids.get(turn.trigger_id, set()))
             raw = self.driver.messages(turn.channel_id, after=None, limit=100)
             if self.driver.exists(turn.trigger_id):
                 raw.extend(self.driver.messages(turn.trigger_id, after=None, limit=100))
@@ -473,6 +481,15 @@ class DiscordBackend:
                 if parent:
                     self.thread_parents[turn.thread_id] = parent
             turn.verdicts = [self.classify(m) for m in messages]
+            for message, verdict in zip(messages, turn.verdicts, strict=True):
+                if verdict == "working" and message.get("edited_timestamp"):
+                    edit: Message = {
+                        "message_id": message.get("id"),
+                        "edited_timestamp": message.get("edited_timestamp"),
+                        "phase": "running",
+                    }
+                    if edit not in turn.card_history:
+                        turn.card_history.append(edit)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
@@ -493,6 +510,46 @@ class DiscordBackend:
             time.sleep(min(self.config.poll_interval_s, max(0, deadline - time.monotonic())))
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
+
+    def current_messages(self, turn: Turn) -> list[Message]:
+        """Refresh only recorded bot messages inside this run's owned channels."""
+        if not turn.messages:
+            raise Pending("no recorded messages to refresh")
+        rows: list[Message] = []
+        for message in turn.messages:
+            channel = str(message.get("channel_id") or turn.thread_id or turn.channel_id)
+            self._owned(channel)
+            identity = str(message.get("id") or "")
+            if not identity:
+                raise Pending("recorded message has no identity")
+            row = obj(self.driver.call("GET", f"/channels/{channel}/messages/{identity}"))
+            if str(row.get("id")) != identity:
+                raise Pending("message refresh returned no matching evidence")
+            rows.append(row)
+        return rows
+
+    def created_threads(self, turns: list[Turn]) -> set[str]:
+        """Probe every trigger, including threads with no Daimon messages."""
+        identities = {turn.thread_id for turn in turns if turn.thread_id}
+        for turn in turns:
+            self._owned(turn.channel_id)
+            path = f"/channels/{turn.trigger_id}"
+            try:
+                row = obj(self.driver.call("GET", path))
+            except SystemExit as exc:
+                if str(exc).startswith(f"HTTP 404 on GET {path}:"):
+                    continue
+                raise Pending("thread inventory read unavailable") from None
+            except Exception as exc:
+                raise Pending("thread inventory read unavailable") from exc
+            if (
+                str(row.get("id")) != turn.trigger_id
+                or row.get("type") not in {10, 11, 12}
+                or str(row.get("parent_id")) != turn.channel_id
+            ):
+                raise Pending("thread inventory returned incomplete or mismatched evidence")
+            identities.add(turn.trigger_id)
+        return identities
 
     def channel_messages(self, turn: Turn) -> list[Message]:
         self._owned(turn.channel_id)
@@ -543,6 +600,9 @@ class DiscordBackend:
             "channel_id": channel,
             "role": step.role,
             "args": step.args,
+            "allow_fail": step.allow_fail,
+            "allow_fail_pattern": step.allow_fail_pattern,
+            "allow_fail_exit_codes": step.allow_fail_exit_codes,
         }
         result = subprocess.run(
             command,
@@ -556,6 +616,31 @@ class DiscordBackend:
             raise RuntimeError("configured staging admin hook failed")
         if result.stdout.strip():
             data = cast(JsonValue, json.loads(result.stdout))
+            exit_code = obj(data).get("exit_code", 0)
+            if type(exit_code) is not int or exit_code < 0:
+                raise ValueError("admin hook must return a nonnegative CLI exit_code")
+            if exit_code:
+                output = obj(data).get("stdout", "")
+                stderr = obj(data).get("stderr", "")
+                if (
+                    isinstance(output, str)
+                    and isinstance(stderr, str)
+                    and TRANSPORT_FAILURE.search(output + "\n" + stderr)
+                ):
+                    raise RuntimeError("staging CLI command reported a transport failure")
+                if (
+                    not step.allow_fail
+                    or exit_code not in step.allow_fail_exit_codes
+                    or not step.allow_fail_pattern
+                    or not isinstance(output, str)
+                    or not isinstance(stderr, str)
+                    or not (output + stderr).strip()
+                    or not re.search(step.allow_fail_pattern, output + "\n" + stderr, re.MULTILINE)
+                ):
+                    raise RuntimeError(
+                        "staging CLI command failed without expected refusal evidence"
+                    )
+                return
             bindings = obj(data).get("context", {})
             if not isinstance(bindings, dict) or any(
                 not isinstance(v, str) for v in bindings.values()

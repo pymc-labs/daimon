@@ -8,12 +8,14 @@ from typing import cast
 
 from pydantic import JsonValue
 
+from qa.live.discord import message_visible_at
 from qa.live.errors import exception_evidence
 from qa.live.schema import Assertion
 from qa.live.types import (
     Backend,
     Check,
     Judge,
+    Message,
     Pending,
     Turn,
     obj,
@@ -21,6 +23,18 @@ from qa.live.types import (
     text_components,
     text_of,
 )
+
+
+def answers(turn: Turn, backend: Backend) -> list[Message]:
+    return [m for m in turn.messages if backend.classify(m) in {"answered", "answered_tool_only"}]
+
+
+def component_labels(component: Message) -> list[str]:
+    labels = [str(component[key]) for key in ("label", "placeholder") if component.get(key)]
+    for key in ("components", "options"):
+        for child in objects(component.get(key)):
+            labels.extend(component_labels(child))
+    return labels
 
 
 def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: Judge) -> Check:
@@ -32,7 +46,35 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
             raise Pending(assertion.pending_extension)
         if kind == "interrupt_within_s":
             raise Pending("headless interrupt hook is not implemented")
-        if kind == "http_check":
+        if kind == "any_of":
+            children: list[Check] = []
+            for child in assertion.alternatives:
+                check = evaluate(child, turns, backend, judge)
+                children.append(check)
+                if check.status == "PASS":
+                    return Check(
+                        kind, "PASS", f"{check.kind}: {check.reason}", evidence=check.evidence
+                    )
+            status = "PENDING" if any(c.status == "PENDING" for c in children) else "FAIL"
+            return Check(
+                kind, status, "; ".join(f"{c.kind}: {c.status} {c.reason}" for c in children)
+            )
+        if kind in {"answers_total", "threads_created"}:
+            if not turns:
+                raise Pending("no turns: whole-run count is unavailable")
+            if kind == "answers_total":
+                identities = {
+                    str(m["id"]) for t in turns for m in answers(t, backend) if m.get("id")
+                }
+            else:
+                identities = backend.created_threads(turns)
+            count = len(identities)
+            maximum = assertion.maximum or 0
+            if count <= maximum and any(not t.settled for t in turns):
+                raise Pending("turn did not settle; whole-run upper bound is unproven")
+            passed = count <= maximum
+            reason = f"observed {count} unique {kind}; maximum {maximum}"
+        elif kind == "http_check":
             from qa.live.http_probe import check_http
 
             passed, reason = check_http(assertion)
@@ -80,7 +122,72 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 for m in turn.messages
                 if m.get("id")
             ]
-            if kind in {"reply_within_s", "no_silent_drop", "done_within_s"}:
+            if kind == "component_present":
+                labels = [
+                    label
+                    for m in turn.messages
+                    for c in objects(m.get("components"))
+                    for label in component_labels(c)
+                ]
+                passed = any(re.search(assertion.label_pattern or "", label) for label in labels)
+                if not passed and not turn.settled:
+                    raise Pending("turn did not settle; component observation is incomplete")
+                reason = f"observed component labels: {labels!r}"
+            elif kind == "card_text_now":
+                rows = backend.current_messages(turn)
+                if not rows:
+                    raise Pending("card refresh returned no evidence")
+                parts = [text_of(m) for m in rows]
+                passed = (
+                    not assertion.pattern
+                    or any(re.search(assertion.pattern, text, re.MULTILINE) for text in parts)
+                ) and (
+                    not assertion.pattern_absent
+                    or not any(
+                        re.search(assertion.pattern_absent, text, re.MULTILINE) for text in parts
+                    )
+                )
+                reason = "refreshed card text " + ("matched" if passed else "did not match")
+            elif kind == "card_edits_min":
+                edits = {
+                    (str(e.get("message_id")), str(e.get("edited_timestamp")))
+                    for e in turn.card_history
+                    if e.get("phase") == "running"
+                    and e.get("message_id")
+                    and e.get("edited_timestamp")
+                }
+                passed = len(edits) >= assertion.minimum
+                if not passed and not turn.settled:
+                    raise Pending("turn did not settle; running card-edit minimum is unproven")
+                reason = (
+                    f"observed {len(edits)} distinct running card edits; "
+                    f"minimum {assertion.minimum}"
+                )
+            elif kind == "chunks_gap_max_s":
+                messages = answers(turn, backend)
+                if not messages:
+                    raise Pending("no answer messages: delivery gaps are unavailable")
+                events = [
+                    message_visible_at(
+                        m, turn.started_at, reused=str(m.get("id")) in turn.baseline_message_ids
+                    )
+                    for m in messages
+                ]
+                if any(event is None for event in events):
+                    raise Pending("answer delivery timestamp is unavailable")
+                timestamps = sorted(event[0] for event in events if event is not None)
+                gap = max(
+                    (
+                        (b - a).total_seconds()
+                        for a, b in zip(timestamps, timestamps[1:], strict=False)
+                    ),
+                    default=0,
+                )
+                passed = gap <= (assertion.maximum or 0)
+                if passed and not turn.settled:
+                    raise Pending("turn did not settle; final delivery gap bound is unproven")
+                reason = f"maximum answer delivery gap {gap}s"
+            elif kind in {"reply_within_s", "no_silent_drop", "done_within_s"}:
                 duration = turn.done_s if kind == "done_within_s" else turn.first_visible_s
                 passed = duration is not None and duration <= (assertion.maximum or 0)
                 reason = f"observed {duration}s; maximum {assertion.maximum}s"

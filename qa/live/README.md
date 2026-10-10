@@ -329,3 +329,28 @@ PENDING (n/a) and records zero usage plus scoped `skip_evidence`. This requires
 matching guild, channel, and turn-window evidence and no observed thread or bot
 messages. Silence alone never proves a skip: executed or unproven turns retain
 missing-model FAIL semantics. Product silence checks still FAIL independently.
+
+The frozen Discord batch also supports whole-run `answers_total` and
+`threads_created` upper bounds, three-valued nested `any_of`, nested component
+labels, current card refreshes after a wait, distinct running card-edit timestamps,
+and answer chunk gaps from answer-bearing edits or message creation times.
+An incomplete observation cannot prove a count or gap upper bound. Expected CLI
+failures require matching declared refusal text and the hook's JSON `exit_code`;
+a transport failure remains a harness error. `new_channel.guild` must resolve to the configured approved QA
+guild before any setup mutation; a separate depleted-tenant scenario remains
+PENDING until its target is independently approved.
+
+An admin CLI step with `allow_fail: true` must declare `allow_fail_pattern` (a
+required stdout/stderr refusal regex) and may narrow `allow_fail_exit_codes`
+(default `[1]`). Both the code and pattern must match. An unexpected exit, empty
+or transport-looking output, malformed exit code, or failed hook is a harness
+error; an exit code alone never proves the intended refusal.
+Thread counts probe every trigger even if its thread has no bot answer. Permission
+errors do not prove absence. Chunk delivery uses creation timestamps except for
+recorded baseline messages or messages predating the trigger. Tenant-credit CLI
+mutations are refused before setup, including the shared QA guild.
+
+Transport/crash signatures (connection refusal/reset, timeouts, DNS, TLS/SSL, 5xx,
+tracebacks and unhandled exceptions) are rejected before the declared refusal regex.
+Expected patterns must not match empty output. CLI args must be command strings;
+tenant-credit tokens are refused even behind wrappers or global options.

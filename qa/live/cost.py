@@ -15,14 +15,17 @@ from typing import TextIO, cast
 from pydantic import JsonValue
 
 from qa.live.config import Pricing
-from qa.live.schema import Scenario
+from qa.live.schema import Assertion, Scenario
 from qa.live.types import Usage, utcnow
 
 DAILY_CAP = 10.0
 
 
 def estimate(scenario: Scenario, pricing: Pricing) -> float:
-    judges = sum(a.kind == "judge" for a in scenario.assertions)
+    def judge_count(assertion: Assertion) -> int:
+        return int(assertion.kind == "judge") + sum(judge_count(a) for a in assertion.alternatives)
+
+    judges = sum(judge_count(a) for a in scenario.assertions)
     return (
         scenario.est_turns * pricing.per_turn_usd
         + judges

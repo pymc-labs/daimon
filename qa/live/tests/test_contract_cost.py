@@ -148,11 +148,11 @@ def test_declared_proposals_are_pending_entries(tmp_path: Path, scenario: Scenar
 
     values = scenario.model_dump(by_alias=True)
     values["steps"][2]["mention"] = True
-    values["assert"] = [{"kind": "chunks_gap_max_s", "turn": 2, "max": 3}]
+    values["assert"] = [{"kind": "answer_part_gap_s", "turn": 2, "max": 3}]
     (tmp_path / "proposal.yaml").write_text(yaml.safe_dump(values))
     entry = load_catalog(tmp_path)[0]
     assert isinstance(entry, ProposedScenario)
-    assert "assertion chunks_gap_max_s" in entry.unsupported
+    assert "assertion answer_part_gap_s" in entry.unsupported
 
 
 def test_invalid_known_step_not_hidden_by_proposal(tmp_path: Path, scenario: Scenario) -> None:
@@ -160,7 +160,7 @@ def test_invalid_known_step_not_hidden_by_proposal(tmp_path: Path, scenario: Sce
 
     values = scenario.model_dump(by_alias=True)
     values["steps"][0].pop("text")
-    values["assert"] = [{"kind": "chunks_gap_max_s", "turn": 2, "max": 3}]
+    values["assert"] = [{"kind": "answer_part_gap_s", "turn": 2, "max": 3}]
     (tmp_path / "invalid.yaml").write_text(yaml.safe_dump(values))
     with pytest.raises(ValueError):
         load_catalog(tmp_path)

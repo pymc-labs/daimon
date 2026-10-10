@@ -185,7 +185,7 @@ def test_pending_catalog_proposal_has_no_side_effects(
     entry = ProposedScenario.model_validate(
         scenario.model_dump(by_alias=True)
         | {
-            "assert": [{"kind": "chunks_gap_max_s", "turn": 2, "max": 3}],
+            "assert": [{"kind": "answer_part_gap_s", "turn": 2, "max": 3}],
         }
     )
     result = Executor(backend, judge, ledger, pricing, "staging").run(entry)
