@@ -547,6 +547,12 @@ async def test_connection_happy_path_and_rechecks(
         empty = await browser.post("/oauth/github/confirm", data={"state": state})
         assert "Select at least one repo" in empty.text
         assert 'id="github-connect-form"' in empty.text
+        too_many = await browser.post(
+            "/oauth/github/confirm",
+            data={"state": state, "repo": [str(n) for n in range(1, 12)], "access": "read"},
+        )
+        assert "Pick up to 10 repos at a time" in too_many.text
+        assert 'id="github-connect-form"' in too_many.text
         spoof = await browser.get(
             "/oauth/github/setup", params={"state": state, "installation_id": "999999"}
         )

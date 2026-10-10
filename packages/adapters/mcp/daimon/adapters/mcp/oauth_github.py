@@ -330,6 +330,9 @@ def _receipt_signature(state: str, invitation_hash: str, secret: str) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+#: A safety net on one Add action; a person rarely needs more at once.
+MAX_REPOS_PER_ADD = 10
+
 _PICKER_SCRIPT = """
 <script>
 (() => {
@@ -374,7 +377,8 @@ _PICKER_SCRIPT = """
     const visibleBoxes = boxes.filter(box => !box.closest(".gh-choice").hidden);
     const allVisibleChecked = visibleBoxes.length > 0 && visibleBoxes.every(box => box.checked);
     bulk.textContent = allVisibleChecked ? "Clear selection" : `Select all ${visibleBoxes.length}`;
-    bulk.hidden = visibleBoxes.length === 0;
+    // No select-all: one stray click ticked 75 repos on 2026-10-10.
+    bulk.hidden = true;
     const access = form.querySelector('input[name="access"]:checked').value;
     const accessLabel = access === "write" ? "Read and write" : "Read only";
     status.textContent = selected ? `${selected} selected. ${accessLabel}.` : "0 selected";
@@ -1007,7 +1011,13 @@ def build_oauth_github_routes(
                 return _error("Selection could not be verified.", retry_url=retry_confirm_url)
             # Repos already on the agent keep their access; only new ticks count.
             selected_ids = [repo_id for repo_id in selected_ids if repo_id not in already_added]
-            if not selected_ids:
+            if len(selected_ids) > MAX_REPOS_PER_ADD:
+                selection_error: str | None = f"Pick up to {MAX_REPOS_PER_ADD} repos at a time"
+            elif not selected_ids:
+                selection_error = "Select at least one repo"
+            else:
+                selection_error = None
+            if selection_error is not None:
                 return _confirmation_page(
                     root=root,
                     state=state,
@@ -1021,7 +1031,7 @@ def build_oauth_github_routes(
                     platform=requester.platform,
                     workspace=invitation.workspace_label,
                     agent_name=invitation.agent_name,
-                    selection_error="Select at least one repo",
+                    selection_error=selection_error,
                     already_added=already_added,
                     needed=needed,
                 )
