@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- QA reads nested Discord V2 card text for current-card assertions and records component-only card edits; unreadable card copy stays pending.
+
 - QA observes queue progress text during live turns and can post thread follow-ups before the first answer completes.
 
 - Agents created before the Connect GitHub change get the new guidance on the next restart.

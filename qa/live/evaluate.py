@@ -19,6 +19,7 @@ from qa.live.types import (
     Message,
     Pending,
     Turn,
+    card_text_of,
     component_text,
     obj,
     objects,
@@ -139,7 +140,9 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 rows = backend.current_messages(turn)
                 if not rows:
                     raise Pending("card refresh returned no evidence")
-                parts = [text_of(m) for m in rows]
+                parts = [card_text_of(m) for m in rows]
+                if any(not part.strip() for part in parts):
+                    raise Pending("current card text unavailable")
                 passed = (
                     not assertion.pattern
                     or any(re.search(assertion.pattern, text, re.MULTILINE) for text in parts)

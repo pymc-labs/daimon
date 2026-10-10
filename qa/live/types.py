@@ -50,6 +50,11 @@ def text_of(message: Message, *, include_fields: bool = True) -> str:
     return "\n".join(text_components(message, include_fields=include_fields))
 
 
+def card_text_of(message: Message) -> str:
+    """Readable card copy, including V2 displays, separate from answer matching."""
+    return "\n".join([*text_components(message), *component_text(message)])
+
+
 @dataclass
 class Usage:
     input_tokens: int | None = None
