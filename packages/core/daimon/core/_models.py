@@ -3158,7 +3158,10 @@ class DiscordMessageAdmission(Base):
     """Durable addressed-message admission, shared by gateway and startup replay."""
 
     __tablename__ = "discord_message_admissions"
-    __table_args__ = (Index("ix_discord_admissions_activity", "tenant_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_discord_admissions_activity", "tenant_id", "created_at"),
+        Index("ix_discord_admissions_channel", "tenant_id", "channel_id", "created_at"),
+    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )

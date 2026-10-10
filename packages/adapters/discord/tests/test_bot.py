@@ -2485,3 +2485,28 @@ async def test_startup_scan_replays_unseen_addressed_messages_through_live_gates
     bot._maybe_participate.assert_not_awaited()
     assert channel.history.call_args.kwargs["limit"] == 100
     assert channel.history.call_args.kwargs["oldest_first"]
+
+
+@pytest.mark.parametrize("status", ["pending", "failed"])
+async def test_replay_does_not_repeat_a_provisioning_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    status: str,
+) -> None:
+    from daimon.core.defaults.provisioning import provision_tenant
+    from daimon.core.stores.tenants import set_provision_status
+
+    guild_id = "801000105"
+    tenant = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
+    )
+    await set_provision_status(db_session_factory, tenant_id=tenant.tenant_id, status=status)
+    bot = make_bot(_make_runtime(db_session_factory))
+    bot._seed_tenant_defaults = AsyncMock()
+    message = _make_thread_message_for_bot(guild_id=int(guild_id))
+    message.id = 55558
+    message.webhook_id = None
+    message.reference = None
+    await bot.on_message(message)
+    await bot.on_message(message, startup_replay=True)
+    message.channel.send.assert_awaited_once()
+    assert "setting up" in message.channel.send.await_args.args[0]

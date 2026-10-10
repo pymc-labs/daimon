@@ -173,6 +173,7 @@ class _InterruptRecorder:
 
 def _reachable_thread() -> MagicMock:
     message = MagicMock(spec=discord.Message)
+    message.embeds = [discord.Embed(title="Working on it…", color=theme.COLOR_IN_PROGRESS)]
     message.edit = AsyncMock()
     thread = MagicMock(spec=discord.Thread)
     thread.fetch_message = AsyncMock(return_value=message)
@@ -228,6 +229,7 @@ async def test_sweep_marks_the_embed_failed_and_clears_the_row(
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
     message = MagicMock(spec=discord.Message)
+    message.embeds = [discord.Embed(title="Working on it…", color=theme.COLOR_IN_PROGRESS)]
     message.edit = AsyncMock()
     thread = MagicMock(spec=discord.Thread)
     thread.fetch_message = AsyncMock(return_value=message)
@@ -277,6 +279,7 @@ async def test_sweep_uneditable_webhook_does_not_post_replacement(
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
     message = MagicMock(spec=discord.Message)
+    message.embeds = [discord.Embed(title="Working on it…", color=theme.COLOR_IN_PROGRESS)]
     message.webhook_id = 42
     message.application_id = 10
     thread = MagicMock(spec=discord.Thread)
@@ -314,6 +317,7 @@ async def test_sweep_runs_once_per_process_not_once_per_reconnect(
     await _make_orphan(db_session)
     bot = _make_bot(db_session_factory)
     message = MagicMock(spec=discord.Message)
+    message.embeds = [discord.Embed(title="Working on it…", color=theme.COLOR_IN_PROGRESS)]
     message.edit = AsyncMock()
     thread = MagicMock(spec=discord.Thread)
     thread.fetch_message = AsyncMock(return_value=message)
@@ -338,6 +342,7 @@ async def test_sweep_does_not_clear_a_marker_rewritten_during_message_edit(
     recorder = _InterruptRecorder()
     bot = _make_bot(db_session_factory, anthropic=build_fake_anthropic(recorder))
     message = MagicMock(spec=discord.Message)
+    message.embeds = [discord.Embed(title="Working on it…", color=theme.COLOR_IN_PROGRESS)]
 
     async def _start_new_turn(**_kwargs: object) -> None:
         await mark_turn_active(
@@ -1072,3 +1077,57 @@ async def test_completed_previous_turn_is_not_delivered_for_an_unsent_orphan(
     kwargs = thread.fetch_message.return_value.edit.await_args.kwargs
     assert "content" not in kwargs
     assert "restart" in kwargs["embed"].description
+
+
+@pytest.mark.parametrize("plain_answer", [False, True])
+async def test_orphan_sweep_preserves_an_already_delivered_answer(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    plain_answer: bool,
+) -> None:
+    await _make_orphan(db_session)
+    bot = _make_bot(db_session_factory)
+    thread = _reachable_thread()
+    message = thread.fetch_message.return_value
+    message.embeds = (
+        []
+        if plain_answer
+        else [discord.Embed(description="Already delivered", color=theme.COLOR_GREEN)]
+    )
+    message.content = "Formatted final answer"
+    message.components = ["feedback buttons"]
+    bot.get_channel = MagicMock(return_value=thread)
+    await bot._retire_orphaned_turns()
+    message.edit.assert_not_awaited()
+    bot.runtime.anthropic.beta.sessions.retrieve.assert_not_awaited()
+    assert message.content == "Formatted final answer"
+    assert message.components == ["feedback buttons"]
+    assert await list_orphaned_turns(db_session, platform="discord") == []
+
+
+@pytest.mark.parametrize("failure", ["timeout", "server_error"])
+async def test_transient_orphan_edit_failure_keeps_marker_for_periodic_retry(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    failure: str,
+) -> None:
+    await _make_orphan(db_session)
+    recorder = _InterruptRecorder()
+    bot = _make_bot(db_session_factory, anthropic=build_fake_anthropic(recorder))
+    thread = _reachable_thread()
+    message = thread.fetch_message.return_value
+    message.edit.side_effect = (
+        TimeoutError()
+        if failure == "timeout"
+        else discord.HTTPException(MagicMock(status=503, reason="Unavailable"), "Unavailable")
+    )
+    bot.get_channel = MagicMock(return_value=thread)
+    await bot._retire_orphaned_turns()
+    assert len(await list_orphaned_turns(db_session, platform="discord")) == 1
+    assert recorder.sent == []
+    message.edit.side_effect = None
+    await bot._retire_orphaned_turns(retry=True)
+    await bot._retire_orphaned_turns(retry=True)
+    assert message.edit.await_count == 2
+    assert await list_orphaned_turns(db_session, platform="discord") == []
+    assert recorder.sent == [("sesn_test", "user.interrupt")]

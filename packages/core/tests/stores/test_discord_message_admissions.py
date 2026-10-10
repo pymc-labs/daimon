@@ -174,3 +174,72 @@ async def test_new_ledger_channel_does_not_use_an_answer_watermark_to_hide_misse
         db_session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - timedelta(minutes=15), limit=25
     )
     assert ("100", None) in channels, "ledger-era channels scan the whole bounded time window"
+
+
+async def test_retention_preserves_channel_boundary_recent_receipts_and_live_pending_inputs(
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+) -> None:
+    from daimon.core._models import DiscordMessageAdmission
+    from daimon.core.stores.discord_message_admissions import prune_old_messages
+    from sqlalchemy import select, update
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    now = datetime.now(UTC)
+    async with db_nullpool_engine.connect() as owner:
+        await owner.execute(text("SELECT pg_advisory_lock(718213)"))
+        try:
+            for message_id, age, handled, owner_key in [
+                ("1", 121, True, 1),  # channel anchor survives all sweeps
+                ("2", 120, True, 1),
+                ("3", 119, False, 1),  # dead pending input beyond the horizon
+                ("4", 118, False, 718213),  # live long-running queued input
+                ("5", 1, True, 1),
+            ]:
+                assert await claim_message(
+                    db_session,
+                    tenant_id=tenant.id,
+                    channel_id="100",
+                    message_id=message_id,
+                    owner_key=owner_key,
+                )
+                await db_session.execute(
+                    update(DiscordMessageAdmission)
+                    .where(
+                        DiscordMessageAdmission.tenant_id == tenant.id,
+                        DiscordMessageAdmission.message_id == message_id,
+                    )
+                    .values(created_at=now - timedelta(minutes=age), handled=handled)
+                )
+            await db_session.commit()
+            assert (
+                await prune_old_messages(
+                    db_session,
+                    tenant_id=tenant.id,
+                    cutoff=now - timedelta(minutes=60),
+                )
+                == 2
+            )
+            await db_session.commit()
+            remaining = await db_session.scalars(
+                select(DiscordMessageAdmission.message_id).where(
+                    DiscordMessageAdmission.tenant_id == tenant.id,
+                )
+            )
+            assert set(remaining) == {"1", "4", "5"}
+            assert await replay_channels(
+                db_session,
+                tenant_id=tenant.id,
+                cutoff=now - timedelta(minutes=15),
+                limit=25,
+            ) == [("100", None)], "pruning must not restore an unsafe legacy answer boundary"
+            assert not await claim_message(
+                db_session,
+                tenant_id=tenant.id,
+                channel_id="100",
+                message_id="5",
+                owner_key=2,
+            )
+        finally:
+            await owner.execute(text("SELECT pg_advisory_unlock(718213)"))

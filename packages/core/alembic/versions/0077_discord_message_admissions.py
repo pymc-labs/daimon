@@ -40,6 +40,11 @@ def upgrade() -> None:
     op.create_index(
         "ix_discord_admissions_activity", "discord_message_admissions", ["tenant_id", "created_at"]
     )
+    op.create_index(
+        "ix_discord_admissions_channel",
+        "discord_message_admissions",
+        ["tenant_id", "channel_id", "created_at"],
+    )
 
 
 def downgrade() -> None:

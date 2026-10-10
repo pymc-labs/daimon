@@ -217,8 +217,12 @@ The `discord_message_admissions` ledger deduplicates each tenant/message ID;
 queued follow-ups remain pending until a card intent is committed or the
 request reaches a visible terminal outcome. A PostgreSQL session advisory
 lock identifies each process for its lifetime, using one dedicated database
-connection outside the turn connection pool. A guard stops the adapter if this
-connection is lost. Another worker can reclaim a pending message only after
+connection outside the turn connection pool. On a failed or slow probe the
+guard invalidates the connection and retries `pg_try_advisory_lock` with the
+same key and exponential backoff (1–10 seconds) for 90 seconds. Transient
+failures leave the adapter running; exhausted recovery signals the entrypoint
+to drain in-flight turns through `_drain_and_close` before closing the gateway.
+Another worker can reclaim a pending message only after
 that owner's lock disappears. Inputs whose card intent was committed before a crash
 but never posted are requeued only after two complete no-card history reads
 separated by a minute; the ledger reset and intent retirement commit together.
@@ -228,6 +232,27 @@ Channels whose ledger predates the replay window scan that whole window using
 per-message dedupe. Legacy-only channels retain their stored answer boundary
 during the first rollout.
 
+Rollout and rollback procedure: on the first deployment of this ledger, set
+`DAIMON_DISCORD__STARTUP_REPLAY_MINUTES=0`. Keep that setting for at least the
+intended replay window while the new image records live admissions, then
+enable replay. Follow the same procedure on roll-forward after running any
+older image that did not write receipts: disable replay for the first boot
+and wait a full window before enabling it. Otherwise already answered
+parent-channel mentions or mentions handled by the rolled-back image may
+be answered again. This bootstrap interval intentionally does not replay
+downtime messages. If a crash occurs after Discord creates a thread but
+before the card intent is committed, replay can still fail to reopen that
+thread; the visible notice asks the user to mention Daimon again.
+
+An hourly sweep removes receipts older than the maximum 60-minute replay
+window, retaining live pending inputs and one oldest receipt per channel.
+That channel checkpoint preserves the ledger's start boundary when pruning;
+all other expired inputs owned by exited workers can be removed. The ledger
+has both tenant/activity and tenant/channel/activity indexes. Deduplication
+of non-opening messages outside the replay horizon is not guaranteed.
+The database connection must be direct or use a session-mode pooler;
+transaction-mode pooling does not support these session advisory locks.
+
 Orphan recovery runs at most four rows concurrently. Successful completed
 provider text is delivered by editing the existing card, with a text attachment
 for replies over Discord's message length limit. It verifies the provider's
@@ -236,7 +261,12 @@ answer. Other orphaned turns edit that card to explain the restart and invite
 a retry, then interrupt the old session. Provider result reads are bounded to
 five seconds and card fetch/edit work to thirty seconds per row. Recovery
 serializes edits across workers and conditionally clears the original marker;
-a newer turn keeps its marker and its running session. Recovery never sends
+a newer turn keeps its marker and its running session. Cards that are already
+terminal retain their formatted answer and feedback controls. A retryable
+Discord fetch/edit failure retains the marker; a 30-second periodic sweep
+retries only the original failed orphan rows, with the same owner and marker
+checks. Missing cards and permanent permission/identity failures clear the
+marker without posting a replacement. Recovery never sends
 a new model request. Generated-file recovery and resuming a still-running
 provider session are not part of this text-recovery path.
 

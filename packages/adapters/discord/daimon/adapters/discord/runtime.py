@@ -27,56 +27,103 @@ from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
 
 @asynccontextmanager
 async def hold_worker_owner(
-    engine: AsyncEngine, *, owner_key: int, probe_interval_s: float = 5
+    engine: AsyncEngine,
+    *,
+    owner_key: int,
+    ownership_lost: asyncio.Event,
+    probe_interval_s: float = 5,
+    recovery_window_s: float = 90,
+    retry_delay_s: float = 1,
 ) -> AsyncIterator[None]:
-    """Keep ownership on one connection; exit if that connection loses its lock."""
-    async with engine.connect() as connection:
-        await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
-        await connection.commit()
-        parent = asyncio.current_task()
-        assert parent is not None
-        ownership_lost = False
+    """Reconnect on transient failure; signal graceful drain only after 90 s."""
+    failures = (SQLAlchemyError, InternalClientError, TimeoutError)
 
-        async def guard() -> None:
-            nonlocal ownership_lost
-            try:
-                while True:
-                    await asyncio.sleep(probe_interval_s)
-                    async with asyncio.timeout(5):
-                        await connection.execute(text("SELECT 1"))
-                        await connection.commit()
-            except (SQLAlchemyError, InternalClientError, TimeoutError) as err:
-                ownership_lost = True
-                log.error("discord.worker_owner_lost", error_type=type(err).__name__)
-                parent.cancel()
-
-        guard_task = asyncio.create_task(guard(), name="discord.worker_owner_guard")
+    async def acquire() -> AsyncConnection:
+        candidate = await engine.connect()
         try:
-            yield
-        finally:
-            guard_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await guard_task
+            owned = await candidate.scalar(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": owner_key}
+            )
+            await candidate.commit()
+            if not owned:
+                raise SQLAlchemyError("worker owner key is still held")
+            return candidate
+        except BaseException:
+            async with asyncio.timeout(5):
+                await candidate.invalidate()
+                await candidate.close()
+            raise
+
+    async with asyncio.timeout(5):
+        connection: AsyncConnection | None = await acquire()
+
+    async def discard() -> None:
+        nonlocal connection
+        stale, connection = connection, None
+        if stale is not None:
             try:
-                if ownership_lost:
-                    await connection.invalidate()
-                else:
-                    async with asyncio.timeout(5):
-                        await connection.execute(
-                            text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key}
-                        )
-                        await connection.commit()
-            except (SQLAlchemyError, InternalClientError, TimeoutError) as err:
-                # Lost ownership already cancels the adapter. Cleanup must
-                # preserve that cancellation, even if the backend is gone.
+                async with asyncio.timeout(5):
+                    await stale.invalidate()
+                    await stale.close()
+            except failures as err:
                 log.warning("discord.worker_owner_release_failed", error_type=type(err).__name__)
+
+    async def guard() -> None:
+        nonlocal connection
+        while True:
+            await asyncio.sleep(probe_interval_s)
+            try:
+                assert connection is not None
+                async with asyncio.timeout(5):
+                    await connection.execute(text("SELECT 1"))
+                    await connection.commit()
+                continue
+            except failures as err:
+                log.warning("discord.worker_owner_reconnecting", error_type=type(err).__name__)
+            deadline = asyncio.get_running_loop().time() + recovery_window_s
+            await discard()
+            delay = retry_delay_s
+            while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
+                try:
+                    async with asyncio.timeout(min(5, remaining)):
+                        connection = await acquire()
+                    log.info("discord.worker_owner_recovered")
+                    break
+                except failures:
+                    await asyncio.sleep(
+                        min(delay, max(0, deadline - asyncio.get_running_loop().time()))
+                    )
+                    delay = min(10, delay * 2)
+            else:
+                log.error("discord.worker_owner_lost", recovery_window_s=recovery_window_s)
+                ownership_lost.set()
+                return
+
+    guard_task = asyncio.create_task(guard(), name="discord.worker_owner_guard")
+    try:
+        yield
+    finally:
+        guard_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await guard_task
+        if connection is not None:  # pyright: ignore[reportUnnecessaryComparison]  # guard can discard it
+            try:
+                async with asyncio.timeout(5):
+                    await connection.execute(
+                        text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key}
+                    )
+                    await connection.commit()
+                    await connection.close()
+                connection = None
+            except failures:
+                await discard()
 
 
 @dataclass(frozen=True)
@@ -91,6 +138,7 @@ class DiscordRuntime:
     turn_deps: TurnDeps
     # Each production process holds this advisory key on a dedicated connection.
     owner_key: int = field(default_factory=lambda: randbits(63))
+    ownership_lost: asyncio.Event = field(default_factory=asyncio.Event)
     # The MCP token form's live check. None means "do not probe" — the seam
     # tests use so a form submit never leaves the process; production wires
     # `daimon.core.mcp_oauth.probe_bearer_token`.
@@ -135,14 +183,18 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
             billing_config=billing_config,
         )
         owner_key = randbits(63)
+        ownership_lost = asyncio.Event()
         # Keep ownership outside the turn pool's preparation/mutation budget.
         # This pool opens one connection; its unused overflow satisfies the
         # shared builder's minimum capacity contract.
         owner_engine = build_engine(str(settings.database.url), pool_size=1, max_overflow=3)
         try:
-            async with hold_worker_owner(owner_engine, owner_key=owner_key):
+            async with hold_worker_owner(
+                owner_engine, owner_key=owner_key, ownership_lost=ownership_lost
+            ):
                 yield DiscordRuntime(
                     owner_key=owner_key,
+                    ownership_lost=ownership_lost,
                     settings=settings,
                     anthropic=anthropic,
                     sessionmaker=sessionmaker,

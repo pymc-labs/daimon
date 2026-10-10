@@ -6,7 +6,7 @@ from uuid import UUID
 
 from daimon.core._models import DiscordMessageAdmission, ThreadSession, TurnCardIntent
 from daimon.core.stores.worker_ownership import owner_is_alive
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -178,6 +178,49 @@ async def replay_channels(
             values.append(str(int(oldest_receipt) - 1))
         result.append((str(channel_id), min(values, key=int) if values else None))
     return result
+
+
+async def prune_old_messages(session: AsyncSession, *, tenant_id: UUID, cutoff: datetime) -> int:
+    """Keep the 60-minute replay horizon, live pending inputs and one channel anchor.
+
+    The oldest receipt per channel proves when the ledger began. Removing all
+    old receipts would incorrectly restore the legacy answer watermark and
+    hide missed inputs behind a long turn's later answer. Dead pending inputs
+    outside the maximum replay horizon can expire; live pending inputs cannot.
+    """
+    anchors = (
+        select(DiscordMessageAdmission.message_id)
+        .where(DiscordMessageAdmission.tenant_id == tenant_id)
+        .distinct(DiscordMessageAdmission.channel_id)
+        .order_by(
+            DiscordMessageAdmission.channel_id,
+            DiscordMessageAdmission.created_at,
+            DiscordMessageAdmission.message_id,
+        )
+    )
+    expired = (
+        DiscordMessageAdmission.tenant_id == tenant_id,
+        DiscordMessageAdmission.created_at < cutoff,
+        DiscordMessageAdmission.message_id.not_in(anchors),
+    )
+    owners = await session.scalars(
+        select(DiscordMessageAdmission.owner_key)
+        .where(*expired, DiscordMessageAdmission.handled.is_(False))
+        .distinct()
+    )
+    dead_owners = [owner for owner in owners if not await owner_is_alive(session, owner)]
+    removed = await session.scalars(
+        delete(DiscordMessageAdmission)
+        .where(
+            *expired,
+            or_(
+                DiscordMessageAdmission.handled.is_(True),
+                DiscordMessageAdmission.owner_key.in_(dead_owners),
+            ),
+        )
+        .returning(DiscordMessageAdmission.message_id)
+    )
+    return len(removed.all())
 
 
 async def release_unposted_messages(session: AsyncSession, *, intent_id: UUID) -> None:

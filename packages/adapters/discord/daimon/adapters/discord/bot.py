@@ -99,6 +99,7 @@ from daimon.core.stores.discord_message_admissions import (
     claim_message,
     finish_messages,
     has_released_messages,
+    prune_old_messages,
     replay_channels,
     unposted_thread_for_message,
 )
@@ -587,6 +588,7 @@ class DaimonBot(commands.Bot):
         self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
         self._orphan_sweep_lock = asyncio.Lock()
+        self._orphan_retry_rows: list[ThreadSessionRow] = []
         self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
         self._turn_card_recovery_started: bool = False
         self._turn_card_periodic_started: bool = False
@@ -1133,43 +1135,32 @@ class DaimonBot(commands.Bot):
         if self._orphan_recovery_armed:
             await self._retire_orphaned_turns()
 
-    async def _retire_orphaned_turns(self) -> None:
+    async def _retire_orphaned_turns(self, *, retry: bool = False) -> None:
         async with self._orphan_sweep_lock:
-            await self._retire_orphaned_turns_once()
+            await self._retire_orphaned_turns_once(retry=retry)
 
-    async def _retire_orphaned_turns_once(self) -> None:
-        """Lay to rest every embed whose turn died with the previous process.
+    async def _retire_orphaned_turns_once(self, *, retry: bool = False) -> None:
+        """Recover dead workers' cards before admitting new turns.
 
-        A turn's render loop lives in the process that started it, so a deploy
-        mid-turn freezes the embed on 'thinking' forever while MA completes and
-        bills the answer server-side. The user sees a spinner that never stops
-        and has no way to tell it is dead.
-
-        Marking it failed is honest and cheap, and the alternative -- draining
-        in-flight turns before the container exits -- needs a lameduck story the
-        compose refresh does not have. It starts from setup_hook, before the
-        gateway connects, and every turn waits for it, so a user reading the
-        thread sees the truth before anything else happens.
-
-        Failures to edit are swallowed per row: the message may be deleted, the
-        thread archived, or permissions changed since. One unreachable embed
-        must not stop the sweep clearing the rest, and the row is cleared either
-        way so a permanently unreachable message is not retried on every boot.
-
-        Runs at most once per process: on_ready re-fires on every full gateway
-        reconnect, and a marker set by this process is a LIVE turn, not an
-        orphan. That only holds because no turn can write a marker before the
-        first run finishes (`_wait_for_orphan_recovery`); the MA interrupt
-        below would otherwise stop a live turn of this very process.
+        The boot snapshot runs once behind the admission barrier. Completed
+        cards keep their formatting and controls; still-working cards receive
+        recovered provider text or a visible restart notice. Permanent missing
+        identity/permissions clear the marker, while transient failures retain
+        it and enter the periodic retry list. Retries only revisit that original
+        list, check owner liveness and compare the original marker, so neither
+        gateway reconnects nor periodic recovery can interrupt a new live turn.
         """
-        if self._orphans_retired:
+        if self._orphans_retired and not retry:
             return
-        async with self.runtime.sessionmaker() as session:
-            if self._boot_turn_card_intents is None:
-                self._boot_turn_card_intents = await list_recoverable_turn_card_intents(
-                    session, platform="discord", exclude_live_owners=True
-                )
-            orphans = await list_orphaned_turns(session, platform="discord")
+        if retry:
+            orphans, self._orphan_retry_rows = self._orphan_retry_rows, []
+        else:
+            async with self.runtime.sessionmaker() as session:
+                if self._boot_turn_card_intents is None:
+                    self._boot_turn_card_intents = await list_recoverable_turn_card_intents(
+                        session, platform="discord", exclude_live_owners=True
+                    )
+                orphans = await list_orphaned_turns(session, platform="discord")
         if not orphans:
             self._orphans_retired = True
             self._start_turn_card_recovery()
@@ -1191,6 +1182,21 @@ class DaimonBot(commands.Bot):
                             message = await channel.fetch_message(
                                 int(locked.active_turn_message_id)
                             )
+                            if not any(
+                                embed.color == discord.Color(theme.COLOR_IN_PROGRESS)
+                                and embed.title is not None
+                                and ("Working on it" in embed.title or "Thinking" in embed.title)
+                                for embed in message.embeds
+                            ):
+                                # Delivery can precede marker cleanup. Preserve
+                                # the final answer, attachments and feedback UI.
+                                await clear_active_turn_if_message_id(
+                                    session,
+                                    id=locked.id,
+                                    expected_message_id=locked.active_turn_message_id,
+                                )
+                                await session.commit()
+                                return
                             result = await completed_orphan_text(self.runtime.anthropic, locked)
                             transport = DiscordPostTransport(
                                 self, channel, name="Daimon", avatar_url=None, builtin=False
@@ -1251,6 +1257,12 @@ class DaimonBot(commands.Bot):
                     log.warning(
                         "turn.orphan_retire_failed", thread_id=locked.thread_id, error=str(err)
                     )
+                    if not (
+                        isinstance(err, (discord.NotFound, discord.Forbidden, ValueError))
+                        or is_definite_recovery_failure(err)
+                    ):
+                        self._orphan_retry_rows.append(row)
+                        return
                 cleared = await clear_active_turn_if_message_id(
                     session, id=locked.id, expected_message_id=locked.active_turn_message_id
                 )
@@ -1292,12 +1304,26 @@ class DaimonBot(commands.Bot):
 
     async def _periodic_turn_card_recovery(self) -> None:
         """Revisit aged active intents without requiring another process restart."""
+        next_aged_sweep = asyncio.get_running_loop().time()
         while not self.is_closed():
-            await asyncio.sleep(3600)
+            await asyncio.sleep(30)
             try:
-                await self._sweep_aged_turn_cards()
+                await self._retire_orphaned_turns(retry=True)
+                if asyncio.get_running_loop().time() >= next_aged_sweep:
+                    await self._sweep_aged_turn_cards()
+                    await self._prune_message_admissions()
+                    next_aged_sweep = asyncio.get_running_loop().time() + 3600
             except Exception:
                 log.warning("turn.card_intent_periodic_sweep_failed", exc_info=True)
+
+    async def _prune_message_admissions(self) -> None:
+        tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
+        async with self.runtime.sessionmaker() as session:
+            for tenant in tenants:
+                await prune_old_messages(
+                    session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - timedelta(minutes=60)
+                )
+            await session.commit()
 
     async def _sweep_aged_turn_cards(self) -> None:
         if self._turn_card_recovery_lock.locked() or (
@@ -2024,22 +2050,13 @@ class DaimonBot(commands.Bot):
         queued_message = False
         try:
             tr: TenantRow | None = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
-            if tr is None or tr.archived_at is not None:
+            needs_provisioning = tr is None or tr.archived_at is not None
+            if needs_provisioning:
                 # Unprovisioned OR archived → provision + un-archive + seed in background.
                 await self._ensure_provisioning(guild)
-                await message.channel.send(_setting_up_message(bot_display_name))
+                tr = await get_tenant_liveness(self.runtime.sessionmaker, tenant_id)
+            if tr is None:
                 return
-            if tr.provision_status == "failed":
-                # Self-heal: re-seed if idle (in-flight guard). NEVER show "failed" to the user.
-                self._spawn(
-                    self._seed_tenant_defaults(tenant_id=tr.id, guild=guild, was_ready=False)
-                )
-                await message.channel.send(_setting_up_message(bot_display_name))
-                return
-            if tr.provision_status == "pending":
-                await message.channel.send(_setting_up_message(bot_display_name))
-                return
-            # Only 'ready' proceeds.
 
             async with self.runtime.sessionmaker() as session:
                 claimed = await claim_message(
@@ -2054,6 +2071,21 @@ class DaimonBot(commands.Bot):
             if not claimed:
                 return
             claimed_message = True
+
+            if needs_provisioning:
+                await message.channel.send(_setting_up_message(bot_display_name))
+                return
+            if tr.provision_status == "failed":
+                # Self-heal: re-seed if idle (in-flight guard). NEVER show "failed" to the user.
+                self._spawn(
+                    self._seed_tenant_defaults(tenant_id=tr.id, guild=guild, was_ready=False)
+                )
+                await message.channel.send(_setting_up_message(bot_display_name))
+                return
+            if tr.provision_status == "pending":
+                await message.channel.send(_setting_up_message(bot_display_name))
+                return
+            # Only 'ready' proceeds.
 
             log.info(
                 "mention_received",

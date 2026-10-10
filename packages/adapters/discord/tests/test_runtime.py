@@ -42,7 +42,8 @@ class TestDiscordRuntime:
             "mcp_token_probe",
             "group_members",
             "owner_key",
-        }, f"expected 11 fields, got {fields}"
+            "ownership_lost",
+        }, f"expected 12 fields, got {fields}"
 
     def test_frozen(self) -> None:
         """DiscordRuntime should be immutable (frozen=True)."""
