@@ -49,8 +49,8 @@ def requester_card(
                 ("Cancel request",),
             )
         return RequestCard(
-            "GitHub access pending. An admin has been asked. This request continues "
-            "when access is ready.",
+            "An admin has been asked to allow GitHub access.\n"
+            "Your request continues when access is ready.",
             None,
             ("Cancel request",),
         )
@@ -65,8 +65,6 @@ def requester_card(
             if connected_names
             else "Connect and add"
         )
-    if not connected_names:
-        title += " (not connected yet)"
     level = "Read only" if ability == "read" else "Read and write"
     detail = f"Can: {level}."
     if not connected_names:

@@ -57,7 +57,6 @@ def _panel_embed(texts: list[str]) -> discord.Embed:
         if len(name) > 80 or not value:
             name, value = "Details", item
         embed.add_field(name=name[:256], value=value[:1024], inline=False)
-    embed.set_footer(text="GitHub on Daimon")
     return embed
 
 

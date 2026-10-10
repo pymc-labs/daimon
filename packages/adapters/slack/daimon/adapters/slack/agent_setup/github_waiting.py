@@ -241,7 +241,6 @@ def build_view(
             blocks.append({"type": "divider"})
             blocks.append({"type": "actions", "elements": buttons})
     blocks.append({"type": "actions", "elements": [_button(ACTION_BACK, "◀ Back")]})
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return finish_modal(
         title="Requests waiting",
         blocks=blocks,

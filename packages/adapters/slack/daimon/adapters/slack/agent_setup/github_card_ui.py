@@ -26,5 +26,4 @@ def github_card_blocks(
         )
     if buttons:
         blocks.extend(({"type": "divider"}, {"type": "actions", "elements": buttons}))
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return blocks

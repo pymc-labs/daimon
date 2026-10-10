@@ -1214,7 +1214,7 @@ async def _attach_skills_to_requested_agent(
         # Admins included: an attach never stamps the reconciler's spec hash,
         # so the seeded agent would drift for good.
         return SkillAttachOutcome(
-            note=f"`{agent.name}` is a built-in agent. Fork it and add them to the fork.",
+            note=f"{agent.name} is a built-in agent.\n\nAsk me to make a copy and add them there.",
             attached=False,
             agent_name=agent.name,
             skill_count=len(skill_ids),

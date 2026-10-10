@@ -593,6 +593,14 @@ def _assert_retry_lifecycle_change(base, current, *, outcome):
                 "Attaching them did not finish. Try again using the same form."
             ):
                 audit["note"] = "Attaching them did not finish. Ask again to retry."
+            # The built-in refusal was reworded on purpose (plain words, GitHub cards).
+            note = audit.get("note")
+            if isinstance(note, str):
+                audit["note"] = re.sub(
+                    r"`(\S+)` is a built-in agent\. Fork it and add them to the fork\.",
+                    "\\1 is a built-in agent.\n\nAsk me to make a copy and add them there.",
+                    note,
+                )
         return fields
 
     assert audit_fields(current[9]) == audit_fields(base[9])

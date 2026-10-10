@@ -211,7 +211,6 @@ def _slack_blocks(
     if buttons:
         blocks.append({"type": "divider"})
         blocks.append({"type": "actions", "elements": buttons})
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "GitHub on Daimon"}]})
     return blocks
 
 

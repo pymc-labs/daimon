@@ -20,5 +20,4 @@ def github_embed(text: str, *, state: str = "info") -> discord.Embed:
             embed.add_field(name="Can", value=detail.removeprefix("Can: ")[:1024], inline=False)
         else:
             embed.add_field(name="Details", value=detail[:1024], inline=False)
-    embed.set_footer(text="GitHub on Daimon")
     return embed
