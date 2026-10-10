@@ -32,7 +32,7 @@ LEDGER_PREFIX = "<!-- mux-ledger "
 LIVE_MODEL_ALLOWLIST: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         "openai": frozenset({"gpt-6-luna"}),
-        "anthropic": frozenset({"claude-haiku-5-5"}),
+        "anthropic": frozenset({"claude-haiku-4-5-20251001"}),
         "gemini": frozenset({"gemini-3.5-flash-lite"}),
     }
 )

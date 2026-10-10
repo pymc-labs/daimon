@@ -16,7 +16,7 @@ from mux.conformance.test_budget import receipts, setup_guard
 
 APPROVED = (
     ("openai", "gpt-6-luna"),
-    ("anthropic", "claude-haiku-5-5"),
+    ("anthropic", "claude-haiku-4-5-20251001"),
     ("gemini", "gemini-3.5-flash-lite"),
 )
 
@@ -52,9 +52,10 @@ def test_approved_model_requires_reviewed_price(
     [
         ("openai", "gpt-6-sol"),
         ("openai", "gpt-6-luna-latest"),
-        ("openai", "claude-haiku-5-5"),
+        ("openai", "claude-haiku-4-5-20251001"),
         ("anthropic", "claude-sonnet-5-5"),
         ("anthropic", "claude-haiku-4-5"),
+        ("anthropic", "claude-haiku-5-5"),
         ("anthropic", "CLAUDE-HAIKU-5-5"),
         ("gemini", "gemini-3.5-pro"),
         ("gemini", "gemini-3.5-flash"),

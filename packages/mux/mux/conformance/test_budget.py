@@ -29,6 +29,8 @@ from mux.conformance.budget import (
     TokenUsage,
 )
 
+TEST_MODELS = {"openai": "gpt-6-luna", "anthropic": "claude-haiku-4-5-20251001"}
+
 
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
 def test_settlement_without_usage_keeps_worst_case_reservation(
@@ -226,7 +228,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
                     provider: {
                         "cap_usd": cap,
                         "models": {
-                            ("gpt-6-luna" if provider == "openai" else "claude-haiku-5-5"): {
+                            TEST_MODELS[provider]: {
                                 "input": "1",
                                 "cached_input": "1",
                                 "cache_write_input": "1",
@@ -246,7 +248,7 @@ def setup_guard(tmp_path: Path, cap: str = "10") -> BudgetGuard:
 def plan(tokens: int = 1_000_000, provider: str = "openai") -> ProbePlan:
     return ProbePlan(
         provider=provider,
-        model="gpt-6-luna" if provider == "openai" else "claude-haiku-5-5",
+        model="gpt-6-luna" if provider == "openai" else "claude-haiku-4-5-20251001",
         fixture_id="C16",
         limits=TokenLimits(input_tokens=tokens, output_tokens=0),
     )
