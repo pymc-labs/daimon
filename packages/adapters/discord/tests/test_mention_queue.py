@@ -30,7 +30,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
 
@@ -148,10 +148,12 @@ def test_compose_empty_list_returns_empty_string() -> None:
 
 @pytest_asyncio.fixture
 async def queued_bot(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
 ):
     """Bot with tenant provisioned. _handle_mention is left intact; tests
     install per-test stubs."""
+    # Parallel mentions need separate connections, as in production.
+    db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Funded: a turn that queued re-checks the balance once it holds a slot.
     result = await provision_tenant(
         db_session_factory, platform="discord", workspace_id="123456", signup_credit=Decimal("10")
@@ -174,6 +176,7 @@ async def test_no_queueing_when_serial_mentions(queued_bot: DaimonBot) -> None:
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
 
@@ -341,6 +344,7 @@ async def test_overlapping_channel_mentions_run_in_parallel(queued_bot: DaimonBo
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append(message)
         entered.set()
@@ -379,6 +383,7 @@ async def test_one_queued_mention_runs_one_composite_followup(queued_bot: Daimon
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -422,6 +427,7 @@ async def test_three_queued_mentions_merge_into_single_composite_turn(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -468,6 +474,7 @@ async def test_queue_drains_repeatedly_if_new_mention_during_drain(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -529,6 +536,7 @@ async def test_multi_author_queue_partitions_into_per_author_turns(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -685,6 +693,7 @@ async def test_channel_mention_thread_registers_and_followup_queues(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append(message)
         if created_thread_ids is not None:
@@ -742,6 +751,7 @@ async def test_queued_followup_after_channel_mention_drains_with_content_overrid
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         if created_thread_ids is not None:
@@ -796,6 +806,7 @@ async def test_channel_branch_processing_registration_does_not_leak_on_exception
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         if created_thread_ids is not None:
             queued_bot._processing.add(thread_id)  # pyright: ignore[reportPrivateUsage]
@@ -840,6 +851,7 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
         unprompted: bool = False,
     ) -> None:
         orchestrate_calls.append(content_override)
@@ -905,6 +917,7 @@ async def test_drain_merges_attachments_from_all_of_authors_queued_messages(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override, attachments_override))
         entered.set()
@@ -956,6 +969,7 @@ def _recording_stub(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
         entered.set()
@@ -1066,6 +1080,7 @@ async def test_mention_queued_during_a_continuation_dispatch_gets_its_own_turn(
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
 
@@ -1122,6 +1137,7 @@ async def test_mention_queued_during_a_raising_continuation_dispatch_still_gets_
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
     ) -> None:
         calls.append((message, content_override))
 
