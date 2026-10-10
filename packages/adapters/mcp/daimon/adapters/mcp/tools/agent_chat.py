@@ -97,6 +97,7 @@ from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
+from daimon.core.stores import usage_sweep_sessions
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
@@ -584,6 +585,13 @@ async def _start_turn_impl(
         observation.agent_id = str(ma_agent.id)
     if recheck is not None:
         await recheck()
+    async with runtime.session_factory.begin() as db:
+        await usage_sweep_sessions.register(
+            db,
+            session_id=session.id,
+            tenant_id=auth.tenant_id,
+            priority=auth.platform_user_id is not None,
+        )
     turn_started_at = now()
     sent = await runtime.client.beta.sessions.events.send(
         session.id,
@@ -668,6 +676,15 @@ async def _continue_turn_impl(
         if session.archived_at is not None:
             raise ToolError("This session is archived.")
         async with runtime.session_factory.begin() as db:
+            # The sweep can archive while the pre-fence retrieve is in flight.
+            if await usage_sweep_sessions.is_archived(db, session_id=handle):
+                raise ToolError("This session is archived.")
+            await usage_sweep_sessions.register(
+                db,
+                session_id=handle,
+                tenant_id=auth.tenant_id,
+                priority=auth.platform_user_id is not None,
+            )
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
                 raise ToolError("This session is closed.")

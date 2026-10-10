@@ -368,6 +368,7 @@ async def mark_turn_active(
         .values(
             active_turn_message_id=active_turn_message_id,
             active_turn_started_at=now,
+            updated_at=now,
             active_turn_channel_id=active_turn_channel_id,
         )
     )

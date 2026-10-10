@@ -2455,3 +2455,31 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     assert session_bodies[0]["agent"] == "ag_personal", (
         "nothing hidden means the call shape does not change at all"
     )
+
+
+@pytest.mark.parametrize("headless", [False, True])
+async def test_create_session_registers_owned_usage_before_return(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    headless: bool,
+) -> None:
+    from daimon.core._models import UsageSweepSession
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    created = await create_session(
+        build_fake_anthropic_http(_session_create_handler()),
+        agent=_make_agent(),
+        environment=_make_env(),
+        tenant_id=tenant.id,
+        session_factory=db_session_factory,
+        requester_is_headless=headless,
+    )
+    async with db_session_factory() as db:
+        owned = await db.get(UsageSweepSession, created.id)
+    assert owned is not None
+    assert owned.tenant_id == tenant.id
+    assert owned.unsettled is True
+    assert owned.resumable is not headless
+    assert owned.priority is headless, "billed headless sessions precede inline repairs"
+    assert owned.finished_at is None

@@ -153,6 +153,15 @@ def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(agent_chat, "session_mutation_fence", fence)
 
+    real_is_archived = agent_chat.usage_sweep_sessions.is_archived
+
+    async def is_archived(session, *, session_id):
+        if isinstance(session, (MagicMock, AsyncMock)):
+            return False
+        return await real_is_archived(session, session_id=session_id)
+
+    monkeypatch.setattr(agent_chat.usage_sweep_sessions, "is_archived", is_archived)
+
     monkeypatch.setattr(_session_access, "load_read_policy", load)
 
 
@@ -3902,3 +3911,142 @@ async def test_start_turn_charges_an_isolated_channels_own_agent_to_that_channel
     assert create.await_args is not None
     kwargs = create.await_args.kwargs
     assert (kwargs["budget_channel_id"], kwargs["origin_channel_id"]) == (charged, None)
+
+
+@pytest.mark.parametrize("continuation", [False, True])
+async def test_turn_registers_unsettled_resumable_usage_before_send(
+    db_session_factory: async_sessionmaker[AsyncSession], continuation: bool
+) -> None:
+    from daimon.core.stores import usage_sweep_sessions
+
+    async with db_session_factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID, workspace_id="usage-before-send")
+        if continuation:
+            await usage_sweep_sessions.register(
+                db, session_id="ses_test001", tenant_id=_TENANT_ID, resumable=False
+            )
+            await db.execute(
+                text(
+                    "UPDATE usage_sweep_sessions SET unsettled=false, "
+                    "finished_at=now()-interval '3 hours', "
+                    "updated_at=now()-interval '3 hours'"
+                )
+            )
+    router = _agent_and_env_router()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_session_json()),
+    )
+    sends = 0
+
+    async def dispatch(req: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        if req.method == "POST" and req.url.path.endswith("/events"):
+            async with db_session_factory() as db:
+                owned = (
+                    (
+                        await db.execute(
+                            text(
+                                "SELECT unsettled, resumable, finished_at, priority FROM usage_sweep_sessions "
+                                "WHERE session_id='ses_test001'"
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+            assert owned is not None, "ownership must commit before a billable send"
+            assert owned["unsettled"] is True
+            assert owned["resumable"] is True
+            assert owned["finished_at"] is None
+            assert owned["priority"] is (_auth().platform_user_id is not None)
+            sends += 1
+            return send_events_response(
+                data=[
+                    {
+                        "id": "evt_owned",
+                        "type": "user.message",
+                        "processed_at": None,
+                        "content": [{"type": "text", "text": "hi"}],
+                    }
+                ]
+            )
+        return router.dispatch(req)
+
+    runtime = _runtime(
+        build_fake_anthropic(dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    if continuation:
+        await _continue_turn_impl(runtime, _auth(), "ses_test001", "hi")
+    else:
+        with patch(
+            "daimon.adapters.mcp.tools.agent_chat.create_session",
+            new=AsyncMock(
+                return_value=ma_session(
+                    id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID
+                )
+            ),
+        ):
+            await _start_turn_impl(runtime, _auth(), "hi")
+    assert sends == 1
+
+
+async def test_continue_turn_checks_durable_archive_when_retrieve_returns_stale_snapshot(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.session_mutation import session_mutation_fence
+    from daimon.core.stores import usage_sweep_sessions
+
+    async with committing_sessionmaker.begin() as db:
+        await make_tenant(db, id=_TENANT_ID, workspace_id="archive-race")
+        await usage_sweep_sessions.register(
+            db,
+            session_id="ses_test001",
+            tenant_id=_TENANT_ID,
+            resumable=False,
+        )
+    router = _agent_and_env_router()
+    snapshot = _session_json(status="idle")
+    assert snapshot["archived_at"] is None, "remote retrieve began before archiving"
+    sent: list[str] = []
+
+    async def dispatch(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/sessions/ses_test001":
+            # Archiving commits while this retrieve's old response is in flight.
+            async with (
+                session_mutation_fence(committing_sessionmaker, "ses_test001", check=False),
+                committing_sessionmaker.begin() as db,
+            ):
+                await usage_sweep_sessions.mark_archived(
+                    db,
+                    session_id="ses_test001",
+                    now=dt.datetime.now(dt.UTC),
+                )
+            return httpx.Response(200, json=snapshot)
+        if req.method == "POST" and req.url.path.endswith("/events"):
+            sent.append(req.url.path)
+            return httpx.Response(500)
+        return router.dispatch(req)
+
+    runtime = _runtime(build_fake_anthropic(dispatch), session_factory=committing_sessionmaker)
+    with pytest.raises(ToolError, match="This session is archived"):
+        await _continue_turn_impl(runtime, _auth(), "ses_test001", "again")
+    assert sent == [], "durable archived state must reject before registering or sending"
+    async with committing_sessionmaker() as db:
+        state = (
+            (
+                await db.execute(
+                    text(
+                        "SELECT resumable,archived_at FROM usage_sweep_sessions WHERE session_id='ses_test001'"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert state["resumable"] is False and state["archived_at"] is not None, (
+        "a rejected continuation cannot wake an archived session"
+    )

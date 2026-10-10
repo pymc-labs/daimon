@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
@@ -18,7 +19,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 from daimon.core import usage_recording
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.pricing import MODEL_PRICING, cost_of
-from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores import tenant_ledger, usage_events, usage_sweep_sessions
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.testing.db import build_test_engine
@@ -28,6 +29,11 @@ from daimon.testing.ma_models import ma_model_usage, ma_session, ma_session_agen
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
+
+
+@pytest.fixture(autouse=True)
+def no_real_sweep_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daimon.core.usage_sweep._REQUEST_INTERVAL_S", 0.0)
 
 
 @pytest_asyncio.fixture
@@ -153,6 +159,9 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
     principal = await make_platform_principal(
         db_session, platform="discord", external_id="usage-race-user"
     )
+    await usage_sweep_sessions.register(
+        db_session, session_id="sesn_race", tenant_id=principal.tenant_id
+    )
     await db_session.commit()
     writer_sessionmaker = async_sessionmaker(bind=usage_race_engine, expire_on_commit=False)
     model_id = "claude-sonnet-4-6"
@@ -171,8 +180,8 @@ async def test_live_writer_and_sweep_wait_on_same_usage_unique_key(
     router = MARouter()
     router.add(
         "GET",
-        r"/v1/sessions",
-        lambda req, m: list_response([session_shape.model_dump(mode="json")]),
+        r"/v1/sessions/sesn_race",
+        lambda req, m: httpx.Response(200, json=session_shape.model_dump(mode="json")),
     )
     router.add(
         "GET",
