@@ -99,7 +99,8 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
                 body=await self._support_post(interaction, updated_row),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            _log.info(
+            log = _log.info if delivered else _log.warning
+            log(
                 "feedback.routed_to_support",
                 feedback_id=str(self._feedback_id),
                 delivered=delivered,

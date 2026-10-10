@@ -49,6 +49,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.channel_admin_roles import member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import DirectMessagePolicy, SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
@@ -119,10 +120,11 @@ async def post_to_support_channel(
         if not isinstance(channel, discord.abc.Messageable):
             _log.warning("support.channel_not_messageable", channel_id=channel_id)
             return False
-        if allowed_mentions is None:
-            await channel.send(body)
-        else:
-            await channel.send(body, allowed_mentions=allowed_mentions)
+        for chunk in split_for_discord_safe(body):
+            if allowed_mentions is None:
+                await channel.send(chunk)
+            else:
+                await channel.send(chunk, allowed_mentions=allowed_mentions)
         return True
     except (discord.HTTPException, ValueError) as exc:
         # A misconfigured id, a channel the bot was removed from, or lost
@@ -295,12 +297,14 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         policies = self._runtime.settings.direct_message_policies
         policy = policies.get(tenant_id, DirectMessagePolicy())
         body = self._body(interaction, note)
+        chunks = split_for_discord_safe(body)
         for tier in tiers:
             landed = 0
             for user_id in (uid for uid in tier if policy.allows(uid)):
                 try:
                     dm = await bot.open_member_dm(int(self._guild_id), int(user_id))
-                    await dm.send(body, allowed_mentions=discord.AllowedMentions.none())
+                    for chunk in chunks:
+                        await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
                     landed += 1
                 except (discord.HTTPException, LookupError, ValueError) as exc:
                     _log.info("support.admin_dm_undelivered", err_type=type(exc).__name__)

@@ -11,6 +11,7 @@ from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
     discord_channel,
+    post_to_support_channel,
 )
 from daimon.core.config import SupportSettings
 from daimon.core.stores import accounts
@@ -24,6 +25,44 @@ _GUILD = "111"
 _CHANNEL = "222"
 _THREAD = "333"
 _ESCALATION = "999"
+
+
+async def test_long_support_note_reaches_channel_in_order() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    sent: list[str] = []
+
+    async def send(body: str, **_kwargs: Any) -> None:
+        if len(body) > 2000:
+            raise discord.HTTPException(
+                SimpleNamespace(status=400, reason="Bad Request"), "too long"
+            )
+        sent.append(body)
+
+    channel.send = AsyncMock(side_effect=send)
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+    note = "x" * 4000
+    body = "**Human support requested** by <@7>\nhttps://discord.com/channels/1/2/3\n\n" + note
+
+    assert await post_to_support_channel(bot, channel_id=_ESCALATION, body=body)
+    assert all(len(part) <= 2000 for part in sent)
+    assert sent[0].startswith("**Human support requested** by <@7>\nhttps://")
+    assert "".join(sent).endswith(note)
+
+
+async def test_partial_support_channel_post_is_undelivered() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock(
+        side_effect=[
+            None,
+            discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "lost access"),
+        ]
+    )
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    assert not await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000)
+    assert channel.send.await_count == 2
 
 
 async def _seed(session: AsyncSession, *, grant: bool) -> None:
@@ -51,6 +90,7 @@ async def _submit(
     *,
     open_dm: Any = None,
     escalation_channel: str = _ESCALATION,
+    note: str = "help please",
 ) -> tuple[Any, Any, AsyncMock]:
     """Send a note on an answer in a thread of `_CHANNEL`; the bot, the escalation channel, a DM."""
     thread = MagicMock(spec=discord.Thread)
@@ -72,7 +112,7 @@ async def _submit(
     runtime.settings.support = SupportSettings(escalation_channel_id=escalation_channel)
     runtime.settings.direct_message_policies = {}
     modal = SupportModal(runtime=runtime, guild_id=_GUILD, channel_id=_THREAD, message_id="444")
-    modal.note_input = SimpleNamespace(value="help please")  # type: ignore[assignment]
+    modal.note_input = SimpleNamespace(value=note)  # type: ignore[assignment]
     await modal.on_submit(interaction)
     return bot, escalation, dm
 
@@ -95,6 +135,30 @@ async def test_a_thread_of_a_channel_with_admins_dms_them_not_the_escalation_cha
     body = dm.send.await_args.args[0]
     assert "help please" in body and f"/{_THREAD}/444" in body
     escalation.send.assert_not_awaited()
+    assert await _delivered(db_session_factory) == [True]
+
+
+async def test_partial_admin_dm_falls_back_to_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        await _seed(session, grant=True)
+
+    dm = AsyncMock()
+    dm.send.side_effect = [
+        None,
+        discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "closed"),
+    ]
+
+    async def open_dm(_guild_id: int, _user_id: int) -> Any:
+        if _user_id != 40:
+            raise LookupError("server admin unavailable")
+        return dm
+
+    _bot, channel, _dm = await _submit(db_session_factory, open_dm=open_dm, note="x" * 4000)
+
+    assert dm.send.await_count == 2
+    assert channel.send.await_count > 1
     assert await _delivered(db_session_factory) == [True]
 
 
