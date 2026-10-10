@@ -160,10 +160,18 @@ def spec(fixture: BackendFixture) -> AgentSpec:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("scenario", "fixture"),
-    [(s, p) for s, p in CASES if p.backend == "openai"],
-    ids=[s.scenario_id for s, p in CASES if p.backend == "openai"],
+    [
+        (s, p)
+        for s, p in CASES
+        if p.backend == "openai" and not any(g.code == "MCP_SERVER_LIMIT" for g in p.gaps)
+    ],
+    ids=[
+        s.scenario_id
+        for s, p in CASES
+        if p.backend == "openai" and not any(g.code == "MCP_SERVER_LIMIT" for g in p.gaps)
+    ],
 )
-async def test_all_ten_recipes_prepare_authenticated_sessions_and_decode_native_calls(
+async def test_admitted_recipes_prepare_authenticated_sessions_and_decode_native_calls(
     scenario: ScenarioFixture,
     fixture: BackendFixture,
     caplog: pytest.LogCaptureFixture,
@@ -271,6 +279,50 @@ async def test_all_ten_recipes_prepare_authenticated_sessions_and_decode_native_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_enabled", (True, False))
+async def test_new17_two_server_intent_refuses_before_resolution_or_native_io(
+    resolver_enabled: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scenario, fixture = PACK.select("QA-NEW17-MCP-USABLE-NEXT-MESSAGE", "openai")
+    assert fixture.mcp_binding is not None
+    assert {c.name for c in fixture.mcp_binding.connections} == {"daimon-mcp", "deepwiki"}
+    assert any(g.code == "MCP_SERVER_LIMIT" and g.status == "BLOCKED" for g in fixture.gaps)
+    wire = WireReplay(
+        scenario_tape(scenario, fixture, keys={t.turn: f"turn-{t.turn}" for t in fixture.turns})
+    )
+    preparation = Preparation(fixture, wire)
+    caplog.set_level(logging.DEBUG)
+    async with AsyncOpenAI(
+        api_key="offline-placeholder",
+        base_url="https://offline.invalid/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(preparation.handle)),
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            authorization=lambda scope, kind, identity: scope == SCOPE,
+            mcp_secrets=preparation.resolve if resolver_enabled else None,
+        )
+        with pytest.raises(UnsupportedCapability) as caught:
+            await driver.agents.create(SCOPE, spec(fixture), key="refuse-two-servers")
+    assert caught.value.missing == ("single_bound_mcp_server",)
+    assert preparation.agent_posts == preparation.session_posts == preparation.agent_gets == 0
+    assert preparation.resolutions == [] and wire.requests == []
+    assert preparation.secret not in caplog.text
+    # Preserve the source scenario and both hypothetical tool calls. Neither
+    # frame consumption nor tool execution is claimed for refused preparation.
+    assert {c.name for t in fixture.turns for c in t.mcp_calls} == {
+        "attach_mcp_server",
+        "ask_question",
+    }
+    assert len(fixture.turns) == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ("no_resolver", "revoked", "destination", "foreign_scope"))
 async def test_authentication_faults_refuse_before_session_or_tool_dispatch(fault: str) -> None:
     scenario, fixture = PACK.select("QA-D5-UNBOUND-AGENT-EDIT-REFUSED", "openai")
@@ -344,7 +396,7 @@ def test_frozen_recipe_sources_schema_pins_and_every_call_are_retained() -> None
         assert fixture.mcp_binding is not None
         fixture.mcp_binding.auth_source.verify(ROOT)
         fixture.mcp_binding.host_source.verify(ROOT)
-        assert fixture.mcp_binding.auth_commit == "48a1dc8ebd5f07427fdd1257d6df5a171151d701"
+        assert fixture.mcp_binding.auth_commit == "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82"
         assert not any(g.code == "NATIVE_TOOL_SCHEMA_UNBOUND" for g in fixture.gaps)
         assert any(g.code == "RUNNER_HOOK" and g.location == "mcp" for g in fixture.gaps)
         for turn in fixture.turns:
@@ -418,4 +470,18 @@ def test_mcp_intent_cannot_silently_downgrade_auth_or_policy(fault: str) -> None
     else:
         connection["tool_policy"]["unknown"] = True
     with pytest.raises(ValidationError):
+        BackendFixture.model_validate_json(json.dumps(document))
+
+
+@pytest.mark.parametrize("fault", ("remove_gap", "wrong_location", "remove_server"))
+def test_two_server_refusal_cannot_be_removed_or_misbound(fault: str) -> None:
+    _, fixture = PACK.select("QA-NEW17-MCP-USABLE-NEXT-MESSAGE", "openai")
+    document = fixture.model_dump(mode="json")
+    if fault == "remove_gap":
+        document["gaps"] = [g for g in document["gaps"] if g["code"] != "MCP_SERVER_LIMIT"]
+    elif fault == "wrong_location":
+        next(g for g in document["gaps"] if g["code"] == "MCP_SERVER_LIMIT")["location"] = "foreign"
+    else:
+        document["mcp_binding"]["connections"].pop()
+    with pytest.raises(ValidationError, match="MCP server limit refusal"):
         BackendFixture.model_validate_json(json.dumps(document))

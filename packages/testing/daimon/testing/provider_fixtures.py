@@ -39,6 +39,7 @@ class FixtureGap(Record):
         "RUNNER_HOOK",
         "ANTHROPIC_SOURCE_UNBOUND",
         "MCP_AUTH_UNBOUND",
+        "MCP_SERVER_LIMIT",
         "EXTERNAL_TOOL_SCHEMA_UNBOUND",
     ]
     location: str
@@ -135,6 +136,11 @@ class BackendFixture(Record):
             source=self.codec_source,
             replies=(),
         )
+        if self.backend == "openai" and self.mcp_binding is not None:
+            refusal = [g for g in self.gaps if g.code == "MCP_SERVER_LIMIT"]
+            multiple = len(self.mcp_binding.connections) > 1
+            if len(refusal) != int(multiple) or any(g.location != "mcp" for g in refusal):
+                raise ValueError("MCP server limit refusal must match the connection intent")
         if len({t.turn for t in self.turns}) != len(self.turns):
             raise ValueError("duplicate catalog turn numbers")
         if len({t.root_id for t in self.turns}) != len(self.turns):

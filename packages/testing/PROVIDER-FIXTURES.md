@@ -113,7 +113,7 @@ structured output schema.
 | D5 | Denied `update_agent` and `attach_mcp_server` | Unchanged agent/server readbacks and refusal |
 | D8 | `github_connect` | Private connection card delivered to the correct admin |
 | ISO | `read_channel`, `search_messages`, native file commands | Real channel/workspace isolation and independent sessions |
-| NEW17 | `attach_mcp_server`, then Deepwiki `ask_question` | Attached server survives follow-up, discovered schema and actual execution |
+| NEW17 | `attach_mcp_server`, then Deepwiki `ask_question` | BLOCKED: approved OpenAI preparation refuses two bound servers; follow-up/discovery still require future support |
 | NEW18 | `add_skill` preview and content-hash follow-up, native skill-file read | Approval, upload/pin, persistence and skill use |
 | NEW21 | `request_agent_key` | Private form identity, owned clock advance and expiry edit |
 | NEW22 | `create_routine` with channel destination | Scheduled execution, memory effect and untruncated delivery |
@@ -122,10 +122,17 @@ structured output schema.
 
 `fixture.mcp_binding` supplies explicit `MCPConnection` intent, a closed allowed
 tool list, source/schema pins and approved auth commit
-`48a1dc8ebd5f07427fdd1257d6df5a171151d701`. The OpenAI proof prepares agents and
+`9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82`. The OpenAI proof prepares agents and
 sessions through the real SDK and driver, resolving scoped credential references
-only into session overrides. It covers all ten recipes, including the denied
-tool results, and checks secret-free persisted agents and SDK DEBUG logs.
+only into session overrides. It covers the nine admitted recipes, including
+the denied tool results, and checks secret-free persisted agents and SDK DEBUG logs.
+NEW17 retains its two resolver-bound connections and authored source turns,
+but carries typed `BLOCKED` gap `MCP_SERVER_LIMIT`: the approved driver must
+refuse with `single_bound_mcp_server` during agent preparation. The real SDK
+negative controls verify zero resolver calls, agent/session POSTs and tool
+dispatch, both with and without a resolver. Its authored follow-up frames
+remain available for future support and are not consumed or treated as
+execution evidence by the authenticated preparation proof.
 Missing resolver, revocation, changed destination and foreign scope refuse
 before session or tool dispatch. The offline fixture URLs and resolver values
 are fictional; they are not credentials or a public endpoint.
@@ -142,7 +149,7 @@ steps and normalization are replayed through the actual SDK. Its current driver
 rejects `credential_ref` or `tool_policy`, so every Gemini MCP recipe retains
 `MCP_AUTH_UNBOUND` until the owner provides that resolver seam. No anonymous
 substitution is allowed. Deepwiki's authored `ask_question` schema retains
-`EXTERNAL_TOOL_SCHEMA_UNBOUND`; discovery and mixed public/auth preparation are
+`EXTERNAL_TOOL_SCHEMA_UNBOUND`; discovery and multiple-server preparation are
 not proven offline. Every recipe also retains `RUNNER_HOOK` at `mcp` for the
 actual approvals, forms, permissions, mutations, scheduling and delivery.
 

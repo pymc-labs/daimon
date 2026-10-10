@@ -40,7 +40,7 @@ from scripts.qa_provider_fixtures import native_turn
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "packages/testing/fixtures/target53"
-AUTH_COMMIT = "48a1dc8ebd5f07427fdd1257d6df5a171151d701"
+AUTH_COMMIT = "9cf23f6c1eaf1d269ed9cab3f281ddd0cc9a6b82"
 OBJECT = TypeAdapter[Object](Object)
 SCENARIOS = frozenset(
     {
@@ -470,6 +470,7 @@ def extend(pack: FixturePack, schema_bytes: bytes) -> FixturePack:
                     "NATIVE_TOOL_SCHEMA_UNBOUND",
                     "MCP_AUTH_UNBOUND",
                     "EXTERNAL_TOOL_SCHEMA_UNBOUND",
+                    "MCP_SERVER_LIMIT",
                 }
                 and not (g.code == "RUNNER_HOOK" and g.location == "mcp")
             ]
@@ -484,6 +485,19 @@ def extend(pack: FixturePack, schema_bytes: bytes) -> FixturePack:
                     ),
                 )
             )
+            if fixture.backend == "openai" and len(connections) > 1:
+                gaps.append(
+                    FixtureGap(
+                        code="MCP_SERVER_LIMIT",
+                        location="mcp",
+                        reason=(
+                            "Approved OpenAI auth accepts exactly one resolver-bound MCP server. "
+                            "This two-server intent must raise single_bound_mcp_server before "
+                            "credential resolution, agent/session POST or tool dispatch. "
+                            "Native follow-up frames are authored inputs, not execution evidence."
+                        ),
+                    )
+                )
             if fixture.backend == "gemini":
                 gaps.append(
                     FixtureGap(
