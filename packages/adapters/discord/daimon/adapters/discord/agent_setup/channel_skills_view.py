@@ -41,7 +41,7 @@ EXPLAINER: Final = (
 )
 #: Beside the skill field: which skills can be named.
 SKILL_HINT: Final = "A library skill, or one uploaded to this channel's agent."
-UNREADABLE: Final = "This server's skills could not all be read. Nothing changed."
+UNREADABLE: Final = "Couldn't read all the skills.\n\nNo skill was added."
 
 
 def build_channel_skills_container(

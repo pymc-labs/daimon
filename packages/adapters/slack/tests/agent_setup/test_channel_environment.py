@@ -93,7 +93,7 @@ def test_the_block_lists_channels_then_the_defaults_and_the_select_marks_the_pic
     assert text.index("*Workspace default:* shared") < text.index(
         "Deployment default: *default*"
     ), "the workspace default comes before the deployment fall-through"
-    assert "_not in effect while a workspace default is set_" in text, (
+    assert "_Not used while a workspace default is set._" in text, (
         "a workspace default takes the deployment default out of the cascade"
     )
     assert select is not None, "an admin gets the select"
@@ -340,8 +340,8 @@ async def test_a_workspace_admin_is_sent_to_chat_to_confirm_an_open_network(
         environment_option_value("science"),
     )
 
-    assert "confirm there" in client.chat_postEphemeral.call_args.kwargs["text"], (
-        "it points at chat"
+    assert client.chat_postEphemeral.call_args.kwargs["text"].endswith(
+        f"\n\nAsk me in chat to make this change for <#{CHANNEL}>, then confirm when I ask."
     )
     assert (
         await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))

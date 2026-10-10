@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
+    _cascade_blocks,
     build_delete_modal,
     build_export_result_view,
     build_post_delete_view,
@@ -354,10 +355,24 @@ def test_summary_line_includes_mcp_tokens_agent_github_binding_slack_categories(
         slack_turn_contexts=PurgePreviewRow(count=4, example=None),
     )
     text = summary_line(preview)
-    assert "MCP token" in text, "summary must mention mcp_tokens"
-    assert "GitHub link" in text, "summary must mention agent_github_binding"
-    assert "Slack user token" in text, "summary must mention slack_user_tokens"
-    assert "Slack turn context" in text, "summary must mention slack_turn_contexts"
+    assert "Daimon access token" in text, "summary must mention mcp_tokens"
+    assert "link from an agent" in text, "summary must mention agent_github_binding"
+    assert "saved Slack access token" in text, "summary must mention slack_user_tokens"
+    assert "temporary Slack request record" in text, "summary must mention slack_turn_contexts"
+
+
+def test_cascade_plain_rows_are_a_spaced_list_without_routine_id() -> None:
+    preview = _make_preview(
+        routines=PurgePreviewRow(count=2, example="routine-uuid"),
+        user_configs=PurgePreviewRow(count=1, example=None),
+        github_credentials=PurgePreviewRow(count=1, example="octocat"),
+    )
+    text = _cascade_blocks(preview)[0]["text"]["text"]
+    assert text.startswith("⚡ *What will happen*\n\n• ")
+    assert "• ⏰ Cancel *2* routines" in text
+    assert "routine-uuid" not in text
+    assert "• ⚙ Remove your saved settings" in text
+    assert "• 🔑 Delete *1* saved GitHub key, for example the one for `octocat`" in text
 
 
 def test_cascade_blocks_render_mcp_tokens_row_when_nonzero() -> None:
@@ -366,7 +381,7 @@ def test_cascade_blocks_render_mcp_tokens_row_when_nonzero() -> None:
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V1")
     joined = _extract_text(view)
     assert "3" in joined, "mcp_tokens count must appear in the cascade"
-    assert "MCP token" in joined, "mcp_tokens row must mention MCP token(s)"
+    assert "Daimon access token" in joined, "mcp_tokens row must mention MCP token(s)"
 
 
 def test_cascade_blocks_render_agent_github_binding_row_when_nonzero() -> None:
@@ -375,7 +390,7 @@ def test_cascade_blocks_render_agent_github_binding_row_when_nonzero() -> None:
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V2")
     joined = _extract_text(view)
     assert "2" in joined, "agent_github_binding count must appear in the cascade"
-    assert "per-agent GitHub token link" in joined, (
+    assert "links from agents to your GitHub keys" in joined, (
         "agent_github_binding row must mention the per-agent GitHub token link"
     )
 
@@ -386,7 +401,9 @@ def test_cascade_blocks_render_slack_user_tokens_row_when_nonzero() -> None:
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V3")
     joined = _extract_text(view)
     assert "1" in joined, "slack_user_tokens count must appear in the cascade"
-    assert "Slack user token" in joined, "slack_user_tokens row must mention Slack user token(s)"
+    assert "saved Slack access token" in joined, (
+        "slack_user_tokens row must mention Slack user token(s)"
+    )
 
 
 def test_cascade_blocks_render_slack_turn_contexts_row_when_nonzero() -> None:
@@ -395,7 +412,7 @@ def test_cascade_blocks_render_slack_turn_contexts_row_when_nonzero() -> None:
     view = build_delete_modal(preview, account_id=uuid.uuid4(), user_name="alice", view_id="V4")
     joined = _extract_text(view)
     assert "5" in joined, "slack_turn_contexts count must appear in the cascade"
-    assert "Slack turn context" in joined, (
+    assert "temporary Slack request record" in joined, (
         "slack_turn_contexts row must mention Slack turn context(s)"
     )
 

@@ -35,7 +35,7 @@ from daimon.adapters.teams.privacy_card import (
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.privacy import collect_purge_preview
+from daimon.core.privacy import DELETE_PAUSED, collect_purge_preview
 from daimon.core.purge import purge_account
 from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
@@ -47,7 +47,6 @@ log = structlog.get_logger()
 NAME_MISMATCH = "That doesn't match your name."
 STALE = "Could not verify your account, so nothing was deleted. Please send privacy again."
 DELETING = "⏳ Deleting… this may take a moment."
-DELETE_PAUSED = "Deleting your account is paused during the event."
 
 
 class PrivacyPanel:

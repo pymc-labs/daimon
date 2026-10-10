@@ -44,9 +44,10 @@ MAX_LISTED: Final = 15
 LISTING_MAX_CHARS: Final = 3_000
 """Room for the listing inside Discord's 4000-character cap on a message's text."""
 EXPLAINER: Final = (
-    "-# Channel admins pick this channel's agent and edit agents that only work in their "
+    "-# Channel admins choose their channels' environment and agent, and edit agents "
+    "limited to those "
     "channels.\n\n"
-    "-# Starting agents and the default agent stay with server admins."
+    "-# Starting agents and the server default stay with server admins."
 )
 
 
@@ -65,9 +66,7 @@ def build_channel_admins_container(
         shown.append(f"-# and {len(grants) - len(shown)} more")
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(header(CHANNEL_ADMINS_LABEL))
-    container.add_item(
-        discord.ui.TextDisplay("\n".join(shown) or "-# no channel has its own admins yet")
-    )
+    container.add_item(discord.ui.TextDisplay("\n".join(shown) or "-# No channel admins yet."))
     container.add_item(hairline())
     container.add_item(discord.ui.TextDisplay(EXPLAINER))
     return container

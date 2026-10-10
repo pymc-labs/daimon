@@ -25,6 +25,39 @@ _THREAD = 3
 _OVER_BUDGET = "This channel's budget is used up.\n\nAn admin can raise it."
 
 
+@pytest.mark.parametrize(
+    ("admin", "action", "expected"),
+    [
+        (False, "enable", "Only a server admin can turn Daimon DMs on or off here."),
+        (True, "enable", "Daimon DMs are on for this server."),
+        (True, "disable", "Daimon DMs are off for this server."),
+    ],
+)
+async def test_dm_policy_replies_use_server_words(
+    monkeypatch: pytest.MonkeyPatch, admin: bool, action: str, expected: str
+) -> None:
+    save = AsyncMock()
+    monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    member = MagicMock()
+    member.guild_permissions.administrator = admin
+    member.guild_permissions.manage_guild = admin
+    guild = MagicMock()
+    guild.id = _GUILD
+    guild.owner_id = 1
+    guild.fetch_member = AsyncMock(return_value=member)
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.channel = MagicMock(spec=discord.TextChannel)
+    interaction.user.id = 999
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    runtime = MagicMock()
+    cog = DirectMessageCog(MagicMock(runtime=runtime))
+    await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
+    assert interaction.followup.send.await_args.args[0] == expected
+    assert save.await_count == (1 if admin else 0)
+
+
 async def _no_history(*, limit: int) -> AsyncIterator[discord.Message]:
     for message in ():
         yield message

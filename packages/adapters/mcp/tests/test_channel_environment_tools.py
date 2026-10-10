@@ -490,7 +490,7 @@ async def test_a_channel_admin_never_opens_the_network_of_a_sealed_channel(
     )
     assert closed.changed, "a limited network stays the channel admin's pick"
     admin = _auth(tenant_id, account_id, admin=True)
-    with pytest.raises(ToolError, match="Only turns inside.*Never confirm on their behalf"):
+    with pytest.raises(ToolError, match="Nothing changed.*Never confirm on their behalf"):
         await _set_channel_environment_impl(
             runtime, admin, environment_name="open", channel_id=CHANNEL
         )
@@ -542,7 +542,7 @@ async def test_a_server_admin_confirms_clearing_a_sealed_channel_onto_an_open_de
     )
     await _seal(committing_sessionmaker, tenant_id, CHANNEL)
 
-    with pytest.raises(ToolError, match="the default it would fall back to.*confirm_open_network"):
+    with pytest.raises(ToolError, match="the default environment.*confirm_open_network"):
         await _clear_channel_environment_impl(runtime, admin, channel_id=CHANNEL)
     cleared = await _clear_channel_environment_impl(
         runtime, admin, channel_id=CHANNEL, confirm_open_network=True
@@ -566,12 +566,13 @@ async def test_a_workspace_default_sealed_channels_follow_onto_an_open_network_i
     await _seal(committing_sessionmaker, tenant_id, CHANNEL)
 
     with pytest.raises(
-        ToolError, match="Channels only turns inside them read would run in the open.*confirm_open"
+        ToolError,
+        match=r"Nothing changed\. Some channels or their threads limit who can read them, and the open environment could let their content out.*confirm_open",
     ):
         await _set_channel_environment_impl(
             runtime, admin, environment_name="open", channel_id=None
         )
-    with pytest.raises(ToolError, match="the environment they would fall back to.*confirm_open"):
+    with pytest.raises(ToolError, match="the default environment.*confirm_open"):
         await _clear_channel_environment_impl(runtime, admin, channel_id=None)
     row = await _workspace_row(committing_sessionmaker, tenant_id)
     assert row == "closed", "unconfirmed, the workspace default stays"

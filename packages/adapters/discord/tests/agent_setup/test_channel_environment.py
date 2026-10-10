@@ -198,7 +198,7 @@ def test_the_block_lists_channels_then_the_defaults() -> None:
     assert text.index("Server default → **shared**") < text.index("Deployment default"), (
         "the server default comes before the deployment fall-through"
     )
-    assert "-# not in effect while a server default is set" in text, (
+    assert "-# Not used while a server default is set." in text, (
         "a server default takes the deployment default out of the cascade"
     )
 
@@ -547,7 +547,9 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network_in_a_se
     select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
     await select.callback(interaction)
 
-    assert "confirm there" in interaction.followup.send.call_args.args[0], "it points at chat"
+    assert interaction.followup.send.call_args.args[0].endswith(
+        "\n\nAsk me in chat to make this change for #growth, then confirm when I ask."
+    )
     assert (
         await get_scope(
             db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))

@@ -195,7 +195,7 @@ def test_deployment_default_is_marked_not_in_effect_when_the_tenant_consumes_the
         sentence=PRECEDENCE_LINE,
     )
     text = _text(container)
-    assert "-# not in effect while a server default is set" in text, (
+    assert "-# Not used while a server default is set." in text, (
         "naming the deployment default as reachable alongside a server default would be wrong"
     )
 
