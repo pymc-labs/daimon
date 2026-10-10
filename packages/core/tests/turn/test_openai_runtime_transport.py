@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import cast
 
 import httpx
 import pytest
@@ -138,11 +139,15 @@ async def test_owned_stream_and_download_close_on_every_end(
     if end == "exhaust":
         assert [item async for item in stream]
     elif end == "close":
-        close = stream.aclose
+        close = cast(Callable[[], Awaitable[None]], getattr(stream, "aclose", None))
         await close()
         await close()
     else:
-        task = asyncio.create_task(anext(stream))
+
+        async def receive() -> object:
+            return await anext(stream)
+
+        task = asyncio.create_task(receive())
         await source.started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

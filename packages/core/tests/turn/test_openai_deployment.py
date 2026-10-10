@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
 
 import httpx
 import pytest
@@ -37,7 +35,7 @@ from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ThreadRef
-from mux.drivers.openai.transport import SDKTransport, Transport
+from mux.drivers.openai import deployment
 from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from openai import AsyncOpenAI
@@ -329,74 +327,99 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
     tmp_path: Path,
     db_clean: None,
 ) -> None:
-    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    row = entry()
+    del row["spend_limit_usd_cents"]
+    manifest(monkeypatch, tmp_path / "runtime.json", [row])
     monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline-only")
     wire = Wire()
-    constructed: list[tuple[str, str]] = []
-    # The driver-owned constructor is replaced at its public boundary only;
-    # preparation, ports, SDK HTTP, journal and turn execution are real.
-    module = ModuleType("mux.drivers.openai.deployment")
-    async with AsyncOpenAI(
-        api_key="offline-only",
-        project="project",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)),
-    ) as client:
+    clients: list[AsyncOpenAI] = []
 
-        def configured_transport(*, api_key: str, project: str) -> Transport:
-            constructed.append((api_key, project))
-            return SDKTransport(client)
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.headers["OpenAI-Project"] == "project"
+        if request.method == "POST" and request.url.path.endswith("/agents/sessions"):
+            wire.requests.append(request)
+            body = json.loads(request.content)
+            assert "spend_control" not in body
+            assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
+            assert body["environment"]["container_size"] == "small"
+            assert request.headers["Idempotency-Key"].startswith("openai:prepare:")
+            return httpx.Response(200, json=wire.session())
+        return wire.handle(request)
 
-        monkeypatch.setattr(module, "configured_transport", configured_transport, raising=False)
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-        async with application.deps.sessionmaker() as db, db.begin():
-            await make_tenant(db, id=TENANT)
-        prepared = await bind_session_impl(
-            application.deps,
-            application.admission,
-            tenant_id=TENANT,
-            platform="slack",
-            external_user_id="caller",
-            thread_id="thread",
-            session_account_id=ACCOUNT,
-            reuse_existing=True,
+    def sdk(
+        *,
+        api_key: str,
+        project: str,
+        organization: str,
+        base_url: str,
+        max_retries: int,
+    ) -> AsyncOpenAI:
+        assert api_key == "offline-only" and project == "project"
+        assert organization == "" and base_url == "https://api.openai.com/v1" and max_retries == 0
+        client = AsyncOpenAI(
+            api_key=api_key,
+            project=project,
+            organization=organization,
+            base_url=base_url,
+            max_retries=max_retries,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
         )
-        assert isinstance(prepared.runtime, OpenAIHostRuntime)
-        assert prepared.session_ref is not None and prepared.session_ref.provider == "openai"
-        assert not application.deps.turn_runtimes and application.deps.state_store is None
+        clients.append(client)
+        return client
 
-        async def reseed() -> str:
-            return "question"
+    # Only SDK network construction is replaced; the deployment loader, public
+    # constructor, request-owned lifetimes, preparation and host turn are real.
+    monkeypatch.setattr(deployment, "AsyncOpenAI", sdk)
+    assert clients == []
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+    prepared = await bind_session_impl(
+        application.deps,
+        application.admission,
+        tenant_id=TENANT,
+        platform="slack",
+        external_user_id="caller",
+        thread_id="thread",
+        session_account_id=ACCOUNT,
+        reuse_existing=True,
+    )
+    assert isinstance(prepared.runtime, OpenAIHostRuntime)
+    assert prepared.session_ref is not None and prepared.session_ref.provider == "openai"
+    assert not application.deps.turn_runtimes and application.deps.state_store is None
 
-        result = await run_prepared_turn(
-            application.deps,
-            prepared,
-            tenant_id=TENANT,
-            platform="slack",
-            thread_id="thread",
-            external_user_id="caller",
-            user_message="question",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=reseed,
-            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
-            render_interval_s=0.01,
-            operation_key="deployment-host-turn",
+    async def reseed() -> str:
+        return "question"
+
+    result = await run_prepared_turn(
+        application.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key="deployment-host-turn",
+    )
+    await drain_outcomes()
+    assert result.state.error is None and "answer turn-1" in str(result.state.content)
+    store = PostgresStateStore(application.deps.sessionmaker)
+    binding = await store.get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+            account_id=str(ACCOUNT),
         )
-        await drain_outcomes()
-        assert result.state.error is None and "answer turn-1" in str(result.state.content)
-        store = PostgresStateStore(application.deps.sessionmaker)
-        binding = await store.get_binding(
-            Slot(
-                thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
-                account_id=str(ACCOUNT),
-            )
-        )
-        assert binding is not None and binding.native_refs["session"] == prepared.session_ref.id
-        rows = await store.read_events(prepared.session_ref.id)
-        assert any(event.type == "session.turn_ended" for event in rows)
-        assert (
-            sum(req.method == "POST" and req.url.path.endswith("/events") for req in wire.requests)
-            == 1
-        )
-        assert all(source.closed for source in wire.sources)
-        assert constructed and all(project == "project" for _, project in constructed)
+    )
+    assert binding is not None and binding.native_refs["session"] == prepared.session_ref.id
+    rows = await store.read_events(prepared.session_ref.id)
+    assert any(event.type == "session.turn_ended" for event in rows)
+    assert (
+        sum(req.method == "POST" and req.url.path.endswith("/events") for req in wire.requests) == 1
+    )
+    assert all(source.closed for source in wire.sources)
+    assert clients and all(client.is_closed() for client in clients)
+    assert await store.pending_outbox()  # unpriced actual usage remains durable pending
