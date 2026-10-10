@@ -480,3 +480,12 @@ Usage revisions persist under the same slot lease across process restart.
 Verified dated prices plus measured container cost can settle; missing evidence
 stays pending without a zero-cost fallback or an Anthropic meter. Authenticated
 remote MCP and paid host certification ship separately.
+## Frozen host tool/resource inventory
+
+The offline [QA-53 inventory](../../tests/parity/tool_parity/README.md) records
+default skills, MCP discovery and resource dependencies for the frozen scenario
+set, with typed gaps and pending host registrations. Run
+`uv run pytest -q tests/parity/test_qa_tool_parity.py` to check the actual MCP
+caller-visible names/schemas through all three provider encoders, native builtin
+allowlisted deltas, and the SDK default Anthropic request. This is availability
+and compiler evidence; it does not certify live cross-provider host turns.

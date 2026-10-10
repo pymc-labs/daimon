@@ -1,0 +1,2306 @@
+{
+  "integration_base": "9d4541c07701ccae38a70e0a254c980ef3f99e41",
+  "catalog_source": "~/cs/daimon-qa-driver-20261010/catalog",
+  "target_sha256": "fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4",
+  "default_skills": [
+    "cli-auth",
+    "file-handling",
+    "channel-tidy",
+    "marimo_notebooks",
+    "workspace-setup",
+    "pymc-artifact-style",
+    "data-ingestion",
+    "data-validation",
+    "data-cleaning",
+    "exploratory-data-analysis",
+    "eda-storytelling"
+  ],
+  "reason_codes": {
+    "HOST_TURN_UNREGISTERED": "Backend is absent from RUNNABLE_PROFILES, turn_backend and turn_codec on audited integration. No model-facing host manifest exists yet.",
+    "HOST_RESOURCE_ANTHROPIC": "Host setup, fork, skill, credential and routine handlers compose the Anthropic resource backend; registering a turn codec does not migrate these resource paths.",
+    "AUTHENTICATED_MCP_UNSUPPORTED": "Actual OpenAI/Gemini agent compilers refuse a streamable-http MCPConnection with credential_ref. Default daimon-mcp requires per-turn authenticated caller context.",
+    "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED": "Real Gemini validate_bundle requires UTF-8 files <=2 MiB. Default pymc-artifact-style includes binary fonts/images; full eleven-skill default cannot be deployed.",
+    "BUILTIN_NAME_SCHEMA_DELTA": "Anthropic six native names map to OpenAI hosted bash or Gemini code_execution. Native builtin input schemas are provider-owned and not exposed by ToolSpec: semantic equivalence is not schema equality.",
+    "PRIVATE_REPOSITORY_UNSUPPORTED": "Gemini compile_sources refuses repository credentials; provider-native authenticated repository resources and host GitHub handoff need their own binding.",
+    "MEMORY_STORE_UNSUPPORTED": "OpenAI/Gemini profiles do not provide Anthropic native memory_stores; a host memory adapter must preserve the routine memory mount.",
+    "GEMINI_CHECKPOINT_LIMIT": "Gemini workspace snapshot parser limits each member to 16 MiB; scenario creates a 40 MiB member. This is a resource gap beyond host registration."
+  },
+  "scenarios": [
+    {
+      "id": "QA-D11-FOOTER-COST-MATCHES-LEDGER",
+      "title": "the footer cost equals the ledger debit for the turn (markup included)",
+      "surface": "discord",
+      "source_sha256": "93db7a7294634041c2947c8452f7e431c75209069e2b363d907f39e48b86fe39",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "usage-ledger"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-D12-PDF-CLAIM-HAS-PDF",
+      "title": "when the answer says a PDF is attached, the PDF is attached and no working file leaks",
+      "surface": "discord",
+      "source_sha256": "06c490405407844e71410377067d3356f5002e84fc767edf10b26b13a7beedd0",
+      "path": "turn",
+      "skills_used": [
+        "file-handling",
+        "pymc-artifact-style"
+      ],
+      "tools": [
+        "bash",
+        "write",
+        "read"
+      ],
+      "resources": [
+        "output-files",
+        "artifact-download"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-D13-FILES-NOT-REPOSTED",
+      "title": "turn 2 posts only its own new file, not turn 1's files again",
+      "surface": "discord",
+      "source_sha256": "af23998ac1b11962b18be8817a9ff84a57d05345a00db13cacc3bf0ec649d496",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "bash",
+        "write"
+      ],
+      "resources": [
+        "persistent-workspace",
+        "output-files",
+        "artifact-download"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-D14-FORK-KEEPS-SKILLS",
+      "title": "a channel-own fork keeps every skill its source carries",
+      "surface": "headless",
+      "source_sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0",
+      "path": "resource",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [],
+      "resources": [
+        "agent-fork",
+        "custom-skill-pins"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "GAP",
+          "reasons": [
+            "HOST_RESOURCE_ANTHROPIC"
+          ]
+        },
+        "gemini": {
+          "status": "GAP",
+          "reasons": [
+            "HOST_RESOURCE_ANTHROPIC"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-D1-CANARY-TWO-TURN",
+      "title": "hourly canary: PDF mention + mentioned follow-up in one thread, file persists",
+      "surface": "discord",
+      "source_sha256": "f27cb01435d171ed9ae253d7cbbc0ba58ca61815a5970c53832d1aed5cfd34f1",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "read",
+        "bash"
+      ],
+      "resources": [
+        "input-files",
+        "persistent-workspace"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+      "title": "a real session replacement for a skills change keeps files and shows no preamble",
+      "surface": "discord",
+      "source_sha256": "44d8dc0c95f90ed25961edf407844a2056bbea6f310a9cc676148e83b67ac348",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "persistent-workspace",
+        "workspace-checkpoint",
+        "custom-skill-pins"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-D1-SLACK-FOLLOWUP",
+      "title": "Slack: canary shape (follow-up reuses the session, no preamble, nothing silent)",
+      "surface": "slack",
+      "source_sha256": "c8763338a57830bec4071e7567d407e7a45ae4b395e48b71e488e33e74f97e87",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "read",
+        "bash"
+      ],
+      "resources": [
+        "input-files",
+        "persistent-workspace",
+        "slack-files"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-D22-WHO-ANSWERS-HERE",
+      "title": "'which agent are you / who answers here' matches the configured routing",
+      "surface": "discord",
+      "source_sha256": "9304b6cb98a720d760aaaca7b4b8df638b650b8b07e98138b3431f5f7858a806",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "explain_agent_resolution",
+        "read_channel",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "routing-context",
+        "daimon-mcp"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+      "title": "Teams: the answer with the 'Ask a person' card is delivered, not 'Something went wrong'",
+      "surface": "teams",
+      "source_sha256": "b01e2ff21751d896972b3bdd8053182f14667dd3993573e30fd87638711d6e34",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "bash",
+        "write"
+      ],
+      "resources": [
+        "output-files",
+        "artifact-download",
+        "teams-files",
+        "approval-cards",
+        "turn-cancel"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+      "title": "a plain member cannot edit an agent that is bound to no channel (#505)",
+      "surface": "discord",
+      "source_sha256": "4323ee270fa53d2f44f41c5c37d15ba0ae9b6ad02054a8887fbb9f4a4e76b52c",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "update_agent",
+        "attach_mcp_server",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "agent-edit-authorization",
+        "daimon-mcp"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+      "title": "a 45 s turn shows progress while running and its card is finalized at the end",
+      "surface": "discord",
+      "source_sha256": "f9bd441447f2635b89d2c662f3d0a3f442c6fd845bfe03b2049ab1861cfef0e4",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "progress-cards"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+      "title": "a 40 MB workspace does not burn minutes in the pre-replacement checkpoint",
+      "surface": "discord",
+      "source_sha256": "b44930e88ec880aa25b198748b1c99f5b143c4aac2db329c71a913149849d8f3",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "persistent-workspace",
+        "workspace-checkpoint-40m",
+        "custom-skill-pins"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "HOST_RESOURCE_ANTHROPIC",
+          "GEMINI_CHECKPOINT_LIMIT"
+        ]
+      }
+    },
+    {
+      "id": "QA-D8-GITHUB-CONNECT-OFFERED",
+      "title": "asking to connect GitHub on a fork with no saved key offers the Connect button, not 'ask your operator'",
+      "surface": "discord",
+      "source_sha256": "0d774eaef640bcb864becc1212a1708911ce091b73fc92bf87b22efaa1e8285a",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "github_connect",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "github-app",
+        "repository-binding"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+      "title": "an agent with a saved GitHub key can be switched to the GitHub App by an admin in-flow",
+      "surface": "discord",
+      "source_sha256": "b69bbbfa18136846c9616b331c60052bf35ef72886ff241fed6e9177062aa6b2",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "request_repo_binding",
+        "github_connect",
+        "bash",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "repository-binding",
+        "private-repository-credentials",
+        "github-app"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC",
+          "PRIVATE_REPOSITORY_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+      "title": "a tool-only turn ends in a finished card, never '(empty response)' or a blank message",
+      "surface": "discord",
+      "source_sha256": "ce22c80b0b6a8ec1f580f87ea22861a089ab8bc227feb999ab25bea0dc604199",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "progress-cards"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-I6-BARE-MENTION-THREAD-TITLE",
+      "title": "a bare @mention after a context message gets a sane thread title",
+      "surface": "discord",
+      "source_sha256": "a97d081ec0ed214e77c4869f2bb3e73f1899906aca3f7b5a4b6496a793ffb082",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "routing-context",
+        "thread-title"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-I7-MCP-OAUTH-DISCOVERY",
+      "title": "the MCP protected-resource metadata resolves for both /mcp and /mcp/",
+      "surface": "headless",
+      "source_sha256": "85ae51df972c745edccfa895c7310ef3bcf5e368bd6fb7db948d70addd4e316d",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "mcp-oauth-metadata"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+      "title": "team A's agent cannot read team B's messages, files or sessions",
+      "surface": "discord",
+      "source_sha256": "86d7c3fc054d0b06644c9259dd2cc5067250099ae057cf8fcada7a44d132804e",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "read_channel",
+        "search_messages",
+        "bash",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "tenant-channel-authorization",
+        "input-files",
+        "persistent-workspace"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+      "title": "a long answer posts all chunks together with balanced fences, and a reply to chunk 2 is answered",
+      "surface": "discord",
+      "source_sha256": "eb04c8d43a4dd17c481abf5dc5f2caa024d359a39fcee952377af6a7cf68d853",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "answer-chunk-rendering",
+        "routing-context"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY",
+      "title": "after the channel's agent changes, the next mention gets plain copy (no rid) and a way forward",
+      "surface": "discord",
+      "source_sha256": "0131ddee78102fde9cf163193b6603b112b0b19b6dc78e2674091b610f7107e7",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [],
+      "resources": [
+        "agent-fork",
+        "session-replacement",
+        "routing-context"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW13-WRITERS-NONE-NOT-SILENT",
+      "title": "in a 'Who can post: Nobody' channel a mention gets a visible signal, not total silence",
+      "surface": "discord",
+      "source_sha256": "5197fe6b73810622ce644c1969e73bf8a2179bce8cd5df01aedd805ed2b7ddb5",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "admission-denial"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+      "title": "when the bot can't create threads, the reply names the permission instead of '@mention again'",
+      "surface": "discord",
+      "source_sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "thread-permission-denial"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED",
+      "title": "an exhausted channel budget refuses the next turn visibly, with no second debit",
+      "surface": "discord",
+      "source_sha256": "8451c0e49a47642f87149ef65e126412ef38d48ec0d56f1b59b9ca415e9a5e25",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "usage-ledger",
+        "admission-denial"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+      "title": "a depleted tenant gets a refusal that names who can top up (and admins were warned first)",
+      "surface": "discord",
+      "source_sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "admission-denial",
+        "usage-ledger"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+      "title": "an MCP server attached in turn 1 is usable in the very next mentioned message",
+      "surface": "discord",
+      "source_sha256": "f493f41c51eb81bb210a167c794aa2e401ca8f2383a6fb6d9feaf04e3e53ff8a",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "attach_mcp_server",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "external-mcp-deepwiki",
+        "session-refresh"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+      "title": "confirming a chat skill add with 'yes please' adds it (not only a bare 'yes')",
+      "surface": "discord",
+      "source_sha256": "b01080a8c2f67a74893bf26418671a8069a2961145eeb668e757be38b7d592ac",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "add_skill"
+      ],
+      "resources": [
+        "input-files",
+        "custom-skill-pins",
+        "chat-skill-add",
+        "session-refresh",
+        "daimon-mcp"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "HOST_RESOURCE_ANTHROPIC",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED",
+      "title": "deleting a skill that an agent still uses is refused (or detaches), never strands the agent",
+      "surface": "discord",
+      "source_sha256": "80af642f9a5fdcd284114063036c4ca93be15608e33cc6670fca1745fac9b01d",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "custom-skill-pins",
+        "skill-delete-guard"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+      "title": "'test @Daimon' with a PDF attached is answered in a thread, never silently dropped",
+      "surface": "discord",
+      "source_sha256": "2a27dc919ebf783194c926b2995771b054f7effce7422c76a2df86c477b85b85",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "read"
+      ],
+      "resources": [
+        "input-files",
+        "thread-title"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+      "title": "an unclicked private form flips to an expired state and the thread is told",
+      "surface": "discord",
+      "source_sha256": "704bf1ec45d4c86830d6c911e2e7a3bfbb14ff32985861b548d69b64bdb92fee",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "request_agent_key",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "credential-forms",
+        "credential-vault"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+      "title": "a routine's long result is delivered whole (or marked truncated), and its memory write works",
+      "surface": "discord",
+      "source_sha256": "3bd66475fc4a53c6716d2f8aec8ab89e3907ff5f48c9f188a07cb1813429f178",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "create_routine",
+        "bash",
+        "write",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "routine-runner",
+        "memory-store",
+        "answer-chunk-rendering"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC",
+          "MEMORY_STORE_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC",
+          "MEMORY_STORE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION",
+      "title": "a routine created without a named destination still posts where it was asked for (or the user is warned)",
+      "surface": "discord",
+      "source_sha256": "19f4a996e788a397e0ee78504672da0ce921110cee077afd5796a2b21339f385",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "create_routine",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "routine-runner",
+        "routing-context"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+      "title": "an unknown/expired notebook or report link shows an HTML page, not raw JSON",
+      "surface": "headless",
+      "source_sha256": "8e3c7e0021621387a6a8bfd1ad5c04030e3b450dc506be5f0371da5c70ebf0e0",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "notebook-report-http"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW25-DM-NOT-SILENT",
+      "title": "a DM to the bot gets a one-time pointer, not silence (bots can't DM bots)",
+      "surface": "discord",
+      "source_sha256": "2f67109f5bbd7db25f2bab91dd33c6907b04d8db8ca1122e6f68e9d35d9ccef5",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "dm-pointer",
+        "slash-command-help"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+      "title": "setting 'Who can post: Nobody' in the Permissions panel asks for confirmation",
+      "surface": "discord",
+      "source_sha256": "2c344afba96bd17810e5debe5aabd7216c3efb6cbeb4ee691da9dc95d5202f88",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "permissions-panel",
+        "admission-denial"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+      "title": "headless: a rejected MCP token does not consume the credential request",
+      "surface": "headless",
+      "source_sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "credential-forms",
+        "mcp-token-validation"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+      "title": "a wrong MCP token in a private form is rejected without using up the form or freezing the card",
+      "surface": "discord",
+      "source_sha256": "4eb9c2a17a743af883fff6020e5346247d9e4c1a74977400fa16c870ffec6bab",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "request_mcp_token",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "credential-forms",
+        "mcp-token-validation",
+        "credential-vault"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+      "title": "an abandoned OAuth sign-in does not freeze the card; a completed one resumes the waiting task",
+      "surface": "discord",
+      "source_sha256": "382913b9d9d5c3087ab1a2a9405622049b4569b0b38d4bd5d55d47020a92e288",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "request_mcp_oauth",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "external-mcp-notion",
+        "credential-forms",
+        "credential-vault",
+        "oauth-resume"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW29-DM-CONVERSATION-FORM",
+      "title": "asking for a private form inside a /dm conversation gives a clear route, not a broken form",
+      "surface": "discord",
+      "source_sha256": "d6ab4b94d50a03e0a84ed446f0e4233bae1238579ef9fa60264731ef5589fa7b",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "request_agent_key",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "credential-forms",
+        "dm-conversation"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW2-CSV-ATTACHMENT-READ",
+      "title": "a CSV attached to the mention is read in the same turn",
+      "surface": "discord",
+      "source_sha256": "838a1b0109d559bd12b29e40e030d2be470361f989f667bad0916a90743dc249",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "read",
+        "bash"
+      ],
+      "resources": [
+        "input-files"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW30-APPROVE-AFTER-RESTART",
+      "title": "clicking Approve/Deny on a card from before a restart says it expired, not 'interaction failed'",
+      "surface": "discord",
+      "source_sha256": "fdabed807534a642da88e5cb1a46baac789583a0b7bd62e8a941ff051acacb37",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [
+        "publish_report"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "report-host",
+        "approval-cards",
+        "restart-expiry"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW31-PANELS-AFTER-RESTART",
+      "title": "setup, billing and routines panels left open across a restart explain they expired",
+      "surface": "discord",
+      "source_sha256": "365e787511f21c7a011599afc373125ce92679aac3f30f25acd5ae355761b9ca",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "setup-billing-routine-panels",
+        "restart-expiry",
+        "coding-token-revoke",
+        "checkout"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW32-ADD-SKILL-ON-BUILTIN",
+      "title": "Add skill on a built-in agent is hidden or offers 'make an editable copy'",
+      "surface": "discord",
+      "source_sha256": "b7db3841fad45b0d473f673ff1919695618f1fab48853e1e28f94d477fa66b9f",
+      "path": "resource",
+      "skills_used": [
+        "workspace-setup"
+      ],
+      "tools": [],
+      "resources": [
+        "agent-fork",
+        "custom-skill-pins",
+        "built-in-edit-guard"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "GAP",
+          "reasons": [
+            "HOST_RESOURCE_ANTHROPIC"
+          ]
+        },
+        "gemini": {
+          "status": "GAP",
+          "reasons": [
+            "HOST_RESOURCE_ANTHROPIC"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+      "title": "/here and /github home always finish (no endless 'is thinking\u2026')",
+      "surface": "discord",
+      "source_sha256": "3706a81575ed8a7d094c29f0b0d70457e47b99ea45e41bbf7502039e8556b839",
+      "path": "host",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "slash-here",
+        "github-home",
+        "privacy-export"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "OK",
+          "reasons": []
+        },
+        "gemini": {
+          "status": "OK",
+          "reasons": []
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": []
+      }
+    },
+    {
+      "id": "QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY",
+      "title": "Slack: wrong token keeps the form; approval replies stay in the card's thread",
+      "surface": "slack",
+      "source_sha256": "9824a6c3df2a1dd355b71e4bd07aefc8840d89175d3a4d411920bfcd92c9473c",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup",
+        "file-handling"
+      ],
+      "tools": [
+        "request_mcp_token",
+        "publish_report",
+        "bash",
+        "write",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "credential-forms",
+        "mcp-token-validation",
+        "approval-cards",
+        "turn-cancel",
+        "slack-files",
+        "usage-ledger"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+      "title": "a routine run that dies on an invalid PDF posts a plain failure line instead of nothing",
+      "surface": "discord",
+      "source_sha256": "11eb9261b0718da078bbc9118430f2963e6c191a23d82e2e51a58ecef278d513",
+      "path": "turn",
+      "skills_used": [
+        "workspace-setup",
+        "file-handling"
+      ],
+      "tools": [
+        "create_routine",
+        "bash",
+        "read",
+        "search_tools",
+        "call_tool"
+      ],
+      "resources": [
+        "daimon-mcp",
+        "routine-runner",
+        "input-files",
+        "routine-failure-notice"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA",
+          "AUTHENTICATED_MCP_UNSUPPORTED",
+          "HOST_RESOURCE_ANTHROPIC"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW36-OVERSIZE-OUTPUT-KEPT",
+      "title": "an output over the Discord cap is reported plainly and stays available to the agent",
+      "surface": "discord",
+      "source_sha256": "a7791538f249164302b78f2571e8ab2526938400a5dd26bb9efcb72e31b595a2",
+      "path": "turn",
+      "skills_used": [
+        "file-handling"
+      ],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "persistent-workspace",
+        "output-files-12m",
+        "artifact-download"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+      "title": "a markdown table answer is not shown as raw pipes on Discord",
+      "surface": "discord",
+      "source_sha256": "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "markdown-table-rendering"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW3-BURST-CHANNEL-MENTIONS",
+      "title": "three channel mentions within 2 s each get a visible response; none is dropped",
+      "surface": "discord",
+      "source_sha256": "cdcb84c71265fbd8ef411b5b7efe482ce207cb343db10bea2efda9398fb0e833",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "turn-queue"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+      "title": "the same mention posted twice 1 s apart gets one answer, not two billed turns",
+      "surface": "discord",
+      "source_sha256": "6078f547156a351a5d1e5ee0ba56f5bb2cd397ab5e54f46920021b0c42de8db1",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "turn-dedupe",
+        "usage-ledger"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW5-THREAD-QUEUE-WHILE-BUSY",
+      "title": "a mentioned follow-up sent while a turn runs is queued visibly and then answered",
+      "surface": "discord",
+      "source_sha256": "5f5c970d774ad6dfc4ccd11b90a3b638ca4337bea64c11fc0b83bf70ac1e70bc",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "turn-queue",
+        "persistent-workspace"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW6-TENANT-CAP-QUEUE",
+      "title": "at the tenant concurrency cap, the extra mention is queued visibly, not refused or dropped",
+      "surface": "discord",
+      "source_sha256": "7a699ca0cd236b3ebee6ce7729188e4e458a6d77a75489dea137cda77e789ee3",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [
+        "bash"
+      ],
+      "resources": [
+        "turn-queue",
+        "tenant-concurrency-cap"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED",
+          "BUILTIN_NAME_SCHEMA_DELTA"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+      "title": "a mention whose only content is a sign-in-walled link is not titled 'Sign in - Google Accounts'",
+      "surface": "discord",
+      "source_sha256": "9baa102bb4e21b61cac0d139157bad5c1def055846b2e1452c3d9bcfae7f8de0",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "thread-title",
+        "url-title-filter"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    },
+    {
+      "id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+      "title": "'what can you do?' from a non-admin shows no ids, paths, tool or config names",
+      "surface": "discord",
+      "source_sha256": "8b010f856868254bbaf5c0f39433f9628fafabdeb5295fe648c8f34ce96e5abd",
+      "path": "turn",
+      "skills_used": [],
+      "tools": [],
+      "resources": [
+        "default-system-instructions",
+        "routing-context"
+      ],
+      "exposure": {
+        "anthropic": {
+          "status": "OK",
+          "reasons": []
+        },
+        "openai": {
+          "status": "PENDING-G1",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        },
+        "gemini": {
+          "status": "PENDING-G2",
+          "reasons": [
+            "HOST_TURN_UNREGISTERED"
+          ]
+        }
+      },
+      "driver_gaps": {
+        "anthropic": [],
+        "openai": [],
+        "gemini": [
+          "GEMINI_DEFAULT_BUNDLE_UNSUPPORTED"
+        ]
+      }
+    }
+  ]
+}
