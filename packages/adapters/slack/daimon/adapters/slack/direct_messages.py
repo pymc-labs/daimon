@@ -67,21 +67,43 @@ def is_direct_message_event(event: dict[str, Any]) -> bool:
 
 
 _REAUTHORIZE = (
-    "A workspace admin must reinstall or reauthorize daimon to grant im:history and im:write. "
-    "Update the app manifest to subscribe to message.im and enable the Messages tab."
+    "Daimon can't use DMs in this workspace yet.\n\n"
+    "Ask a workspace admin to finish Daimon's DM setup."
 )
-
-
-def _error_message(exc: Exception, fallback: str, *, settings: Settings) -> str:
-    if isinstance(exc, SlackApiError) and exc.response.get("error") in {  # pyright: ignore[reportUnknownMemberType]  # SlackApiError.response is untyped
+#: What an operator does about `_REAUTHORIZE`; logged, never posted.
+DM_SETUP_STEPS = (
+    "Reinstall or reauthorize the Slack app to grant the im:history and im:write bot scopes, "
+    "subscribe it to the message.im event, and enable the App Home Messages tab."
+)
+DM_SETUP_DOCS = "https://pymc-labs.github.io/daimon/slack/#dm-setup"
+_SCOPE_ERRORS = frozenset(
+    {
         "missing_scope",
         "token_revoked",
         "token_expired",
         "invalid_auth",
         "not_authed",
         "account_inactive",
-    }:
-        return _REAUTHORIZE
+    }
+)
+
+
+def _log_dm_setup_needed(*, team_id: str, cause: str) -> None:
+    log.warning(
+        "slack.dm.setup_incomplete",
+        team_id=team_id,
+        cause=cause,
+        steps=DM_SETUP_STEPS,
+        docs=DM_SETUP_DOCS,
+    )
+
+
+def _error_message(exc: Exception, fallback: str, *, settings: Settings, team_id: str) -> str:
+    if isinstance(exc, SlackApiError):
+        code = exc.response.get("error")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # SlackApiError.response is untyped
+        if code in _SCOPE_ERRORS:
+            _log_dm_setup_needed(team_id=team_id, cause=str(code))  # pyright: ignore[reportUnknownArgumentType]  # SlackApiError.response is untyped
+            return _REAUTHORIZE
     if isinstance(exc, AdmissionDenied):
         return admission_refusal_message(exc.reason, settings, in_dm=True)
     return str(exc) if isinstance(exc, DaimonError) else fallback
@@ -97,6 +119,7 @@ async def _live_role(
             (str(value) for key, value in headers.items() if key.lower() == "x-oauth-scopes"), ""
         )
         if not {"im:history", "im:write"} <= {scope.strip() for scope in granted.split(",")}:
+            _log_dm_setup_needed(team_id=team_id, cause="im_scopes_not_granted")
             raise DaimonError(_REAUTHORIZE)
     user = cast(dict[str, Any], response.get("user", {}))
     if (
@@ -199,15 +222,15 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,
-                text=(
-                    f"Continuing from <{source_url}|this channel>. Send your next message here. "
-                    "Run /dm in a channel again to start a new private conversation."
-                ),
+                text=f"Continuing from <#{channel_id}>.\n\nSend your next message here.",
                 unfurl_links=False,
             )
             reply = "Ready in your DMs."
         else:
-            reply = "Use /dm to continue privately, or /dm enable|disable for the workspace policy."
+            reply = (
+                "Run `/dm` in a channel to carry on in private.\n\n"
+                "Admins: `/dm enable` or `/dm disable`."
+            )
         await client.chat_postEphemeral(channel=channel_id, user=user_id, text=reply)  # pyright: ignore[reportUnknownMemberType]
     except _ERRORS as exc:
         log.warning("slack.dm.command_failed", error_type=type(exc).__name__)
@@ -220,6 +243,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                         exc,
                         "Couldn't open that private conversation. Please retry.",
                         settings=runtime.settings,
+                        team_id=team_id,
                     ),
                 )
 
@@ -314,6 +338,7 @@ async def handle_direct_message(
                         exc,
                         "Couldn't complete this private conversation. Please retry.",
                         settings=runtime.settings,
+                        team_id=team_id,
                     ),
                     **thread_kwargs,
                 )

@@ -89,15 +89,14 @@ class NoticeKeys:
 # Workspace-wide, persistent failures: retrying per file (or per turn) is pure
 # noise, so these abort the sweep and produce one notice per affected thread.
 _ABORT_NOTICES: dict[str, str] = {
+    # The app is missing the `files:write` scope.
     "missing_scope": (
-        "I couldn't attach the generated file because this app is missing the "
-        "`files:write` Slack scope. A workspace admin must add that scope and "
-        "reinstall daimon from the install link before file delivery can work."
+        "I couldn't attach the file.\n\n"
+        "Ask a workspace admin to allow file uploads and reinstall Daimon."
     ),
     "storage_limit_reached": (
-        "I couldn't attach the generated file because this workspace has hit "
-        "its Slack file-storage limit. A workspace admin must free up space or "
-        "upgrade the plan before file delivery can work."
+        "I couldn't attach the file. This Slack workspace is out of file space.\n\n"
+        "Ask a workspace admin to free some up."
     ),
 }
 
@@ -190,6 +189,7 @@ async def deliver_session_outputs(
                 session_id=session_id,
                 team_id=team_id,
                 code=code,
+                needed_scope="files:write" if code == "missing_scope" else None,
             )
             notice_keys.add(log_key)
         notice_key = f"notice:{team_id}:{channel_id}:{thread_ts}:{code}"

@@ -76,7 +76,12 @@ from daimon.adapters.discord.bot import (
     admission_refusal_message,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
-from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.errors import (
+    NOT_SET_UP_NOTICE,
+    SETUP_OUT_OF_DATE_NOTICE,
+    generate_request_id,
+    render_error,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.thread_send import safe_thread_send
@@ -485,22 +490,7 @@ async def run_wizard_submit_turn_observed(
                 short_id=row.id,
                 missing=list(err.missing),
             )
-            hints: list[str] = []
-            if "agent" in err.missing:
-                hints.append(
-                    "An admin can tell Daimon: make an agent answer in this channel or the "
-                    "whole server. Run `/agent-setup` to see who answers where."
-                )
-            if "environment" in err.missing:
-                hints.append(
-                    "An admin of this server or channel can pick an environment in "
-                    "`/agent-setup` → Who answers where."
-                )
-            await channel.send(
-                "Your answers were recorded, but no "
-                f"{' or '.join(err.missing)} configured for this channel -- ask again "
-                "in the thread once it's set up. " + " ".join(hints)
-            )
+            await channel.send(NOT_SET_UP_NOTICE)
             return
         except MAResolverMissError as err:
             _log.warning(
@@ -509,11 +499,7 @@ async def run_wizard_submit_turn_observed(
                 daimon_tag=err.daimon_tag,
                 tenant_id=str(err.tenant_id),
             )
-            await channel.send(
-                "Your answers were recorded, but the configured agent or environment "
-                "no longer exists. An admin of this server or channel can pick another in "
-                "`/agent-setup`; then ask again in the thread."
-            )
+            await channel.send(SETUP_OUT_OF_DATE_NOTICE)
             return
         except AdmissionDenied as err:
             if err.reason == "writers_none":

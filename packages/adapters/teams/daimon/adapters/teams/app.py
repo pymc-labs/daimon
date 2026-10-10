@@ -179,10 +179,10 @@ _RECOVERY_RETRY_DELAY_S = 1.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
-_RESOLVER_MISS = (
-    "The configured agent or environment no longer exists. Pick another with `setup` in a "
-    "1:1 chat with me, or ask an admin to restore it."
-)
+# "Daimon can't answer here": the same words as Discord and Slack, with
+# Teams' `setup` command.
+_NOT_SET_UP = "Daimon isn't set up in this channel yet.\n\nAsk an admin to send setup to Daimon."
+_RESOLVER_MISS = "This channel's setup is out of date.\n\nAsk an admin to send setup to Daimon."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
@@ -240,7 +240,7 @@ def _admission_refusal(
     """Log a refused admission; what to tell the person, if anything."""
     if isinstance(err, MissingTurnConfigError):
         log.info("teams.missing_config", missing=list(err.missing))
-        return f"No {' or '.join(err.missing)} configured here. Ask the operator to set one."
+        return _NOT_SET_UP
     if isinstance(err, MAResolverMissError):
         log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
         return _RESOLVER_MISS

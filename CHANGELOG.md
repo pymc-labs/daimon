@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Setup, error, file and limit notices on Discord, Slack and Teams use plain words, one line for what happened and one for what to do, with a blank line between. A channel with no agent or environment says "Daimon isn't set up in this channel yet." and one whose agent or environment was removed says "This channel's setup is out of date."; both point at `/agent-setup` (`setup` on Teams). Discord and Slack errors name the cause (the AI service busy, unreachable or refusing the request, the usage limit, a missing Slack permission, an unreadable Slack token, Slack or Discord rejecting the call, or "Something went wrong on our side.") and end with a small `Ref` line, the last six characters of the request id; the full id and the exception are logged as `error.rendered`. No exception text reaches the chat. Slack's file-upload and `/dm` notices are shorter, the `/dm` setup steps are logged and documented in the Slack guide, Discord's usage-limit card no longer mentions the tenant, and a channel budget DM reads "#team-020 has used its $5.00 monthly budget." with how to resume.
 - Live QA now shares one approved cheap-model map across the judge and pre/post-turn guards, with a temporary staging-only Haiku 4.5 exception and HTTP-503-only Gemini fallback helper.
 - QA catalog validation now refuses unknown kinds in hourly canaries while preserving isolated PENDING entries for other tiers.
 

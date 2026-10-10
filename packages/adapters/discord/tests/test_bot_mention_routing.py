@@ -7,7 +7,7 @@
   + replies "setting up" (the word "failed" is never user-visible); 'pending' replies
   "setting up"; only 'ready' proceeds to resolve_agent.
 - The plain agent-resolve-miss path: MAResolverMissError on a ready guild collapses to the
-  "no longer exists" message — no retry, no per-user-active fallthrough.
+  "out of date" notice — no retry, no per-user-active fallthrough.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _make_channel_message(
 
 
 class TestAgentResolveMiss:
-    """A miss on a ready guild collapses to the plain 'no longer exists' message —
+    """A miss on a ready guild collapses to the plain 'out of date' notice —
     no retry, no per-user-active fallthrough."""
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -119,8 +119,8 @@ class TestAgentResolveMiss:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """On a ready guild, an MAResolverMissError sends the plain 'no longer exists'
-        message — a single resolve_config call, no retry, no session/turn."""
+        """On a ready guild, an MAResolverMissError sends the plain 'out of date'
+        notice — a single resolve_config call, no retry, no session/turn."""
         from daimon.core.defaults.provisioning import provision_tenant
 
         guild_id = "710000001"
@@ -151,7 +151,9 @@ class TestAgentResolveMiss:
         mock_run_turn.assert_not_called()
         message.channel.send.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
         sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-        assert "no longer exists" in sent_text, "should render the plain 'no longer exists' message"
+        assert sent_text == (
+            "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+        ), "should render the plain 'out of date' notice"
 
 
 class TestPerMessageTenantResolution:

@@ -43,7 +43,7 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
         platform="teams",
         channel_id="19:chan@thread.tacv2",
         recipient_ids=("aad-1", "aad-2", "aad-3"),
-        budget_line="$1.00 of $1.00 (monthly)",
+        limit_line="$1.00",
         monthly=True,
         budget_id=uuid.uuid4(),
         window_key="window",
@@ -54,7 +54,10 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
     direct.post.assert_awaited_once()
     chat, text = direct.post.await_args.args
     assert chat == "chat-29:one"
-    assert text.startswith("Channel `19:chan@thread.tacv2`'s budget is used up"), text
+    assert text == (
+        "Channel `19:chan@thread.tacv2` has used its $1.00 monthly budget.\n\n"
+        "Raise the budget to resume now, or wait until next month."
+    ), text
 
 
 def test_a_runtime_without_1_1_chats_gets_no_notifier() -> None:

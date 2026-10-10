@@ -761,13 +761,9 @@ class TestNewThreadCreation:
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "agent" in sent_text, "error should mention missing agent"
-        assert "environment" in sent_text, "error should mention missing environment"
-        # CR-01: recovery hint points at the /agent-setup panel, not the deleted /propagate.
-        assert "/agent-setup" in sent_text, "recovery hint should point at /agent-setup"
-        assert "/propagate" not in sent_text, "the deleted /propagate command must not be suggested"
-        assert "operator" not in sent_text and "admin of this server or channel" in sent_text, (
-            "a server or channel admin picks the environment, not the operator"
+        # One notice whatever is missing; CR-01: it points at /agent-setup.
+        assert sent_text == (
+            "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
         )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -822,10 +818,10 @@ class TestNewThreadCreation:
         edit_kwargs = card.edit.call_args.kwargs
         assert edit_kwargs["view"] is None and edit_kwargs["embed"] is None
         error_text: str = edit_kwargs["content"]
-        assert "rid:" not in error_text, "trace ids stay in logs"
-        assert "couldn't reach Claude" in error_text, (
-            "the connection failure should have a plain retry instruction"
-        )
+        assert "rid:" not in error_text, "the full trace id stays in logs"
+        assert error_text.startswith(
+            "Daimon couldn't reach its AI service.\n\nTry again in a minute.\n\n-# Ref "
+        ), "the connection failure should have a plain retry instruction and a short ref"
         assert mock_thread.send.await_count == 1, "the error edits the card, it is not a 2nd post"
         retire.assert_awaited_once()
         assert retire.call_args.kwargs["expected_message_id"] == "4242"
@@ -875,7 +871,7 @@ class TestNewThreadCreation:
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert mock_thread.send.await_count == 2, "card, then the error below it"
         error_text: str = mock_thread.send.call_args.args[0]
-        assert "couldn't reach Claude" in error_text
+        assert "couldn't reach its AI service" in error_text
         retire.assert_not_awaited()  # the card is still up: recovery owns its intent
         mock_run_turn.assert_not_called()
 
@@ -933,7 +929,7 @@ class TestNewThreadCreation:
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         contents = [c.kwargs.get("content") for c in card.edit.call_args_list]
         assert any(c is not None and "The answer" in c for c in contents)
-        db_error = "couldn't load or save this change"
+        db_error = "Something went wrong on our side."
         assert not any(c is not None and db_error in c for c in contents), "answer overwritten"
         error_text: str = mock_thread.send.call_args.args[0]
         assert db_error in error_text
@@ -991,7 +987,7 @@ class TestNewThreadCreation:
         await bot.on_message(message)
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        assert "couldn't reach Claude" in replacement.edit.call_args.kwargs["content"]
+        assert "couldn't reach its AI service" in replacement.edit.call_args.kwargs["content"]
         retire.assert_not_awaited()
 
 
@@ -1361,7 +1357,7 @@ class TestHandleMentionErrorBoundary:
         # The error lands on the turn's own card in its thread, not the channel.
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         error_text: str = card.edit.call_args.kwargs["content"]
-        assert "couldn't reach Claude" in error_text, (
+        assert "couldn't reach its AI service" in error_text, (
             f"the connection failure should have a plain retry instruction; got: {error_text!r}"
         )
         assert "An error occurred. Please try again." not in error_text, (

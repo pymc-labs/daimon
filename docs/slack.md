@@ -325,9 +325,22 @@ This version moves recent channel text, not Slack thread replies or attachments.
 
 Before `/dm` moves a conversation or `/dm enable` changes policy, Daimon checks the
 granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
-without saving a route; scope/token errors request reinstall or reauthorization.
+without saving a route. The person sees "Daimon can't use DMs in this workspace
+yet." and "Ask a workspace admin to finish Daimon's DM setup."; the steps below are
+logged as a `slack.dm.setup_incomplete` warning with the workspace's `team_id`.
 The scope header cannot verify event subscriptions: operators must also apply the
 manifest's `message.im` subscription and enable the Messages tab.
+
+#### DM setup
+
+1. Reinstall or reauthorize the Slack app so it holds the `im:history` and
+   `im:write` bot scopes.
+2. Subscribe the app to the `message.im` bot event.
+3. Turn on the Messages tab under App Home.
+4. Run `/dm enable` as a workspace admin.
+
+`docs/slack-app-manifest.yaml` already carries steps 1 to 3; applying it and
+reinstalling covers them.
 
 Private turns use fresh MA sessions with isolated execution credentials. Recent
 private history is replayed, but ephemeral workspace files are not carried forward.

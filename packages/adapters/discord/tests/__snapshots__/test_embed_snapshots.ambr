@@ -1,9 +1,21 @@
 # serializer version: 1
 # name: TestRenderErrorSnapshot.test_generic_exception_snapshot
-  "Daimon couldn't use that input. Check it and try again."
+  '''
+  Something went wrong on our side.
+  
+  Try again. If it keeps happening, tell an admin.
+  
+  -# Ref 9G5FAV
+  '''
 # ---
 # name: TestRenderErrorSnapshot.test_spec_error_snapshot
-  "Daimon couldn't read this setup. Ask an admin to check it."
+  '''
+  Something went wrong on our side.
+  
+  Try again. If it keeps happening, tell an admin.
+  
+  -# Ref 9G5FAV
+  '''
 # ---
 # name: test_embed_render_snapshot[minimal_thinking]
   EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='', color=3447003, footer='42s', details=None, notice=None)
