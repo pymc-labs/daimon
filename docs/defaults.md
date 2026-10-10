@@ -135,6 +135,10 @@ from the compose `init` service, and a per-tenant equivalent,
 self-heal path when a tag fails to resolve during admission, when the bot
 joins a new server, and on adapter boot. That is why the fingerprint skip
 matters: without it every one of those calls would rewrite every resource.
+After reconciling seeded agents, each tenant reconcile also refreshes credential
+guidance in the system prompt of live, non-isolated user agents. It skips
+unchanged prompts and leaves other agent fields alone; individual failures are
+logged and retried on the next reconcile.
 
 ## `daimon defaults verify`
 
