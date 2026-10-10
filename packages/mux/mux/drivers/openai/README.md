@@ -191,7 +191,7 @@ This follows the [session deletion reference](https://developers.openai.com/api/
 cleanup may continue after the public resource is deleted. Actual pinned-SDK
 regressions cover the idle/409/running/failed race, bounded busy/conflict waits,
 ownership changes, transport failures and interrupted deletion. Live C10/C15/C16
-reruns remain subject to review of this fix.
+cleanup recovery is recorded in the partial matrix below.
 
 Initial file mounts use uploaded `file:` refs at canonical `/workspace/` paths.
 Repositories, raw native/secret bindings and conditional resource replacement are
@@ -212,10 +212,18 @@ unavailable. C08 and deployed repository/MCP certification remain pending.
 Host durability, batching, attribution, pricing, wake generations and registry
 selection still require their shared fixture adapters. The guarded Luna smoke
 above verifies a narrow live lifecycle path; it does not certify these host
-guarantees or resource workflows. No recorder fixtures were made.
-selection still require their shared fixture adapters. A guarded smoke on
-2026-10-09 returned `invalid_request`, with unknown billing and a retained $0.45
-reservation; it did not establish live correctness. No recorder fixtures were made.
+guarantees or resource workflows. That smoke made no recorder fixtures.
+An earlier `gpt-5-nano` smoke returned `invalid_request`, with unknown billing
+and a retained $0.45 reservation; that earlier attempt did not establish live
+correctness.
+
+The later [partial live matrix](../../../../../CERT-M2.md) records C10/C15/C16
+passing on `gpt-6-luna` after reviewed cleanup recovery; fifteen missing live
+scenarios remain typed PENDING. The idle-session tapes contain zero normalized
+Events and replay verifies request metadata and absence of unexpected writes.
+They do not certify native codecs, SSE, binary resources, hosted continuity or
+host durability. Earlier failed attempts and unknown billing remain in the
+receipt manifest. This is an incomplete certificate.
 
 ## Offline conformance
 
