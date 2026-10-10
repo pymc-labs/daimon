@@ -1247,3 +1247,8 @@ provider's entry is never used as a fallback. Native SDK request and stream
 lifetimes belong to the driver. Journal and usage revisions use the persisted
 host binding/lease, with unknown prices and container costs left pending for
 reconciliation. Gemini deployment construction follows in a separate delta.
+
+Configured OpenAI runtimes refuse `OPENAI_CUSTOM_HEADERS` before constructing
+a client, including changes introduced after runtime preparation. This prevents
+ambient header injection from replacing the selected channel key or project;
+the refusal never includes header contents.

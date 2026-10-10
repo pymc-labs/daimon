@@ -98,6 +98,37 @@ async def test_no_inherited_provider_routing_and_owned_request_close(
     assert clients[0].is_closed()
 
 
+@pytest.mark.parametrize("late", [False, True])
+@pytest.mark.parametrize("operation", ["request", "multipart", "stream", "download"])
+async def test_ambient_custom_headers_refused_before_sdk_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    late: bool,
+    operation: str,
+) -> None:
+    def forbidden(**kwargs: object) -> AsyncOpenAI:
+        pytest.fail("ambient headers reached SDK construction")
+
+    monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+    monkeypatch.setattr(deployment, "AsyncOpenAI", forbidden)
+    transport = deployment.configured_transport(api_key="offline", project="selected-project")
+    monkeypatch.setenv(
+        "OPENAI_CUSTOM_HEADERS",
+        "Authorization: Bearer hostile\nOpenAI-Project: hostile-project\n"
+        "OpenAI-Organization: hostile-org\nX-Injected: hostile-extra",
+    )
+    with pytest.raises(ValueError, match="^ambient OpenAI custom headers are unsupported$"):
+        if not late:
+            deployment.configured_transport(api_key="offline", project="selected-project")
+        elif operation == "request":
+            await transport.request("POST", "/agents/sessions", body={}, key="claimed")
+        elif operation == "multipart":
+            await transport.multipart("/files", files=(), fields={}, key="claimed")
+        elif operation == "stream":
+            await transport.open_stream("/agents/sessions/native/events")
+        else:
+            await transport.download("/files/native/content")
+
+
 async def test_lost_mutation_acknowledgment_is_one_post_and_closes_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import IO, cast
 
 from openai import AsyncOpenAI
 
 from mux.drivers.openai.transport import Method, Object, SDKTransport, Transport
+
+
+def _check_environment() -> None:
+    # The SDK merges this variable into headers after its explicit auth/project.
+    # Refuse it without inspecting or exposing its possibly secret contents.
+    if "OPENAI_CUSTOM_HEADERS" in os.environ:
+        raise ValueError("ambient OpenAI custom headers are unsupported")
 
 
 class _OwnedStream[T](AsyncIterator[T]):
@@ -46,6 +54,7 @@ class _ConfiguredTransport:
     def _client(self) -> AsyncOpenAI:
         # Explicit origin/project/key override SDK environment discovery. The
         # credential is not a client-global singleton shared between callers.
+        _check_environment()
         return AsyncOpenAI(
             api_key=self._api_key,
             project=self._project,
@@ -98,6 +107,7 @@ class _ConfiguredTransport:
 
 def configured_transport(*, api_key: str, project: str) -> Transport:
     """No I/O at construction; each request/stream owns its SDK client lifetime."""
+    _check_environment()
     if not api_key.strip() or not project.strip():
         raise ValueError("explicit OpenAI credential and project are required")
     return _ConfiguredTransport(api_key, project)

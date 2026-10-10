@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain acknowledged session references for cleanup on control failure, and
   preserve optional cap omission and default provider behavior.
 
+- Refuse ambient OpenAI custom headers before configured client construction so process headers cannot replace channel credentials or project routing.
 
 - Allow OpenAI G1 host sessions to omit the optional native spending control rejected by the project, retaining host budget admission and bounded turn deadlines.
 - Gemini explicitly sends configured tools (or an empty list) on every interaction, preventing implicit provider web-tool defaults, including continuations and fallback sends.

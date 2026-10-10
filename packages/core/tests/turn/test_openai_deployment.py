@@ -162,6 +162,8 @@ async def test_unconfigured_application_never_discovers_provider_credentials(
         "missing",
         "malformed",
         "duplicate",
+        "tenant",
+        "platform",
         "account",
         "channel",
         "digest",
@@ -178,9 +180,15 @@ async def test_missing_or_foreign_deployment_refuses_without_credentials(
 ) -> None:
     path = tmp_path / "runtime.json"
     row = entry()
-    if invalid in ("account", "channel", "digest"):
+    if invalid in ("tenant", "platform", "account", "channel", "digest"):
         row[
-            {"account": "account_id", "channel": "channel_id", "digest": "config_digest"}[invalid]
+            {
+                "tenant": "tenant_id",
+                "platform": "platform",
+                "account": "account_id",
+                "channel": "channel_id",
+                "digest": "config_digest",
+            }[invalid]
         ] = "foreign"
     elif invalid == "inline-secret":
         row["api_key"] = "must-never-appear-in-errors"
