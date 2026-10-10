@@ -119,3 +119,30 @@ def test_non_exact_and_invalid_date_snapshots_refuse(model: str) -> None:
     assert not policy.accepts("anthropic", model, "staging")
     assert not policy.accepts("anthropic", model, "prod")
     assert not policy.policy("anthropic").matches_primary(model)
+
+
+@pytest.mark.parametrize("missing", [("anthropic",), ("anthropic", "openai", "gemini")])
+def test_older_operator_configs_inherit_approved_snapshot_defaults(
+    missing: tuple[str, ...], pricing: Pricing
+) -> None:
+    config = Config(pricing=pricing)
+    legacy = config.model_dump(mode="json")
+    for backend in missing:
+        del legacy["models"]["backends"][backend]["dated_snapshots"]
+    original = json.dumps(legacy, sort_keys=True)
+    for loaded in (Config.model_validate_json(json.dumps(legacy)), Config.model_validate(legacy)):
+        assert loaded.models == config.models
+        assert loaded.models.accepts("anthropic", "claude-haiku-5-5-20261001", "prod")
+    assert json.dumps(legacy, sort_keys=True) == original
+
+
+@pytest.mark.parametrize(
+    "backend,enabled", [("anthropic", False), ("openai", True), ("gemini", True)]
+)
+def test_explicit_conflicting_snapshot_config_is_still_refused(
+    backend: str, enabled: bool, pricing: Pricing
+) -> None:
+    config = Config(pricing=pricing).model_dump(mode="json")
+    config["models"]["backends"][backend]["dated_snapshots"] = enabled
+    with pytest.raises(ValidationError, match="root-approved"):
+        Config.model_validate_json(json.dumps(config))

@@ -81,6 +81,20 @@ class ModelPolicy(BaseModel):
         default_factory=lambda: dict(APPROVED_MODELS)
     )
 
+    @field_validator("backends", mode="before")
+    @classmethod
+    def approved_snapshot_defaults(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        updated = dict(cast(dict[object, object], value))
+        for backend, policy in APPROVED_MODELS.items():
+            candidate = updated.get(backend)
+            if isinstance(candidate, dict):
+                entry = cast(dict[object, object], candidate)
+                if "dated_snapshots" not in entry:
+                    updated[backend] = {**entry, "dated_snapshots": policy.dated_snapshots}
+        return updated
+
     def _require_approved(self) -> None:
         if self.backends != APPROVED_MODELS:
             raise ValueError("model map must match the root-approved cheap-model policy")
