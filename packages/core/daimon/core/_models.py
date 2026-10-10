@@ -445,6 +445,27 @@ class Routine(Base):
     )
 
 
+class UsageSweepSession(Base):
+    """Durable ownership for sessions that may have no live usage recorder."""
+
+    __tablename__ = "usage_sweep_sessions"
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    last_swept_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    remote_status: Mapped[str | None] = mapped_column(Text)
+    unsettled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    resumable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ThreadSession(Base):
     __tablename__ = "thread_sessions"
     __table_args__ = (

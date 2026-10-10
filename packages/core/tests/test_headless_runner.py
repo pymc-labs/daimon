@@ -213,6 +213,15 @@ async def test_run_turn_returns_last_message_text(origin, db_session, db_session
         session_factory=db_session_factory,
     )
 
+    from daimon.core._models import UsageSweepSession
+
+    async with db_session_factory() as db:
+        from sqlalchemy import select
+
+        owned = (await db.scalars(select(UsageSweepSession))).one()
+    assert owned.resumable is False
+    assert owned.finished_at is not None
+    assert owned.unsettled is True, "completion must not assume usage was reconciled"
     assert tail == "hello world", "run_turn should return the agent.message text"
     from daimon.core.context_prompt import context_prompt
 

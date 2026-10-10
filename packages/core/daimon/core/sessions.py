@@ -76,6 +76,7 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
+from daimon.core.stores import usage_sweep_sessions
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
@@ -617,6 +618,14 @@ async def create_session(
                 ),
                 resources=resources if resources else omit,
             )
+            if session_factory is not None and tenant_id is not None:
+                async with session_factory.begin() as db:
+                    await usage_sweep_sessions.register(
+                        db,
+                        session_id=created.id,
+                        tenant_id=tenant_id,
+                        resumable=not requester_is_headless,
+                    )
             if app_access is not None:
                 assert (
                     session_factory is not None and tenant_id is not None and vault_id is not None

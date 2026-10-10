@@ -448,6 +448,7 @@ none back. No operator token can open a top-up: `/billing/checkout` answers 403.
 | --- | --- |
 | `tenant_ledger` | every credit and debit, append-only. **Balance is `SUM(delta_usd)`, never a column.** A unique `idempotency_key` prevents replayed writes; top-ups also check the payment intent to recognize older event-keyed credits. Debits carry the `channel_id` they count against, if any. |
 | `usage_events` | token counts per model call, with the same `channel_id`. No money column; cost is computed on read. |
+| `usage_sweep_sessions` | owned MA session IDs, local activity, unsettled usage, reconciliation progress and safe archive eligibility. |
 | `payment_events` | Stripe webhook dedup, keyed by the Stripe event id, with the compare-and-set `credited_at`. Explicitly not a ledger. |
 | `pending_payment_clawbacks` | verified refunds and disputes received before the Checkout credit; keyed by Stripe event id and joined to the later credit by payment intent. |
 | `tenant_user_caps` | per-person monthly caps, with a null-user row as the tenant default. |
@@ -464,36 +465,44 @@ beside them in `packages/core/daimon/core/stores/`. Ledger reasons in use:
 `classifier_debit`, `thread_naming_debit`, and the two clawback reasons named
 after their Stripe events.
 
-**The sweep.** The sweep is **off by default**
-(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=false`): the current implementation
-lists every session in the Managed Agents workspace and reads their events,
-which drained the workspace request rate limit and stalled turn admission.
-While it is off, three things pause: usage from MCP `start_turn` sessions
-(and other headless sessions with no live recorder) is not debited; usage a
-live adapter missed (a crashed adapter, an interrupted turn) is not
-recovered; and absorbed spend for exempt sessions is not logged. Turning it
-back on replays what was missed, because recording is idempotent and the
-startup pass reads every stamped session, but only for sessions and events
-still present in the workspace. A scoped replacement that reads only recently
-active sessions is planned; until it ships, the rest of this section
-describes the sweep when it is switched on.
+**The sweep.** Inline turn events are the primary billing path. An MCP
+`start_turn` sends a message without driving the stream, so its usage needs
+backfill. `packages/core/daimon/core/usage_sweep.py` runs on a separate
+scheduler loop when `DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED=true` (default
+`false`). While disabled, headless MCP billing, recovery of missed inline
+usage and exempt-spend logging pause. When enabled, it retrieves IDs from
+this deployment's database and never lists
+the Managed Agents workspace. Ownership and an unsettled flag are registered
+in `usage_sweep_sessions` before messages are sent. Recent thread mappings,
+turn outcomes, usage rows and GitHub session vaults seed legacy ownership;
+failed or unobserved MCP turns can seed an unsettled record regardless of age.
+Sessions with no local record cannot be discovered this way.
 
-An MCP `start_turn` creates a session and sends a message but
-never drives the stream, so the inline hook never fires for it.
-`packages/core/daimon/core/usage_sweep.py` closes that hole. On its own
-scheduler loop, pausing the tick interval between passes, it lists Managed
-Agents sessions, skips any without a `daimon_tenant` stamp, belonging to a
-tenant this deployment does not own, or stamped `daimon_billing_exempt`, and replays the rest's `span.model_request_end`
-events through the same recorder. It requests only that event type and skips
-events already in `usage_events` before writing, so a session that is fully
-metered costs one query and a read of its model calls, not a write per call.
-After a successful pass, it skips event
-reads for sessions last updated before that pass started minus 15 minutes.
-The watermark stays in scheduler memory; startup and hourly passes read all
-stamped sessions, and a failed pass leaves the watermark in place. It is safe to run
-against already-metered sessions precisely because the idempotency grain is
-the same. A call with a `usage_events` row counts as metered, because the
-recorder writes that row and its debit in one transaction.
+The sweep checks sessions active within two hours or still marked unsettled.
+Recent settled sessions are rechecked after thirty minutes; old settled
+histories are skipped. A successful complete event read settles an idle
+session only when it covers the session's reported cumulative token counts.
+Missing events or cumulative totals, running sessions and failed reads retain
+the durable flag across restarts. A continuation wakes it before sending.
+Each pass selects up to two sessions, oldest check first within unsettled work. It requests only
+`span.model_request_end` events and skips IDs already in `usage_events`.
+
+Every MA request, including event pagination and archive calls, is spaced
+at least two minutes apart: at most thirty requests per hour in a continuously
+running scheduler. Interactive calls use no sweep limiter. The first HTTP
+429 ends the pass without SDK retries and defers passes for at least sixty
+seconds or `Retry-After`, whichever is longer. Failed usage progress stays
+unsettled; committed usage rows remain idempotent on retry.
+`usage_sweep.ma_calls` counts every request attempted, including failures.
+
+Only explicitly finished, nonresumable headless sessions with settled usage
+can be archived after two hours without activity. The sweep checks remote
+idle/terminated status and serializes cleanup with session sends, rechecking
+local protections immediately before archiving. Chat sessions, live thread
+mappings and open MCP handles are protected. Archiving preserves event
+history but stops future events: the finished headless session cannot be
+continued with its existing handle or workspace. A new routine run creates
+a new session. The sweep does not delete session history.
 
 The sweep and the live recorder race for each model call, and the first
 commit wins. The amount is the same either way, because both price at the
@@ -502,12 +511,10 @@ is the only writer (a crashed adapter, an interrupted turn, a headless
 session), the row carries `turn_debit` and the platform user of the session's
 `daimon_account` stamp. It does not carry the turn's reason and author.
 
-The sweep bills every session whose `daimon_tenant` stamp names a tenant in
-its own database, and a session carries no deployment identity. Tenant ids are
-derived from `(platform, workspace id)`. Two deployments whose API keys share
-one Managed Agents workspace, and which both have the same Discord server or
-Slack workspace installed, would each debit the other's sessions. Give each
-deployment its own Managed Agents workspace.
+The sweep bills only locally owned session IDs whose `daimon_tenant` stamp
+matches their registered tenant. Sessions from another deployment are not
+retrieved, even if both deployments have the same tenant installed and share
+a Managed Agents workspace.
 
 ### Seeing absorbed spend
 
@@ -518,12 +525,13 @@ and logs `usage_sweep.exempt_skipped` with `tenant_id`, `managed_session_id`,
 which prices at zero as in the recorder), `model_calls`, the four token
 counts, `cost_usd` (the raw price) and `would_be_debit_usd` (with
 `DAIMON_BILLING__MARKUP` applied). Each pass ends with one
-`usage_sweep.completed` line carrying `recorded` (calls written in that
+`usage_sweep.completed` line carrying `ma_calls`, `recorded` (calls written in that
 pass), `exempt_sessions`,
 `exempt_model_calls`, `exempt_cost_usd` and `exempt_would_be_debit_usd`.
 
-Nothing is written to the database for these sessions. An exempt session is
-logged again when its events are read, including the hourly full pass. Total
+No usage event or tenant debit is written for these sessions; ownership and
+sweep progress are still persisted. An exempt session is logged again when
+its events are read within the recent window or while unsettled. Total
 the absorbed spend by distinct
 `managed_session_id` (taking its latest line), not by summing every line or
 the per-pass totals.

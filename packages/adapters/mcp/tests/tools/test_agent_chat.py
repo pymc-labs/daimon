@@ -3902,3 +3902,83 @@ async def test_start_turn_charges_an_isolated_channels_own_agent_to_that_channel
     assert create.await_args is not None
     kwargs = create.await_args.kwargs
     assert (kwargs["budget_channel_id"], kwargs["origin_channel_id"]) == (charged, None)
+
+
+@pytest.mark.parametrize("continuation", [False, True])
+async def test_turn_registers_unsettled_resumable_usage_before_send(
+    db_session_factory: async_sessionmaker[AsyncSession], continuation: bool
+) -> None:
+    from daimon.core.stores import usage_sweep_sessions
+
+    async with db_session_factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID, workspace_id="usage-before-send")
+        if continuation:
+            await usage_sweep_sessions.register(
+                db, session_id="ses_test001", tenant_id=_TENANT_ID, resumable=False
+            )
+            await db.execute(
+                text(
+                    "UPDATE usage_sweep_sessions SET unsettled=false, "
+                    "finished_at=now()-interval '3 hours', "
+                    "updated_at=now()-interval '3 hours'"
+                )
+            )
+    router = _agent_and_env_router()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(200, json=_session_json()),
+    )
+    sends = 0
+
+    async def dispatch(req: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        if req.method == "POST" and req.url.path.endswith("/events"):
+            async with db_session_factory() as db:
+                owned = (
+                    (
+                        await db.execute(
+                            text(
+                                "SELECT unsettled, resumable, finished_at FROM usage_sweep_sessions "
+                                "WHERE session_id='ses_test001'"
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+            assert owned is not None, "ownership must commit before a billable send"
+            assert owned["unsettled"] is True
+            assert owned["resumable"] is True
+            assert owned["finished_at"] is None
+            sends += 1
+            return send_events_response(
+                data=[
+                    {
+                        "id": "evt_owned",
+                        "type": "user.message",
+                        "processed_at": None,
+                        "content": [{"type": "text", "text": "hi"}],
+                    }
+                ]
+            )
+        return router.dispatch(req)
+
+    runtime = _runtime(
+        build_fake_anthropic(dispatch),
+        session_factory=db_session_factory,
+        environment_name=_ENV_NAME,
+    )
+    if continuation:
+        await _continue_turn_impl(runtime, _auth(), "ses_test001", "hi")
+    else:
+        with patch(
+            "daimon.adapters.mcp.tools.agent_chat.create_session",
+            new=AsyncMock(
+                return_value=ma_session(
+                    id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID
+                )
+            ),
+        ):
+            await _start_turn_impl(runtime, _auth(), "hi")
+    assert sends == 1

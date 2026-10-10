@@ -62,6 +62,7 @@ from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
+from daimon.core.stores import usage_sweep_sessions
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
 from daimon.core.turn.approvals import headless_tool_confirmation
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
@@ -75,6 +76,7 @@ from daimon.core.turn.posture import (
     ExemptReason,
 )
 from daimon.core.turn.state import TurnState, extract_final_response
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -402,6 +404,13 @@ async def run_turn_impl(
         return extract_final_response(state.content)
     finally:
         if session_factory is not None:
+            try:
+                async with session_factory.begin() as db:
+                    await usage_sweep_sessions.mark_finished(db, session_id=session.id)
+            except SQLAlchemyError:
+                # Cleanup boundary: a failed optional retirement marker keeps
+                # the session protected; inline usage has already been billed.
+                log.exception("headless.usage_session_finish.failed", session_id=session.id)
             try:
                 await close_headless_app_session(
                     anthropic, session_factory, session_id=session.id, fernet=fernet
