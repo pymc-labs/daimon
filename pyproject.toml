@@ -132,6 +132,7 @@ source_modules = [
     "daimon.core.credential_requests",
     "daimon.core.credential_submit",
     "daimon.core.cron",
+    "daimon.core.cron_words",
     "daimon.core.db",
     "daimon.core.env_file",
     "daimon.core.direct_messages",
