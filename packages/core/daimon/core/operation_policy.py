@@ -9,8 +9,9 @@ also local to those channels. Being unreachable does not establish ownership.
 New MCP connections are attachment writes: a private token or OAuth grant
 still adds servers and tools to the shared agent spec. Only key_add and
 keys_import retain the posted-token exception, which does not change the
-agent's spec. GitHub invitations remain server-admin only; grants require
-an admin or the same channel ownership and locality.
+agent's spec. GitHub grants, and a GitHub Connect for one agent, require an
+admin or the same channel ownership and locality. A server-wide Connect has
+no agent target, so its facts are all False and only an admin passes.
 
 The I/O shells read TargetFacts and retain their own refusal wording.
 """
@@ -109,9 +110,7 @@ def _decide_operation(
     the three families described above; `authorize` decides each family's
     fixed order (`Action.CHANGE_SHARED_AGENT`).
     """
-    if operation == "github_connect":
-        return "allow" if is_admin else "needs_admin"
-    if operation == "github_grant":
+    if operation in ("github_connect", "github_grant"):
         return (
             "allow"
             if is_admin
@@ -161,9 +160,9 @@ def needs_reachability_read(
     re-derived at each of the three call sites that gate a live DB read on
     it.
     """
-    if operation in _POSTED_TOKEN_OPERATIONS or operation == "github_connect":
+    if operation in _POSTED_TOKEN_OPERATIONS:
         return False
-    if operation == "github_grant":
+    if operation in ("github_connect", "github_grant"):
         return not is_admin and not is_daimon_managed
     # Both remaining families only consult reachability once neither the
     # managed check nor the admin check has already settled the outcome.

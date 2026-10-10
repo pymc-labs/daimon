@@ -5,8 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_admins import (
+    ChannelAdminCaller,
+    confirm_stored_group_ids,
+    grant_group_ids,
+    read_stored_admin,
+)
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
+from daimon.core.operation_policy import decide_operation
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
@@ -42,9 +51,102 @@ __all__ = [
     "connect_link",
     "sync_connect_admin",
     "pending_connect_link",
+    "AGENT_CONNECT_ONLY_AGENT",
+    "AGENT_CONNECT_TITLE",
+    "agent_connect_title",
+    "can_manage_agent_github",
+    "requester_manages_agent",
 ]
 
 CONNECT_COPY = "Choose repos on GitHub. If someone else manages them, send them this link."
+
+# Words for a Connect bound to one agent. The UI slice owns where they show.
+AGENT_CONNECT_TITLE = "Connect to {agent} in #{channel}"
+AGENT_CONNECT_ONLY_AGENT = "Only {agent} can use these repos."
+
+
+def agent_connect_title(agent_name: str, channel_name: str | None) -> str:
+    """The confirm page title for a Connect bound to one agent."""
+    if not channel_name:
+        return f"Connect to {agent_name}"
+    return AGENT_CONNECT_TITLE.format(agent=agent_name, channel=channel_name.lstrip("#"))
+
+
+async def can_manage_agent_github(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    caller: ChannelAdminCaller,
+    agent_names: tuple[str | None, ...],
+    ma_agent_id: str,
+    is_daimon_managed: bool,
+    default: DeploymentDefault,
+) -> bool:
+    """Whether the caller may connect, grant and remove repos for one agent.
+
+    A server admin, or a channel admin for a non-managed agent that is local to
+    and held by their channels (`github_connect`, the `github_grant` terms).
+    """
+    facts = await load_target_facts(
+        session,
+        "github_connect",
+        tenant_id=tenant_id,
+        platform=platform,
+        agent_names=agent_names,
+        ma_agent_id=ma_agent_id,
+        default=default,
+        caller=caller,
+        is_daimon_managed=is_daimon_managed,
+        caller_platform_user_id=caller.platform_user_id,
+    )
+    return (
+        decide_operation("github_connect", is_admin=caller.is_server_admin, target=facts) == "allow"
+    )
+
+
+async def requester_manages_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str | None,
+    platform_user_id: str | None,
+    agent_name: str | None,
+    ma_agent_id: str | None,
+    default: DeploymentDefault,
+) -> bool:
+    """The confirm-time check for a link someone made for one agent, outside a chat turn.
+
+    Reads the requester's stored role and channel admin grants. A Slack or
+    Teams group is not looked up here, so a grant held only through one no
+    longer counts; a grant naming the person, or a Discord role, does.
+    Whether the agent is managed was checked when the link was made.
+    """
+    if not agent_name or not ma_agent_id or platform is None:
+        return False
+    stored = await read_stored_admin(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        account_id=account_id,
+        platform_user_id=platform_user_id,
+    )
+    if stored.is_admin:
+        return True
+    role_ids = await confirm_stored_group_ids(
+        platform, platform_user_id, stored.role_ids, None, named=grant_group_ids(stored.grants)
+    )
+    return await can_manage_agent_github(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        caller=ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids),
+        agent_names=(agent_name,),
+        ma_agent_id=ma_agent_id,
+        is_daimon_managed=False,
+        default=default,
+    )
 
 
 async def sync_connect_admin(
@@ -155,23 +257,41 @@ async def connect_link(
     start_over: bool = False,
     agent_id: uuid.UUID | None = None,
     agent_name: str | None = None,
+    agent_ma_id: str | None = None,
+    verified_agent_manager: bool = False,
     origin_parent_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_followup_token: str | None = None,
     origin_followup_expires_at: datetime | None = None,
 ) -> str:
-    """Mint for the clicker after resolving their current tenant-admin account."""
+    """Mint for the clicker after resolving their current account.
+
+    A server-wide link needs a live tenant admin. A link for one agent also
+    allows someone the caller checked manages it (`can_manage_agent_github`);
+    their repos are for that agent only.
+    """
     root = connect_root(settings)
     if root is None:
         raise ValueError("GitHub connection is not configured for this workspace.")
-    if not verified_tenant_admin:
+    for_agent = agent_id is not None and agent_name is not None
+    if verified_tenant_admin:
+        account_id = await admin_account_for_platform_user(
+            session, tenant_id=tenant_id, external_id=platform_user_id
+        )
+    elif for_agent and verified_agent_manager:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
+        )
+        account_id = principal.account_id
+    else:
         raise ValueError("Only a workspace admin can connect GitHub.")
-    account_id = await admin_account_for_platform_user(
-        session, tenant_id=tenant_id, external_id=platform_user_id
-    )
     if agent_id is not None and agent_name is not None:
         await require_app_eligible_agent(
-            session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            switch_saved_key=True,
         )
     if start_over:
         await expire_pending_invitation(
@@ -189,6 +309,8 @@ async def connect_link(
         workspace_label=workspace_label,
         agent_id=agent_id,
         agent_name=agent_name,
+        agent_ma_id=agent_ma_id,
+        agent_manager_verified=verified_agent_manager,
         origin_platform=platform,
         origin_parent_channel_id=origin_parent_channel_id,
         origin_thread_id=origin_thread_id,

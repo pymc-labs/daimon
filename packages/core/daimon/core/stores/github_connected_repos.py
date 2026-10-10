@@ -14,7 +14,7 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.stores.security_audit import append_event
-from sqlalchemy import delete, distinct, func, select, update
+from sqlalchemy import Exists, delete, distinct, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -38,11 +38,40 @@ async def _require_admin(
         raise ValueError("Only a server or workspace admin can manage connected repos.")
 
 
+def _has_own_row(model: type[AgentGitHubGrant] | type[AgentGitHubGrantDraft]) -> Exists:
+    """The grant's agent has this repo connected for itself."""
+    return (
+        select(TenantGitHubRepo.id)
+        .where(
+            TenantGitHubRepo.tenant_id == model.tenant_id,
+            TenantGitHubRepo.repo_id == model.repo_id,
+            TenantGitHubRepo.scope_agent_id == model.agent_id,
+            TenantGitHubRepo.status == "active",
+        )
+        .exists()
+    )
+
+
+async def _server_wide_row(
+    session: AsyncSession, *, tenant_id: uuid.UUID, repo_id: int
+) -> TenantGitHubRepo | None:
+    return await session.scalar(
+        select(TenantGitHubRepo)
+        .where(
+            TenantGitHubRepo.tenant_id == tenant_id,
+            TenantGitHubRepo.repo_id == repo_id,
+            TenantGitHubRepo.scope_agent_id.is_(None),
+        )
+        .with_for_update()
+    )
+
+
 async def summary(session: AsyncSession, *, tenant_id: uuid.UUID) -> ConnectedRepoSummary:
     repos = list(
         await session.scalars(
             select(TenantGitHubRepo).where(
                 TenantGitHubRepo.tenant_id == tenant_id,
+                TenantGitHubRepo.scope_agent_id.is_(None),
                 TenantGitHubRepo.status == "active",
             )
         )
@@ -70,7 +99,7 @@ async def set_repo_ability(
     account_id: uuid.UUID,
 ) -> None:
     await _require_admin(session, tenant_id=tenant_id, account_id=account_id)
-    repo = await session.get(TenantGitHubRepo, (tenant_id, repo_id), with_for_update=True)
+    repo = await _server_wide_row(session, tenant_id=tenant_id, repo_id=repo_id)
     if repo is None or repo.status != "active":
         raise ValueError("This repo is no longer connected.")
     if ability == "write" and repo.max_access != "write":
@@ -83,6 +112,7 @@ async def set_repo_ability(
             .where(
                 AgentGitHubGrant.tenant_id == tenant_id,
                 AgentGitHubGrant.repo_id == repo_id,
+                ~_has_own_row(AgentGitHubGrant),
             )
             .with_for_update()
         )
@@ -96,6 +126,7 @@ async def set_repo_ability(
             .where(
                 AgentGitHubGrantDraft.tenant_id == tenant_id,
                 AgentGitHubGrantDraft.repo_id == repo_id,
+                ~_has_own_row(AgentGitHubGrantDraft),
             )
             .with_for_update()
         )
@@ -127,22 +158,25 @@ async def disconnect_repo(
     account_id: uuid.UUID,
 ) -> None:
     await _require_admin(session, tenant_id=tenant_id, account_id=account_id)
-    repo = await session.get(TenantGitHubRepo, (tenant_id, repo_id), with_for_update=True)
+    repo = await _server_wide_row(session, tenant_id=tenant_id, repo_id=repo_id)
     if repo is None or repo.status != "active":
         raise ValueError("This repo is no longer connected.")
     repo.status = "revoked"
     repo.status_reason = "disconnected in Daimon"
     repo.version += 1
+    # An agent that has the repo connected for itself keeps it.
     await session.execute(
         delete(AgentGitHubGrant).where(
             AgentGitHubGrant.tenant_id == tenant_id,
             AgentGitHubGrant.repo_id == repo_id,
+            ~_has_own_row(AgentGitHubGrant),
         )
     )
     await session.execute(
         delete(AgentGitHubGrantDraft).where(
             AgentGitHubGrantDraft.tenant_id == tenant_id,
             AgentGitHubGrantDraft.repo_id == repo_id,
+            ~_has_own_row(AgentGitHubGrantDraft),
         )
     )
     await append_event(

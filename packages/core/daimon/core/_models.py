@@ -2535,16 +2535,37 @@ class TurnOutcome(Base):
 
 
 class TenantGitHubRepo(Base):
+    """One confirmed repo: server-wide, or owned by one agent (`scope_agent_id`).
+
+    A repo may be confirmed server-wide and for several agents at once; each
+    row carries its own confirmation and limit. Agents live in Managed Agents,
+    so `scope_agent_id` has no local table to reference.
+    """
+
     __tablename__ = "tenant_github_repos"
     __table_args__ = (
-        PrimaryKeyConstraint("tenant_id", "repo_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "repo_id",
+            "scope_agent_id",
+            name="uq_tenant_github_repos_scope",
+            postgresql_nulls_not_distinct=True,
+        ),
         CheckConstraint("max_access IN ('read', 'write')"),
         CheckConstraint("status IN ('active', 'suspended', 'revoked')"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
     )
     repo_id: Mapped[int] = mapped_column(BigInteger)
+    # Null: any agent in the workspace may be granted it. Set: only that agent.
+    scope_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     owner_id: Mapped[int] = mapped_column(BigInteger)
     installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_full_name: Mapped[str] = mapped_column(Text)
@@ -2581,6 +2602,9 @@ class GitHubConnectInvitation(Base):
     requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     agent_name: Mapped[str | None] = mapped_column(Text)
+    # The target's Managed Agents id, so a channel admin's right to connect
+    # for it can be checked again when the repos are confirmed.
+    agent_ma_id: Mapped[str | None] = mapped_column(Text)
     operator_issued: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -2618,6 +2642,7 @@ class GitHubConnectClickIntent(Base):
     requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_ma_id: Mapped[str | None] = mapped_column(Text)
     origin_parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     origin_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     origin_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2669,11 +2694,9 @@ class AgentGitHubGrant(Base):
     __tablename__ = "agent_github_grants"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
-        ForeignKeyConstraint(
-            ["tenant_id", "repo_id"],
-            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
-            ondelete="CASCADE",
-        ),
+        # Several confirmations may share (tenant_id, repo_id), so grants no
+        # longer reference one; the stores remove grants with their repo.
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         CheckConstraint("baseline_access IN ('none', 'read', 'write')"),
         CheckConstraint("ceiling_access IN ('read', 'write')"),
         CheckConstraint(
@@ -2701,11 +2724,9 @@ class AgentGitHubGrantDraft(Base):
     __tablename__ = "agent_github_grant_drafts"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
-        ForeignKeyConstraint(
-            ["tenant_id", "repo_id"],
-            ["tenant_github_repos.tenant_id", "tenant_github_repos.repo_id"],
-            ondelete="CASCADE",
-        ),
+        # Several confirmations may share (tenant_id, repo_id), so grants no
+        # longer reference one; the stores remove grants with their repo.
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         CheckConstraint("operation IN ('upsert', 'remove')"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
