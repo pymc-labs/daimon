@@ -85,6 +85,10 @@ class Assertion(Contract):
         "same_thread",
         "progress_seen",
         "no_blank_message",
+        "message_count",
+        "fences_balanced",
+        "footer_on_last_message",
+        "thread_name",
     ]
     turn: int | None = Field(default=None, ge=1)
     maximum: float | None = Field(default=None, alias="max", ge=0)
@@ -92,6 +96,8 @@ class Assertion(Contract):
     as_turn: int | None = Field(default=None, ge=1)
     within_s: float | None = Field(default=None, ge=0)
     pattern: str | None = None
+    pattern_absent: str | None = None
+    max_len: int | None = Field(default=None, ge=1)
     emoji: str | None = None
     name_pattern: str | None = None
     unique: bool = False
@@ -103,8 +109,6 @@ class Assertion(Contract):
 
     @property
     def pending_extension(self) -> str | None:
-        if self.kind == "attachments" and self.name_pattern is not None:
-            return "filtered attachment counts (P5)"
         if self.kind == "reaction_present" and self.within_s is not None:
             return "timed reaction observation"
         return None
@@ -131,7 +135,19 @@ class Assertion(Contract):
             raise ValueError("db_check requires sql")
         if self.kind == "judge" and not self.rubric:
             raise ValueError("judge requires rubric")
-        for pattern in (self.pattern, self.name_pattern):
+        if self.kind == "thread_name" and not (self.pattern or self.pattern_absent or self.max_len):
+            raise ValueError("thread_name requires pattern, pattern_absent or max_len")
+        if self.kind != "thread_name" and (
+            self.pattern_absent is not None or self.max_len is not None
+        ):
+            raise ValueError("pattern_absent and max_len require thread_name")
+        if (
+            self.kind == "message_count"
+            and self.maximum is not None
+            and not self.maximum.is_integer()
+        ):
+            raise ValueError("message_count max must be an integer")
+        for pattern in (self.pattern, self.pattern_absent, self.name_pattern):
             if pattern:
                 try:
                     re.compile(pattern)
@@ -201,16 +217,12 @@ class Scenario(ScenarioMetadata):
 PROPOSED_STEPS = frozenset({"pytest"})
 PROPOSED_ASSERTIONS = frozenset(
     {
-        "footer_on_last_message",
         "footer_cost_matches_ledger",
         "ledger_debits",
         "ledger_matches_usage",
         "answers_total",
         "threads_created",
-        "message_count",
-        "fences_balanced",
         "chunks_gap_max_s",
-        "thread_name",
         "component_present",
         "card_text_now",
         "channel_text_present",

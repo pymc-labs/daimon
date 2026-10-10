@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Live QA supports Discord message counts, per-message balanced fences, cost-footer placement, thread-name readback, and filename-filtered attachment counts.
+
 - **Haiku 5.5 can be picked as an agent model and is metered.** It is billed at Anthropic's list price by prompt length: $0.10 input and $0.50 output per million tokens up to a 100,000-token prompt, and five times that above it. Before this, turns on `claude-haiku-5-5` were recorded as free.
 
 - A channel admin can connect GitHub repos, including personal ones, to an agent they manage (one limited to their channels and not a Daimon default agent), from the agent's Connect GitHub or by asking the agent. Repos connected for an agent belong to it: no other agent can be given them, by anyone. Connecting again adds repos and keeps the ones it has. A server admin's Connect for one agent works the same way. Whoever manages the agent can remove its repos, which removes only that agent's access. If the agent had a saved GitHub key, the key is retired once its working repo and skill repos are among its repos.

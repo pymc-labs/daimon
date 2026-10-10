@@ -104,6 +104,9 @@ class FakeBackend:
             models=[STAGING_LEGACY_MODEL],
         )
 
+    def thread_name(self, turn: Turn) -> str:
+        return "Inventory example"
+
     def classify(self, message: Message) -> str:
         return "working" if message.get("working") else self.verdict
 
