@@ -23,7 +23,7 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
     assert "then select Save" in prompt
     assert "In chat, make one change on a clear ask" in CREDENTIAL_GUIDANCE_BLOCK
     assert "none" in setup
-    assert "GH_TOKEN_*" in cli_auth
+    assert "gh repo clone owner/repo" in cli_auth
     assert "Other repos granted to this agent" in cli_auth
 
 
