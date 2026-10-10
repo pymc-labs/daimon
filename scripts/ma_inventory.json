@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2182,
+  "files_scanned": 2185,
   "parse_errors": [],
   "calls": [
     {
@@ -18351,6 +18351,15 @@
     {
       "file": "packages/testing/daimon/testing/mark_disposable.py",
       "line": 17,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/qa_mcp_host.py",
+      "line": 47,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
