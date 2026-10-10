@@ -1,0 +1,11 @@
+{
+  "discord:user": "71d553cafd86e32cbd11ee11287e68974bbc5594df9c464d5eab59f7670e98a5",
+  "discord:admin": "71d553cafd86e32cbd11ee11287e68974bbc5594df9c464d5eab59f7670e98a5",
+  "discord:agent": "a6e11e6938cf820f31f7a47e1e3ae63e645e1d1f03182ad8e6a44fe55f3ef2dc",
+  "slack:user": "71d553cafd86e32cbd11ee11287e68974bbc5594df9c464d5eab59f7670e98a5",
+  "slack:admin": "71d553cafd86e32cbd11ee11287e68974bbc5594df9c464d5eab59f7670e98a5",
+  "slack:agent": "a6e11e6938cf820f31f7a47e1e3ae63e645e1d1f03182ad8e6a44fe55f3ef2dc",
+  "teams:user": "71d553cafd86e32cbd11ee11287e68974bbc5594df9c464d5eab59f7670e98a5",
+  "teams:admin": "71d553cafd86e32cbd11ee11287e68974bbc5594df9c464d5eab59f7670e98a5",
+  "teams:agent": "a6e11e6938cf820f31f7a47e1e3ae63e645e1d1f03182ad8e6a44fe55f3ef2dc"
+}

@@ -1,0 +1,12 @@
+{
+  "reason": "BUILTIN_NAME_SCHEMA_DELTA",
+  "missing": [
+    "read",
+    "edit",
+    "grep",
+    "glob",
+    "write"
+  ],
+  "added": [],
+  "native_schema": "provider-owned-unavailable"
+}
