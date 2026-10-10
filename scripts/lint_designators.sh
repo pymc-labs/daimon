@@ -17,7 +17,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 # Trees to scan. This script is excluded from its own scan (it names the patterns).
 readonly SELF="scripts/lint_designators.sh"
-readonly TREES=(packages apps scripts .github)
+readonly TREES=(packages apps scripts .github qa)
 
 failed=0
 

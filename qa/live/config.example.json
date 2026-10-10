@@ -1,5 +1,5 @@
 {
-  "driver_path": "/home/clsandoval/cs/daimon-private/.claude/skills/daimon-qa/qa.py",
+  "driver_path": "/home/clsandoval/.config/daimon-qa/qa.py",
   "model": "claude-haiku-4-5-20251001",
   "pricing": {
     "per_turn_usd": 0.25,

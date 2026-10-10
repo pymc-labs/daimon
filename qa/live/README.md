@@ -30,6 +30,9 @@ for unavailable values; numeric regex quantifiers stay literal.
 `est_turns` is the driver's billed-turn estimate, which may differ from trigger
 count when triggers coalesce. The driver must set a conservative estimate.
 
+Set the local config's `driver_path` to the installed `daimon-qa/qa.py` driver.
+Its default location is `~/.config/daimon-qa/qa.py`; the runner does not copy or
+install the driver. Keep installation-specific paths in the private local config.
 Edit the local config's `pricing` before approval. The example prices are sample
 values, not measured turn estimates. Include the worst expected Daimon turn cost,
 judge input/output token prices, and a bounded judge input allowance. Judge calls

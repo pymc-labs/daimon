@@ -47,7 +47,7 @@ class Alerts(Contract):
 
 
 class Config(Contract):
-    driver_path: str = str(Path.home() / "cs/daimon-private/.claude/skills/daimon-qa/qa.py")
+    driver_path: str = str(Path.home() / ".config/daimon-qa/qa.py")
     model: Literal["claude-haiku-4-5-20251001"] = MODEL
     pricing: Pricing
     staging: Target = Field(default_factory=Target)
