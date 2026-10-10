@@ -1,9 +1,11 @@
 """No network or real credentials: probe limits, receipts and recorded evidence."""
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from mux.conformance.budget import BudgetGuard, BudgetRefused, TokenLimits
 from mux.conformance.live_probe import ProbeRunError
@@ -12,16 +14,32 @@ from mux.drivers.gemini.fake import FakeTransport
 from mux.drivers.gemini.live_cert import (
     GEMINI_STOP,
     LIVE_MODEL,
+    MODEL_CHAIN,
     LimitedTransport,
     SmokeSettings,
     read_key,
     run_prepared,
+    run_sdk_smoke,
     smoke,
+    smoke_with_fallback,
+    usage_metadata,
     validate_budget,
     write_report,
 )
-from mux.drivers.gemini.transport import Object
+from mux.drivers.gemini.transport import Object, object_value
 from mux.errors import ProviderError
+
+
+@pytest.fixture(autouse=True)
+def reviewed_gemini_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Offline composition with N9's required allowlist update; production stays
+    # closed until that separately owned policy lands.
+    import mux.conformance.budget as shared
+    import mux.drivers.gemini.live_cert as cert
+
+    policy = {**shared.LIVE_MODEL_ALLOWLIST, "gemini": frozenset(MODEL_CHAIN)}
+    monkeypatch.setattr(shared, "LIVE_MODEL_ALLOWLIST", policy)
+    monkeypatch.setattr(cert, "LIVE_MODEL_ALLOWLIST", policy)
 
 
 def budget(
@@ -39,12 +57,13 @@ def budget(
                     "cap_usd": "30",
                     "opening_spend_usd": opening,
                     "models": {
-                        model: {
+                        candidate: {
                             "input": "1",
                             "cached_input": "1",
                             "cache_write_input": "1",
                             "output": "4",
                         }
+                        for candidate in (*MODEL_CHAIN, model)
                     }
                     if priced
                     else {},
@@ -156,6 +175,31 @@ async def test_allowed_live_model_still_requires_prices_before_key_loading(
     with pytest.raises(BudgetRefused, match="reviewed prices"):
         await run_prepared(output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=config)
     assert list(output.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_old_shared_policy_refuses_before_key_or_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mux.drivers.gemini.live_cert as cert
+
+    guard = budget(tmp_path)
+    config = json.loads(guard.config_path.read_text())
+    config["ledger_path"] = str(cert.SHARED_SPEND_PATH)
+    guard.config_path.write_text(json.dumps(config))
+    monkeypatch.setattr(cert, "LIVE_MODEL_ALLOWLIST", {"gemini": frozenset({MODEL_CHAIN[2]})})
+
+    def forbidden_key() -> str:
+        raise AssertionError("old allowlist reached credentials")
+
+    monkeypatch.setattr(cert, "read_key", forbidden_key)
+    output = tmp_path / "output"
+    output.mkdir()
+    with pytest.raises(BudgetRefused, match="allowlist update"):
+        await run_prepared(
+            output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=guard.config_path
+        )
+    assert not list(output.iterdir())
 
 
 @pytest.mark.asyncio
@@ -316,7 +360,8 @@ async def test_live_preparation_rejects_a_private_ledger_before_key_or_dispatch(
     "model",
     [
         "gemini-3.8-pro",
-        "gemini-3.8-flash",
+        "gemini-flash-latest",
+        "gemini-3.5-flash-lite",
         "gemini-3.7-flash",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
@@ -354,7 +399,7 @@ async def test_live_rejects_every_other_model_even_when_priced_before_key_or_cli
 
     monkeypatch.setattr(cert, "read_key", forbidden_key)
     monkeypatch.setattr(httpx, "AsyncClient", forbidden_client)
-    with pytest.raises(BudgetRefused, match="gemini-3.5-flash-lite only"):
+    with pytest.raises(BudgetRefused, match="gemini-3.8-flash as the primary"):
         if entry == "preparation":
             await run_prepared(output, SmokeSettings(model=model), live=True, budget_path=config)
         else:
@@ -416,3 +461,255 @@ async def test_live_shared_ledger_gate_reaches_key_loading_without_ledger_io(
     with pytest.raises(KeyRequired):
         await run_prepared(output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=config)
     assert list(output.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overloads", [0, 1, 2, 3])
+async def test_only_http503_advances_model_chain_with_separate_receipts(
+    tmp_path: Path,
+    overloads: int,
+) -> None:
+    guard = budget(tmp_path)
+    source = FakeTransport()
+    source.responses.extend(
+        ProviderError("overloaded", retryable=True, native_code="503") for _ in range(overloads)
+    )
+    if overloads < 3:
+        response = native()
+        response["usage"] = {
+            "total_input_tokens": 64,
+            "total_cached_tokens": 16,
+            "total_output_tokens": 8,
+            "total_thought_tokens": 3,
+        }
+        source.responses.append(response)
+        probe = await smoke_with_fallback(
+            source, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+        )
+        assert probe.receipt.model == MODEL_CHAIN[overloads]
+        if overloads == 1:
+            assert probe.receipt.status == "uncertain"
+            assert probe.receipt.tokens is None
+            assert probe.receipt.cost_estimate_usd == probe.receipt.reserved_usd
+        else:
+            assert probe.receipt.tokens is not None and probe.receipt.tokens.output_tokens == 11
+            assert probe.receipt.tokens.input_cached_tokens == 16
+            assert probe.receipt.tokens.input_cache_write_tokens == 0
+            assert probe.receipt.cost_estimate_usd == Decimal("0.000108")
+    else:
+        with pytest.raises(ProbeRunError):
+            await smoke_with_fallback(
+                source, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+            )
+    assert [object_value(request["agent_config"])["model"] for request in source.requests] == list(
+        MODEL_CHAIN[: min(overloads + 1, 3)]
+    )
+    receipts = sorted(tmp_path.glob("smoke-receipt-*.json"))
+    assert len(receipts) == min(overloads + 1, 3)
+    for index, path in enumerate(receipts):
+        value = json.loads(path.read_text())
+        assert value["model"] == MODEL_CHAIN[index]
+        assert value["fallback_from"] == (MODEL_CHAIN[index - 1] if index else None)
+        assert value["fallback_trigger_http_status"] == (503 if index else None)
+        spend = value["spend_receipt"]
+        if index < overloads:
+            assert spend["status"] == "failed"
+            assert Decimal(spend["cost_estimate_usd"]) == Decimal(spend["reserved_usd"]) > 0
+            assert not Tape.model_validate_json(
+                (tmp_path / value["recording"]).read_text()
+            ).complete
+        assert spend["run_id"] in guard.spend_path.read_text()
+        assert value["price_review_date"] == "2026-10-10"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,code",
+    [
+        ("auth", "401"),
+        ("permission", "403"),
+        ("rate_limited", "429"),
+        ("upstream", "500"),
+        ("transient_network", None),
+        ("overloaded", None),
+        ("overloaded", "504"),
+    ],
+)
+async def test_other_refusals_and_ambiguous_delivery_never_fallback(
+    tmp_path: Path,
+    category: str,
+    code: str | None,
+) -> None:
+    from mux.contracts.errors import ProviderErrorCategory
+    from pydantic import TypeAdapter
+
+    source = FakeTransport()
+    source.responses.append(
+        ProviderError(
+            TypeAdapter[ProviderErrorCategory](ProviderErrorCategory).validate_python(category),
+            retryable=True,
+            native_code=code,
+        )
+    )
+    with pytest.raises(ProbeRunError):
+        await smoke_with_fallback(
+            source, budget(tmp_path), tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+        )
+    assert len(source.requests) == 1
+    value = json.loads((tmp_path / "smoke-receipt-1.json").read_text())
+    assert value["create_refusal_http_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_poll503_after_acceptance_never_starts_another_model(tmp_path: Path) -> None:
+    source = FakeTransport()
+    source.responses.append(native("in_progress"))
+    source.reads["smoke"] = [ProviderError("overloaded", retryable=True, native_code="503")]
+    with pytest.raises(ProbeRunError):
+        await smoke_with_fallback(
+            source, budget(tmp_path), tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+        )
+    assert len(source.requests) == 1 and source.cancelled == ["smoke"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_budget_stop_prevents_second_dispatch(tmp_path: Path) -> None:
+    guard = budget(tmp_path, opening="23.80")
+    source = FakeTransport()
+    source.responses.append(ProviderError("overloaded", retryable=True, native_code="503"))
+    with pytest.raises(BudgetRefused):
+        await smoke_with_fallback(
+            source, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+        )
+    assert len(source.requests) == 1
+    ledger = guard.spend_path.read_text()
+    assert '"status":"failed"' in ledger and '"status":"blocked"' in ledger
+
+
+def test_native_usage_metadata_retains_four_counts_without_free_form_data() -> None:
+    observed = usage_metadata(
+        {
+            "usageMetadata": {
+                "promptTokenCount": 64,
+                "candidatesTokenCount": 8,
+                "cachedContentTokenCount": 16,
+                "thoughtsTokenCount": 3,
+                "secret": "must-be-omitted",
+            }
+        }
+    )
+    assert observed == {
+        "source": "usageMetadata",
+        "promptTokenCount": 64,
+        "candidatesTokenCount": 8,
+        "cachedContentTokenCount": 16,
+        "thoughtsTokenCount": 3,
+    }
+    unknown = usage_metadata({})
+    assert all(unknown[key] is None for key in observed if key != "source")
+    with pytest.raises(ValueError):
+        usage_metadata({"usage": {"total_input_tokens": True}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overloads", [0, 1, 2, 3])
+async def test_real_sdk_request_bytes_and_every_response_usage_remain_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overloads: int
+) -> None:
+    original = httpx.MockTransport
+    bodies: list[bytes] = []
+    methods: list[str] = []
+
+    def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
+        def respond(request: httpx.Request) -> httpx.Response:
+            assert request.url.host == "generativelanguage.googleapis.com"
+            methods.append(request.method)
+            if request.method == "POST":
+                bodies.append(request.content)
+                if len(bodies) <= overloads:
+                    # Non-JSON refusals must still map the exact HTTP status.
+                    return httpx.Response(503, text="upstream unavailable")
+            value = json.loads(handler(request).content)
+            value.pop("usage")
+            value["usageMetadata"] = {
+                "promptTokenCount": 64,
+                "candidatesTokenCount": 8,
+                "cachedContentTokenCount": 16,
+                "thoughtsTokenCount": 3,
+            }
+            return httpx.Response(200, json=value)
+
+        return original(respond)
+
+    monkeypatch.setattr(httpx, "MockTransport", factory)
+    guard = budget(tmp_path)
+    if overloads == 3:
+        with pytest.raises(ProbeRunError):
+            await run_sdk_smoke(
+                guard,
+                tmp_path / "sdk.json",
+                SmokeSettings(model=LIVE_MODEL),
+                key="offline-sdk-secret",
+                mock=True,
+            )
+    else:
+        probe = await run_sdk_smoke(
+            guard,
+            tmp_path / "sdk.json",
+            SmokeSettings(model=LIVE_MODEL),
+            key="offline-sdk-secret",
+            mock=True,
+        )
+        if overloads != 1:
+            assert probe.receipt.tokens is not None
+            assert probe.receipt.tokens.output_tokens == 11
+            assert probe.receipt.tokens.input_cached_tokens == 16
+    assert len(bodies) == min(overloads + 1, 3)  # Zero SDK retries.
+    for index, body in enumerate(bodies):
+        parsed = json.loads(body)
+        assert parsed["agent_config"]["model"] == MODEL_CHAIN[index]
+        assert parsed["agent_config"]["max_total_tokens"] == 4096
+        assert parsed["background"] is True and parsed["store"] is True
+    usages = sorted(tmp_path.glob("sdk-usage-*.json"))
+    assert len(usages) == len(methods)
+    for index, path in enumerate(usages):
+        value = json.loads(path.read_text())
+        assert value["method"] == methods[index]
+        assert value["model"] == MODEL_CHAIN[min(index, overloads, 2)]
+        counts = value["usageMetadata"]
+        assert counts["promptTokenCount"] == (None if index < overloads else 64)
+        assert counts["thoughtsTokenCount"] == (None if index < overloads else 3)
+        assert "offline-sdk-secret" not in path.read_text()
+    if overloads < 3:
+        receipt = json.loads((tmp_path / f"sdk-receipt-{overloads + 1}.json").read_text())
+        assert receipt["reported_tokens"]["output_tokens"] == 11
+        assert receipt["verification"] == (
+            "estimated, unverified" if overloads == 1 else "measured"
+        )
+
+
+@pytest.mark.asyncio
+async def test_dated_primary_price_settles_cached_and_thought_tokens_once(tmp_path: Path) -> None:
+    guard = budget(tmp_path)
+    config = json.loads(guard.config_path.read_text())
+    example = Path(__file__).parents[3] / "mux/drivers/gemini/live-budget.example.json"
+    config["providers"]["gemini"]["models"] = json.loads(example.read_text())["providers"][
+        "gemini"
+    ]["models"]
+    guard.config_path.write_text(json.dumps(config))
+    source = FakeTransport()
+    value = native()
+    value["usage"] = {
+        "total_input_tokens": 64,
+        "total_output_tokens": 8,
+        "total_cached_tokens": 16,
+        "total_thought_tokens": 3,
+    }
+    source.responses.append(value)
+    probe = await smoke_with_fallback(
+        source, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL)
+    )
+    # Reconcile and usage fetch the same cumulative snapshot; do not sum reads.
+    assert probe.receipt.cost_estimate_usd == Decimal("0.00007845")
+    receipt = json.loads((tmp_path / "smoke-receipt-1.json").read_text())
+    assert receipt["actual_usd"] == "0.00007845" and receipt["held_usd"] == "0"

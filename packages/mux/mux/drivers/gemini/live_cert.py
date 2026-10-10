@@ -7,22 +7,26 @@ import json
 import os
 import stat
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 from pydantic import JsonValue, TypeAdapter
 
 from mux.conformance.budget import (
+    LIVE_MODEL_ALLOWLIST,
     BudgetConfig,
     BudgetGuard,
     BudgetRefused,
     ProbePlan,
+    Reservation,
+    SpendReceipt,
     TokenLimits,
     TokenUsage,
 )
 from mux.conformance.gemini import PENDING_REASONS, GeminiScript
-from mux.conformance.live_probe import ProbeOutcome, ProbeRun, run_probe
+from mux.conformance.live_probe import ProbeOutcome, ProbeRun, ProbeRunError, run_probe
 from mux.conformance.recording import Recorder, RequestMetadata
 from mux.conformance.runner import Adapter, PendingKind, PendingReason, Result, run_fixture
 from mux.contracts.actions import UserMessage
@@ -38,9 +42,11 @@ from mux.state.memory import MemoryStateStore
 
 GEMINI_CAP = Decimal("30")
 GEMINI_STOP = Decimal("24")
-# Official offline runtime model table, source-G-runtime.txt:735-749.
-# Live probes pin the cost-focused Flash-Lite tier; no default/fallback model.
-LIVE_MODEL = "gemini-3.5-flash-lite"
+# Carlos 2026-10-10: explicit primary; each successor needs the prior POST HTTP503.
+LIVE_MODEL = "gemini-3.8-flash"
+MODEL_CHAIN = (LIVE_MODEL, "gemini-flash-latest", "gemini-3.5-flash-lite")
+PRICE_REVIEW_DATE = "2026-10-10"
+PRICE_SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
 SHARED_SPEND_PATH = Path("/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md")
 KEY_PATH = Path.home() / ".config/daimon-nc/gemini.env"
 SCOPE = Scope(
@@ -81,8 +87,12 @@ def validate_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
 
 def validate_shared_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
     if settings.model != LIVE_MODEL:
-        raise BudgetRefused("live Gemini probes require gemini-3.5-flash-lite only")
+        raise BudgetRefused("live Gemini probes require gemini-3.8-flash as the primary")
+    if not set(MODEL_CHAIN).issubset(LIVE_MODEL_ALLOWLIST.get("gemini", frozenset())):
+        raise BudgetRefused("Gemini fallback requires the reviewed N9 allowlist update")
     config = validate_budget(path, settings)
+    for model in MODEL_CHAIN[1:]:
+        validate_budget(path, replace(settings, model=model))
     if config.ledger_path.resolve() != SHARED_SPEND_PATH:
         raise BudgetRefused("live Gemini probes require the approved N9 shared spend ledger")
     return config
@@ -252,6 +262,7 @@ async def smoke(
                         input_tokens=meter.input_tokens,
                         output_tokens=meter.output_tokens,
                         input_cached_tokens=meter.input_cached_tokens,
+                        input_cache_write_tokens=0,
                     )
                     if (
                         tokens.minimum_input_tokens > settings.limits.input_tokens
@@ -315,9 +326,14 @@ async def smoke(
                         input_tokens=meter.input_tokens,
                         output_tokens=meter.output_tokens,
                         input_cached_tokens=meter.input_cached_tokens,
+                        input_cache_write_tokens=0,
                     ),
                     result=result,
                 )
+        except BaseException:
+            # Error calls also retain redacted request metadata, never their body.
+            record(recorder, ())
+            raise
         finally:
             if bounded.accepted_id is not None and not terminal:
                 # Best effort, bounded; an unobserved acceptance remains charged
@@ -390,6 +406,161 @@ def write_report(path: Path, value: Mapping[str, JsonValue]) -> None:
         file.write("\n")
 
 
+class ReceiptGuard(BudgetGuard):
+    """Observe public guard methods without changing its ledger/accounting rules."""
+
+    def __init__(self, guard: BudgetGuard) -> None:
+        super().__init__(guard.config_path, guard.spend_path)
+        self.reservation: Reservation | None = None
+        self.receipt: SpendReceipt | None = None
+        self.reported_usage: TokenUsage | None = None
+
+    def reserve(self, plan: ProbePlan, *, fixture_exists: bool = False) -> Reservation:
+        self.reservation = super().reserve(plan, fixture_exists=fixture_exists)
+        return self.reservation
+
+    def settle(
+        self,
+        reservation: Reservation,
+        *,
+        status: Literal["completed", "failed", "cancelled"],
+        limits: TokenLimits,
+        usage: TokenUsage | None = None,
+    ) -> SpendReceipt:
+        self.reported_usage = usage
+        # The moving alias has no independently published tariff/resolved model
+        # proof. Keep its hold until N9 can verify the actual resolved price.
+        verified = reservation.receipt.model != "gemini-flash-latest" and (
+            usage is not None
+            and usage.input_cached_tokens is not None
+            and usage.input_cache_write_tokens is not None
+        )
+        self.receipt = super().settle(
+            reservation, status=status, limits=limits, usage=usage if verified else None
+        )
+        return self.receipt
+
+
+class AttemptTransport:
+    """Only a definite create refusal can enable the next reviewed model."""
+
+    def __init__(self, source: Transport) -> None:
+        self.source = source
+        self.overloaded_create = False
+
+    async def create(self, request: Mapping[str, JsonValue]) -> Object:
+        try:
+            return await self.source.create(request)
+        except ProviderError as error:
+            self.overloaded_create = error.category == "overloaded" and error.native_code == "503"
+            raise
+
+    async def get(self, interaction_id: str) -> Object:
+        return await self.source.get(interaction_id)
+
+    async def cancel(self, interaction_id: str) -> Object:
+        return await self.source.cancel(interaction_id)
+
+    async def download_snapshot(self, environment_id: str) -> bytes:
+        return await self.source.download_snapshot(environment_id)
+
+    async def open_stream(
+        self, interaction_id: str, *, after: str | None = None
+    ) -> AsyncIterator[Object]:
+        return await self.source.open_stream(interaction_id, after=after)
+
+
+async def smoke_with_fallback(
+    source: Transport,
+    guard: BudgetGuard,
+    output: Path,
+    settings: SmokeSettings,
+    *,
+    secrets: tuple[str, ...] = (),
+    request_metadata: list[RequestMetadata] | None = None,
+) -> ProbeRun:
+    """Fresh driver/reservation per attempt; at most three explicit POSTs."""
+    if settings.model != LIVE_MODEL:
+        raise BudgetRefused("Gemini fallback probes require gemini-3.8-flash as the primary")
+    for model in MODEL_CHAIN:
+        validate_budget(guard.config_path, replace(settings, model=model))
+    for index, model in enumerate(MODEL_CHAIN):
+        attempt = AttemptTransport(source)
+        observed = ReceiptGuard(guard)
+        path = output if index == 0 else output.with_name(f"{output.stem}-attempt-{index + 1}.json")
+        if request_metadata is not None:
+            request_metadata.clear()
+        try:
+            return await smoke(
+                attempt,
+                observed,
+                path,
+                replace(settings, model=model),
+                secrets=secrets,
+                request_metadata=request_metadata,
+            )
+        except ProbeRunError:
+            if not attempt.overloaded_create or index + 1 == len(MODEL_CHAIN):
+                raise
+        finally:
+            if observed.receipt is not None and observed.reservation is not None:
+                write_report(
+                    path.with_name(f"{output.stem}-receipt-{index + 1}.json"),
+                    {
+                        "version": 1,
+                        "attempt": index + 1,
+                        "requested_model": LIVE_MODEL,
+                        "model": model,
+                        "fallback_from": MODEL_CHAIN[index - 1] if index else None,
+                        "fallback_trigger_http_status": 503 if index else None,
+                        "create_refusal_http_status": 503 if attempt.overloaded_create else None,
+                        "eligible_fallback_model": MODEL_CHAIN[index + 1]
+                        if attempt.overloaded_create and index + 1 < len(MODEL_CHAIN)
+                        else None,
+                        "price_review_date": PRICE_REVIEW_DATE,
+                        "price_source": PRICE_SOURCE,
+                        "price_per_million": observed.reservation.price.model_dump(mode="json"),
+                        "actual_usd": str(observed.receipt.cost_estimate_usd)
+                        if observed.receipt.status == "completed"
+                        else None,
+                        "held_usd": "0"
+                        if observed.receipt.status == "completed"
+                        else str(observed.receipt.reserved_usd),
+                        "verification": "measured"
+                        if observed.receipt.status == "completed"
+                        else "estimated, unverified",
+                        "reported_tokens": observed.reported_usage.model_dump(mode="json")
+                        if observed.reported_usage is not None
+                        else None,
+                        "spend_receipt": observed.receipt.model_dump(mode="json"),
+                        "recording": path.name,
+                    },
+                )
+    raise ProbeRunError("Gemini model chain exhausted")
+
+
+def usage_metadata(raw: Object) -> Object:
+    """Whitelist token facts; Interactions names are explicitly labelled."""
+    native = raw.get("usageMetadata")
+    source = "usageMetadata" if native is not None else "interactions.usage"
+    meter = object_value(native if native is not None else raw.get("usage") or {})
+    names = {
+        "promptTokenCount": "total_input_tokens",
+        "candidatesTokenCount": "total_output_tokens",
+        "cachedContentTokenCount": "total_cached_tokens",
+        "thoughtsTokenCount": "total_thought_tokens",
+    }
+    result: Object = {"source": source}
+    for name, interaction_name in names.items():
+        value = meter.get(name if native is not None else interaction_name)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise ValueError("invalid native usage counter")
+        result[name] = value
+    return result
+
+
 async def run_sdk_smoke(
     guard: BudgetGuard,
     output: Path,
@@ -411,15 +582,45 @@ async def run_sdk_smoke(
     from mux.drivers.gemini.transport import API_REVISION, SDKTransport
 
     metadata: list[RequestMetadata] = []
+    active_model = settings.model
+    call_index = 0
 
     async def capture(request: httpx.Request) -> None:
+        nonlocal active_model
         body: dict[str, object] | None = None
         if request.method == "POST":
-            body = dict(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+            parsed = TypeAdapter(dict[str, JsonValue]).validate_json(request.content)
+            active_model = str(object_value(parsed["agent_config"])["model"])
+            body = dict(parsed)
         metadata.append(
             RequestMetadata.from_request(
                 request.method, str(request.url), headers=request.headers, body=body
             )
+        )
+
+    async def capture_usage(response: httpx.Response) -> None:
+        nonlocal call_index
+        await response.aread()
+        try:
+            raw = TypeAdapter[Object](Object).validate_json(response.content)
+            counts = usage_metadata(raw)
+        except ValueError:
+            # A non-JSON refusal still has an HTTP status; retain unknown facts
+            # without recording the unsafe response or blocking SDK error mapping.
+            counts = usage_metadata({})
+        call_index += 1
+        write_report(
+            output.with_name(f"{output.stem}-usage-{call_index}.json"),
+            {
+                "version": 1,
+                "call": call_index,
+                "model": active_model,
+                "method": response.request.method,
+                "http_status": response.status_code,
+                "price_review_date": PRICE_REVIEW_DATE,
+                "usageMetadata": counts,
+                "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
+            },
         )
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -432,7 +633,7 @@ async def run_sdk_smoke(
         stamp = datetime.now(UTC).isoformat()
         if request.method == "POST":
             body = json.loads(request.content)
-            if body["agent_config"].get("model") != settings.model:
+            if body["agent_config"].get("model") not in MODEL_CHAIN:
                 raise ValueError("explicit probe model missing")
             if body["agent_config"].get("max_total_tokens") != settings.max_total_tokens:
                 raise ValueError("provider token budget missing")
@@ -463,7 +664,7 @@ async def run_sdk_smoke(
         transport=httpx.MockTransport(respond) if mock else None,
         trust_env=False,
         timeout=settings.timeout_s,
-        event_hooks={"request": [capture]},
+        event_hooks={"request": [capture], "response": [capture_usage]},
     ) as http:
         client = genai.Client(
             api_key=key,
@@ -475,7 +676,7 @@ async def run_sdk_smoke(
             ),
         )
         try:
-            return await smoke(
+            return await smoke_with_fallback(
                 SDKTransport(client),
                 guard,
                 output,
@@ -518,12 +719,13 @@ async def run_prepared(
                     "gemini": {
                         "cap_usd": "30",
                         "models": {
-                            settings.model: {
+                            model: {
                                 "input": "1",
                                 "cached_input": "1",
                                 "cache_write_input": "1",
                                 "output": "4",
                             }
+                            for model in MODEL_CHAIN
                         },
                     }
                 },
@@ -540,7 +742,15 @@ async def run_prepared(
         {
             "version": 1,
             "mode": "live_smoke" if live else "mock_transport",
-            "model": settings.model,
+            "requested_model": settings.model,
+            "model": probe.receipt.model,
+            "attempt_receipts": [
+                path.name for path in sorted(output.glob("smoke-C07-receipt-*.json"))
+            ],
+            "usage_recordings": [
+                path.name for path in sorted(output.glob("smoke-C07-usage-*.json"))
+            ],
+            "price_review_date": PRICE_REVIEW_DATE,
             "gemini_cap_usd": "30",
             "gemini_stop_usd": "24",
             "smoke_status": "completed",

@@ -60,7 +60,9 @@ def normalize_error(error: Exception) -> ProviderError:
         return ProviderError("transient_network", retryable=True)
     category = categories.get(status or 0, "upstream")
     return ProviderError(
-        category, retryable=status == 429 or (status is not None and status >= 500)
+        category,
+        retryable=status == 429 or (status is not None and status >= 500),
+        native_code="503" if status == 503 else None,
     )
 
 

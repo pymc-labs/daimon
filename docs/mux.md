@@ -955,8 +955,12 @@ explicit model and empty output directory. Its default MockTransport command
 uses a private ledger and no real key. An authorized `--live` command additionally
 requires the pinned mode-0600 key file and reviewed model prices in the shared
 N9 ledger configuration ($30 Gemini allocation, $24 admission stop). Live mode
-requires exactly `gemini-3.5-flash-lite`; other models refuse before key access.
-It records a bounded single-POST SDK smoke and the separate offline C-matrix, preserving
+requires exactly `gemini-3.8-flash` as primary; only a create POST returning 503
+permits `gemini-flash-latest`, then `gemini-3.5-flash-lite`. Reviewed prices and
+N9's matching policy are required before key access. Each attempt has its own
+reservation, normalized tape and fallback receipt; every response saves nullable
+token counters and known usage settles once. The moving alias remains unverified.
+It records a bounded SDK smoke and the separate offline C-matrix, preserving
 typed PENDING and unknown spend. Neither key presence nor offline passes grant a
 live certificate. See the driver's `LIVE-CERT.md` for commands and provider-budget
 limitations.
