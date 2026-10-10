@@ -124,11 +124,7 @@ async def test_terminal_waits_for_missing_card_replacement_across_handover(
 async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
     monkeypatch: pytest.MonkeyPatch, extra_render: bool, ending: str
 ) -> None:
-    """Both #628 review races: timeout, and a second edit after cancellation.
-
-    Hold a progress edit while terminal delivery queues behind it. The final
-    card is only applied after that older request has completed.
-    """
+    """A held progress request cannot delay delivery; a late result is repaired."""
     monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
     releases = [asyncio.Event(), asyncio.Event()]
     started = [asyncio.Event(), asyncio.Event()]
@@ -185,11 +181,12 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
         finish = asyncio.create_task(lc.end_card("Outer turn failure"))
     else:
         finish = asyncio.create_task(lc.on_terminal_success(state))
-    await asyncio.sleep(0.02)
-    assert not finish.done(), "terminal delivery must wait for the on-wire progress edit"
+    await asyncio.wait_for(finish, 1)
+    delivered = dict(current)
+    assert delivered.get("view") is None
+    assert not releases[0].is_set(), "terminal delivery must precede held progress"
     releases[0].set()
     await asyncio.wait_for(asyncio.gather(*pending), 1)
-    await asyncio.wait_for(finish, 1)
     if ending == "recovered":
         successor = DiscordTurnLifecycle(
             send=send,
@@ -263,11 +260,10 @@ async def test_progress_settled_before_terminal_or_missing_needs_no_repair(
         await asyncio.wait_for(asyncio.gather(*pending), 1)
     if missing:
         finish = asyncio.create_task(lc.on_terminal_success(_make_success_state("Answer")))
-        await asyncio.sleep(0.02)
-        assert not finish.done()
+        await asyncio.wait_for(finish, 1)
+        assert not release.is_set()
         release.set()
         await asyncio.wait_for(asyncio.gather(*pending), 1)
-        await asyncio.wait_for(finish, 1)
     else:
         await lc.on_terminal_success(_make_success_state("Answer"))
     assert lc._terminal_reassert_task is None
@@ -298,6 +294,24 @@ async def test_abandoned_render_does_not_leave_a_progress_task_waiting_for_termi
     await asyncio.wait_for(asyncio.gather(*pending), 1)
     assert not lc._progress_edits
     assert lc._terminal_reassert_task is None
+
+
+async def test_terminal_edit_has_an_application_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lifecycle_module, "_TERMINAL_EDIT_S", 0.01)
+    started = asyncio.Event()
+
+    async def send(**kwargs: Any) -> object:
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await lc.post_initial()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(lc.end_card("Done"), 1)
+    assert started.is_set()
 
 
 def _make_lifecycle(

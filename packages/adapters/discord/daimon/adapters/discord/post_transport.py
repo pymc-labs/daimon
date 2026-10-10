@@ -20,6 +20,7 @@ from daimon.core.agent_post_identity import (
 )
 
 import discord
+from discord.webhook.async_ import AsyncWebhookAdapter, async_context
 
 _POOL_SIZE = 1
 _CREATE_WAIT_SECONDS = 2.0
@@ -466,6 +467,7 @@ class DiscordPostTransport:
         # Boot recovery must keep the original intent when its pending card
         # cannot be edited; a replacement message does not clear that card.
         allow_replacement = kwargs.pop("_allow_replacement", True)
+        urgent = kwargs.pop("_urgent", False)
         if isinstance(kwargs.get("content"), str) and kwargs["content"].startswith(
             fallback_name_prefix(self.name, "")
         ):
@@ -485,6 +487,16 @@ class DiscordPostTransport:
                 edit_kwargs = dict(kwargs)
                 if thread is not None:
                     edit_kwargs["thread"] = thread
+                if urgent:
+                    # discord.py's default adapter serializes every edit for this webhook.
+                    # A stuck progress call must not hold the terminal card behind it.
+                    context = async_context.set(AsyncWebhookAdapter())
+                    try:
+                        return cast(
+                            discord.Message, await hook.edit_message(message.id, **edit_kwargs)
+                        )  # pyright: ignore[reportCallIssue]
+                    finally:
+                        async_context.reset(context)
                 return cast(discord.Message, await hook.edit_message(message.id, **edit_kwargs))  # pyright: ignore[reportCallIssue]
             except discord.NotFound as exc:
                 if exc.code != 10015:

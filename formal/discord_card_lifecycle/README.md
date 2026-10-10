@@ -3,8 +3,10 @@
 Question: can an older Discord write restore a visible Working card after the
 turn's terminal card or restarted notice has been applied?
 
-`CardLifecycle.tla` is the current queue model. It separates queuing a write,
-dispatching it, and Discord applying it. `CardHandover.tla` preserves the
+`CardLifecycle.tla` is the current bounded-terminal model. It separates issuing
+a write, dispatching it, and Discord applying it. A terminal edit can overtake
+on-wire progress; its later completion schedules a repair on the same message.
+`CardHandover.tla` preserves the
 reviewed intermediate design from `73cef3f9c`; its three broken modes are
 witnesses for Astra's replacement, successor-edit, and repair-gate reports.
 The older safe mode describes that intermediate design, **not** the code on
@@ -15,12 +17,12 @@ accidentally modeled away.
 
 | Model action | Code boundary or historical source |
 | --- | --- |
-| `IssueProgress` | `packages/adapters/discord/daimon/adapters/discord/lifecycle.py:737`, `:746`, `:515-581` (`_maybe_flush`, shielded task, dispatch under message lock) |
-| `EndTurn`, `IssueQueuedTerminal` | `lifecycle.py:751`, `:814`, `:515-581`; the terminal request is registered before waiting for the lock |
-| `ApplyProgress`, `ApplyTerminal` | `lifecycle.py:595-669`, `:515-588`; the fake's transport completion stands for Discord applying a request |
+| `IssueProgress` | `packages/adapters/discord/daimon/adapters/discord/lifecycle.py:754-764`, `:550-573`; shielded progress dispatches under the message lock |
+| `EndTurn`, `IssueQueuedTerminal` | `lifecycle.py:802-811`, `:543-587`; terminal dispatches after a bounded settle, outside the progress lock; `IssueQueuedTerminal` is historical queue mode only |
+| `ApplyProgress`, `ApplyTerminal` | `lifecycle.py:589-608`, `:611-692`; the fake's transport completion stands for Discord applying a request |
 | `Handover` | `lifecycle.py:362-380`, `:442-446`; the new lifecycle shares the queue and increments its epoch |
 | `DeleteCard`, `StartReplacement`, `FinishReplacement` | `lifecycle.py:595-669`, `:670-705`; #607 recovery and returned transport replacements |
-| `Repair` | `lifecycle.py:165-208`; defensive repair scheduling after a detected stale completion |
+| `Repair` | `lifecycle.py:147-214`; a successful stale completion schedules a same-message edit, with a strong task reference and a 120-second timeout |
 | `Crash` | `packages/adapters/discord/daimon/adapters/discord/bot.py:1130-1158`; a new process enters the boot barrier |
 | `RetireOrphan`, `DropOrphan` | `bot.py:1159-1275`, `packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:511-569`; the boot sweep edits the old message or reports that it could not |
 | `CardHandover` edit/send/terminal/handover/repair actions | `73cef3f9c:packages/adapters/discord/daimon/adapters/discord/lifecycle.py:80-205`, `:423-690`, `:746-775` |
@@ -29,10 +31,13 @@ accidentally modeled away.
 replacement, and two lifecycle owners. One is enough to show terminal
 overtaking; the second owner shows handover. `CardHandover` permits three
 owners and three card IDs so a second handover and stale replacement can be
-distinguished. The production bounds are unbounded: these are witness bounds,
-not throughput estimates. Discord's 10-second progress debounce comes from
-`lifecycle.py:70,737`; the five-second local wait from `:71,792`. Neither
-limits an already dispatched request, so the model omits time. The three
+distinguished. The model's card/owner counts are witness bounds, not throughput
+estimates. The 10-second progress debounce, five-second settle, 10-second
+terminal edit and 120-second repair come from `lifecycle.py:70-73,754-764,802-811,576-587,196-204`.
+The urgent webhook edit uses its own discord.py adapter lock in
+`post_transport.py:490-500`. Bot-message edits remain subject to discord.py's
+bucket wait, but the terminal edit timeout bounds that wait. The model assumes
+the terminal edit succeeds within this bound and omits time. The three
 recovery attempts and five-second retries in
 `turn_card_recovery.py:361,483-505` are outside the write-order property.
 
@@ -42,8 +47,8 @@ recovery attempts and five-second retries in
 | `Card655` | violates `TerminalStable` | 23 | #655's repair permits a stale interval |
 | `Card655Replacement` | violates `NoStaleReplacement` | 32 | a late replacement can show Working separately |
 | `Card655Handover` | violates `RepairScheduled` | 61 | old repair ownership is lost at handover |
-| `CardQueue` | clean | 142 | serialized writes within one live process |
-| `CardQueueRestart` | violates `TerminalStable` | 58 | an old request may land after boot retirement |
+| `CardQueue` | clean | 148 | a late progress completion schedules repair within one live process |
+| `CardQueueRestart` | violates `RestartStable` | 57 | an old request may land after boot retirement |
 | `CardQueueOrphanDrop` | violates `NoWorkingAfterRetirement` | 20 | boot lacks a route to edit the old card |
 | `CardHandoverSafe` | clean | 1,564 | historical intermediate under its bounded assumptions |
 | `CardHandoverUnsafe` | violates `NoStaleReplacement` | 171 | stale replacement is left visible |
@@ -75,16 +80,25 @@ Plain counterexamples:
 | A request sent before process death may still land after death | Unsupported but deliberately allowed in `CardQueueRestart` |
 | A missing-card replacement can complete after its caller is cancelled | Exercised by the adapter fake; `lifecycle.py:595-705` contains awaits on this path |
 | Boot can edit the orphan card | Unsupported when the webhook token, permissions, or message is unavailable; a dropped retirement is logged and is outside the clean queue config |
-| Started transport calls eventually return | Fairness assumption for eventual delivery; no liveness claim is made for a hung call |
+| Started progress calls eventually return | Needed for a late-write repair to run; an indefinitely hung call cannot overwrite the terminal card |
+| Urgent terminal and repair edits succeed within their 10 and 120-second bounds | Unsupported by a Discord contract; transport failure is outside the clean model |
 | Stale replacement deletion or fallback control stripping succeeds | Assumed only by historical `CardHandoverSafe`; real transport failures remain possible |
 
 ## Accepted limitations
 
-`CardQueueRestart` deliberately remains an expected `TerminalStable` violation.
+`CardQueueRestart` deliberately remains an expected `RestartStable` violation.
 The old process sends a Working edit, then dies. The new process edits that
 same card to say it restarted. Discord can apply the old request afterward and
 restore Working and Stop. The per-message queue exists only in the live
-process, so it cannot order those two writes. Discord documents
+process, so it cannot order those two writes. The live-process invariant is:
+after a stale write changes an applied terminal card, repair is scheduled;
+assuming the bounded repair succeeds, the terminal card is reapplied. Readers
+can see Working and Stop between the late write and the repair.
+`test_lifecycle.py::test_late_progress_edits_cannot_overwrite_terminal_delivery`
+replays that interval with a held progress request and checks final same-message
+repair. `test_post_transport.py::test_urgent_webhook_edit_uses_an_independent_adapter`
+checks the separate webhook adapter context.
+Discord documents
 [eventual consistency and reordering](https://docs.discord.com/developers/reference#consistency)
 without a bound for draining an already-sent request. No finite local wait
 establishes the strict invariant across a worker restart.

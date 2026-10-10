@@ -206,8 +206,8 @@ discord_card_lifecycle	CardLifecycle	CardPre655	violates:TerminalStable	23	-	pre
 discord_card_lifecycle	CardLifecycle	Card655	violates:TerminalStable	23	-	#655 permits an older edit to land after terminal delivery
 discord_card_lifecycle	CardLifecycle	Card655Replacement	violates:NoStaleReplacement	32	-	#655 late missing-card replacement leaves another Working card
 discord_card_lifecycle	CardLifecycle	Card655Handover	violates:RepairScheduled	61	-	#655 loses repair ownership across dead-session handover
-discord_card_lifecycle	CardLifecycle	CardQueue	clean	142	-	per-message queue orders active-process writes; excludes process death
-discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:TerminalStable	58	-	process death leaves an on-wire request able to overtake boot retirement
+discord_card_lifecycle	CardLifecycle	CardQueue	clean	148	-	late active-process progress schedules terminal repair; excludes process death
+discord_card_lifecycle	CardLifecycle	CardQueueRestart	violates:RestartStable	57	-	process death leaves an on-wire request able to overtake boot retirement
 discord_card_lifecycle	CardLifecycle	CardQueueOrphanDrop	violates:NoWorkingAfterRetirement	20	-	boot cannot edit an orphaned card when its webhook token is unavailable
 discord_card_lifecycle	CardHandover	CardHandoverSafe	clean	1564	-	prior sequencer repairs reviewed in-process handover interleavings
 discord_card_lifecycle	CardHandover	CardHandoverUnsafe	violates:NoStaleReplacement	171	-	rejected design leaves a late replacement visible

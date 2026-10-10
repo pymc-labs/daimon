@@ -69,6 +69,8 @@ DeleteFn = Callable[[discord.Message], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
 _PROGRESS_SETTLE_S = 5.0
+_TERMINAL_EDIT_S = 10.0
+_REPAIR_EDIT_S = 120.0
 
 # A text block sealed by a later tool use posts permanently once it reaches
 # this size; shorter sealed blocks are pre-tool narration and stay in the
@@ -78,11 +80,7 @@ _SEALED_RESPONSE_MIN_CHARS = 500
 
 
 class _CardWriteSequencer:
-    """Order card writes across all lifecycles of one recovered turn.
-
-    Every request for one message waits for the preceding request to finish.
-    The lock follows that message through a recovery handover.
-    """
+    """Serialize progress and track terminal races across a recovery handover."""
 
     def __init__(self, owner: DiscordTurnLifecycle) -> None:
         self.owner = owner
@@ -142,13 +140,15 @@ class _CardWriteSequencer:
         self.inflight.setdefault(message_id, set()).add(token)
         return token
 
-    def complete(self, message: discord.Message, token: object, *, terminal: bool) -> None:
+    def complete(
+        self, message: discord.Message, token: object, *, terminal: bool, applied: bool
+    ) -> None:
         message_id = self.key(message)
         if terminal:
             _, epoch, version = self.terminal_tokens.pop(token)
-            if epoch == self.epoch and version == self.terminal_version.get(message_id):
+            if applied and epoch == self.epoch and version == self.terminal_version.get(message_id):
                 self.terminal_ready.add(message_id)
-            elif message_id in self.terminal:
+            elif applied and message_id in self.terminal:
                 # A previous terminal request can also finish after a successor
                 # or a newer answer has issued its own render.
                 self.dirty.add(message_id)
@@ -158,7 +158,7 @@ class _CardWriteSequencer:
                 pending.discard(token)
                 if not pending:
                     del self.inflight[message_id]
-            if message_id in self.terminal_ready:
+            if applied and message_id in self.terminal_ready:
                 self.dirty.add(message_id)
         self.queue_repair()
 
@@ -193,11 +193,10 @@ class _CardWriteSequencer:
         self, message: discord.Message, kwargs: dict[str, Any], epoch: int, version: int
     ) -> None:
         try:
-            async with self.lock_for(message):
-                if epoch == self.epoch and version == self.terminal_version.get(self.key(message)):
-                    await self.owner._edit(  # pyright: ignore[reportPrivateUsage]
-                        message, _allow_replacement=False, **kwargs
-                    )
+            if epoch == self.epoch and version == self.terminal_version.get(self.key(message)):
+                async with asyncio.timeout(_REPAIR_EDIT_S):
+                    edit = self.owner._urgent_edit or self.owner._edit  # pyright: ignore[reportPrivateUsage]
+                    await edit(message, _allow_replacement=False, **kwargs)
         except Exception:
             log.warning("turn.terminal_card_reassert_failed", exc_info=True)
         finally:
@@ -283,6 +282,7 @@ class DiscordTurnLifecycle:
         *,
         send: SendFn,
         edit: EditFn,
+        urgent_edit: EditFn | None = None,
         agent_name: str,
         fallback_active: Callable[[], bool] | None = None,
         model_id: str,
@@ -320,6 +320,7 @@ class DiscordTurnLifecycle:
         self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._edit = edit
+        self._urgent_edit = urgent_edit
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
         # has something to show: no up-front thinking embed, no "Turn
@@ -527,6 +528,7 @@ class DiscordTurnLifecycle:
         card_write = self._card_writes.key(message) in self._card_writes.card_ids
         terminal = terminal_override or (self._terminal and not progress)
         token: object | None = None
+        applied = False
         write_id = str(uuid.uuid4()) if card_write else None
         fields = {
             "turn_id": str(self._turn_id),
@@ -544,7 +546,7 @@ class DiscordTurnLifecycle:
                 return False
             log.info("turn.card_write_issued", **fields)
         try:
-            if card_write:
+            if card_write and not terminal:
                 async with self._card_writes.lock_for(message):
                     if self._card_epoch != self._card_writes.epoch:
                         log.info("turn.card_write_dropped", reason="handover", **fields)
@@ -555,8 +557,6 @@ class DiscordTurnLifecycle:
                     ):
                         log.info("turn.card_write_dropped", reason="overtaken", **fields)
                         return False
-                    if terminal and self._message_ref is not None:
-                        message = self._message_ref
                     log.info("turn.card_write_dispatched", **fields)
                     result = await self._perform_edit_message(
                         message,
@@ -566,13 +566,19 @@ class DiscordTurnLifecycle:
                         **kwargs,
                     )
             else:
-                result = await self._perform_edit_message(
-                    message,
-                    progress=progress,
-                    recover_missing=recover_missing,
-                    missing_is_error=missing_is_error,
-                    **kwargs,
-                )
+                if terminal and not terminal_override and self._message_ref is not None:
+                    message = self._message_ref
+                if card_write:
+                    log.info("turn.card_write_dispatched", **fields)
+                async with asyncio.timeout(_TERMINAL_EDIT_S if terminal else None):
+                    result = await self._perform_edit_message(
+                        message,
+                        progress=progress,
+                        recover_missing=recover_missing,
+                        missing_is_error=missing_is_error,
+                        urgent=terminal,
+                        **kwargs,
+                    )
             if card_write:
                 log.info(
                     "turn.card_write_completed" if result else "turn.card_write_dropped",
@@ -583,6 +589,7 @@ class DiscordTurnLifecycle:
                 )
                 if terminal and result:
                     log.info("turn.card_terminal_applied", **fields)
+            applied = result
             return result
         except Exception as err:
             if card_write:
@@ -590,7 +597,9 @@ class DiscordTurnLifecycle:
             raise
         finally:
             if token is not None:
-                self._card_writes.complete(original_message, token, terminal=terminal)
+                self._card_writes.complete(
+                    original_message, token, terminal=terminal, applied=applied
+                )
 
     async def _perform_edit_message(
         self,
@@ -599,6 +608,7 @@ class DiscordTurnLifecycle:
         progress: bool,
         recover_missing: bool,
         missing_is_error: bool,
+        urgent: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> bool:
         may_outlive_terminal = progress or not self._terminal
@@ -608,7 +618,9 @@ class DiscordTurnLifecycle:
             elif "embed" in kwargs:
                 self._terminal_card_embeds = [kwargs["embed"]] if kwargs["embed"] else []
         try:
-            replacement = await self._edit(message, **kwargs)
+            replacement = await ((self._urgent_edit or self._edit) if urgent else self._edit)(
+                message, **kwargs
+            )
         except discord.HTTPException as err:
             if err.code != 10008:
                 raise

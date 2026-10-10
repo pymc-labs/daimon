@@ -29,7 +29,7 @@ IssueProgress == /\ phase = "running" /\ ~progress /\ ~terminal
                  /\ UNCHANGED <<phase, card, extra, terminal, outcome, ended, sealed,
                                  repair, replacement, owner, restart>>
 
-\* A terminal request is issued without waiting in pre-#655 and #655.
+\* The bounded mode dispatches terminal while progress may still be on wire.
 EndTurn(k) == /\ phase = "running" /\ k \in {"answer", "failure"}
            /\ phase' = "ending"
            /\ ended' = TRUE
@@ -56,7 +56,8 @@ ApplyProgress == /\ progress
                  /\ progress' = FALSE
                  /\ oldWire' = FALSE
                  /\ card' = IF card = "deleted" THEN card ELSE "working"
-                 /\ repair' = IF Mode = "655" /\ phase = "ended" /\ owner = 1
+                 /\ repair' = IF ((Mode = "655" /\ owner = 1) \/ Mode = "bounded")
+                                   /\ phase = "ended"
                               THEN TRUE ELSE repair
                  /\ UNCHANGED <<phase, extra, terminal, outcome, ended, sealed,
                                  replacement, owner, restart>>
@@ -89,7 +90,7 @@ StartReplacement == /\ card = "deleted" /\ ~replacement /\ extra = "absent"
                                     ended, sealed, repair, owner, restart, oldWire>>
 FinishReplacement == /\ replacement
                      /\ replacement' = FALSE
-                     /\ extra' = IF ended /\ Mode = "queue" THEN "retired"
+                     /\ extra' = IF ended /\ Mode \in {"queue", "bounded"} THEN "retired"
                                   ELSE "working"
                      /\ UNCHANGED <<phase, card, progress, terminal, outcome, ended,
                                      sealed, repair, owner, restart, oldWire>>
@@ -123,7 +124,8 @@ Spec == Init /\ [][Next]_vars
 
 \* Once a terminal render is applied, no later write may change its card.
 TerminalStable == sealed => card \in {"answer", "failure", "restarted", "deleted"}
-\* If a stale edit did land, a repair must at least be scheduled.
+RestartStable == (restart /\ phase = "retired" /\ sealed) => card # "working"
+\* A late progress edit may briefly restore Working, but schedules repair.
 RepairScheduled == (sealed /\ card = "working" /\ ~progress) => repair
 NoStaleReplacement == (ended /\ ~replacement) => extra # "working"
 NoWorkingAfterRetirement == (phase = "retired") => card # "working"

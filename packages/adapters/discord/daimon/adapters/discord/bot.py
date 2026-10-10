@@ -2759,6 +2759,12 @@ class DaimonBot(commands.Bot):
         ) -> discord.Message | None:
             return await transport.edit(msg, **kwargs)
 
+        async def _urgent_edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            return await transport.edit(msg, _urgent=True, **kwargs)
+
         async def _delete_message(msg: discord.Message) -> None:
             await transport.delete(msg)
 
@@ -2778,6 +2784,7 @@ class DaimonBot(commands.Bot):
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
@@ -2901,6 +2908,7 @@ class DaimonBot(commands.Bot):
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
                 ),
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
@@ -3355,6 +3363,12 @@ class DaimonBot(commands.Bot):
         ) -> discord.Message | None:
             return await transport.edit(msg, **kwargs)
 
+        async def _urgent_edit_message(
+            msg: discord.Message,
+            **kwargs: Any,  # noqa: ANN401
+        ) -> discord.Message | None:
+            return await transport.edit(msg, _urgent=True, **kwargs)
+
         async def _delete_message(msg: discord.Message) -> None:
             await transport.delete(msg)
 
@@ -3376,6 +3390,7 @@ class DaimonBot(commands.Bot):
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
@@ -3835,6 +3850,7 @@ class DaimonBot(commands.Bot):
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=turn_send,
                 edit=_edit_message,
+                urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
                 fallback_active=lambda: transport.fallback_used,
