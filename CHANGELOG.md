@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Restrict live budget admission to Haiku 5.5, Gemini 3.8 Flash and its approved 503 fallback IDs, and GPT-6 Luna; reviewed prices remain required and fallback enforcement stays in the Gemini harness.
 - Register the real Anthropic driver with the offline C01–C18 conformance runner using actual SDK wire scripts; report sixteen typed provider/host gaps and withhold certification.
 - Refuse a default-capability turn whose running record omits or mismatches its declared root identity, or whose records name another root before or after running.
 - Route responder-identity reads through scoped native session ports, preserving SDK null metadata and reuse of the observed response for snapshot backfill.
