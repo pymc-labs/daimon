@@ -114,5 +114,6 @@ class Backend(Protocol):
 
 class Judge(Protocol):
     usage: list[Usage]
+    errors: list[Message]
 
     def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]: ...

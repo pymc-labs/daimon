@@ -15,6 +15,7 @@ from pathlib import Path
 from qa.live.config import Pricing
 from qa.live.context import Context
 from qa.live.cost import Ledger, estimate
+from qa.live.errors import exception_evidence
 from qa.live.evaluate import evaluate
 from qa.live.models import BackendName, ModelPolicy
 from qa.live.report import Result
@@ -103,6 +104,7 @@ class Executor:
         self.channels = {}
         self.created = []
         self.trigger_attempted = False
+        harness_failed = False
         try:
             self.backend.preflight(
                 {s.role for s in [*scenario.setup, *scenario.steps, *scenario.teardown]}
@@ -142,35 +144,54 @@ class Executor:
         except Pending as exc:
             result.checks.append(Check("execution", "PENDING", str(exc)))
         except (KeyboardInterrupt, SystemExit) as exc:
-            result.checks.append(Check("execution", "PENDING", type(exc).__name__))
-        except Exception as exc:
-            # External tool/DB/API exceptions can contain credentials. Persist the type only.
+            harness_failed = True
+            result.errors.append(exception_evidence(exc, "execution"))
             result.checks.append(
-                Check("execution", "FAIL", f"execution raised {type(exc).__name__}")
+                Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
+            )
+        except Exception as exc:
+            harness_failed = True
+            result.errors.append(exception_evidence(exc, "execution"))
+            result.checks.append(
+                Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
             )
         finally:
+            result.errors.extend(self.judge.errors)
             if channel:
                 for step in scenario.teardown:
                     try:
                         self.step(step, result, channel)
                     except BaseException as exc:
-                        result.checks.append(Check("teardown", "FAIL", type(exc).__name__))
+                        result.errors.append(exception_evidence(exc, "teardown"))
+                        result.checks.append(
+                            Check("teardown", "PENDING", f"harness error: {type(exc).__name__}")
+                        )
                 for created in reversed(self.created):
                     try:
                         with deferred_interrupts():
                             self.backend.delete_channel(created)
                     except BaseException as exc:
+                        result.errors.append(exception_evidence(exc, "cleanup"))
                         result.checks.append(
                             Check(
                                 "cleanup",
-                                "FAIL",
-                                f"delete channel {created}: {type(exc).__name__}",
+                                "PENDING",
+                                f"harness error: delete channel {created}: {type(exc).__name__}",
                             )
                         )
             for turn in result.turns:
                 try:
                     turn.usage = self.backend.usage(turn)
-                    if not turn.usage.models or any(
+                    if not turn.usage.models and harness_failed:
+                        result.checks.append(
+                            Check(
+                                "model",
+                                "PENDING",
+                                "harness error: turn model could not be collected",
+                                turn.number,
+                            )
+                        )
+                    elif not turn.usage.models or any(
                         not self.models.accepts(self.model_backend, model, self.env)
                         for model in turn.usage.models
                     ):
@@ -182,10 +203,16 @@ class Executor:
                                 turn.number,
                             )
                         )
-                except Exception:
+                except Exception as exc:
+                    result.errors.append(exception_evidence(exc, "usage"))
                     result.notes.append(f"turn {turn.number}: usage unavailable")
                     result.checks.append(
-                        Check("model", "FAIL", "Daimon model evidence unavailable", turn.number)
+                        Check(
+                            "model",
+                            "PENDING",
+                            f"harness error: usage evidence unavailable: {type(exc).__name__}",
+                            turn.number,
+                        )
                     )
             usages = [t.usage for t in result.turns] + self.judge.usage
             fixture_dir.cleanup()

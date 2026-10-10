@@ -122,6 +122,12 @@ are observation bounds at the configured polling interval.
 Watch timeouts preserve evidence and evaluate assertions: a silent or stuck bot
 fails the canary and alerts. The fallback watch is bounded to 180 seconds, and
 the service allows 1200 seconds for watches, probes, log ingestion and cleanup.
+Unexpected harness execution, cleanup or usage exceptions are PENDING rather
+than product failures and do not alert root by themselves. Result JSON retains
+their type, message, frames and formatted traceback without captured locals;
+credential values are redacted. Read-only model probes retry one transient
+transport failure; valid metadata outside the approved policy still refuses
+without posting. Missing model evidence on a normally completed turn still FAILs.
 
 `admin` and weekly-only `restart_workers` invoke only named `admin_hooks` from
 the operator config. A hook is an argv list executed without a shell; it receives

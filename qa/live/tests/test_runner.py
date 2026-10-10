@@ -29,7 +29,7 @@ def test_two_turn_followup_and_receipt(
 @pytest.mark.parametrize(
     "error,status",
     [
-        (RuntimeError("a secret must not appear"), "FAIL"),
+        (RuntimeError("a secret must not appear"), "PENDING"),
         (KeyboardInterrupt(), "PENDING"),
         (SystemExit("token"), "PENDING"),
         (Pending("not available"), "PENDING"),

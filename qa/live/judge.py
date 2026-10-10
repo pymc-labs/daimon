@@ -10,9 +10,10 @@ import urllib.request
 from pydantic import Field
 
 from qa.live.config import Pricing
+from qa.live.errors import exception_evidence
 from qa.live.models import ModelPolicy
 from qa.live.schema import Contract
-from qa.live.types import Pending, Usage, obj, objects
+from qa.live.types import Message, Pending, Usage, obj, objects
 
 
 class Verdict(Contract):
@@ -27,6 +28,7 @@ class HaikuJudge:
         self.pricing = pricing
         self.go = go
         self.usage: list[Usage] = []
+        self.errors: list[Message] = []
 
     def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]:
         if not self.go:
@@ -72,12 +74,14 @@ class HaikuJudge:
             with urllib.request.urlopen(request, timeout=60) as response:
                 result = obj(json.loads(response.read()))
         except urllib.error.HTTPError as exc:
+            self.errors.append(exception_evidence(exc, "judge"))
             # Rejected requests do not generate a completion. A server error
             # can leave billing uncertain; retain the reserved judge allowance.
             if exc.code >= 500:
                 self.usage.append(Usage(source="judge_request_unavailable", models=[self.model]))
             raise Pending(f"judge execution unavailable: HTTP {exc.code}") from None
         except (OSError, ValueError) as exc:
+            self.errors.append(exception_evidence(exc, "judge"))
             self.usage.append(Usage(source="judge_request_unavailable", models=[self.model]))
             raise Pending(f"judge execution unavailable: {type(exc).__name__}") from None
         usage = obj(result.get("usage"))

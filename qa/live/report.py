@@ -12,7 +12,7 @@ from typing import cast
 
 from qa.live.config import Alerts
 from qa.live.schema import Status
-from qa.live.types import Check, Turn, utcnow
+from qa.live.types import Check, Message, Turn, utcnow
 
 
 @dataclass
@@ -25,6 +25,7 @@ class Result:
     turns: list[Turn] = field(default_factory=list[Turn])
     notes: list[str] = field(default_factory=list[str])
     channel_id: str | None = None
+    errors: list[Message] = field(default_factory=list[Message])
 
     def finalize(self) -> None:
         statuses = [c.status for c in self.checks]
@@ -77,7 +78,8 @@ class Alerter:
             result.status == "PENDING"
             and unavailable
             and all(
-                c.kind == "judge" and c.reason.startswith("judge execution unavailable")
+                c.reason.startswith("harness error")
+                or (c.kind == "judge" and c.reason.startswith("judge execution unavailable"))
                 for c in unavailable
             )
         ):

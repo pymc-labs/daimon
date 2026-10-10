@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from qa.live.errors import exception_evidence
 from qa.live.schema import Assertion
 from qa.live.types import Backend, Check, Judge, Pending, Turn, obj, objects, text_of
 
@@ -141,6 +142,7 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 except Pending:
                     raise
                 except Exception as exc:
+                    judge.errors.append(exception_evidence(exc, "judge"))
                     # A broken evaluator is unavailable evidence, not a
                     # product failure. Never expose provider exception bodies.
                     raise Pending(f"judge execution unavailable: {type(exc).__name__}") from None

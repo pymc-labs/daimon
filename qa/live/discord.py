@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qa.live.config import Config, Target
+from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
 
@@ -230,16 +231,31 @@ class DiscordBackend:
             "channel_id": parent,
             "category_id": self.target.category_id,
         }
-        response = subprocess.run(
-            self.target.model_probe,
-            input=json.dumps(request),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if response.returncode:
-            raise ValueError("deployment model readback did not prove the Haiku pin")
+        for attempt in range(2):
+            try:
+                response = subprocess.run(
+                    self.target.model_probe,
+                    input=json.dumps(request),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                if attempt:
+                    raise
+                time.sleep(2)
+                continue
+            if not response.returncode:
+                break
+            if attempt:
+                raise RuntimeError(
+                    f"read-only deployment model probe exited {response.returncode}; "
+                    f"stdout={redact(response.stdout)}; stderr={redact(response.stderr)}"
+                )
+            time.sleep(2)
+        else:
+            raise RuntimeError("read-only deployment model probe did not finish")
         evidence = ModelEvidence.model_validate_json(response.stdout)
         if (
             evidence.guild_id != self.target.guild_id
