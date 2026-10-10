@@ -32,7 +32,7 @@ from mux.conformance.budget import (
 )
 from mux.conformance.gemini import PENDING_REASONS, GeminiScript
 from mux.conformance.live_probe import ProbeOutcome, ProbeRun, ProbeRunError, run_probe
-from mux.conformance.recording import Recorder, RequestMetadata
+from mux.conformance.recording import Audit, Recorder, RecordingError, RequestMetadata
 from mux.conformance.runner import Adapter, PendingKind, PendingReason, Result, run_fixture
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
@@ -66,10 +66,13 @@ SCOPE = Scope(
 class EvidenceAliases:
     """Per-run opaque identity map, applied before the unchanged recorder."""
 
-    def __init__(self) -> None:
+    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
+        self.secrets = secrets
         self.ids: dict[str, str] = {}
 
     def identity(self, value: str) -> str:
+        if Audit(self.secrets).plain(value, False):
+            raise RecordingError("credential-shaped identity; tape refused")
         if len(value) < 24:
             return value
         if value not in self.ids:
@@ -248,7 +251,7 @@ async def smoke(
     bounded = LimitedTransport(source, settings.max_total_tokens)
     metadata_recorded = 0
     facts_recorded = False
-    aliases = EvidenceAliases()
+    aliases = EvidenceAliases(secrets)
 
     def observe(meter: UsageObservation, *, complete: bool) -> ActualSpend:
         tokens = TokenUsage(
@@ -683,7 +686,7 @@ async def run_sdk_smoke(
     from mux.drivers.gemini.transport import API_REVISION, SDKTransport
 
     metadata: list[RequestMetadata] = []
-    aliases = EvidenceAliases()
+    aliases = EvidenceAliases((key,))
     active_model = settings.model
     call_index = 0
 

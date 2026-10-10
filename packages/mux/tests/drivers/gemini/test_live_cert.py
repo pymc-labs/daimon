@@ -864,6 +864,50 @@ async def test_missing_or_expired_dates_refuse_before_key(
     assert not list(output.iterdir())
 
 
+@pytest.mark.parametrize(
+    "identity", ["sk-ant-api03-" + "A" * 40, "AIza" + "B" * 40, "exact-offline-key"]
+)
+@pytest.mark.parametrize("slot", ["path", "event_id"])
+def test_credential_identity_refuses_before_aliasing(
+    tmp_path: Path, identity: str, slot: str
+) -> None:
+    from datetime import UTC, datetime
+
+    from mux.conformance.recording import Recorder, RecordingError, RequestMetadata
+    from mux.contracts.events import Event, NativeProvenance
+    from mux.drivers.gemini.live_cert import EvidenceAliases
+
+    aliases = EvidenceAliases(secrets=("exact-offline-key",))
+    recorder = Recorder(secrets=("exact-offline-key",))
+    output = tmp_path / "refused.json"
+    with pytest.raises(RecordingError, match="credential-shaped identity"):
+        if slot == "path":
+            request = RequestMetadata(
+                method="GET", path=aliases.path(f"/v1beta/interactions/{identity}")
+            )
+            events = ()
+        else:
+            request = RequestMetadata(method="GET", path="/v1beta/interactions/safe")
+            events = (
+                aliases.event(
+                    Event(
+                        id=identity,
+                        session_id="session",
+                        sequence=0,
+                        type="agent.message",
+                        observed_at=datetime(2026, 10, 10, tzinfo=UTC),
+                        authority="record",
+                        payload={"item_id": "item", "content": []},
+                        native=NativeProvenance(provider="gemini", api_revision="test"),
+                    )
+                ),
+            )
+        recorder.record(request, events)
+        recorder.save(output, fixture_id="C16", provider="gemini", model=LIVE_MODEL, complete=True)
+    assert not output.exists() and not list(tmp_path.iterdir())
+    assert identity not in aliases.ids
+
+
 @pytest.mark.asyncio
 async def test_opaque_native_identity_is_aliased_before_unchanged_recorder(tmp_path: Path) -> None:
     from mux.conformance.recording import Recorder, RecordingError, RequestMetadata

@@ -78,6 +78,8 @@ installed, and importing this module performs no I/O.
 
 Live evidence uses stable short aliases for opaque route segments and normalized
 identity fields before the unchanged recorder. Real provider IDs remain in memory
-for routing; message/tool content is still fully audited. HTTP usage sidecars
+for routing. Raw identities first pass the recorder's secret/key-shape audit;
+credential hits refuse the tape before aliasing. Recorded message content remains
+audited, and tool input is omitted by the recorder. HTTP usage sidecars
 project interaction_status into a closed vocabulary; unknown values become null.
 This delta leaves merged #650 settlement behaviour unchanged.
