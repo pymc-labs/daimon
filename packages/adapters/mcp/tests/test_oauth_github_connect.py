@@ -7,6 +7,7 @@ import html
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -1019,7 +1020,21 @@ async def test_channel_admin_completes_connect_for_their_agent(
                 "working": "keep",
             },
         )
-    assert looked_up == [agent_id, agent_id]
+        if still_channel_admin:
+            used_link = await browser.get(f"/oauth/github/connect/{invitation_token}")
+            assert used_link.status_code == 200
+            assert "ana/thesis" not in used_link.text
+            async with sessionmaker.begin() as session:
+                await delete_channel_admins(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id="team-a",
+                )
+            revoked_receipt = await browser.get("/oauth/github/confirm", params={"state": state})
+            assert revoked_receipt.status_code == 403
+            assert "ana/thesis" not in revoked_receipt.text
+    assert looked_up and set(looked_up) == {agent_id}
     async with sessionmaker() as session:
         own = await github_access.list_authorized_repos(
             session, tenant_id=tenant_id, agent_id=agent_id
@@ -1184,13 +1199,20 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         state, hidden, rendered = await page()
         assert "Current repos" in rendered and "Read only" in rendered
         working = await save(hidden, working="101")
-        assert working.status_code == 200 and "working repo" in working.text
+        assert working.status_code == 200 and "Working repo" in working.text
 
         admin_ids.clear()
-        _state, _hidden, unavailable = await page()
+        with monkeypatch.context() as pending_patch:
+            pending_patch.setattr(
+                oauth_github,
+                "has_pending_installation_request",
+                AsyncMock(return_value=oauth_github._PendingInstallationRequest(True, "editor")),
+            )
+            _state, _hidden, unavailable = await page()
+        assert "Waiting for GitHub approval from editor" in unavailable
         assert "editor/repo-101" in unavailable and "editor/repo-102" in unavailable
         assert "GitHub admin access required to edit" in unavailable
-        assert "Manage GitHub App installation" in unavailable
+        assert "Choose repos on GitHub" in unavailable
         admin_ids.update({101, 102, 103})
 
         state, hidden, rendered = await page()
@@ -1205,11 +1227,11 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         state, hidden, rendered = await page()
         mixed = await save(hidden, repo="103", remove="101", working="103")
         assert mixed.status_code == 200
-        assert "repo-101" not in mixed.text and "working repo" in mixed.text
+        assert "repo-101" not in mixed.text and "Working repo" in mixed.text
 
         state, hidden, rendered = await page()
         cleared = await save(hidden, working="clear")
-        assert cleared.status_code == 200 and "working repo" not in cleared.text
+        assert cleared.status_code == 200 and "Working repo" not in cleared.text
 
         state, hidden, rendered = await page()
         async with sessionmaker.begin() as session:
@@ -1325,6 +1347,9 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
                 operator_issued=True,
             )
             await set_role(session, account_id, Role.USER)
+        revoked_receipt = await save(hidden, repo="101")
+        assert revoked_receipt.status_code == 403
+        assert "editor/repo-101" not in revoked_receipt.text
         start = await browser.get(f"/oauth/github/connect/{operator_token}")
         state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
         await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})

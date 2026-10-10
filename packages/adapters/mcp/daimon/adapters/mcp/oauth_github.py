@@ -347,8 +347,9 @@ def _saved_agent_page(
     items = "".join(
         f"<li><strong>{html.escape(repo.full_name)}</strong> "
         f"<span>{'Read and write' if repo.ceiling_access == 'write' else 'Read only'}"
-        f"{'; working repo' if repo.is_working_repo else ''}"
-        f"{'; staged' if repo.staged else '; unavailable' if repo.status != 'active' else ''}"
+        f"{'</span><span>Working repo' if repo.is_working_repo else ''}"
+        f"{'</span><span>Setup pending' if repo.staged else ''}"
+        f"{'</span><span>Unavailable' if not repo.staged and repo.status != 'active' else ''}"
         "</span></li>"
         for repo in grants
     )
@@ -356,7 +357,11 @@ def _saved_agent_page(
         '<div class="gh-status-icon">'
         + icon("circle-check")
         + "</div>"
-        + (f'<ul class="gh-repo-list">{items}</ul>' if items else "<p>No repos on this agent.</p>")
+        + (
+            f'<ul class="gh-saved-repos">{items}</ul>'
+            if items
+            else "<p>No repos on this agent.</p>"
+        )
         + (
             f"<p>Still using the old GitHub key. Add "
             f"{html.escape(_missing_phrase(missing))} to finish switching.</p>"
@@ -368,6 +373,58 @@ def _saved_agent_page(
         + "<p>You can close this tab.</p>"
     )
     return github_page(title=f"{name}'s repos saved", body_html=body, heading_icon=True)
+
+
+_EDITOR_SCRIPT = """
+<script>
+(() => {
+  const form = document.getElementById("github-connect-form");
+  const search = document.getElementById("search-repos");
+  const working = document.getElementById("working-repo");
+  const button = document.getElementById("save-repos");
+  const status = document.getElementById("selection-status");
+  let saving = false;
+  function render() {
+    const added = [...form.querySelectorAll('input[name="repo"]:checked')];
+    const removed = [...form.querySelectorAll('input[name="remove"]:checked')];
+    const clearsWorking = removed.some(box => box.value === form.dataset.working);
+    const lines = [];
+    const count = boxes => `${boxes.length} ${boxes.length === 1 ? "repo" : "repos"}`;
+    if (added.length) lines.push(`${count(added)} to add or finish`);
+    if (removed.length) lines.push(`${count(removed)} to remove`);
+    if (working.value === "clear" || (working.value === "keep" && clearsWorking)) {
+      lines.push("Working repo: none");
+    } else if (working.value !== "keep") {
+      lines.push(`Working repo: ${working.selectedOptions[0].textContent}`);
+    }
+    status.replaceChildren();
+    for (const line of lines.length ? lines : ["Choose a change to save."]) {
+      const span = document.createElement("span");
+      span.textContent = line;
+      span.style.display = "block";
+      status.appendChild(span);
+    }
+    button.disabled = lines.length === 0;
+    if (search) {
+      const query = search.value.trim().toLowerCase();
+      const rows = [...form.querySelectorAll(".gh-add-list .repo-choice")];
+      for (const row of rows) row.hidden = !row.textContent.toLowerCase().includes(query);
+      document.getElementById("no-search-results").hidden = rows.some(row => !row.hidden);
+    }
+  }
+  form.addEventListener("change", render);
+  if (search) search.addEventListener("input", render);
+  form.addEventListener("submit", event => {
+    if (saving) { event.preventDefault(); return; }
+    saving = true;
+    button.disabled = true;
+    button.textContent = "Saving…";
+    form.setAttribute("aria-busy", "true");
+  });
+  render();
+})();
+</script>
+"""
 
 
 def _agent_editor_page(
@@ -387,6 +444,8 @@ def _agent_editor_page(
     needed: Mapping[int, bool] | None = None,
     missing_names: tuple[str, ...] = (),
     selection_error: str | None = None,
+    clients_present: bool = False,
+    pending_installation: _PendingInstallationRequest | None = None,
 ) -> Response:
     """Show every current grant, plus GitHub repos the confirmer may add."""
     admin = {
@@ -399,7 +458,8 @@ def _agent_editor_page(
     esc = html.escape
     place = "Server" if platform == "discord" else "Workspace"
     parts = [
-        f'<form id="github-connect-form" method="post" '
+        '<form id="github-connect-form" class="gh-editor" method="post" '
+        f'data-working="{working.repo_id if working else ""}" '
         f'action="{esc(root, quote=True)}/oauth/github/confirm">',
         f'<input type="hidden" name="state" value="{esc(state, quote=True)}">',
         f'<input type="hidden" name="invitation" value="{esc(invitation_hash, quote=True)}">',
@@ -410,121 +470,139 @@ def _agent_editor_page(
         f'value="{_snapshot_signature(state, invitation_hash, snapshot, secret)}">',
         f'<div class="gh-context">{platform_mark(platform)}'
         f"<span>{place}: {esc(workspace)}</span></div>",
+        f'<p class="gh-editor-note">Anyone who talks to {esc(agent_name)} '
+        "can ask it to use these repos.</p>",
         '<div class="gh-picker-grid"><section class="gh-results">',
         "<h2>Current repos</h2>",
     ]
-    if not grants:
-        parts.append("<p>No repos yet.</p>")
+    if grants:
+        parts.append('<div class="gh-current-list">')
+    else:
+        parts.append('<p class="gh-empty">No repos yet. Choose repos to add below.</p>')
     for repo in grants:
         access = "Read and write" if repo.ceiling_access == "write" else "Read only"
-        status = "Staged" if repo.staged else "Unavailable" if repo.status != "active" else "Active"
-        working_label = "Working repo" if repo.is_working_repo else ""
+        status = (
+            "Setup pending" if repo.staged else "Unavailable" if repo.status != "active" else ""
+        )
         editable = repo.repo_id in admin
         parts.append(
-            '<div class="gh-choice repo-choice"><span>'
-            f"<strong>{esc(repo.full_name)}</strong>"
-            f"<small>{access}<br>{status}"
-            + (f"<br>{working_label}" if working_label else "")
-            + "</small>"
-            "</span>"
-            + (
-                f'<label><input type="checkbox" name="remove" '
-                f'value="{repo.repo_id}"> Remove</label>'
-                if editable
-                else "<small>GitHub admin access required to edit</small>"
-            )
-            + (
-                f'<label><input type="checkbox" name="repo" value="{repo.repo_id}">'
-                " Finish setup</label>"
-                if editable and (repo.staged or repo.repo_id in needed)
-                else ""
-            )
-            + "</div>"
+            '<div class="gh-choice gh-current-row"><span class="gh-repo-details">'
+            f"<strong>{esc(repo.full_name)}</strong><small>{access}</small>"
+            + (f"<small>{status}</small>" if status else "")
+            + ('<span class="gh-working-badge">Working repo</span>' if repo.is_working_repo else "")
+            + "</span>"
         )
+        if editable:
+            parts.append(
+                '<div class="gh-repo-actions"><label><input type="checkbox" name="remove" '
+                f'value="{repo.repo_id}" aria-label="Remove {esc(repo.full_name, quote=True)}">'
+                "Remove</label>"
+            )
+            if repo.staged or repo.repo_id in needed:
+                parts.append(
+                    f'<label><input type="checkbox" name="repo" value="{repo.repo_id}" '
+                    f'aria-label="Finish setup for {esc(repo.full_name, quote=True)}">'
+                    "Finish setup</label>"
+                )
+                if needed.get(repo.repo_id):
+                    parts.append('<small class="gh-repo-locked">Needs read and write</small>')
+            parts.append("</div>")
+        else:
+            parts.append(
+                '<small class="gh-repo-locked">GitHub admin access required to edit</small>'
+            )
+        parts.append("</div>")
+    if grants:
+        parts.append("</div>")
     parts.append("<h2>Add repos</h2>")
     available = sorted(
         (repo for repo_id, repo in admin.items() if repo_id not in current),
         key=lambda repo: repo.full_name.casefold(),
     )
+    if pending_installation is not None and pending_installation.found:
+        organization = pending_installation.account_login
+        parts.append(
+            '<p class="gh-warning">Waiting for GitHub approval'
+            + (f" from {esc(organization)}" if organization else "")
+            + ".</p><p>A GitHub organization admin needs to approve access.</p>"
+            + f'<a class="gh-link" href="{esc(root, quote=True)}/oauth/github/confirm?'
+            + f'{urlencode({"state": state})}">Check again</a>'
+        )
     if available:
         parts.append(
-            '<label class="gh-search-wrap">Search repos '
-            '<input id="search-repos" type="search" autocomplete="off"></label>'
+            f'<div class="gh-search-wrap">{icon("search")}'
+            '<input class="gh-search" id="search-repos" type="search" '
+            'aria-label="Search repos to add" placeholder="Search repos" autocomplete="off">'
+            '</div><div class="gh-add-list">'
         )
     else:
         parts.append("<p>No additional repos available from this GitHub account.</p>")
-    if missing_names:
-        parts.append(
-            "<p>Still needed before switching from the old GitHub key: "
-            + ", ".join(esc(name) for name in missing_names)
-            + ".</p>"
-        )
-    parts.append(
-        f'<p><a class="gh-link" href="{esc(install_url, quote=True)}">'
-        "Manage GitHub App installation</a></p>"
-    )
     for repo in available:
         parts.append(
             '<label class="gh-choice repo-choice"><input type="checkbox" '
-            f'name="repo" value="{repo.id}">'
-            f"<span>{esc(repo.full_name)}</span></label>"
+            f'name="repo" value="{repo.id}"><span>{esc(repo.full_name)}</span></label>'
+        )
+    if available:
+        parts.append(
+            '<p class="gh-empty" id="no-search-results" hidden>No matching repos.</p></div>'
+        )
+    parts.append(
+        f'<p class="gh-install-link"><a class="gh-link" href="{esc(install_url, quote=True)}">'
+        "Choose repos on GitHub</a></p>"
+    )
+    if missing_names:
+        parts.append(
+            "<p>Still needed to finish setup: "
+            + ", ".join(esc(name) for name in missing_names)
+            + ".</p>"
         )
     parts.extend(
         [
             '</section><aside class="gh-side">',
-            _access_choices(agent=True),
-            '<section class="gh-side-card gh-access" '
-            'aria-label="Working repo"><h2>Working repo</h2>',
-            "<p>Optional repo opened as the agent’s workspace.</p>",
-            '<label><input type="radio" name="working" value="keep" checked>'
-            + (f"Keep {esc(working.full_name)}" if working else "Keep none")
-            + "</label>",
+            '<section class="gh-side-card" aria-label="Working repo">'
+            '<h2><label for="working-repo">Working repo</label></h2>',
+            '<p class="gh-working-note">One optional repo to open in the agent\'s workspace.</p>',
+            '<select id="working-repo" class="gh-working-select" name="working">',
+            '<option value="keep" selected>'
+            + (f"{esc(working.full_name)} (current)" if working else "None (current)")
+            + "</option>",
         ]
     )
     if may_change_working:
-        parts.append('<label><input type="radio" name="working" value="clear">None</label>')
+        parts.append('<option value="clear">None</option>')
         for repo in grants:
-            if repo.repo_id in admin and repo.status == "active":
-                parts.append(
-                    f'<label><input type="radio" name="working" value="{repo.repo_id}">'
-                    f"{esc(repo.full_name)}</label>"
-                )
+            if repo.repo_id in admin and repo.status == "active" and not repo.is_working_repo:
+                parts.append(f'<option value="{repo.repo_id}">{esc(repo.full_name)}</option>')
         for repo in available:
-            parts.append(
-                f'<label><input type="radio" name="working" value="{repo.id}">'
-                f"{esc(repo.full_name)} (add above)</label>"
-            )
-    else:
+            parts.append(f'<option value="{repo.id}">{esc(repo.full_name)} (add above)</option>')
+    parts.append("</select>")
+    if not may_change_working:
         parts.append(
-            "<p>GitHub admin access to the current working repo is required to change it.</p>"
+            '<p class="gh-working-note">GitHub admin access to the current working repo '
+            "is required to change it.</p>"
         )
     parts.extend(
         [
-            "</section></aside></div>",
+            "</section>",
+            _access_choices(agent=True),
+            "</aside></div>",
             '<div class="gh-finish"><div class="gh-finish-status">',
             '<p id="selection-status" aria-live="polite">Review your choices, then save.</p>',
+            (
+                f'<p class="gh-client-note">Clients can see what {esc(agent_name)} shares.</p>'
+                if clients_present
+                else ""
+            ),
             (
                 f'<p class="gh-inline-error" role="alert">{esc(selection_error)}</p>'
                 if selection_error
                 else ""
             ),
             '</div><div class="gh-finish-actions">',
-            '<button class="gh-primary" type="submit">Save changes</button>',
+            '<button class="gh-primary" id="save-repos" type="submit">Save changes</button>',
             f'<a class="gh-link" href="{esc(cancel_url, quote=True)}">Cancel</a>',
             "</div></div></form>",
-            '<script>(()=>{const f=document.getElementById("github-connect-form");'
-            'const q=document.getElementById("search-repos");'
-            'if(q)q.addEventListener("input",()=>{for(const b of '
-            'f.querySelectorAll("input[name=repo]"))'
-            'b.closest("label").hidden=!b.closest("label").textContent.toLowerCase()'
-            ".includes(q.value.toLowerCase())});"
-            'f.addEventListener("change",()=>{const a='
-            'f.querySelectorAll("input[name=repo]:checked").length;'
-            'const r=f.querySelectorAll("input[name=remove]:checked").length;'
-            'const w=f.querySelector("input[name=working]:checked").value;'
-            'document.getElementById("selection-status").textContent='
-            '`Add ${a}, remove ${r}, working repo: ${w==="keep"?"unchanged":w==="clear"?"none":'
-            'f.querySelector(`input[name=working][value="${w}"]`).parentElement.textContent.trim()}.`;});})();</script>',
+            _EDITOR_SCRIPT,
         ]
     )
     return github_page(title=f"{agent_name}'s repos", body_html="".join(parts), kind="picker")
@@ -981,6 +1059,7 @@ def build_oauth_github_routes(
             invitation = await github_connect.successful_confirmation(
                 session, state=state, cookie=cookie, invitation_hash=invitation_hash
             )
+            authenticated = invitation is not None
             if invitation is None and invitation_hash:
                 status, candidate = await github_connect.invitation_status(session, invitation_hash)
                 if status == "used" and candidate is not None:
@@ -990,6 +1069,16 @@ def build_oauth_github_routes(
             requester = await get_account_with_tenant(
                 session, account_id=invitation.requester_account_id
             )
+            if invitation.agent_id is not None:
+                if not authenticated:
+                    return _already_connected_page(invitation.connected_repo_count)
+                live = await live_agent(invitation)
+                if (
+                    requester is None
+                    or requester.is_external
+                    or not await may_manage_agent(session, invitation, requester, live)
+                ):
+                    return _error("You can no longer manage this agent.", 403)
             missing = await _missing(session, invitation)
             pending = await _key_pending(session, invitation)
             agent_grants = (
@@ -1029,18 +1118,6 @@ def build_oauth_github_routes(
                     else ""
                 )
                 if status == "used":
-                    if invitation.agent_id is not None:
-                        grants = await list_agent_repos(
-                            session,
-                            tenant_id=invitation.tenant_id,
-                            agent_id=invitation.agent_id,
-                        )
-                        return _saved_agent_page(
-                            invitation.agent_name or "Agent",
-                            grants,
-                            await _missing(session, invitation),
-                            await _key_pending(session, invitation),
-                        )
                     return _already_connected_page(
                         invitation.connected_repo_count,
                         back,
@@ -1312,6 +1389,18 @@ def build_oauth_github_routes(
                 )
             cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
             if request.method == "GET":
+                pending_installation = _PendingInstallationRequest(False)
+                if not any(repo.admin for item in installations for repo in item.repos):
+                    try:
+                        async with factory() as client:
+                            pending_installation = await has_pending_installation_request(
+                                client,
+                                app_id=app_id,
+                                private_key=private_key,
+                                github_user_id=flow.github_user_id,
+                            )
+                    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                        return _error("Couldn't reach GitHub", 502, retry_confirm_url)
                 return _agent_editor_page(
                     root=root,
                     state=state,
@@ -1327,6 +1416,8 @@ def build_oauth_github_routes(
                     install_url=install_url,
                     needed=needed,
                     missing_names=tuple(missing_names),
+                    clients_present=clients_present,
+                    pending_installation=pending_installation,
                 )
             posted_snapshot = fields.get("snapshot", [""])[0]
             posted_signature = fields.get("snapshot_sig", [""])[0]
@@ -1406,6 +1497,7 @@ def build_oauth_github_routes(
                     install_url=install_url,
                     needed=needed,
                     missing_names=tuple(missing_names),
+                    clients_present=clients_present,
                     selection_error="Choose a change to save.",
                 )
             if posted_snapshot != snapshot:
@@ -1527,7 +1619,7 @@ def build_oauth_github_routes(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
             except DBAPIError as exc:
-                if getattr(exc.orig, "sqlstate", None) == "40001":
+                if getattr(exc.orig, "sqlstate", None) in ("40001", "40P01"):
                     return _error(
                         "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                     )
