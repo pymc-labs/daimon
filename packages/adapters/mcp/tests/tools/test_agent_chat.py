@@ -81,6 +81,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
@@ -471,6 +472,8 @@ async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, id=_TENANT_ID, workspace_id="app-start-turn")
         account = await make_account(session, tenant=tenant, id=_ACCOUNT_ID)
+        # Granting a server-wide repo is a server admin's.
+        await set_role(session, account.id, Role.ADMIN)
         await session.execute(
             text(
                 "INSERT INTO tenant_github_repos "

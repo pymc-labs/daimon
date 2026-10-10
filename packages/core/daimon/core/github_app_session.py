@@ -613,7 +613,7 @@ async def _current_app_access(
         ]
         # A revoked grant or removed installation repository is still needed to
         # restore a running turn if this refresh fails after touching MA.
-        repo_rows = await list_authorized_repos(session, tenant_id=tenant_id)
+        repo_rows = await list_authorized_repos(session, tenant_id=tenant_id, agent_id=agent_id)
         grant_rows = await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
         repos = {repo.repo_id: repo for repo in repo_rows}
         grants = {grant.repo_id: grant for grant in grant_rows}

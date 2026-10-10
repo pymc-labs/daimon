@@ -137,7 +137,9 @@ async def request_github_access_impl(
         tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     )
     async with runtime.session_factory() as session:
-        known_repos = await list_authorized_repos(session, tenant_id=origin.tenant_id)
+        known_repos = await list_authorized_repos(
+            session, tenant_id=origin.tenant_id, agent_id=agent_id
+        )
         known = next(
             (
                 repo
