@@ -29,7 +29,7 @@ from daimon.core.stores import github_access, github_app_installations, github_c
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import list_events
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
@@ -812,30 +812,51 @@ def test_agent_done_page_mentions_old_token_only_after_the_switch() -> None:
     assert "no longer uses" not in pending
 
 
-@pytest.mark.parametrize("manages", [True, False])
-async def test_agent_manager_confirms_repos_for_their_agent(
+@pytest.mark.parametrize("still_channel_admin", [True, False])
+async def test_channel_admin_completes_connect_for_their_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    manages: bool,
+    still_channel_admin: bool,
 ) -> None:
+    """A channel admin's link for the agent pinned to their channel adds repos for it only."""
     from types import SimpleNamespace
 
+    from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 
     sessionmaker = committing_sessionmaker
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bot")
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        await make_account(session, tenant=tenant, id=account_id)
+        account = await make_account(session, tenant=tenant, id=account_id)
         await set_role(session, account_id, Role.USER)
+        await make_platform_principal(
+            session, platform="discord", external_id="u1", tenant=tenant, account=account
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id="team-a",
+            role_ids=[],
+            user_ids=["u1"],
+            actor_account_id=None,
+        )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"Bot": ("team-a",)}),
+        )
         invitation_token = await github_connect.mint_invitation(
             session,
             tenant_id=tenant_id,
             requester_account_id=account_id,
             requester_label="Ana",
-            requester_platform_user_id="123",
+            requester_platform_user_id="u1",
             agent_id=agent_id,
             agent_name="Bot",
             agent_ma_id="ag_bot",
@@ -889,20 +910,15 @@ async def test_agent_manager_confirms_repos_for_their_agent(
             )
         raise AssertionError(f"unexpected GitHub path {request.url.path}")
 
-    checked: list[dict[str, object]] = []
-
-    async def requester_manages_agent(_session: object, **kwargs: object) -> bool:
-        checked.append(kwargs)
-        return manages
+    looked_up: list[uuid.UUID] = []
 
     async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+        looked_up.append(agent_id)
         return SimpleNamespace(metadata={})
 
-    monkeypatch.setattr(oauth_github, "requester_manages_agent", requester_manages_agent)
     monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
     monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
     key = Fernet.generate_key().decode()
-    members = object()
     connect, callback, setup, confirm = build_oauth_github_routes(
         settings=_settings(key),
         sessionmaker=sessionmaker,
@@ -910,7 +926,7 @@ async def test_agent_manager_confirms_repos_for_their_agent(
         client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
         deployment_default=DeploymentDefault(),
         anthropic=object(),  # type: ignore[arg-type]
-        group_members=lambda _platform, _workspace: members,  # type: ignore[arg-type,return-value]
+        group_members=lambda _platform, _workspace: None,
     )
     app = Starlette(
         routes=[
@@ -929,22 +945,30 @@ async def test_agent_manager_confirms_repos_for_their_agent(
         picker = await browser.get("/oauth/github/confirm", params={"state": state})
         assert "Add repos to Bot" in picker.text
         assert "Anyone who talks to Bot can ask it to read them." in picker.text
+        if not still_channel_admin:
+            async with sessionmaker.begin() as session:
+                await delete_channel_admins(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id="team-a",
+                )
         done = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "101", "access": "read"}
         )
-    assert checked and checked[0]["ma_agent_id"] == "ag_bot"
-    assert checked[0]["is_daimon_managed"] is False
-    assert checked[0]["members"] is members
+    assert looked_up == [agent_id]
     async with sessionmaker() as session:
         own = await github_access.list_authorized_repos(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
         shared = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
     assert shared == []
-    if manages:
+    if still_channel_admin:
         assert done.status_code == 200
         assert "Added 1 repo to Bot." in done.text
-        assert [(repo.repo_id, repo.scope_agent_id) for repo in own] == [(101, agent_id)]
+        assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
+            (101, agent_id, "read")
+        ]
     else:
         assert "Added" not in done.text
         assert own == []
