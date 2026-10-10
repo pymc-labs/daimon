@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce the frozen TARGET-53 digest when building and replaying QA catalog matrices, refusing re-scored extras.
 
 - Map the frozen 53-scenario QA catalog across three explicit channel backends, preserving replay inputs and reporting adapter/capability gaps separately from unscored extras.
+- Add a scoped provider-action callback with separate browser origin and authentication controls, preserving native responses and default Anthropic approvals.
+
 - Prepared mux recovery can publish native journal snapshots atomically under its admitted lease.
 - Run explicitly configured OpenAI persistent-workspace turns through native preparation, fenced claims/journal, root-isolated display/replay/cancellation, origin approvals and provider usage accounting. Require injected authorized native resources and Luna controls; preserve the unconfigured Anthropic path.
 - Preserve failed and recovered-cancelled OpenAI roots in final host outcomes; refuse missing native runtime and restricted preparation with a typed host admission error before native I/O, and limit this host slice to verified delegation-disabled sessions.

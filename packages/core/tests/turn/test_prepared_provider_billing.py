@@ -21,6 +21,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.io import TurnEvent, TurnIO, TurnStream
 from daimon.core.turn.posture import Billed
 from daimon.core.turn.prepare import PreparedTurn
+from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionPrompt
 from daimon.core.turn.run import prepared_billing, run_prepared_turn_impl
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.ma import MARouter
@@ -266,7 +267,19 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
 
     codec = FailedCodec()
 
+    async def provider_hook(prompt: ProviderActionPrompt) -> None:
+        raise AssertionError("failing stream cannot ask for approval")
+
+    approvals: list[ProviderActionApproval] = []
+
     def factory(*args: object, **kwargs: object) -> TurnIO:
+        approval = kwargs.get("provider_actions")
+        assert isinstance(approval, ProviderActionApproval)
+        assert approval.hook is provider_hook
+        assert approval.requester.platform == "slack"
+        assert approval.requester.thread_id == "thread"
+        assert approval.requester.platform_user_id == "caller"
+        approvals.append(approval)
         return cast(TurnIO, codec)
 
     async def forbidden_recovery(*args: object, **kwargs: object) -> NoReturn:
@@ -290,7 +303,10 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
         cancel=asyncio.Event(),
         reseed_user_message=forbidden_reseed,
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        provider_action=provider_hook,
     )
+    assert len(approvals) == 1
+    assert approvals[0].expires_at > datetime.now(UTC)
     assert result.recovered is False and result.ma_session_id == ref.id
     assert result.state.error is not None and result.state.error.kind == "upstream"
     assert recorded == [observation] and recorded[0] is observation

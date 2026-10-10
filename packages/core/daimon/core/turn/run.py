@@ -75,6 +75,11 @@ from daimon.core.turn.prepare import (
     insert_mapping,
     stamp_session_seal,
 )
+from daimon.core.turn.provider_actions import (
+    ProviderActionApproval,
+    ProviderActionHook,
+    ProviderActionRequester,
+)
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
@@ -91,6 +96,10 @@ class _TurnPortKwargs(TypedDict, total=False):
     session_ref: ResourceRef
     profile: str
     backend_request: TurnBackendRequest
+
+
+class _ProviderActionKwargs(TypedDict, total=False):
+    provider_actions: ProviderActionApproval
 
 
 def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> BillingPosture:
@@ -705,6 +714,7 @@ async def run_prepared_turn(
     deadline: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirm_write: ConfirmationHook | None = None,
+    provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
     operation_key: str | None = None,
 ) -> RunOutcome:
@@ -738,6 +748,7 @@ async def run_prepared_turn(
                 deadline=deadline,
                 now=now,
                 confirm_write=confirm_write,
+                provider_action=provider_action,
                 attended=attended,
                 operation_key=operation_key,
             )
@@ -768,6 +779,7 @@ async def run_prepared_turn_impl(
     deadline: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirm_write: ConfirmationHook | None = None,
+    provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
     operation_key: str | None = None,
 ) -> RunOutcome:
@@ -874,6 +886,23 @@ async def run_prepared_turn_impl(
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
 
+        action_kwargs: _ProviderActionKwargs = {}
+        if (
+            provider_action is not None
+            and prepared.admission.backend_revision is not None
+            and prepared.admission.backend_revision.profile != "anthropic.managed_agents"
+        ):
+            action_kwargs["provider_actions"] = ProviderActionApproval(
+                requester=ProviderActionRequester(platform, thread_id, external_user_id),
+                expires_at=min(
+                    effective_deadline,
+                    now() + timedelta(seconds=deps.tool_safety.confirmation_timeout_s),
+                ),
+                cancel=cancel,
+                hook=provider_action,
+                now=now,
+            )
+
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
         async with persisted(prepared.admission, ma_session_id, mapping_id, prepared.session_ref):
             state = await run_turn(
@@ -893,6 +922,7 @@ async def run_prepared_turn_impl(
                 render_interval_s=render_interval_s,
                 billing=prepared_billing(prepared, tenant_id=tenant_id),
                 tool_confirmation=tool_confirmation,
+                **action_kwargs,
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,
                 before_send=decide_before_send(deps, prepared.admission),

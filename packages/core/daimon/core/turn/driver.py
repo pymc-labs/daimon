@@ -103,6 +103,7 @@ from daimon.core.turn.posture import (
     ToolConfirmation,
     ToolConfirmationResult,
 )
+from daimon.core.turn.provider_actions import ProviderActionApproval
 from daimon.core.turn.reducers import apply, apply_usage_observation
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import (
@@ -539,6 +540,7 @@ async def run_turn(
     session_ref: ResourceRef | None = None,
     profile: str | None = None,
     backend_request: TurnBackendRequest | None = None,
+    provider_actions: ProviderActionApproval | None = None,
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
@@ -604,6 +606,7 @@ async def run_turn(
         profile=profile,
         backend_request=backend_request,
         persistence=persistence,
+        provider_actions=provider_actions,
     )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)

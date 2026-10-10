@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
@@ -25,6 +26,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO, TurnCodecRequest, TurnIO, turn_io
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
+from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
 from daimon.core.turn.run import _turn_port_kwargs
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
@@ -155,6 +157,11 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
     )
     factories: list[TurnBackendRequest] = []
     codecs: list[TurnCodecRequest] = []
+    approval = ProviderActionApproval(
+        ProviderActionRequester("slack", "thread", "requester"),
+        NOW + timedelta(minutes=10),
+        asyncio.Event(),
+    )
     async with transport.client() as client:
         marker = LegacyTurnIO(client, "unused")
 
@@ -179,6 +186,7 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
             profile=PROFILE,
             backend_request=request,
             persistence=persistence,
+            provider_actions=approval,
         )
         expected = (
             replace(request, on_stop_event=persistence.record)
@@ -187,6 +195,10 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
         )
         assert selected is marker and factories == [expected]
         assert len(codecs) == 1
+        assert codecs[0].provider_actions is not None
+        assert codecs[0].provider_actions.approval is approval
+        assert codecs[0].provider_actions.scope is SCOPE
+        assert codecs[0].provider_actions.session is SESSION
         assert codecs[0].persistence is persistence
         assert codecs[0].model == "gpt-6-luna" and codecs[0].config == REVISION
         assert codecs[0].scope == SCOPE and codecs[0].session == SESSION
