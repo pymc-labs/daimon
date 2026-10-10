@@ -584,7 +584,7 @@ async def test_handle_mention_catches_sqlalchemy_error_from_orchestrate(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "boundary should render the error via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 @pytest.mark.asyncio
@@ -613,7 +613,7 @@ async def test_handle_mention_catches_unexpected_exception_from_orchestrate(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "catch-all boundary should also render via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 @pytest.mark.asyncio
@@ -641,7 +641,7 @@ async def test_on_message_prologue_failure_never_escapes_and_sends_error(
 
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert "rid:" in error_text, "prologue boundary should also render via render_error"
+    assert "rid:" not in error_text, "trace ids stay in logs"
 
 
 # ---------------------------------------------------------------------------

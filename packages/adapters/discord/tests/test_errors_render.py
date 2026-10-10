@@ -1,4 +1,4 @@
-"""Tests for render_error -- structured error rendering with emoji, bold labels, and request IDs."""
+"""Known errors use plain copy without provider bodies or internal identifiers."""
 
 from __future__ import annotations
 
@@ -8,114 +8,82 @@ import anthropic
 import discord
 import httpx
 from daimon.adapters.discord.errors import generate_request_id, render_error
-from daimon.core.errors import DaimonError, SpecError, StoreError
-from sqlalchemy.exc import DBAPIError, OperationalError
+from daimon.core.errors import DaimonError, SpecError, StoreError, TurnError
+from sqlalchemy.exc import DBAPIError
 
 TEST_RID = "01JTZXTEST000000000000000"
 
 
-class TestRenderError:
-    def test_spec_error(self) -> None:
-        exc = SpecError("invalid field 'foo'")
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("⚠️"), "should start with warning emoji"
-        assert "**Spec validation failed**" in result, "should have bold label"
-        assert "invalid field" in result, "should include error detail"
-        assert TEST_RID in result, "should include request ID"
+def test_known_local_errors_never_publish_exception_bodies() -> None:
+    body = "sesn_private agent_private access_token=private SELECT secret"
+    for error, expected in [
+        (SpecError(body), "Daimon couldn't read this setup."),
+        (StoreError(body), "Daimon couldn't load or save this change."),
+        (DaimonError(body), "Something went wrong while handling your request."),
+        (ValueError(body), "Daimon couldn't use that input."),
+        (RuntimeError(body), "Something went wrong while handling your request."),
+        (
+            DBAPIError("SELECT secret", {"token": "private"}, Exception(body)),
+            "Daimon couldn't load or save this change.",
+        ),
+    ]:
+        result = render_error(error, request_id=TEST_RID)
+        assert result.startswith(expected)
+        assert "private" not in result
+        assert "SELECT" not in result
+        assert TEST_RID not in result
+        assert "rid:" not in result
 
-    def test_store_error(self) -> None:
-        exc = StoreError("agent not found")
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("⚠️"), "should start with warning emoji"
-        assert "**Store error**" in result, "should have bold label"
-        assert "agent not found" in result, "should include error detail"
-        assert TEST_RID in result, "should include request ID"
 
-    def test_daimon_error_generic(self) -> None:
-        exc = DaimonError("something broke")
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("⚠️"), "should start with warning emoji"
-        assert "**Error**" in result, "should have bold label"
-        assert "something broke" in result, "should include error detail"
-        assert TEST_RID in result, "should include request ID"
-
-    def test_api_connection_error(self) -> None:
-        exc = anthropic.APIConnectionError(
-            request=httpx.Request("GET", "https://api.anthropic.com"),
-        )
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("\U0001f50c"), "should start with plug emoji"
-        assert "**Connection Error**" in result, "should have bold label"
-        assert "Could not connect" in result, "should mention connection failure"
-        assert TEST_RID in result, "should include request ID"
-
-    def test_api_status_error(self) -> None:
-        exc = anthropic.APIStatusError(
-            message="rate limited",
+def test_anthropic_failures_use_plain_copy_without_json_or_identifiers() -> None:
+    for status, expected in [
+        (503, "Claude is overloaded right now. Try again in a minute."),
+        (529, "Claude is overloaded right now. Try again in a minute."),
+        (429, "Too many requests right now. Try again in a minute."),
+        (400, "Claude couldn't accept this request. Try sending it again."),
+        (401, "Daimon couldn't connect to Claude. Ask an admin to check the connection."),
+        (403, "Daimon couldn't connect to Claude. Ask an admin to check the connection."),
+        (500, "Claude is unavailable right now. Try again in a minute."),
+    ]:
+        error = anthropic.APIStatusError(
+            message=f"Error code: {status} - "
+            + "{'request_id': 'req_private', 'message': 'Overloaded'}",
             response=httpx.Response(
-                status_code=429,
-                request=httpx.Request("POST", "https://api.anthropic.com"),
+                status, request=httpx.Request("POST", "https://api.anthropic.com")
             ),
-            body=None,
+            body={"request_id": "req_private"},
         )
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("❌"), "should start with cross mark emoji"
-        assert "**API Error (429)**" in result, "should have bold label with status"
-        assert "rate limited" in result, "should include error message"
-        assert TEST_RID in result, "should include request ID"
-
-    def test_generic_api_error(self) -> None:
-        exc = anthropic.APIError(
-            message="unknown api error",
-            request=httpx.Request("POST", "https://api.anthropic.com"),
-            body=None,
+        assert render_error(error, request_id=TEST_RID) == expected
+        assert (
+            render_error(TurnError(kind="upstream", cause=error), request_id=TEST_RID) == expected
         )
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("❌"), "should start with cross mark emoji"
-        assert "**API Error**" in result, "should have bold label"
-        assert "unknown api error" in result, "should include message"
-        assert TEST_RID in result, "should include request ID"
 
-    def test_unexpected_error(self) -> None:
-        exc = RuntimeError("boom")
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("❌"), "should start with cross mark emoji"
-        assert "**Unexpected error**" in result, "should have bold label"
-        assert "boom" in result, "should include error text"
-        assert TEST_RID in result, "should include request ID"
 
-    def test_value_error(self) -> None:
-        exc = ValueError("bad input")
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("⚠️"), "should start with warning emoji"
-        assert "**Invalid input**" in result, "should have bold label"
-        assert "bad input" in result, "should include error detail"
-        assert TEST_RID in result, "should include request ID"
+def test_connection_and_generic_api_errors_do_not_publish_bodies() -> None:
+    request = httpx.Request("POST", "https://api.anthropic.com")
+    assert render_error(anthropic.APIConnectionError(request=request), request_id=TEST_RID) == (
+        "Daimon couldn't reach Claude. Try again in a minute."
+    )
+    assert render_error(
+        anthropic.APIError("req_private", request, body=None), request_id=TEST_RID
+    ) == ("Daimon couldn't get a reply from Claude. Try again in a minute.")
 
-    def test_database_error_omits_statement_and_parameters(self) -> None:
-        # str() on a DBAPIError embeds the failing statement and its bound
-        # parameters, so rendering it verbatim publishes both to the channel.
-        exc = DBAPIError(
-            "SELECT tenants.id FROM tenants WHERE tenants.id = $1::UUID",
-            {"id": "8014123e-f113-5516-a71e-3ba7401d3808"},
-            OperationalError("SELECT 1", None, Exception("connection was closed in the middle")),
-        )
-        result = render_error(exc, request_id=TEST_RID)
-        assert "SELECT" not in result, "must not leak the failing SQL statement"
-        assert "tenants" not in result, "must not leak table or column names"
-        assert "8014123e" not in result, "must not leak bound parameter values"
-        assert "DBAPIError" in result, "should name the exception class"
-        assert TEST_RID in result, "should include request ID"
 
-    def test_discord_http_exception(self) -> None:
-        response = MagicMock()
-        response.status = 403
-        exc = discord.HTTPException(response, "Forbidden")
-        result = render_error(exc, request_id=TEST_RID)
-        assert result.startswith("❌"), "should start with cross mark emoji"
-        assert "Discord Error" in result, "should mention Discord error"
-        assert "403" in result, "should include status code"
-        assert TEST_RID in result, "should include request ID"
+def test_discord_existing_thread_error_is_plain_copy() -> None:
+    response = MagicMock(status=400, reason="Bad Request")
+    error = discord.HTTPException(
+        response, {"code": 160004, "message": "A thread has already been created for this message"}
+    )
+    assert render_error(error, request_id=TEST_RID) == (
+        "A conversation already exists for this message. Continue in its thread."
+    )
+
+
+def test_discord_permission_error_is_actionable_without_http_detail() -> None:
+    error = discord.HTTPException(MagicMock(status=403, reason="Forbidden"), "private")
+    assert render_error(error, request_id=TEST_RID) == (
+        "Daimon doesn't have permission to post here. Ask a server admin for help."
+    )
 
 
 class TestGenerateRequestId:

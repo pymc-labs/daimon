@@ -101,6 +101,15 @@ async def deliver_session_outputs(
 
     async def on_skip(skipped: SkippedFile) -> None:
         await check_protection()
+        nonlocal already_posted
+        if already_posted is None:
+            already_posted = await _own_attachments(thread, window=turn_window)
+        name = sanitize_title(skipped.filename)
+        if already_posted.get((_attachment_key(name), skipped.size_bytes)):
+            # A tool may have delivered the file before the output sweep.
+            # Do not claim that it couldn't be attached after it arrived.
+            log.info("discord.output_delivery.skipped_already_posted", filename=name)
+            return
         await thread.send(
             f"I couldn't attach `{sanitize_title(skipped.filename)}` — it is "
             f"{skipped.size_bytes / _MIB:.1f} MiB, over the "

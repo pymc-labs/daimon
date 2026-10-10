@@ -37,7 +37,7 @@ from daimon.adapters.discord.embed import (
     update,
     update_activity,
 )
-from daimon.adapters.discord.errors import bound_request_id
+from daimon.adapters.discord.errors import bound_request_id, render_error
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
@@ -728,11 +728,11 @@ class DiscordTurnLifecycle:
             log.warning("turn.terminal_failure", error=str(err), unprompted=True)
             return
         self._apply_usage(state)
-        label = str(err)[:100]
-        body = ""
+        label = "Something went wrong"
+        body = render_error(err, request_id="")
         reason = request_id = None
         # The notice is words on top of the red card, never a reason not to
-        # draw it: if building it fails, the card falls back to the raw label.
+        # draw it: if building it fails, the card keeps the plain fallback copy.
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
@@ -740,6 +740,17 @@ class DiscordTurnLifecycle:
                 reason, state=state, request_id=request_id, error=err
             )
             if notice is not None:
+                if (
+                    reason is TerminationReason.UPSTREAM
+                    and notice.headline != "Conversation stuck"
+                    and spend_limit_error(err) is None
+                ):
+                    notice = dataclasses.replace(
+                        notice,
+                        cause=render_error(err, request_id=request_id),
+                        survived="Files that were already created may still arrive.",
+                        next_step="Wait a minute, then send your message again.",
+                    )
                 label, body = notice.headline, format_termination_notice(notice)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)

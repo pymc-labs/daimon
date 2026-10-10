@@ -490,12 +490,18 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     notice = render_termination_notice(reason, state=state)
     assert notice is not None
     assert embed.title == "Something went wrong."
-    assert embed.description == notice.next_step
-    assert notice.cause in embed.fields[0].value
-    assert notice.next_step in embed.description, "the next step is not truncated away"
+    assert embed.description == (
+        "Wait a minute, then send your message again."
+        if reason is TerminationReason.UPSTREAM
+        else notice.next_step.replace("share the request id with an admin", "ask an admin for help")
+    )
+    if reason is not TerminationReason.UPSTREAM:
+        assert notice.cause in embed.fields[0].value
+    else:
+        assert "may still arrive" in embed.fields[0].value
     assert "**Next:**" not in embed.fields[0].value
-    assert "`fit_model`" in embed.fields[0].value, "work in flight is named"
-    assert "`rid: " in embed.fields[0].value
+    assert "fit_model" not in embed.fields[0].value, "tool details stay in logs"
+    assert "rid:" not in embed.fields[0].value
     assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
     assert "xxx" not in str(embed.to_dict()), "raw error stays in the logs"
 
@@ -534,7 +540,7 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     assert len(embed.description) <= 4096
     assert len(embed.footer.text) <= 2048
     assert "and 42 more" in embed.fields[0].value
-    assert "`rid: " in embed.fields[0].value
+    assert "rid:" not in embed.fields[0].value
     assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
 
 
@@ -553,7 +559,7 @@ async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
     embed = edits[-1][1]["embeds"][0]
     assert embed.colour.value == COLOR_RED
     assert embed.title == "Something went wrong."
-    assert embed.description == "Mention me to try again."
+    assert "Try again in a minute" in embed.fields[0].value
     assert not any("upstream timeout" in str(field.value) for field in embed.fields)
 
 
@@ -561,10 +567,13 @@ async def test_the_card_reuses_the_rid_bound_for_the_turn() -> None:
     lc, _, edits = _make_lifecycle()
     await lc.on_render(TurnState())
 
-    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs, structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
         await lc.on_terminal_failure(TurnState(), Exception("x"))
 
-    assert "`rid: 01BOUNDRID`" in edits[-1][1]["embeds"][0].fields[0].value
+    assert "01BOUNDRID" not in str(edits[-1][1]["embeds"][0].to_dict())
+    assert any(entry.get("request_id") == "01BOUNDRID" for entry in logs)
 
 
 async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -> None:
@@ -2052,3 +2061,27 @@ async def test_setup_notice_replaces_a_deleted_initial_card():
     await lifecycle.edit_card(content="Send your message again.", embed=None, view=None)
     assert sent[-1] == {"content": "Send your message again."}
     assert lifecycle.final_message_id == "1001"
+
+
+@pytest.mark.parametrize("status", [503, 529])
+async def test_terminal_overload_is_plain_and_allows_for_later_file_delivery(status: int) -> None:
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+    from anthropic import APIStatusError
+
+    error = APIStatusError(
+        message="{'type': 'error', 'request_id': 'req_private', 'message': 'Overloaded'}",
+        response=httpx.Response(status, request=httpx.Request("POST", "https://api.anthropic.com")),
+        body={"request_id": "req_private"},
+    )
+    await lc.on_terminal_failure(
+        TurnState(termination=TerminationReason.UPSTREAM), TurnError(kind="upstream", cause=error)
+    )
+    card = edits[-1][1]["embeds"][0]
+    text = str(card.to_dict())
+    assert "overloaded right now" in text
+    assert "may still arrive" in text
+    assert "req_private" not in text
+    assert "rid:" not in text
+    assert "tool calls" not in text
+    assert "error'" not in text

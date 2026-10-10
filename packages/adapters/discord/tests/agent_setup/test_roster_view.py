@@ -746,7 +746,7 @@ async def test_details_click_reports_a_failed_load_and_leaves_the_panel_alone(
     assert state.details is None, "a failed load must not leave a half-built Details on the state"
     interaction.edit_original_response.assert_not_awaited()
     message = interaction.followup.send.call_args.args[0]
-    assert "no longer exists" in message, (
+    assert "Something went wrong" in message, (
         f"the failure is reported through render_error; got {message!r}"
     )
 

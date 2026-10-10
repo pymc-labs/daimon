@@ -169,10 +169,9 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
 
 def format_termination_notice(notice: TerminationNotice) -> str:
     """Draw the core notice below the ERROR card's title, in Discord markdown."""
-    lines = [_escape_markdown(notice.cause)]
-    if (work := notice.work_line(lambda name: f"`{name.replace('`', '')}`")) is not None:
-        lines.append(work)
-    lines.append(notice.survived)
-    lines.append(f"**Next:** {notice.next_step}")
-    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
-    return fit_notice(lines, tail=tail, limit=_NOTICE_MAX_CHARS)
+    lines = [_escape_markdown(notice.cause), notice.survived]
+    next_step = notice.next_step.replace(
+        "share the request id with an admin", "ask an admin for help"
+    )
+    lines.append(f"**Next:** {next_step}")
+    return fit_notice(lines, tail=None, limit=_NOTICE_MAX_CHARS)
