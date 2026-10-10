@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Live QA alerts advance dedupe after durable inbox delivery and record queued or failed tsend status without halting a catalog pass.
 
+- `/privacy` deletion results now say whether account deletion succeeded and whether chat transcript deletion is still incomplete.
 - Live QA burst posts follow their declared cadence with concurrent per-trigger watchers; first-response latency uses Discord creation/edit timestamps, and anchored text checks keep content separate from embed footers.
 
 - Live QA records private redacted tracebacks for harness errors, reports them as PENDING without root alerts, and retries a transient read-only model-probe failure once before refusing a trigger.

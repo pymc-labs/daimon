@@ -12,8 +12,11 @@ from contextlib import AbstractAsyncContextManager
 import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
+from daimon.adapters.teams.privacy_card import no_data_card, post_delete_card
 from daimon.adapters.teams.privacy_panel import DELETING, NAME_MISMATCH, STALE
+from daimon.core.ma import SessionDeletionReport
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.purge import AccountPurgeResult, PurgeReport
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,6 +39,53 @@ pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 POLICY_URL = "https://example.com/privacy"
 NAME = USER_NAME
+
+
+@pytest.mark.parametrize(
+    ("failed", "upstream_error", "expected"),
+    [
+        (0, False, "Your research-bot account has been deleted."),
+        (1, False, "We could not delete 1 chat transcript from Anthropic."),
+        (3, False, "We could not delete 3 chat transcripts from Anthropic."),
+        (0, True, "We could not confirm deletion of all chat transcripts from Anthropic."),
+        (3, True, "We could not confirm deletion of all chat transcripts from Anthropic."),
+    ],
+)
+def test_post_delete_card_copy(failed: int, upstream_error: bool, expected: str) -> None:
+    card = post_delete_card(
+        AccountPurgeResult(
+            db=PurgeReport(accounts=1),
+            sessions=SessionDeletionReport(failed=failed, upstream_error=upstream_error),
+        ),
+        bot="research-bot",
+    )
+    rendered = json.dumps(card.model_dump(), ensure_ascii=False)
+    assert (
+        "⚠ Deletion incomplete" if failed or upstream_error else "✅ Account deleted"
+    ) in rendered
+    assert expected in rendered
+    if failed or upstream_error:
+        assert (
+            "Your research-bot account was deleted, but chat transcript deletion is incomplete."
+            in rendered
+        )
+        assert (
+            "Ask the person who runs research-bot to check and help remove them."
+            if upstream_error
+            else "You do not need to retry while research-bot keeps trying."
+        ) in rendered
+    else:
+        assert "You can start again by using research-bot." in rendered
+    assert "Usage records are retained" in rendered
+    assert "send privacy to retry" not in rendered
+    if upstream_error:
+        assert "We could not delete 3 chat transcripts" not in rendered
+
+
+def test_no_account_card_copy() -> None:
+    assert "You have no research-bot account." in json.dumps(
+        no_data_card("research-bot").model_dump()
+    )
 
 
 def _running(
@@ -74,8 +124,10 @@ async def test_command_without_data_says_so_and_creates_nothing(
     async with _running(db_session_factory, teams_api_fake) as service:
         await post_activity(service, make_message_activity(text="privacy"))
         await service.turns.drain(timeout=30)
+        export = await post_activity(service, _click("export"))
 
-    assert "no data on file" in json.dumps(teams_api_fake.activity_requests[-1].body)
+    assert "You have no daimon account." in json.dumps(teams_api_fake.activity_requests[-1].body)
+    assert "You have no daimon account." in json.dumps(export)
     assert not await _has_principal(db_session_factory, AAD_OBJECT_ID), "the read is read-only"
 
 

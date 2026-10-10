@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import discord
+import pytest
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.privacy_panel.embeds import (
     build_deleted_state_container,
@@ -46,13 +47,17 @@ def test_post_delete_container_is_green() -> None:
 
 
 def test_post_delete_container_header_starts_with_deleted() -> None:
-    """First TextDisplay must start with '## ✅ Deleted'."""
+    """First TextDisplay uses the account deletion title."""
     result = _make_result(accounts=1)
     container = build_post_delete_container(result)
     texts = _text_displays(container)
     assert texts, "Container must have at least one TextDisplay"
-    assert texts[0].startswith("## ✅ Deleted"), (
-        f"Post-delete header must start with '## ✅ Deleted'; got {texts[0]!r}"
+    assert texts[0].startswith("## ✅ Account deleted"), (
+        f"Post-delete header must name account deletion; got {texts[0]!r}"
+    )
+    assert (
+        "-# Your daimon account has been deleted.\n-# You can start again by using daimon."
+        in texts[0]
     )
 
 
@@ -100,36 +105,35 @@ def test_post_delete_container_reports_session_transcripts_deleted() -> None:
     )
 
 
-def test_post_delete_container_reports_session_transcript_failures() -> None:
-    """When sessions.failed > 0 the container surfaces failures."""
+@pytest.mark.parametrize("failed", [1, 3])
+def test_post_delete_container_reports_session_transcript_failures(failed: int) -> None:
     result = AccountPurgeResult(
         db=PurgeReport(accounts=1),
-        sessions=SessionDeletionReport(deleted=2, failed=1),
+        sessions=SessionDeletionReport(deleted=2, failed=failed),
     )
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "1 transcript(s) could not be deleted" in joined, (
-        f"When sessions.failed > 0, container must surface failures; got {joined!r}"
-    )
+    noun = "chat transcript" if failed == 1 else "chat transcripts"
+    assert "## ⚠ Deletion incomplete" in joined
+    assert "Your daimon account was deleted, but chat transcript deletion is incomplete." in joined
+    assert f"We could not delete {failed} {noun} from Anthropic." in joined
+    assert "You do not need to retry while daimon keeps trying." in joined
+    assert "re-run /privacy" not in joined
 
 
-def test_post_delete_container_discloses_upstream_error_without_retry_hint() -> None:
-    """When sessions.upstream_error is set, the container discloses that
-    transcripts remain at Anthropic — without the unreachable /privacy retry hint
-    (the account row is gone, so /privacy renders the deleted state)."""
+@pytest.mark.parametrize("failed", [0, 3])
+def test_post_delete_container_discloses_upstream_error_without_retry_hint(failed: int) -> None:
     result = AccountPurgeResult(
         db=PurgeReport(accounts=1),
-        sessions=SessionDeletionReport(deleted=0, failed=0, upstream_error=True),
+        sessions=SessionDeletionReport(deleted=0, failed=failed, upstream_error=True),
     )
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "could not be deleted from Anthropic" in joined, (
-        f"upstream_error must surface a transcript-deletion disclosure; got {joined!r}"
-    )
-    assert "re-run /privacy" not in joined, (
-        "upstream_error disclosure must NOT promise a /privacy retry — it is unreachable "
-        f"after the account row is purged; got {joined!r}"
-    )
+    assert "## ⚠ Deletion incomplete" in joined
+    assert "Your daimon account was deleted, but chat transcript deletion is incomplete." in joined
+    assert "We could not confirm deletion of all chat transcripts from Anthropic." in joined
+    assert "Ask the person who runs daimon to check and help remove them." in joined
+    assert "We could not delete 3 chat transcripts" not in joined
 
 
 def test_post_delete_container_upstream_error_row_absent_when_clean() -> None:
@@ -140,7 +144,7 @@ def test_post_delete_container_upstream_error_row_absent_when_clean() -> None:
     )
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "could not be deleted from Anthropic" not in joined, (
+    assert "could not confirm deletion" not in joined, (
         f"clean upstream phase must not render the upstream_error row; got {joined!r}"
     )
 
@@ -255,13 +259,11 @@ def test_deleted_state_container_is_grey() -> None:
     )
 
 
-def test_deleted_state_container_has_no_data_on_file_copy() -> None:
-    """Deleted-state container must contain 'no data on file' copy (D-COPY-02)."""
+def test_deleted_state_container_has_no_account_copy() -> None:
     container = build_deleted_state_container("carlos")
     joined = _joined_text(container)
-    assert "no data on file" in joined, (
-        f"Deleted-state copy must contain 'no data on file'; got {joined!r}"
-    )
+    assert "You have no daimon account." in joined
+    assert "no data on file" not in joined
 
 
 def test_deleted_state_container_header_no_warning_glyphs() -> None:
@@ -273,3 +275,10 @@ def test_deleted_state_container_header_no_warning_glyphs() -> None:
     assert "⚠" not in header_text and "❌" not in header_text, (
         "Deleted-state header must NOT use warning glyphs per D-COPY-02"
     )
+
+
+def test_no_account_state_names_the_configured_bot() -> None:
+    """The no-account line uses the configured bot name, like every other platform."""
+    container = build_deleted_state_container("carlos", bot_display_name="daimon-staging")
+    texts = [c.content for c in container.walk_children() if isinstance(c, discord.ui.TextDisplay)]
+    assert "You have no daimon-staging account." in texts

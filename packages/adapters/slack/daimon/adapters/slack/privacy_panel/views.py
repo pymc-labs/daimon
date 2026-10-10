@@ -343,16 +343,17 @@ def build_post_delete_view(
         rows.append("• ✓ Account row removed")
     if result.sessions.deleted > 0:
         rows.append(f"• ✓ {result.sessions.deleted} session transcript(s) deleted from Anthropic")
-    if result.sessions.failed > 0:
-        rows.append(
-            f"• ⚠ {result.sessions.failed} transcript(s) could not be deleted"
-            " — re-run /privacy to retry"
-        )
     if result.sessions.upstream_error:
+        rows.append("• We could not confirm deletion of all chat transcripts from Anthropic.")
         rows.append(
-            "• ⚠ Session transcripts could not be deleted from Anthropic"
-            " — contact the operator if you need them removed"
+            f"• Ask the person who runs {escape_mrkdwn(display_name)} "
+            "to check and help remove them."
         )
+    elif result.sessions.failed > 0:
+        count = result.sessions.failed
+        noun = "chat transcript" if count == 1 else "chat transcripts"
+        rows.append(f"• We could not delete {count} {noun} from Anthropic.")
+        rows.append(f"• You do not need to retry while {escape_mrkdwn(display_name)} keeps trying.")
     # Carve-out disclosures — always shown.
     rows += [
         "",
@@ -361,20 +362,32 @@ def build_post_delete_view(
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
     ]
+    incomplete = result.sessions.failed > 0 or result.sessions.upstream_error
+    if incomplete:
+        introduction = (
+            "*⚠ Deletion incomplete*\n"
+            f"Your {escape_mrkdwn(display_name)} account was deleted, "
+            "but chat transcript deletion is incomplete."
+        )
+    else:
+        introduction = (
+            "*✅ Account deleted*\n"
+            f"Your {escape_mrkdwn(display_name)} account has been deleted.\n"
+            f"You can start again by using {escape_mrkdwn(display_name)}."
+        )
 
     return {
         "type": "modal",
-        "title": {"type": "plain_text", "text": "Deleted"},
+        "title": {
+            "type": "plain_text",
+            "text": "⚠ Deletion incomplete" if incomplete else "✅ Account deleted",
+        },
         "blocks": [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        "*✅ Deleted*\n"
-                        f"Your {escape_mrkdwn(display_name)} data has been deleted. "
-                        "Re-onboarding starts from scratch."
-                    ),
+                    "text": introduction,
                 },
             },
             {"type": "divider"},
@@ -407,7 +420,7 @@ def build_export_result_view(
     posted as an ephemeral channel message. ``summary=None`` means no account.
     """
     if summary is None:
-        text = f"📤 *Privacy export*\nYou have no data on file with {escape_mrkdwn(display_name)}."
+        text = f"📤 *Privacy export*\nYou have no {escape_mrkdwn(display_name)} account."
     else:
         text = (
             "📤 *Privacy export (summary)*\n"

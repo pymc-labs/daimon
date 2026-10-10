@@ -274,7 +274,7 @@ async def test_export_with_no_account_pushes_no_data_modal(
     assert push_calls, "no-account export must still push a result modal"
     body: dict[str, Any] = push_calls[0].kwargs["json"]
     view_text = str(body["view"]["blocks"][0]["text"]["text"])
-    assert "no data" in view_text, "no-account export must say there is nothing on file"
+    assert "You have no daimon account." in view_text
 
 
 async def test_disconnect_deletes_row_and_revokes(
