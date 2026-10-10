@@ -18,6 +18,7 @@ from daimon.core.operation_policy import decide_operation
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
 from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     admin_account_for_platform_user,
@@ -164,6 +165,7 @@ _PUBLIC_ERRORS = frozenset(
         "Only a server or workspace admin can manage connected repos.",
         "Only a workspace admin can connect GitHub.",
         CLIENT_AGENT_MESSAGE,
+        SERVER_WIDE_GRANT_MESSAGE,
         "Confirm read and write access on GitHub first.",
     }
 )

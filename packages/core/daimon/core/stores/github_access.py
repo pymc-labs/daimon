@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Literal, cast
 
 from daimon.core._models import (
+    Account,
     AgentGitHubGrant,
     AgentGitHubGrantDraft,
     AgentGitHubMode,
@@ -255,6 +256,23 @@ async def get_agent_mode(
 
 _ACCESS_RANK = {"none": 0, "read": 1, "write": 2}
 
+SERVER_WIDE_GRANT_MESSAGE = "Only a server admin can add a repo connected for the whole server."
+
+
+async def require_may_grant(
+    session: AsyncSession, *, repo: TenantGitHubRepo, account_id: uuid.UUID | None
+) -> None:
+    """A server-wide repo is a server admin's to grant; an agent's own repo, its manager's.
+
+    `account_id=None` is the operator CLI. Whether the account manages the
+    agent at all is the caller's check.
+    """
+    if repo.scope_agent_id is not None or account_id is None:
+        return
+    account = await session.get(Account, account_id)
+    if account is None or account.role != "admin" or account.is_external:
+        raise ValueError(SERVER_WIDE_GRANT_MESSAGE)
+
 
 async def stage_grant(
     session: AsyncSession,
@@ -280,6 +298,7 @@ async def stage_grant(
     )
     if authorized is None or authorized.status != "active":
         raise ValueError("repository is not actively authorized for this workspace")
+    await require_may_grant(session, repo=authorized, account_id=granted_by_account_id)
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if installation is None or installation.suspended_at is not None:
         raise ValueError("GitHub App installation is not active")
