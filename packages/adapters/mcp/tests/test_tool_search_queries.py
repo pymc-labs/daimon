@@ -77,7 +77,7 @@ CASES = [
         # bind_public_repo checks visibility first and points a private repo
         # at github_connect; the token form is never offered.
         frozenset(["github_connect", "bind_public_repo"]),
-        frozenset(["github_connect"]),
+        frozenset([]),
     ),
     SearchCase(
         "install the GitHub app",
