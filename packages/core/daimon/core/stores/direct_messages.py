@@ -11,7 +11,7 @@ from daimon.core._models import (
     ThreadAgentBinding,
     ThreadSession,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select, union, update
 from sqlalchemy.dialects.postgresql import insert
@@ -117,9 +117,9 @@ async def claim_message(
         DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
     )
     if row is None:
-        raise DaimonError("Run /dm in the workspace channel you want to continue from first.")
+        raise UserFacingError("Run /dm in the workspace channel you want to continue from first.")
     if row.scope_id != expected_scope_id:
-        raise DaimonError("The selected workspace changed. Please send your message again.")
+        raise UserFacingError("The selected workspace changed. Please send your message again.")
     if message_id in row.recent_message_ids:
         return None
     if row.active_until is not None and row.active_until > now:

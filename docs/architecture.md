@@ -1848,6 +1848,8 @@ Discord passes through only explicitly audited `UserFacingError` guidance. Raise
 that marker with deliberate copy, never exception text, provider bodies, secrets
 or internal identifiers. Known domain errors map to fixed next steps; unmarked
 exceptions keep a generic public fallback and diagnostics in logs. Both Discord
-and shared New Agent creators use the typed name-collision refusal. Terminal
+and shared New Agent creators use the typed name-collision refusal, as does
+agent copying. Shared setup-responder, agent-visibility and DM routing refusals
+mark their fixed guidance explicitly. Terminal
 failure cards retain audited guidance as their next step, including an expired
 setup context encountered during reconnection.

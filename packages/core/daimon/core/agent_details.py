@@ -28,7 +28,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.skills import resolve_custom_skill_titles
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.github_repo_auth import RepoAccess, derive_repo_access
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import build_unrouted_note
@@ -265,7 +265,7 @@ async def load_agent_details(
         session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
     )
     if viewer is not None and not viewer.sees_agent(agent):
-        raise DaimonError(
+        raise UserFacingError(
             "That agent is no longer available in this workspace. Choose another agent."
         )
     tenant_row, channel_rows = await scoped_config_read.list_propagations_for_tenant(

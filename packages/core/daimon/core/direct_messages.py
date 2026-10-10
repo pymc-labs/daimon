@@ -14,7 +14,7 @@ from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.scope import ChannelScopeRef
@@ -109,7 +109,7 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
     for session_id in retired:
         with suppress(anthropic.APIError):
             await deps.anthropic.beta.sessions.archive(session_id)
-    raise DaimonError(SEALED_SINCE_MESSAGE)
+    raise UserFacingError(SEALED_SINCE_MESSAGE)
 
 
 async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMessageRow) -> None:
@@ -135,7 +135,7 @@ def require_unsealed_source(admission: Admission) -> None:
     channels.
     """
     if admission.source_sealed:
-        raise DaimonError(SEALED_SOURCE_MESSAGE)
+        raise UserFacingError(SEALED_SOURCE_MESSAGE)
 
 
 async def start_dm(
@@ -291,7 +291,7 @@ async def reply_to_dm(
         async with deps.sessionmaker() as session:
             tenant = await get_tenant(session, conversation.tenant_id)
         if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
-            raise DaimonError("This workspace is not available. No DM turn was started.")
+            raise UserFacingError("This workspace is not available. No DM turn was started.")
         await _require_source_still_unsealed(deps, conversation)
         admission = await admit(
             deps,
@@ -307,7 +307,7 @@ async def reply_to_dm(
             now=now,
         )
         if admission.account_id != conversation.account_id:
-            raise DaimonError("Your account changed. Run /dm again in the workspace channel.")
+            raise UserFacingError("Your account changed. Run /dm again in the workspace channel.")
         if on_agent is not None:
             await on_agent(admission.agent.name)
         execution_id = uuid.uuid4() if platform == "slack" else None
@@ -421,4 +421,4 @@ async def require_dm_enabled(deps: TurnDeps, *, tenant_id: uuid.UUID) -> None:
     async with deps.sessionmaker() as session:
         enabled = await dm_enabled(session, tenant_id=tenant_id)
     if not enabled:
-        raise DaimonError("DM conversations are disabled here. Ask an admin to run /dm enable.")
+        raise UserFacingError("DM conversations are disabled here. Ask an admin to run /dm enable.")

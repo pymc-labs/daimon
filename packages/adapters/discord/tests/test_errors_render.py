@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import MagicMock
 
 import anthropic
 import discord
 import httpx
+import pytest
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.core.channel_admins import InvalidChannelAdminIds
 from daimon.core.channel_budget import ChannelBudgetError
@@ -21,7 +23,9 @@ from daimon.core.errors import (
     UserFacingError,
 )
 from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.setup_conversations import get_setup_responder
 from daimon.core.stores.direct_messages import DirectMessageBusy
+from daimon.testing.ma import build_fake_anthropic
 from sqlalchemy.exc import DBAPIError
 
 TEST_RID = "01JTZXTEST000000000000000"
@@ -125,3 +129,19 @@ def test_audited_user_guidance_keeps_its_next_step_without_retry_later() -> None
         "The agent was created but is not listed yet. Reopen `/agent-setup` to see it.",
     ):
         assert render_error(UserFacingError(copy), request_id=TEST_RID) == copy
+
+
+@pytest.mark.parametrize("status", [400, 404])
+async def test_missing_setup_responder_keeps_shared_helper_guidance(status: int) -> None:
+    client = build_fake_anthropic(
+        lambda req: httpx.Response(
+            status,
+            json={"type": "error", "error": {"type": "not_found_error", "message": "private"}},
+        )
+    )
+    with pytest.raises(UserFacingError) as caught:
+        await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_private")
+    assert render_error(caught.value, request_id=TEST_RID) == (
+        "This setup conversation's Daimon responder is missing. "
+        "Ask the operator to restore it, then open a new setup conversation."
+    )
