@@ -8,12 +8,13 @@ import hashlib
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal, localcontext
 from pathlib import Path
-from typing import Annotated, Literal, TextIO
+from types import MappingProxyType
+from typing import Annotated, Final, Literal, TextIO
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -25,6 +26,16 @@ Count = Annotated[int, Field(strict=True, ge=0, le=1_000_000_000)]
 PREFIX = "<!-- mux-probe "
 HEADER = "# Managed probe spend"
 LEDGER_PREFIX = "<!-- mux-ledger "
+
+# Probe policy is independent of the pricing map: reviewed rates never grant
+# permission to use a larger model. Unknown providers refuse admission too.
+LIVE_MODEL_ALLOWLIST: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "openai": frozenset({"gpt-6-luna"}),
+        "anthropic": frozenset({"claude-haiku-4-5-20251001"}),
+        "gemini": frozenset({"gemini-3.5-flash-lite"}),
+    }
+)
 
 
 _KEY = re.compile(r"(?:sk-|AIza)[A-Za-z0-9_-]{32,}")
@@ -511,7 +522,8 @@ class BudgetGuard:
             raise BudgetRefused("probe metadata must not contain credentials")
         with self._locked() as (file, lock, checkpoint, runs, config):
             budget = config.providers.get(plan.provider)
-            price = budget.models.get(plan.model) if budget is not None else None
+            allowed = plan.model in LIVE_MODEL_ALLOWLIST.get(plan.provider, frozenset())
+            price = budget.models.get(plan.model) if budget is not None and allowed else None
             estimate = price.reserve(plan.limits) if price is not None else Decimal(0)
             receipt = SpendReceipt(
                 run_id=uuid4().hex,

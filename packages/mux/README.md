@@ -46,7 +46,12 @@ host-provided scope and skill grant before I/O.
 `mux.conformance.budget` provides standalone manual budget admission and spend
 receipts without recorder or SDK imports. Its pinned ledger, checkpoint and
 stable sequence lock refuse reset/rollback attempts. Authorized operators supply
-reviewed model prices and enforce token bounds across the whole probe.
+reviewed model prices and enforce token bounds across the whole probe. Admission
+also requires an exact model in the immutable `LIVE_MODEL_ALLOWLIST`: OpenAI
+`gpt-6-luna`, Anthropic `claude-haiku-4-5-20251001`, or Gemini `gemini-3.5-flash-lite`.
+Unknown providers, aliases and other models receive a blocked receipt with zero
+spend before the callback can access a key. An allowed model without reviewed
+prices still refuses; policy membership alone cannot enable a live call.
 
 `mux.conformance.recording` retains only normalized mux events and request
 metadata, excluding raw HTTP bodies, body values and opaque native provenance.

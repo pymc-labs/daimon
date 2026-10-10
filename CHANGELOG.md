@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Route MCP repository credentials, vault summaries, bundle uploads, hosted charts, hub sessions and skill-version counts through scoped mux resource ports while preserving native request bytes and existing host policy.
+- Refuse manual live probes outside the fixed cheapest-model allowlist before invocation, even when another model has configured prices.
 
 - A channel can carry its own agent backend configuration (backend, profile,
   model, required capabilities, thread mode), read at admission only when
