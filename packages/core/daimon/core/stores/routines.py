@@ -35,6 +35,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
+LAST_RESULT_TAIL_MAX = 1000
+"""Maximum length of the stored preview; delivery keeps the complete reply."""
+
 
 async def create_routine(
     session: AsyncSession,
@@ -446,9 +449,9 @@ async def record_result(
     result still pending from an earlier successful fire stays pending.
     """
     preview = tail
-    if tail is not None and len(tail) > 1000:
+    if tail is not None and len(tail) > LAST_RESULT_TAIL_MAX:
         marker = "… (truncated)\n"
-        preview = tail[-(1000 - len(marker)) :]
+        preview = tail[-(LAST_RESULT_TAIL_MAX - len(marker)) :]
         # Start at a whole word when the retained suffix begins inside one.
         cut = len(tail) - len(preview)
         if not tail[cut - 1].isspace() and not preview[0].isspace():
