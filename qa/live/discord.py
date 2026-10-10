@@ -496,7 +496,7 @@ class DiscordBackend:
         self._owned(turn.channel_id)
         if not turn.settled or turn.ended_at is None:
             raise Pending("channel history requires a settled reference turn")
-        trigger_at = message_created_at({"id": turn.trigger_id}) or turn.started_at
+        observation_start = turn.ended_at
         reference_ids = {str(row.get("id")) for row in turn.messages}
         observed: dict[str, Message] = {}
         for channel in self.owned | self.threads:
@@ -513,7 +513,7 @@ class DiscordBackend:
                         or str(row.get("application_id")) == self.target.daimon_id
                     )
                     and created is not None
-                    and created > trigger_at
+                    and created > observation_start
                     and str(row.get("id")) not in reference_ids
                 ):
                     observed[str(row.get("id"))] = row
