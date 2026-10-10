@@ -628,6 +628,7 @@ async def create_session(
                         env_file_id=None,
                         repo_token_issued_at=None,
                         vault_id=vault_id,
+                        sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
                     )
                     if app_session_unmapped

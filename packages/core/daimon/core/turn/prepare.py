@@ -48,6 +48,7 @@ from daimon.core.session_snapshot import (
     fingerprint_identity,
     fingerprint_mutable,
     hash_env_bytes,
+    session_skills,
     snapshot_from_created_session,
 )
 from daimon.core.sessions import create_session
@@ -326,6 +327,7 @@ async def create_ma_session(
             if github_mode == "app" and ma_session.vault_ids
             else next(iter(ma_session.vault_ids), None)
         ),
+        sent_skills=session_skills(admission.agent, admission.channel_skills),
         github_mode=github_mode,
     )
     return CreatedSession(

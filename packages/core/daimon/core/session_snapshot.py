@@ -196,6 +196,7 @@ def snapshot_from_created_session(
     env_file_id: str | None,
     repo_token_issued_at: int | None,
     vault_id: str | None,
+    sent_skills: Sequence[MaSkill],
     github_mode: Literal["legacy", "app"] = "legacy",
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
@@ -203,9 +204,15 @@ def snapshot_from_created_session(
     `env_sha256` and `repo_token_issued_at` are not readable back off the
     session — only the creator knows the bytes it uploaded and when it minted
     the clone token — so the caller supplies them.
+
+    `sent_skills` are hashed instead of the session's own: MA echoes a skill
+    sent as `version="latest"` back at the version it resolved, which the
+    desired snapshot (built from the agent's `"latest"`) would read as drift
+    on every turn after.
     """
     return _snapshot_from_session(
         session,
+        skills_sha256=hash_skills(sent_skills),
         env_sha256=env_sha256,
         env_file_id=env_file_id,
         repo_token_issued_at=repo_token_issued_at,
@@ -229,6 +236,7 @@ def snapshot_from_retrieved_session(
     """
     return _snapshot_from_session(
         session,
+        skills_sha256=hash_skills(session.agent.skills),
         env_sha256=env_sha256,
         env_file_id=None,
         repo_token_issued_at=repo_token_issued_at,
@@ -239,6 +247,7 @@ def snapshot_from_retrieved_session(
 def _snapshot_from_session(
     session: BetaManagedAgentsSession,
     *,
+    skills_sha256: str,
     env_sha256: str | None,
     env_file_id: str | None,
     repo_token_issued_at: int | None,
@@ -280,7 +289,7 @@ def _snapshot_from_session(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         system_sha256=hash_system(agent.system),
-        skills_sha256=hash_skills(agent.skills),
+        skills_sha256=skills_sha256,
         environment_id=session.environment_id,
         github_mode=github_mode,
         repo_urls=tuple(sorted(repo_urls)) if github_mode == "app" else (),

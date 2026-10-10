@@ -127,6 +127,7 @@ async def _session_with_env(
         env_file_id=None,
         repo_token_issued_at=None,
         vault_id=None,
+        sent_skills=created.agent.skills,
     )
     return created.id, snapshot
 
@@ -490,7 +491,12 @@ async def test_repo_token_rotation_targets_the_recorded_resource(
         ],
     )
     recorded = snapshot_from_created_session(
-        created, env_sha256=None, env_file_id=None, repo_token_issued_at=0, vault_id=None
+        created,
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=0,
+        vault_id=None,
+        sent_skills=created.agent.skills,
     )
     assert recorded.repo_resource_id is not None, "the session must carry a repo resource"
 

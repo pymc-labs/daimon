@@ -64,7 +64,12 @@ def _snapshot_of(session: BetaManagedAgentsSession) -> SessionSnapshot:
     answer.
     """
     return snapshot_from_created_session(
-        session, env_sha256=None, env_file_id=None, repo_token_issued_at=None, vault_id=None
+        session,
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id=None,
+        sent_skills=session.agent.skills,
     )
 
 

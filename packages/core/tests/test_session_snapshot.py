@@ -20,6 +20,7 @@ from anthropic.types.beta.beta_managed_agents_anthropic_skill import BetaManaged
 from anthropic.types.beta.beta_managed_agents_branch_checkout import (
     BetaManagedAgentsBranchCheckout,
 )
+from anthropic.types.beta.beta_managed_agents_custom_skill import BetaManagedAgentsCustomSkill
 from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
 from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema import (
     BetaManagedAgentsCustomToolInputSchema,
@@ -40,6 +41,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_memory_store_resource imp
     BetaManagedAgentsMemoryStoreResource,
 )
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.session_compat import identity_change_reasons
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -50,6 +52,7 @@ from daimon.core.session_snapshot import (
     hash_skills,
     hash_system,
     hash_tools,
+    session_skills,
     snapshot_from_created_session,
 )
 from daimon.core.stores.domain import AgentFileRow
@@ -310,6 +313,7 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
         env_file_id="file_env",
         repo_token_issued_at=1789000000,
         vault_id=None,
+        sent_skills=session.agent.skills,
     )
 
     assert snapshot.env_resource_id == "res_env", "the .env resource id is the handle to replace it"
@@ -505,3 +509,92 @@ def test_read_only_policy_without_a_memory_store_does_not_create_phantom_drift()
     )
     absent_mount = desired.model_copy(update={"memory_read_only": False})
     assert fingerprint_identity(desired) == fingerprint_identity(absent_mount)
+
+
+def _skilled_agent(*skills: BetaManagedAgentsCustomSkill) -> BetaManagedAgentsAgent:
+    return _agent().model_copy(update={"skills": list(skills)})
+
+
+def _created_echoing(
+    agent: BetaManagedAgentsAgent, *echoed: BetaManagedAgentsCustomSkill
+) -> BetaManagedAgentsSession:
+    """A just-created session whose agent reports `echoed`, the versions MA resolved."""
+    return BetaManagedAgentsSession(
+        id="sess_pinned",
+        agent=BetaManagedAgentsSessionAgent(
+            id=agent.id,
+            description=None,
+            mcp_servers=[],
+            model=agent.model,
+            name=agent.name,
+            skills=list(echoed),
+            system=agent.system,
+            tools=[],
+            type="agent",
+            version=agent.version,
+        ),
+        archived_at=None,
+        created_at=_NOW,
+        environment_id="env_science",
+        metadata={},
+        outcome_evaluations=[],
+        resources=[],
+        stats=BetaManagedAgentsSessionStats(),
+        status="idle",
+        title=None,
+        type="session",
+        updated_at=_NOW,
+        usage=BetaManagedAgentsSessionUsage(),
+        vault_ids=[],
+    )
+
+
+def _desired_for(agent: BetaManagedAgentsAgent) -> SessionSnapshot:
+    return desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+    )
+
+
+def test_a_latest_skill_echoed_back_pinned_is_not_skills_drift() -> None:
+    latest = BetaManagedAgentsCustomSkill(skill_id="skill_style", type="custom", version="latest")
+    pinned = BetaManagedAgentsCustomSkill(
+        skill_id="skill_style", type="custom", version="1791535473768193"
+    )
+    agent = _skilled_agent(latest)
+    recorded = snapshot_from_created_session(
+        _created_echoing(agent, pinned),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id=None,
+        sent_skills=session_skills(agent),
+    )
+
+    assert identity_change_reasons(recorded, _desired_for(agent)) == (), (
+        "MA resolving 'latest' to a version must not replace the session on every turn"
+    )
+
+
+def test_a_real_skill_change_after_creation_is_still_skills_drift() -> None:
+    style = BetaManagedAgentsCustomSkill(skill_id="skill_style", type="custom", version="latest")
+    charts = BetaManagedAgentsCustomSkill(skill_id="skill_charts", type="custom", version="latest")
+    created_with = _skilled_agent(style)
+    recorded = snapshot_from_created_session(
+        _created_echoing(created_with, style.model_copy(update={"version": "17"})),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id=None,
+        sent_skills=session_skills(created_with),
+    )
+
+    assert identity_change_reasons(recorded, _desired_for(_skilled_agent(style, charts))) == (
+        "skills",
+    ), "adding a skill to the agent must still replace the session"
