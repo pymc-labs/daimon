@@ -364,6 +364,38 @@ independent inclusive-input, output and dated-charge lower bounds. A proven
 overrun enlarges the conservative hold and blocks the provider's next dispatch,
 including a zero-token plan, while actual dollars remain nullable.
 
+An earlier overrun snapshot is admission evidence, not a replacement for the
+newest billable measurement. Adapters call
+`guard.settle_with_overrun(..., actual=latest_actual, overrun_evidence=earlier_overrun)`;
+the required overrun evidence uses the same `ActualSpend` schema and must prove an
+overrun against the pinned token/runtime/cost limits. The adapter still selects
+the newest accepted-root-bound, verified, freshness-checked revision, and rejects
+stale or foreign cleanup responses before settlement. Only a complete accepted
+billable measurement settles actual. For each request ID in
+`proof ∪ actual`, take the larger available priced bound, then sum those bounds.
+Container lifetimes use the same rule in a separate identity namespace.
+`held_usd = max(union_floor - actual_usd, 0)`; incomplete actual retains the
+reservation or the union floor, whichever is larger. A fresh downwards correction
+therefore records settled actual plus a residual hold for the earlier bound.
+The receipt retains
+`status="overrun"`, `admission_blocked=True`, and separate `overrun_evidence`.
+A complete actual must cover every proof request ID at an observation time no
+older than the proof, and every proven container identity/lifetime. Missing or
+older evidence remains estimated and held. Unknown final usage retains proven
+bounds by identity before summing: an overlapping stale request cannot lose its
+larger proof while missing and new IDs contribute their own bounds. Missing
+measurements stay absent; they do not become actual zero. A rejected stale response
+cannot replace an already accepted verified measurement. Lead reconciliation
+releases held dollars
+without clearing the admission latch; legacy overrun rows also latch admission.
+Legacy receipt hashes exclude fields
+absent from the original row, preserving existing signed approvals. During replay,
+a legacy row without the latch field inherits its prior latch in memory; an
+explicit false value cannot clear it. Reading never rewrites old row bytes.
+`data/legacy_reconciled_ledger.json` is a pre-upgrade fixture including unchanged
+canonical v1/v2 rows and base-produced reconciliation/approval cases.
+This API does not fetch, authorize or verify native provider revisions itself.
+
 Model price entries carry `effective_from`, optional exclusive `effective_until`
 and the official `source`. Rates are pinned into the reservation; later config
 changes cannot retroactively lower them. `short_prompt` selects a price tier per
@@ -372,7 +404,10 @@ lifetimes; `actual_input_limit` refuses admission beyond a reviewed price range
 and prevents declaring actual spend for an unreviewed tier. Receipts retain the
 workflow `status` for adapter compatibility and add `accounting_status`:
 `pending`, `estimated_unverified` or `actual`, plus separate `actual_usd` and
-`held_usd`. `cost_estimate_usd` remains the compatibility budget debit; it is
+`held_usd`. When a complete billable actual coexists with a residual overrun
+hold, `actual_usd` remains settled and `accounting_status` is
+`estimated_unverified` for the unsettled remainder. `cost_estimate_usd` is the
+compatibility budget debit, equal to settled actual plus held dollars; it is
 never a billed-spend claim. `guard.report()` returns the current receipts with
 these fields. Legacy rows stay unchanged and do not acquire an actual claim.
 
@@ -407,7 +442,9 @@ when calculated from usage, and token/runtime components. The lead signs by
 pinning that exact `proposal.digest` in the trusted config's
 `approved_reconciliations` list. `guard.reconcile(proposal)` refuses unsigned,
 changed, foreign, stale or repeated proposals and appends a `reconciled` receipt,
-releasing the held balance without deleting any prior row. A still-`reserved`
+releasing the held balance without deleting any prior row. A residual overrun
+hold with settled actual can also be reconciled, but a signed total cannot remove
+already verified settled dollars. A still-`reserved`
 run can be reconciled for crash recovery: this fences a later worker settlement
 as already settled, so the lead must first stop that worker. Approval uses
 trusted operator config, not a cryptographic identity service. A fresh

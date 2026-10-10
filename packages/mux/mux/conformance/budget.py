@@ -532,6 +532,8 @@ class SpendReceipt(ProbeModel):
     container_allowance: ContainerAllowance | None = None
     session_prices: tuple[SessionPrice, ...] = ()
     actual_evidence: ActualSpend | None = None
+    overrun_evidence: ActualSpend | None = None
+    admission_blocked: bool = Field(default=False, strict=True)
     token_usd: Money | None = None
     container_usd: Money | None = None
     reconcile: Reconciliation | None = None
@@ -549,6 +551,11 @@ class SpendReceipt(ProbeModel):
 
     @model_validator(mode="after")
     def accounting(self) -> SpendReceipt:
+        # An overrun latches admission independently of its current billable total.
+        if self.status == "overrun":
+            object.__setattr__(self, "admission_blocked", True)
+        if self.overrun_evidence is not None and not self.admission_blocked:
+            raise ValueError("overrun evidence must retain the admission latch")
         # Legacy rows remain byte-for-byte untouched and never gain an actual claim.
         if self.held_usd is None:
             object.__setattr__(self, "held_usd", self.cost_estimate_usd)
@@ -560,14 +567,19 @@ class SpendReceipt(ProbeModel):
             )
         if self.status in ("reserved", "uncertain") and self.actual_usd is not None:
             raise ValueError("unsettled runs cannot claim actual spend")
-        if self.accounting_status == "actual":
-            if (
-                self.actual_usd is None
-                or self.held_usd != 0
-                or self.cost_estimate_usd != self.actual_usd
-            ):
-                raise ValueError("actual spend releases all held dollars")
-        elif self.actual_usd is not None or self.held_usd != self.cost_estimate_usd:
+        if self.actual_usd is not None:
+            if self.cost_estimate_usd != self.actual_usd + (self.held_usd or Decimal(0)):
+                raise ValueError("budget debit must include settled and held dollars")
+            if self.held_usd:
+                if (
+                    self.accounting_status != "estimated_unverified"
+                    or self.status != "overrun"
+                    or self.overrun_evidence is None
+                ):
+                    raise ValueError("residual hold requires independent overrun evidence")
+            elif self.accounting_status != "actual":
+                raise ValueError("fully settled spend must be actual")
+        elif self.accounting_status == "actual" or self.held_usd != self.cost_estimate_usd:
             raise ValueError("unverified spend must remain separately held")
         if self.status == "reconciled":
             if (
@@ -805,6 +817,13 @@ class BudgetGuard:
                 if receipt.status == "blocked":
                     continue
                 previous = runs.get(receipt.run_id)
+                if previous is not None and previous.admission_blocked:
+                    if "admission_blocked" not in receipt.model_fields_set:
+                        # Old rows have no independent latch field. Carry the
+                        # proven history in memory without rewriting their bytes.
+                        object.__setattr__(receipt, "admission_blocked", True)
+                    elif not receipt.admission_blocked:
+                        raise BudgetLedgerError("overrun admission latch cannot be cleared")
                 if previous is None:
                     if receipt.status != "reserved":
                         raise BudgetLedgerError("spend receipt has no reservation")
@@ -813,6 +832,10 @@ class BudgetGuard:
                     if (
                         previous.status in ("blocked", "reconciled")
                         or previous.actual_usd is not None
+                        and not previous.held_usd
+                        or previous.actual_usd is not None
+                        and approval is not None
+                        and approval.actual_usd < previous.actual_usd
                         or approval is None
                         or approval.ledger_id != binding.ledger_id
                         or approval.run_id != previous.run_id
@@ -954,7 +977,7 @@ class BudgetGuard:
                         used + estimate > budget.cap_usd * Decimal("0.8")
                         or total_used + estimate > config.total_cap_usd * Decimal("0.8")
                     ) or any(
-                        r.status == "overrun" and r.provider == plan.provider for r in runs.values()
+                        r.admission_blocked and r.provider == plan.provider for r in runs.values()
                     ):
                         reason = "budget"
             if reason is not None:
@@ -991,7 +1014,10 @@ class BudgetGuard:
 
     @staticmethod
     def receipt_digest(receipt: SpendReceipt) -> str:
-        return hashlib.sha256(receipt.model_dump_json().encode()).hexdigest()
+        # Hash the schema actually present on disk. Adding read-time defaults or
+        # inheriting an admission latch must not invalidate a pre-upgrade signature.
+        absent = {"overrun_evidence", "admission_blocked"} - receipt.model_fields_set
+        return hashlib.sha256(receipt.model_dump_json(exclude=absent).encode()).hexdigest()
 
     @staticmethod
     def _measured(
@@ -1068,6 +1094,37 @@ class BudgetGuard:
                     container_cost += cost
         return tokens, token_cost, container_cost, lower_tokens, known_cost
 
+    @staticmethod
+    def _exceeded(
+        original: SpendReceipt,
+        limits: TokenLimits,
+        actual: ActualSpend | None,
+        lower_tokens: TokenUsage | None,
+        known_cost: Decimal,
+    ) -> bool:
+        container_exceeded = (
+            actual is not None
+            and original.container_allowance is not None
+            and (
+                len(actual.containers or ()) > original.container_allowance.sessions
+                or any(
+                    c.seconds > original.container_allowance.seconds_per_session
+                    or c.memory_gb != original.container_allowance.memory_gb
+                    or c.meter != original.container_allowance.meter
+                    for c in actual.containers or ()
+                )
+            )
+        )
+        return (
+            container_exceeded
+            or known_cost > original.reserved_usd
+            or lower_tokens is not None
+            and (
+                lower_tokens.minimum_input_tokens > limits.input_tokens
+                or (lower_tokens.output_tokens or 0) > limits.output_tokens
+            )
+        )
+
     def settle(
         self,
         reservation: Reservation,
@@ -1077,10 +1134,119 @@ class BudgetGuard:
         usage: TokenUsage | None = None,
         actual: ActualSpend | None = None,
     ) -> SpendReceipt:
+        """Release holds on complete dated evidence; retain unknown spend.
+
+        Existing adapter overrides keep this signature. For an earlier admission
+        overrun independent of the latest billable usage, use settle_with_overrun.
+        """
+        return self._settle(reservation, status=status, limits=limits, usage=usage, actual=actual)
+
+    def settle_with_overrun(
+        self,
+        reservation: Reservation,
+        *,
+        status: Literal["completed", "failed", "cancelled"],
+        limits: TokenLimits,
+        overrun_evidence: ActualSpend,
+        actual: ActualSpend | None = None,
+    ) -> SpendReceipt:
+        """Settle newest accepted actual while retaining an earlier overrun latch.
+
+        The adapter supplies its newest root-bound, verified, freshness-checked
+        actual snapshot, or None when none is accepted. Earlier overrun_evidence
+        proves admission refusal; it never replaces actual or adds duplicate
+        billable requests. Rejected stale responses must not supersede an already
+        accepted verified measurement. Actual must also cover every proof request
+        at a non-older observation time and every proven container lifetime;
+        otherwise known bounds stay held. Bounds take the maximum per identity
+        across both snapshots before summing. Even complete actual retains any
+        residual floor above settled dollars. Native freshness checks belong to adapters.
+        """
+        return self._settle(
+            reservation,
+            status=status,
+            limits=limits,
+            actual=actual,
+            overrun_evidence=overrun_evidence,
+        )
+
+    @staticmethod
+    def _covers_proof(actual: ActualSpend, proof: ActualSpend) -> bool:
+        requests = {request.id: request for request in actual.requests}
+        for prior in proof.requests:
+            current = requests.get(prior.id)
+            if (
+                current is None
+                or prior.observed_at.tzinfo is None
+                or current.observed_at.tzinfo is None
+                or current.observed_at < prior.observed_at
+            ):
+                return False
+        containers = {container.id: container for container in actual.containers or ()}
+        return all(
+            (current := containers.get(prior.id)) is not None
+            and current.meter == prior.meter
+            and current.memory_gb == prior.memory_gb
+            and current.started_at == prior.started_at
+            for prior in proof.containers or ()
+        )
+
+    @staticmethod
+    def _union_floor(
+        original: SpendReceipt, proof: ActualSpend, actual: ActualSpend | None
+    ) -> Decimal:
+        request_bounds: dict[str, Decimal] = {}
+        container_bounds: dict[str, Decimal] = {}
+        for snapshot in (proof, actual):
+            if snapshot is None:
+                continue
+            for request in snapshot.requests:
+                one = ActualSpend(requests=(request,), containers=(), usage_complete=True)
+                _, cost, _, lower_tokens, known = BudgetGuard._measured(original, one)
+                bound = (
+                    cost
+                    if cost is not None
+                    else max(
+                        known,
+                        original.price.reserve(
+                            TokenLimits(input_tokens=0, output_tokens=0), usage=lower_tokens
+                        )
+                        if original.price is not None
+                        else Decimal(0),
+                    )
+                )
+                previous = request_bounds.get(request.id)
+                request_bounds[request.id] = bound if previous is None else max(previous, bound)
+            for container in snapshot.containers or ():
+                one = ActualSpend(containers=(container,))
+                _, _, _, _, bound = BudgetGuard._measured(original, one)
+                previous = container_bounds.get(container.id)
+                container_bounds[container.id] = bound if previous is None else max(previous, bound)
+        with localcontext() as context:
+            context.prec = 80
+            return sum(request_bounds.values(), Decimal(0)) + sum(
+                container_bounds.values(), Decimal(0)
+            )
+
+    def _settle(
+        self,
+        reservation: Reservation,
+        *,
+        status: Literal["completed", "failed", "cancelled"],
+        limits: TokenLimits,
+        usage: TokenUsage | None = None,
+        actual: ActualSpend | None = None,
+        overrun_evidence: ActualSpend | None = None,
+    ) -> SpendReceipt:
         """Release holds immediately on complete dated usage and container evidence.
 
         Failed/cancelled runs can have known actual spend too. Partial walks,
         undated prices and unknown runtime never become actual zero dollars.
+        The adapter selects the newest root-bound, verified, freshness-checked
+        snapshot for actual. Earlier overrun_evidence proves an admission latch;
+        it never replaces actual or adds duplicate billable usage. Unknown/stale
+        snapshots must not be supplied as actual. Retain their accepted overrun
+        evidence separately, including when a fresh correction lowers the total.
         """
         reservation = Reservation.model_validate(reservation.model_dump())
         original = reservation.receipt
@@ -1107,30 +1273,26 @@ class BudgetGuard:
         reason: Literal["settled", "probe_error", "unknown_usage", "overrun"] = "settled"
         terminal: Literal["completed", "uncertain", "failed", "cancelled", "overrun"] = status
         known_cost = max(known_cost, (token_cost or Decimal(0)) + (container_cost or Decimal(0)))
-        container_exceeded = (
-            actual is not None
-            and original.container_allowance is not None
-            and (
-                len(actual.containers or ()) > original.container_allowance.sessions
-                or any(
-                    c.seconds > original.container_allowance.seconds_per_session
-                    or c.memory_gb != original.container_allowance.memory_gb
-                    or c.meter != original.container_allowance.meter
-                    for c in actual.containers or ()
-                )
-            )
+        exceeded = self._exceeded(original, limits, actual, lower_tokens, known_cost) or (
+            actual is None and estimate is not None and estimate > original.reserved_usd
         )
-        exceeded = (
-            container_exceeded
-            or known_cost > original.reserved_usd
-            or lower_tokens is not None
-            and (
-                lower_tokens.minimum_input_tokens > limits.input_tokens
-                or (lower_tokens.output_tokens or 0) > limits.output_tokens
-                or (measured is not None and measured > original.reserved_usd)
-                or (actual is None and estimate is not None and estimate > original.reserved_usd)
+        proof_tokens: TokenUsage | None = None
+        proof_cost = Decimal(0)
+        if overrun_evidence is not None:
+            _, proof_token_cost, proof_container_cost, proof_tokens, proof_cost = self._measured(
+                original, overrun_evidence
             )
-        )
+            proof_cost = max(
+                proof_cost,
+                (proof_token_cost or Decimal(0)) + (proof_container_cost or Decimal(0)),
+            )
+            if not self._exceeded(original, limits, overrun_evidence, proof_tokens, proof_cost):
+                raise BudgetLedgerError("overrun evidence does not prove a reservation overrun")
+            exceeded = True
+            if actual is not None and not self._covers_proof(actual, overrun_evidence):
+                # A different request or an older revision cannot erase proven
+                # spend, even if that partial walk claims to be complete.
+                measured = None
         if exceeded:
             terminal, reason = "overrun", "overrun"
         elif measured is not None:
@@ -1148,10 +1310,21 @@ class BudgetGuard:
             and estimate is not None
         ):
             charged = estimate
-        if terminal == "overrun" and measured is None:
-            charged = max(charged, original.reserved_usd, known_cost)
+        if terminal == "overrun" and measured is None and overrun_evidence is None:
+            charged = max(charged, original.reserved_usd, known_cost, proof_cost)
             if lower_tokens is not None:
                 charged = max(charged, reservation.price.reserve(limits, usage=lower_tokens))
+            if proof_tokens is not None:
+                charged = max(charged, reservation.price.reserve(limits, usage=proof_tokens))
+        held = Decimal(0) if measured is not None else charged
+        if overrun_evidence is not None:
+            floor = self._union_floor(original, overrun_evidence, actual)
+            if measured is None:
+                # Unknown final usage retains its reservation as well as the
+                # identity union's floor. No missing measurement becomes actual zero.
+                floor = max(floor, original.reserved_usd)
+            held = max(floor - (measured if measured is not None else Decimal(0)), Decimal(0))
+            charged = (measured if measured is not None else Decimal(0)) + held
         receipt = SpendReceipt.model_validate(
             {
                 **original.model_dump(),
@@ -1161,9 +1334,13 @@ class BudgetGuard:
                 "tokens": usage,
                 "cost_estimate_usd": charged,
                 "actual_usd": measured,
-                "held_usd": Decimal(0) if measured is not None else charged,
-                "accounting_status": "actual" if measured is not None else "estimated_unverified",
+                "held_usd": held,
+                "accounting_status": "actual"
+                if measured is not None and held == 0
+                else "estimated_unverified",
                 "actual_evidence": actual,
+                "overrun_evidence": overrun_evidence,
+                "admission_blocked": exceeded,
                 "token_usd": token_cost,
                 "container_usd": container_cost,
                 "reason": reason,
@@ -1194,7 +1371,12 @@ class BudgetGuard:
         """Read-only proposal; evidence hash binds the reviewed export/calculation."""
         with self._locked() as (_file, _lock, checkpoint, runs, _config):
             current = runs.get(run_id)
-            if current is None or current.actual_usd is not None or current.status == "reconciled":
+            if (
+                current is None
+                or current.actual_usd is not None
+                and not current.held_usd
+                or current.status == "reconciled"
+            ):
                 raise BudgetLedgerError("reconciliation requires a held run")
             return Reconciliation(
                 ledger_id=checkpoint.binding.ledger_id,
@@ -1213,6 +1395,8 @@ class BudgetGuard:
 
         No private key, provider key, caller boolean, deletion or ledger rewrite.
         Config is trusted operator state, as for existing caps/initialization.
+        A residual overrun hold may coexist with verified settled actual; the
+        approved total cannot remove that known settled amount.
         A reserved run may be reconciled for lead-approved crash recovery. This
         fences any later worker settlement as already settled; do not reconcile
         a run whose worker is still expected to finish.
@@ -1222,8 +1406,15 @@ class BudgetGuard:
             if proposal.digest not in config.approved_reconciliations:
                 raise BudgetRefused("reconciliation needs the lead-signed proposal digest")
             current = runs.get(proposal.run_id)
-            if current is None or current.actual_usd is not None or current.status == "reconciled":
+            if (
+                current is None
+                or current.actual_usd is not None
+                and not current.held_usd
+                or current.status == "reconciled"
+            ):
                 raise BudgetLedgerError("reconciliation requires a held run")
+            if current.actual_usd is not None and proposal.actual_usd < current.actual_usd:
+                raise BudgetRefused("reconciliation cannot remove verified settled dollars")
             if (
                 proposal.ledger_id != checkpoint.binding.ledger_id
                 or proposal.previous_sha256 != self.receipt_digest(current)

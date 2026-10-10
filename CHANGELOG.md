@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bound live-probe overrun exposure per request/container identity across all snapshots, retaining residual holds above settled actual and preserving the sum in budget checkpoints.
+
+- Preserve pre-upgrade reconciliation hashes and legacy ledger replay; keep proven live-probe bounds held when a complete measurement omits or predates the overrun evidence.
+
+- Settle fresh verified live-probe actual spend independently of earlier overrun evidence, releasing holds while retaining admission refusal through reconciliation.
+
 - Keep unknown Anthropic session runtime held and detect live-probe overruns from known request bounds even when other usage is missing.
 
 - Separate live probe actual spend from held dollars, settle complete dated token/runtime evidence, size default holds to short probes, and require lead-approved append-only reconciliation for historical holds.
