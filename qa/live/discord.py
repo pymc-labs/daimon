@@ -22,7 +22,18 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from qa.live.config import Config, Target
 from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
-from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
+from qa.live.types import (
+    Message,
+    Pending,
+    Turn,
+    Usage,
+    WatchTimeout,
+    component_text,
+    obj,
+    objects,
+    text_of,
+    utcnow,
+)
 
 CHANNEL_MARKER = "daimon-live-qa"
 TRANSPORT_FAILURE = re.compile(
@@ -367,6 +378,9 @@ class DiscordBackend:
         deadline = time.monotonic() + timeout
         stable_since: float | None = None
         previous = ""
+        progress_snapshots = {
+            fingerprint(obj(row.get("message"))) for row in turn.progress_text_history
+        }
         while time.monotonic() < deadline:
             # Sample acknowledgements before the slower message/thread reads.
             # Keep history: successful turns remove their transient reactions.
@@ -471,15 +485,16 @@ class DiscordBackend:
             if thread_ids:
                 if len(thread_ids) != 1:
                     raise ValueError("turn unexpectedly answered in multiple threads")
-                turn.thread_id = next(iter(thread_ids))
-                self.threads.add(turn.thread_id)
+                observed_thread = next(iter(thread_ids))
+                self.threads.add(observed_thread)
                 parent = (
                     turn.channel_id
                     if turn.channel_id in self.owned
                     else self.thread_parents.get(turn.channel_id)
                 )
                 if parent:
-                    self.thread_parents[turn.thread_id] = parent
+                    self.thread_parents[observed_thread] = parent
+                turn.thread_id = observed_thread
             turn.verdicts = [self.classify(m) for m in messages]
             for message, verdict in zip(messages, turn.verdicts, strict=True):
                 if verdict == "working" and message.get("edited_timestamp"):
@@ -490,6 +505,32 @@ class DiscordBackend:
                     }
                     if edit not in turn.card_history:
                         turn.card_history.append(edit)
+
+            observed_at = utcnow()
+            observed_s = max(0, (observed_at - trigger_at).total_seconds())
+            if turn.progress_first_poll_s is None:
+                turn.progress_first_poll_s = observed_s
+            turn.progress_observed_until_s = observed_s
+            for message, verdict in zip(messages, turn.verdicts, strict=True):
+                snapshot = fingerprint(message)
+                unknown_components = bool(component_text(message)) and not message.get("embeds")
+                if (
+                    verdict in {"working", "other_embed"} or unknown_components
+                ) and snapshot not in progress_snapshots:
+                    # Content may disappear on a final card edit. Freeze it at
+                    # the actual poll time; a snowflake cannot date edited text.
+                    frozen = obj(json.loads(json.dumps(message)))
+                    turn.progress_text_history.append(
+                        {
+                            "message": frozen,
+                            "classification": "component_state_unknown"
+                            if unknown_components
+                            else verdict,
+                            "observed_at": observed_at.isoformat(),
+                            "elapsed_s": observed_s,
+                        }
+                    )
+                    progress_snapshots.add(snapshot)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)

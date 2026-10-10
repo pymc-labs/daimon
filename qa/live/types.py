@@ -25,6 +25,17 @@ def objects(value: JsonValue) -> list[Message]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def component_text(message: Message) -> list[str]:
+    """Discord V2 text displays only; button labels are controls, not copy."""
+    parts: list[str] = []
+    for component in objects(message.get("components")):
+        content = component.get("content")
+        if component.get("type") == 10 and isinstance(content, str):
+            parts.append(content)
+        parts.extend(component_text(component))
+    return parts
+
+
 def text_components(message: Message, *, include_fields: bool = True) -> list[str]:
     parts = [str(message.get("content") or "")]
     for embed in objects(message.get("embeds")):
@@ -64,6 +75,9 @@ class Turn:
     done_s: float | None = None
     thread_id: str | None = None
     progress_seen_s: float | None = None
+    progress_text_history: list[Message] = field(default_factory=list[Message])
+    progress_first_poll_s: float | None = None
+    progress_observed_until_s: float | None = None
     guild_id: str = "1435062989119295640"
     trigger_reactions: list[Message] = field(default_factory=list[Message])
     trigger_reaction_history: list[Message] = field(default_factory=list[Message])

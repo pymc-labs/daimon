@@ -354,3 +354,20 @@ Transport/crash signatures (connection refusal/reset, timeouts, DNS, TLS/SSL, 5x
 tracebacks and unhandled exceptions) are rejected before the declared refusal regex.
 Expected patterns must not match empty output. CLI args must be command strings;
 tenant-credit tokens are refused even behind wrappers or global options.
+
+Queue scenarios that send a thread follow-up before the first `wait_done` start
+watching mentions immediately. The follow-up uses the preceding turn's observed
+thread and never waits for its terminal answer or guesses a thread ID. Watchers
+finish before assertions, teardown, and accounting.
+
+`progress_text_seen {turn, pattern, within_s}` checks frozen non-terminal card
+text at the actual poll time. JSON retains `progress_text_history`, first-poll
+time, and observation coverage. Creation/edit timestamps do not backdate text
+seen on a late poll. Missing early coverage is PENDING; a completed observation
+without a matching early progress message FAILs. Tenant-cap mutation still needs
+an explicitly configured isolated QA operator hook.
+
+Progress text includes nested Discord V2 type-10 text displays. A component-only
+card whose running/terminal state the driver cannot identify is retained as
+`component_state_unknown`; it can only produce PENDING, never a false progress
+PASS or FAIL. The generic card/text assertions need separate V2 rendering support.

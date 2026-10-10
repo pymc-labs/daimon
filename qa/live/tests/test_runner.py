@@ -191,3 +191,55 @@ def test_pending_catalog_proposal_has_no_side_effects(
     result = Executor(backend, judge, ledger, pricing, "staging").run(entry)
     assert result.status == "PENDING"
     assert not backend.events and not ledger.path.exists()
+
+
+def test_thread_followup_posts_while_first_turn_is_still_running(
+    backend: FakeBackend,
+    judge: FakeJudge,
+    ledger: Ledger,
+    pricing: Pricing,
+    scenario: Scenario,
+) -> None:
+    import threading
+
+    from qa.live.types import Turn
+
+    first_live = threading.Event()
+    followup_posted = threading.Event()
+    original_send = backend.send
+    original_collect = backend.collect
+
+    def send(
+        channel: str, step: Step, *, mention: bool, reply_message_id: str | None = None
+    ) -> str:
+        if backend.sent == 1:
+            assert channel == "thread"
+            assert first_live.is_set()
+            followup_posted.set()
+        return original_send(channel, step, mention=mention, reply_message_id=reply_message_id)
+
+    def collect(turn: Turn, timeout: float) -> None:
+        if turn.number == 1:
+            turn.thread_id = "thread"
+            first_live.set()
+            assert followup_posted.wait(2), "runner waited for first turn terminal before follow-up"
+        original_collect(turn, timeout)
+
+    backend.send = send  # type: ignore[method-assign]
+    backend.collect = collect  # type: ignore[method-assign]
+    changed = Scenario.model_validate(
+        scenario.model_dump(by_alias=True)
+        | {
+            "steps": [
+                {"do": "mention", "text": "FIRST"},
+                {"do": "wait", "s": 0.01},
+                {"do": "thread_reply", "mention": True, "text": "SECOND"},
+                {"do": "wait_done", "timeout_s": 5},
+            ],
+        }
+    )
+    result = Executor(backend, judge, ledger, pricing, "staging").run(changed)
+    assert followup_posted.is_set()
+    assert result.status == "PASS"
+    assert len(result.turns) == 2 and all(t.settled for t in result.turns)
+    assert backend.events[-1] == "delete"

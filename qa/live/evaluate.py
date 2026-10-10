@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import cast
 
@@ -18,6 +19,7 @@ from qa.live.types import (
     Message,
     Pending,
     Turn,
+    component_text,
     obj,
     objects,
     text_components,
@@ -187,6 +189,49 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 if passed and not turn.settled:
                     raise Pending("turn did not settle; final delivery gap bound is unproven")
                 reason = f"maximum answer delivery gap {gap}s"
+
+            elif kind == "progress_text_seen":
+                maximum = assertion.within_s or 0
+                matched = False
+                unknown_state = False
+                for snapshot in turn.progress_text_history:
+                    elapsed = snapshot.get("elapsed_s")
+                    if (
+                        not isinstance(elapsed, (int, float))
+                        or isinstance(elapsed, bool)
+                        or not math.isfinite(elapsed)
+                        or elapsed < 0
+                        or not isinstance(snapshot.get("message"), dict)
+                    ):
+                        raise Pending("progress snapshot evidence is malformed")
+                    if (
+                        snapshot.get("classification") in {"component_state_unknown", "other_embed"}
+                        and elapsed <= maximum
+                    ):
+                        unknown_state = True
+                    if snapshot.get("classification") != "working":
+                        continue
+                    if elapsed <= maximum and any(
+                        re.search(assertion.pattern or "", part, re.MULTILINE)
+                        for part in (
+                            text_components(obj(snapshot.get("message")))
+                            + component_text(obj(snapshot.get("message")))
+                        )
+                    ):
+                        matched = True
+                if not matched and (
+                    unknown_state
+                    or turn.progress_first_poll_s is None
+                    or turn.progress_first_poll_s > maximum
+                    or turn.progress_observed_until_s is None
+                    or (turn.progress_observed_until_s < maximum and not turn.settled)
+                ):
+                    raise Pending("early progress observation window is incomplete")
+                passed = matched
+                reason = (
+                    f"non-terminal progress regex {assertion.pattern!r}; "
+                    f"observed within {maximum}s={matched}"
+                )
             elif kind in {"reply_within_s", "no_silent_drop", "done_within_s"}:
                 duration = turn.done_s if kind == "done_within_s" else turn.first_visible_s
                 passed = duration is not None and duration <= (assertion.maximum or 0)

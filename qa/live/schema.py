@@ -108,6 +108,7 @@ class Assertion(Contract):
         "interrupt_within_s",
         "same_thread",
         "progress_seen",
+        "progress_text_seen",
         "no_blank_message",
         "message_count",
         "fences_balanced",
@@ -204,8 +205,10 @@ class Assertion(Contract):
             raise ValueError("CLI fields require cli_check")
         if self.kind == "same_thread" and self.as_turn is None:
             raise ValueError("same_thread requires as_turn")
-        if self.kind == "progress_seen" and self.within_s is None:
-            raise ValueError("progress_seen requires within_s")
+        if self.kind in {"progress_seen", "progress_text_seen"} and self.within_s is None:
+            raise ValueError(f"{self.kind} requires within_s")
+        if self.kind == "progress_text_seen" and not self.pattern:
+            raise ValueError("progress_text_seen requires pattern")
         if self.kind == "reaction_present" and not self.emoji:
             raise ValueError("reaction_present requires emoji")
         if self.kind == "db_check" and not self.sql:

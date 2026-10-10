@@ -152,3 +152,107 @@ def test_reaction_assertion_uses_progress_history(
         {"elapsed_s": 2.0, "reactions": []},
     ]
     assert evaluate(assertion, [turn], backend, judge).status == "PASS"
+
+
+@pytest.mark.parametrize(
+    "observed_s,first_poll,until,settled,classification,expected",
+    [
+        (2.0, 1.0, 15.0, False, "working", "PASS"),
+        (20.0, 20.0, 30.0, True, "working", "PENDING"),
+        (20.0, 1.0, 30.0, True, "working", "FAIL"),
+        (2.0, 1.0, 15.0, True, "answered", "FAIL"),
+        (None, None, None, False, "working", "PENDING"),
+        (None, 1.0, 8.0, False, "working", "PENDING"),
+    ],
+)
+def test_progress_text_requires_a_real_early_nonterminal_snapshot(
+    observed_s: float | None,
+    first_poll: float | None,
+    until: float | None,
+    settled: bool,
+    classification: str,
+    expected: str,
+    turn: Turn,
+    backend: FakeBackend,
+    judge: FakeJudge,
+) -> None:
+    turn.progress_first_poll_s = first_poll
+    turn.progress_observed_until_s = until
+    turn.settled = settled
+    turn.progress_text_history = (
+        []
+        if observed_s is None
+        else [
+            {
+                "elapsed_s": observed_s,
+                "classification": classification,
+                "message": {"content": "Queued for a free slot"},
+            }
+        ]
+    )
+    check = evaluate(
+        Assertion(kind="progress_text_seen", turn=1, pattern="(?i)queued", within_s=15),
+        [turn],
+        backend,
+        judge,
+    )
+    assert check.status == expected
+
+
+@pytest.mark.parametrize(
+    "classification,expected",
+    [("working", "PASS"), ("component_state_unknown", "PENDING"), ("other_embed", "PENDING")],
+)
+def test_progress_nested_component_copy_requires_known_running_state(
+    classification: str,
+    expected: str,
+    turn: Turn,
+    backend: FakeBackend,
+    judge: FakeJudge,
+) -> None:
+    turn.progress_first_poll_s = 1.0
+    turn.progress_observed_until_s = 20.0
+    turn.progress_text_history = [
+        {
+            "elapsed_s": 2.0,
+            "classification": classification,
+            "message": {
+                "components": [
+                    {
+                        "type": 17,
+                        "components": [
+                            {
+                                "type": 9,
+                                "components": [{"type": 10, "content": "Queued for a free slot"}],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    ]
+    check = evaluate(
+        Assertion(kind="progress_text_seen", turn=1, pattern="Queued", within_s=15),
+        [turn],
+        backend,
+        judge,
+    )
+    assert check.status == expected
+
+
+def test_component_text_display_ignores_button_labels() -> None:
+    from qa.live.types import component_text
+
+    assert component_text(
+        {
+            "components": [
+                {
+                    "type": 17,
+                    "components": [
+                        {"type": 10, "content": "Visible copy"},
+                        {"type": 1, "components": [{"type": 2, "label": "Queued button"}]},
+                    ],
+                }
+            ]
+        }
+    ) == ["Visible copy"]
