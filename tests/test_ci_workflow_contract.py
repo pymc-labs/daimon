@@ -74,6 +74,23 @@ def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
     assert deploy[promotable]["if"] == "steps.images.outputs.prebuilt == 'true'"
 
 
+def test_defaults_verify_qa_exception_is_staging_only() -> None:
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    verify = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify deployed installs match shipped defaults"
+    )
+    assert verify["env"]["STAGING_QA_TENANT"] == "${{ vars.STAGING_QA_TENANT }}"
+    script = verify["run"]
+    assert (
+        'if [ "${{ inputs.environment }}" = staging ] && [ -n "$STAGING_QA_TENANT" ]; then'
+        in script
+    )
+    assert "--warn-tenant $STAGING_QA_TENANT" in script
+    assert "defaults verify $verify_tenant_arg" in script
+
+
 def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     select = next(step for step in steps if step.get("id") == "images")
