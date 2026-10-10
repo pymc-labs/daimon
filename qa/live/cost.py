@@ -133,7 +133,16 @@ class Ledger:
             raise ValueError("measured cost must be finite and nonnegative")
         measured = sum(u.usd or 0.0 for u in usages)
         complete = bool(usages) and all(
-            u.usd is not None and u.source in {"turn_outcomes", "anthropic_messages"}
+            u.usd is not None
+            and (
+                u.source in {"turn_outcomes", "anthropic_messages"}
+                or (
+                    u.source == "pre-admission skip log"
+                    and u.usd == 0
+                    and u.skipped_reason == "turn.skipped.writers_none"
+                    and u.skip_evidence.get("event") == u.skipped_reason
+                )
+            )
             for u in usages
         )
         no_spend = not spend_possible and not usages

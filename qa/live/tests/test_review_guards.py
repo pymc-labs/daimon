@@ -390,3 +390,31 @@ async def test_model_probe_reads_actual_cascade_and_agent_metadata(
     )
     assert evidence.model == STAGING_LEGACY_MODEL and evidence.channel_pinned
     assert statements == ["SET TRANSACTION READ ONLY", "SET LOCAL statement_timeout = '15000ms'"]
+
+
+def test_confirmed_skipped_turn_has_no_applicable_model_and_no_charge(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: FakeBackend,
+    judge: FakeJudge,
+    ledger: Ledger,
+    pricing: Pricing,
+    scenario: Scenario,
+) -> None:
+    monkeypatch.setattr(
+        backend,
+        "usage",
+        lambda turn: Usage(
+            usd=0,
+            source="pre-admission skip log",
+            skipped_reason="turn.skipped.writers_none",
+            skip_evidence={"event": "turn.skipped.writers_none"},
+        ),
+    )
+    result = Executor(backend, judge, ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING"
+    assert any(
+        c.kind == "model" and c.status == "PENDING" and c.reason.startswith("n/a:")
+        for c in result.checks
+    )
+    assert not any(c.kind == "model" and c.status == "FAIL" for c in result.checks)
+    assert ledger.charged({result.run_id}) == 0

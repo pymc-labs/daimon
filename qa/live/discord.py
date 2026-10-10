@@ -852,6 +852,13 @@ class DiscordBackend:
 
     def usage(self, turn: Turn) -> Usage:
         footer = self._footer_usage(turn)
+        if self.env == "staging" and not turn.thread_id and not turn.messages and turn.ended_at:
+            try:
+                skipped = self._skipped_usage(turn)
+            except Pending:
+                skipped = None
+            if skipped:
+                return skipped
         try:
             rows = objects(
                 asyncio.run(
@@ -895,6 +902,52 @@ class DiscordBackend:
         except Exception:
             pass
         return footer
+
+    def _skipped_usage(self, turn: Turn) -> Usage | None:
+        """Positive pre-admission evidence only; silence never proves a skip."""
+        if not turn.ended_at or turn.guild_id != self.target.guild_id:
+            return None
+        self._wait_for_logs(turn)
+        event = "turn.skipped.writers_none"
+        query = " AND ".join(
+            [
+                f"timestamp>={json.dumps(turn.started_at.isoformat())}",
+                f"timestamp<={json.dumps(turn.ended_at.isoformat())}",
+                log_scope("event", event),
+                log_scope("guild_id", turn.guild_id),
+                log_scope("channel_id", turn.channel_id),
+            ]
+        )
+        for row in self._read_logs(query):
+            payload = obj(row.get("jsonPayload"))
+            stamp = str(payload.get("timestamp") or row.get("timestamp") or "")
+            try:
+                at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if (
+                payload.get("event") == event
+                and str(payload.get("guild_id")) == turn.guild_id
+                and str(payload.get("channel_id")) == turn.channel_id
+                and at.tzinfo is not None
+                and turn.started_at <= at <= turn.ended_at
+            ):
+                return Usage(
+                    input_tokens=0,
+                    output_tokens=0,
+                    cache_read_input_tokens=0,
+                    cache_creation_input_tokens=0,
+                    usd=0,
+                    source="pre-admission skip log",
+                    skipped_reason=event,
+                    skip_evidence={
+                        "event": event,
+                        "guild_id": turn.guild_id,
+                        "channel_id": turn.channel_id,
+                        "timestamp": stamp,
+                    },
+                )
+        return None
 
     @staticmethod
     def _footer_usage(turn: Turn) -> Usage:

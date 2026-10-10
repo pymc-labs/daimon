@@ -323,3 +323,9 @@ Image evidence cannot distinguish an environment-only redeploy on the same image
 that case follows the same alertable policy. A failed event-log read remains a
 separate `events_error` and restores a PENDING observation check, so image recovery
 never proves a PASS with missing logs.
+
+A confirmed pre-admission `turn.skipped.writers_none` event makes the model check
+PENDING (n/a) and records zero usage plus scoped `skip_evidence`. This requires
+matching guild, channel, and turn-window evidence and no observed thread or bot
+messages. Silence alone never proves a skip: executed or unproven turns retain
+missing-model FAIL semantics. Product silence checks still FAIL independently.
