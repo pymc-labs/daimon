@@ -564,32 +564,42 @@ class DiscordBackend:
             self.bindings.update(cast(dict[str, str], bindings))
 
     def cli_read(self, command: str) -> str:
+        import re
         import shlex
 
         if self.env != "staging":
             raise Pending("CLI readback is staging-only")
-        tokens = shlex.split(command)
+        try:
+            tokens = shlex.split(command)
+        except ValueError as exc:
+            raise Pending("CLI readback command is malformed") from exc
         if (
             len(tokens) != 6
             or tokens[:3] != ["daimon", "agents", "--guild"]
             or tokens[3] != self.target.guild_id
             or tokens[4] != "get"
+            or re.fullmatch(r"qa-[a-z0-9-]{1,96}", tokens[5]) is None
         ):
             raise Pending("CLI readback only supports this QA guild's agents get")
         hook = self.config.admin_hooks.get("cli_check")
         if not hook:
             raise Pending("read-only staging CLI hook is not configured")
-        response = subprocess.run(
-            hook,
-            input=json.dumps({"guild_id": self.target.guild_id, "cmd": command, "read_only": True}),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        try:
+            response = subprocess.run(
+                hook,
+                input=json.dumps(
+                    {"guild_id": self.target.guild_id, "argv": tokens, "read_only": True}
+                ),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise Pending(f"read-only staging CLI hook unavailable: {type(exc).__name__}") from exc
         if response.returncode:
             raise Pending(f"read-only staging CLI hook exited {response.returncode}")
-        if len(response.stdout) > 131072:
+        if len(response.stdout.encode("utf-8")) > 131072:
             raise Pending("CLI readback exceeds bounded observation")
         return redact(response.stdout)
 

@@ -281,10 +281,13 @@ Configured staging admin hooks accept structured or quoted string args via JSON 
 
 `cli_check` reads agent configuration through the configured `admin_hooks.cli_check`
 operator command. It accepts only `daimon agents --guild <configured QA guild> get <name>`;
-the command and `read_only: true` are passed as JSON stdin, never through a shell.
+names must match `qa-[a-z0-9-]{1,96}`. Validated tokens in `argv` and
+`read_only: true` are passed as JSON stdin, never through a shell.
 The operator hook must enforce QA resource ownership and read-only behavior.
 Assertions support regex `expect`, `expect_absent`, and `expect_all_of` (a list
 or a substituted JSON string list). An unavailable hook, empty output, or output
-over 128 KiB is PENDING. CLI checks can inspect setup state without a billed turn.
+over 128 KiB in UTF-8 bytes is PENDING. Malformed resolved expectations stay
+PENDING without stopping other assertions. CLI checks can inspect Discord-surface
+setup state without a billed turn; headless CLI workflows remain PENDING.
 
 Timer and manual entrypoints must share `live_lock`; the default is `~/.local/state/daimon-qa/live-run.lock`. A held lock refuses a second session before any live action. File-only alerts use `alerts.command=[]` and a local `alerts.inbox`. `Ledger.charged(run_ids)` sums final receipts and excludes reservation changes from reported charges.
