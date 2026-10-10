@@ -13,12 +13,14 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
+from daimon.adapters.mcp.tools.reachability import channel_admin_caller
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
     resolve_setup_agent,
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.github_connect_cards import (
     CONNECT_GITHUB_EMOJI,
     connect_attachment,
@@ -26,6 +28,7 @@ from daimon.core.github_connect_cards import (
     resolve_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
+from daimon.core.github_panel import can_manage_agent_github
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
@@ -164,14 +167,34 @@ async def _github_connect_impl(
     async with runtime.session_factory.begin() as session:
         try:
             await require_app_eligible_agent(
-                session, tenant_id=auth.tenant_id, agent_id=agent_id, agent_name=agent.name
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent_id,
+                agent_name=agent.name,
+                switch_saved_key=True,
             )
         except ClientAgentConnectionError:
             return ConnectResult(status="client_agent", message=CLIENT_AGENT_MESSAGE)
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
-        if account.role != Role.ADMIN or not auth.is_admin:
+        is_admin = account.role == Role.ADMIN and auth.is_admin
+        # A channel admin may connect their own repos for an agent they manage.
+        manages = is_admin or await can_manage_agent_github(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform,
+            caller=channel_admin_caller(auth).model_copy(update={"is_server_admin": False}),
+            agent_names=(
+                target_name,
+                agent.name,
+                str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
+            ),
+            ma_agent_id=str(agent.id),
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            default=runtime.deployment_default,
+        )
+        if not manages:
             await record_connect_request(
                 session,
                 tenant_id=auth.tenant_id,
@@ -207,6 +230,7 @@ async def _github_connect_impl(
                 origin_ma_agent_id=origin.responder_ma_agent_id,
                 origin_responder_name=origin.responder_name,
                 requested_work=requested_work,
+                agent_ma_id=str(agent.id),
             )
         else:
             token = await mint_invitation(
@@ -217,6 +241,8 @@ async def _github_connect_impl(
                 requester_platform_user_id=auth.platform_user_id,
                 agent_id=agent_id,
                 agent_name=agent.name,
+                agent_ma_id=str(agent.id),
+                agent_manager_verified=manages,
                 origin_platform=auth.platform,
                 origin_parent_channel_id=origin.parent_channel_id,
                 origin_thread_id=origin.thread_id,
@@ -237,7 +263,10 @@ async def _github_connect_impl(
             tool_name="github_connect",
             operation="github_connect",
             outcome="allowed",
-            reason="admin connect button posted" if intent_id else "admin link minted",
+            reason=(
+                ("admin" if is_admin else "channel admin")
+                + (" connect button posted" if intent_id else " link minted")
+            ),
         )
     try:
         if auth.platform == "discord":
@@ -285,8 +314,10 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ConnectResult:
         """Connect this agent to GitHub when someone asks to set up GitHub.
 
-        Show the admin a single-use connection button bound to the selected agent.
-        Members get Ask an admin and a recorded request. Never repeat a private
+        Show a single-use connection button bound to the selected agent to a
+        server admin, or to a channel admin who manages that agent; repos
+        connected this way are for that agent only. Other members get Ask an
+        admin and a recorded request. Never repeat a private
         link in a shared reply. For a setup target, pass its current name and
         MA id from turn_controls; otherwise this defaults to the responder.
         When GitHub access interrupted a task, pass a short restatement as

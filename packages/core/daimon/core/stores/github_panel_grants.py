@@ -13,7 +13,12 @@ from daimon.core._models import (
 )
 from daimon.core.stores import agent_files, agent_github_binding, agent_repo_binding, github_access
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.github_connect import has_saved_github_state, require_app_eligible_agent
+from daimon.core.stores.github_connect import (
+    finish_pending_connect_updates,
+    has_pending_connect_update,
+    has_saved_github_state,
+    require_app_eligible_agent,
+)
 from daimon.core.stores.github_credentials import delete_credential_for_principal
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.thread_sessions import mark_github_key_restart
@@ -183,6 +188,7 @@ async def stage_panel_grant(
     )
     if authorized is None or authorized.status != "active":
         raise ValueError("Repository is not connected to this workspace.")
+    await github_access.require_may_grant(session, repo=authorized, account_id=account_id)
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if installation is None or installation.suspended_at is not None:
         raise ValueError("GitHub installation is unavailable.")
@@ -269,13 +275,17 @@ async def activate_grants(
     agent_name: str,
 ) -> bool:
     """Switch only after working-repo coverage; retire a per-agent PAT atomically."""
-    # Whoever may save this panel manages the agent; the saved key is retired below.
+    # Finishing a chat Connect that kept the saved key retires it below, once
+    # the working and skill repos are covered; otherwise a saved key refuses.
+    finishing_connect = await has_pending_connect_update(
+        session, tenant_id=tenant_id, agent_id=agent_id
+    )
     await require_app_eligible_agent(
         session,
         tenant_id=tenant_id,
         agent_id=agent_id,
         agent_name=agent_name,
-        switch_saved_key=True,
+        switch_saved_key=finishing_connect,
     )
     panel = await load_grants_panel(
         session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
@@ -345,6 +355,8 @@ async def activate_grants(
     await github_access.activate_agent(
         session, tenant_id=tenant_id, agent_id=agent_id, changed_by_account_id=account_id
     )
+    if finishing_connect:
+        await finish_pending_connect_updates(session, tenant_id=tenant_id, agent_id=agent_id)
     if drafts:
         await session.execute(
             delete(AgentGitHubGrantDraft).where(
