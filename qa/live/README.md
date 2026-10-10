@@ -93,7 +93,9 @@ currently returns PENDING because the reused uploader cannot encode that referen
 thread, or the owned parent if there is no thread. Each trigger receives an index;
 queued triggers can share a composite answer. Fingerprints exclude previous turns'
 unchanged messages from follow-up evidence. The collector settles after terminal
-messages stop changing and includes visible queue reactions. Time measurements
+messages stop changing and includes visible queue reactions. Trigger reactions are sampled before message/thread
+reads and retained with elapsed timestamps, so an early 👀/⌛ remains available
+to presence assertions after completion clears it; the final snapshot records cleanup. Time measurements
 are observation bounds at the configured polling interval.
 Watch timeouts preserve evidence and evaluate assertions: a silent or stuck bot
 fails the canary and alerts. The fallback watch is bounded to 180 seconds, and
@@ -178,7 +180,9 @@ the driver must replace this with verified conservative pricing. Real Sonnet/Opu
 production agents are refused; they are never used to estimate a cheaper run.
 
 Receipts read measured tokens, cache tokens and cost from read-only
-`turn_outcomes`, scoped to the thread and turn window. Old footers can supply
+`turn_outcomes`, scoped to the thread and turn window. Model IDs and token counts
+remain valid evidence when `cost_usd` is NULL; accounting then retains the conservative
+reservation. A missing or unapproved model still fails. Old footers can supply
 rounded token/cost evidence; modern ones supply only rounded costs. If full
 measurement is unavailable, the charged ledger entry conservatively retains at
 least the reserved estimate and explicitly marks accounting incomplete. Missing

@@ -59,6 +59,7 @@ class Turn:
     progress_seen_s: float | None = None
     guild_id: str = "1435062989119295640"
     trigger_reactions: list[Message] = field(default_factory=list[Message])
+    trigger_reaction_history: list[Message] = field(default_factory=list[Message])
     messages: list[Message] = field(default_factory=list[Message])
     parent_messages: list[Message] = field(default_factory=list[Message])
     verdicts: list[str] = field(default_factory=list[str])

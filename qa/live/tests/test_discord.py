@@ -395,3 +395,51 @@ def test_measured_usage_records_real_token_and_model_evidence(
     usage = backend.usage(turn)
     assert usage.input_tokens == 100 and usage.cache_read_input_tokens == 300
     assert usage.usd == 0.00023 and usage.models == [MODEL]
+
+
+def test_null_cost_preserves_measured_model_and_tokens(
+    backend: DiscordBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def query(sql: str, params: dict[str, object] | None = None) -> JsonValue:
+        assert params and params["thread"] == "thread"
+        return [
+            {
+                "model_ids": ["claude-haiku-4-5-20251001"],
+                "cost_usd": None,
+                "input_tokens": 28,
+                "output_tokens": 510,
+                "cache_read_input_tokens": 51282,
+                "cache_creation_input_tokens": 18445,
+            }
+        ]
+
+    monkeypatch.setattr(backend, "_query", query)
+    turn = Turn(1, "trigger", "parent", utcnow(), thread_id="thread", ended_at=utcnow())
+    usage = backend.usage(turn)
+    assert usage.models == ["claude-haiku-4-5-20251001"]
+    assert usage.source == "turn_outcomes" and usage.usd is None
+    assert usage.input_tokens == 28 and usage.output_tokens == 510
+    assert usage.cache_read_input_tokens == 51282
+    assert usage.cache_creation_input_tokens == 18445
+
+
+def test_progress_reaction_survives_cleanup_in_history(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.owned.add("parent")
+    driver.trigger["reactions"] = [{"emoji": {"name": "👀"}}]
+    driver.current = [{"id": "answer", "channel_id": "thread", "content": "DONE"}]
+    original = driver.turn_messages
+
+    def messages(channel_id: str, *, after: str, daimon_id: str) -> list[Message]:
+        # Simulate a fast answer clearing its marker during the slower reads.
+        driver.trigger["reactions"] = []
+        return original(channel_id, after=after, daimon_id=daimon_id)
+
+    monkeypatch.setattr(driver, "turn_messages", messages)
+    turn = Turn(1, "trigger", "parent", utcnow())
+    backend.collect(turn, 1)
+    assert turn.trigger_reactions == []
+    assert turn.trigger_reaction_history[0]["reactions"] == [{"emoji": {"name": "👀"}}]
+    assert turn.trigger_reaction_history[-1]["reactions"] == []
+    assert float(str(turn.trigger_reaction_history[0]["elapsed_s"])) < (turn.done_s or 0)

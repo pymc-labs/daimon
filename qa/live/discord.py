@@ -302,6 +302,35 @@ class DiscordBackend:
         stable_since: float | None = None
         previous = ""
         while time.monotonic() < deadline:
+            # Sample acknowledgements before the slower message/thread reads.
+            # Keep history: successful turns remove their transient reactions.
+            trigger = obj(
+                self.driver.call("GET", f"/channels/{turn.channel_id}/messages/{turn.trigger_id}")
+            )
+            turn.trigger_reactions = []
+            for reaction in objects(trigger.get("reactions")):
+                emoji = obj(reaction.get("emoji"))
+                name = str(emoji.get("name", ""))
+                if emoji.get("id"):
+                    name += ":" + str(emoji["id"])
+                users = objects(
+                    self.driver.call(
+                        "GET",
+                        f"/channels/{turn.channel_id}/messages/{turn.trigger_id}/reactions/"
+                        f"{urllib.parse.quote(name, safe='')}?limit=100",
+                    )
+                )
+                if any(u.get("id") == self.target.daimon_id for u in users):
+                    turn.trigger_reactions.append(reaction)
+            reaction_elapsed = (utcnow() - turn.started_at).total_seconds()
+            turn.trigger_reaction_history.append(
+                {
+                    "elapsed_s": reaction_elapsed,
+                    "reactions": list(turn.trigger_reactions),
+                }
+            )
+            if turn.trigger_reactions and turn.first_visible_s is None:
+                turn.first_visible_s = reaction_elapsed
             candidates = self.driver.turn_messages(
                 turn.channel_id,
                 after=turn.trigger_id,
@@ -332,31 +361,7 @@ class DiscordBackend:
                 if fingerprint(m) not in self.baselines.get(turn.trigger_id, set())
             ]
             elapsed = (utcnow() - turn.started_at).total_seconds()
-            # Queue reactions on the trigger count as visible output even without an answer.
-            trigger = obj(
-                self.driver.call(
-                    "GET",
-                    f"/channels/{turn.channel_id}/messages/{turn.trigger_id}",
-                )
-            )
-            visible_reaction = False
-            turn.trigger_reactions = []
-            for reaction in objects(trigger.get("reactions")):
-                emoji = obj(reaction.get("emoji"))
-                name = str(emoji.get("name", ""))
-                if emoji.get("id"):
-                    name += ":" + str(emoji["id"])
-                users = objects(
-                    self.driver.call(
-                        "GET",
-                        f"/channels/{turn.channel_id}/messages/{turn.trigger_id}/reactions/"
-                        f"{urllib.parse.quote(name, safe='')}?limit=100",
-                    )
-                )
-                if any(u.get("id") == self.target.daimon_id for u in users):
-                    visible_reaction = True
-                    turn.trigger_reactions.append(reaction)
-            if (messages or visible_reaction) and turn.first_visible_s is None:
+            if messages and turn.first_visible_s is None:
                 turn.first_visible_s = elapsed
             turn.messages = messages
             turn.parent_messages = [m for m in messages if str(m.get("channel_id")) in self.owned]
@@ -599,7 +604,7 @@ class DiscordBackend:
                     )
                 )
             )
-            if len(rows) == 1 and rows[0].get("cost_usd") is not None:
+            if len(rows) == 1:
                 row = rows[0]
                 models = row.get("model_ids")
                 return Usage(
@@ -615,7 +620,7 @@ class DiscordBackend:
                     cache_creation_input_tokens=int(str(row["cache_creation_input_tokens"]))
                     if row.get("cache_creation_input_tokens") is not None
                     else None,
-                    usd=float(str(row["cost_usd"])),
+                    usd=float(str(row["cost_usd"])) if row.get("cost_usd") is not None else None,
                     source="turn_outcomes",
                     models=[str(m) for m in models] if isinstance(models, list) else [],
                 )

@@ -121,3 +121,16 @@ def test_working_card_and_parent_post_fail(
             ).status
             == "FAIL"
         )
+
+
+def test_reaction_assertion_uses_progress_history(
+    turn: Turn, backend: FakeBackend, judge: FakeJudge
+) -> None:
+    turn.trigger_reactions = []
+    assertion = Assertion(kind="reaction_present", turn=1, emoji="👀")
+    assert evaluate(assertion, [turn], backend, judge).status == "FAIL"
+    turn.trigger_reaction_history = [
+        {"elapsed_s": 0.5, "reactions": [{"emoji": {"name": "👀"}}]},
+        {"elapsed_s": 2.0, "reactions": []},
+    ]
+    assert evaluate(assertion, [turn], backend, judge).status == "PASS"
