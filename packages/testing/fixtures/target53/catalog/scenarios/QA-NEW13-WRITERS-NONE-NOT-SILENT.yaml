@@ -1,0 +1,33 @@
+id: QA-NEW13-WRITERS-NONE-NOT-SILENT
+title: 'in a ''Who can post: Nobody'' channel a mention gets a visible signal, not
+  total silence'
+friction:
+- NEW-13
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 0
+notes: Expected FAIL today (bot.py:1875 returns silently). A reaction counts as a
+  signal. The setting itself is a select (B), but the CLI writes the same rule.
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --writers none
+- do: mention
+  text: 'QA writers-none: are you there?'
+- do: wait
+  s: 20
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 20
+- kind: log_present
+  turn: 1
+  event: turn.skipped.writers_none
+teardown:
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --writers any

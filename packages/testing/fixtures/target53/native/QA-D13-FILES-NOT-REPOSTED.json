@@ -1,0 +1,219 @@
+{
+  "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+  "source": {
+    "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+    "sha256": "af23998ac1b11962b18be8817a9ff84a57d05345a00db13cacc3bf0ec649d496"
+  },
+  "projection": {
+    "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+    "sha256": "715549d98919620893be08f7d68754023eb6400bf92214c38bd9c9c58fd63b5c"
+  },
+  "scenario": {
+    "id": "QA-D13-FILES-NOT-REPOSTED",
+    "title": "turn 2 posts only its own new file, not turn 1's files again",
+    "friction": [
+      "F3"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "full",
+    "priority": "P1",
+    "est_turns": 2,
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "Write the numbers 1-5 to a file qa_one.csv in an outputs folder and attach it. One-line answer."
+      },
+      {
+        "do": "wait_done"
+      },
+      {
+        "do": "thread_reply",
+        "mention": true,
+        "text": "Now write the numbers 6-10 to qa_two.csv and attach only that file. One-line answer."
+      },
+      {
+        "do": "wait_done"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "attachments",
+        "turn": 1,
+        "min": 1,
+        "name_pattern": "qa_one\\.csv$"
+      },
+      {
+        "kind": "attachments",
+        "turn": 2,
+        "min": 1,
+        "name_pattern": "qa_two\\.csv$"
+      },
+      {
+        "kind": "attachments",
+        "turn": 2,
+        "max": 0,
+        "name_pattern": "qa_one\\.csv$"
+      },
+      {
+        "kind": "attachments",
+        "turn": 2,
+        "unique": true
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "Write the numbers 1-5 to a file qa_one.csv in an outputs folder and attach it. One-line answer."
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "Write the numbers 1-5 to a file qa_one.csv in an outputs folder and attach it. One-line answer.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "host_turn",
+      "source": {
+        "do": "thread_reply",
+        "mention": true,
+        "text": "Now write the numbers 6-10 to qa_two.csv and attach only that file. One-line answer."
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "Now write the numbers 6-10 to qa_two.csv and attach only that file. One-line answer.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[4]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": {
+    "pin": {
+      "path": "tests/judge/fixtures/catalog_anthropic.json",
+      "sha256": "4975d67964aee0461d47c80fda3b4816789b95c3d9ea6a784aad5d18a74a1d96"
+    },
+    "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+    "source_kind": "catalog-authored"
+  },
+  "anthropic_gaps": [],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ARTIFACT_PROTOCOL_UNBOUND",
+          "location": "steps[1]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "ARTIFACT_PROTOCOL_UNBOUND",
+          "location": "steps[3]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ARTIFACT_PROTOCOL_UNBOUND",
+          "location": "steps[1]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "ARTIFACT_PROTOCOL_UNBOUND",
+          "location": "steps[3]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        }
+      ]
+    }
+  ]
+}

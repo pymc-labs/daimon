@@ -1,0 +1,29 @@
+id: QA-NEW21-FORM-EXPIRY-UPDATES-CARD
+title: an unclicked private form flips to an expired state and the thread is told
+friction:
+- NEW-21
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 1
+notes: Bots can read the card; nobody clicks. Waits past the 30 min TTL. Expected
+  FAIL today (no expiry sweeper).
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: I want you to use my Acme API key. Ask me for it as ACME_API_KEY with a private
+    form.
+- do: wait_done
+- do: wait
+  s: 1920
+assert:
+- kind: component_present
+  turn: 1
+  label_pattern: (?i)add|enter|give|share|key
+- kind: card_text_now
+  turn: 1
+  pattern: (?i)expired
+  pattern_absent: (?i)received\. saving
+teardown: []

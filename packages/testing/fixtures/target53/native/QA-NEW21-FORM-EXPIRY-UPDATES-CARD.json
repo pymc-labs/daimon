@@ -1,0 +1,190 @@
+{
+  "scenario_id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+  "source": {
+    "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+    "sha256": "704bf1ec45d4c86830d6c911e2e7a3bfbb14ff32985861b548d69b64bdb92fee"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+    "sha256": "fb84615d417dc122fb05997909af84ab26c8d80e8f1da2d90e3671236ef877bd"
+  },
+  "scenario": {
+    "id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+    "title": "an unclicked private form flips to an expired state and the thread is told",
+    "friction": [
+      "NEW-21"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "weekly",
+    "priority": "P2",
+    "est_turns": 1,
+    "notes": "Bots can read the card; nobody clicks. Waits past the 30 min TTL. Expected FAIL today (no expiry sweeper).",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "I want you to use my Acme API key. Ask me for it as ACME_API_KEY with a private form."
+      },
+      {
+        "do": "wait_done"
+      },
+      {
+        "do": "wait",
+        "s": 1920
+      }
+    ],
+    "assert": [
+      {
+        "kind": "component_present",
+        "turn": 1,
+        "label_pattern": "(?i)add|enter|give|share|key"
+      },
+      {
+        "kind": "card_text_now",
+        "turn": 1,
+        "pattern": "(?i)expired",
+        "pattern_absent": "(?i)received\\. saving"
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "I want you to use my Acme API key. Ask me for it as ACME_API_KEY with a private form."
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "I want you to use my Acme API key. Ask me for it as ACME_API_KEY with a private form.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "wait",
+      "source": {
+        "do": "wait",
+        "s": 1920
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
+          "location": "steps[1]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
+          "location": "steps[1]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,226 @@
+{
+  "scenario_id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+  "source": {
+    "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+    "sha256": "c1395059f170cfb3a8c2a6478607b8d7b50d3b14a84c01cdd4f798cc110a57cf"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+    "sha256": "5adc9991e6ff9815357a9094a54ef5af0416c49d9a4899736dab6dab80fd848c"
+  },
+  "scenario": {
+    "id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+    "title": "a routine's long result is delivered whole (or marked truncated), and its memory write works",
+    "friction": [
+      "D15",
+      "F9"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "weekly",
+    "priority": "P1",
+    "est_turns": 2,
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "Create a routine that runs every minute, posts to this channel, and does: save the word ROUTINE-MEM to a memory note qa_routine.md (say MEMRY-FAIL-X plus the error if that fails), then reply with the numbers 1 to 400 separated by spaces and nothing else. Do not call send_message yourself in the routine."
+      },
+      {
+        "do": "wait_done"
+      },
+      {
+        "do": "wait",
+        "s": 240
+      }
+    ],
+    "assert": [
+      {
+        "kind": "channel_text_present",
+        "since_turn": 1,
+        "pattern": "(?i)\\b400\\b|truncated"
+      },
+      {
+        "kind": "channel_text_absent",
+        "since_turn": 1,
+        "pattern": "(?i)MEMRY-FAIL-X|read-only"
+      }
+    ],
+    "teardown": [
+      {
+        "do": "admin",
+        "tool": "delete_routines",
+        "args": {
+          "channel": "{channel_id}"
+        }
+      }
+    ]
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "Create a routine that runs every minute, posts to this channel, and does: save the word ROUTINE-MEM to a memory note qa_routine.md (say MEMRY-FAIL-X plus the error if that fails), then reply with the numbers 1 to 400 separated by spaces and nothing else. Do not call send_message yourself in the routine."
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "Create a routine that runs every minute, posts to this channel, and does: save the word ROUTINE-MEM to a memory note qa_routine.md (say MEMRY-FAIL-X plus the error if that fails), then reply with the numbers 1 to 400 separated by spaces and nothing else. Do not call send_message yourself in the routine.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "wait",
+      "source": {
+        "do": "wait",
+        "s": 240
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "teardown[0]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "delete_routines",
+        "args": {
+          "channel": "{channel_id}"
+        }
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
+          "location": "steps[1]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "NATIVE_TOOL_SCHEMA_UNBOUND",
+          "location": "steps[1]",
+          "reason": "Native tool/artifact recipe needs the owner's real schema."
+        }
+      ]
+    }
+  ]
+}

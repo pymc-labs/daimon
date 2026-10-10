@@ -1,0 +1,213 @@
+{
+  "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+  "source": {
+    "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+    "sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+    "sha256": "cf1b07433a5ddef5c0330df1c89073376964c585b42ce3bf8ac384cb6e32a5a3"
+  },
+  "scenario": {
+    "id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+    "title": "a depleted tenant gets a refusal that names who can top up (and admins were warned first)",
+    "friction": [
+      "D17"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 0,
+    "notes": "Needs a dedicated QA tenant (a second staging guild) whose balance can be zeroed: zeroing the shared QA guild blocks every other lane. Manual until that tenant exists.",
+    "setup": [
+      {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon tenants credit discord {env.qa_drain_guild_id} -<balance> --note qa-deplete --id qa-deplete-{nonce}"
+      }
+    ],
+    "steps": [
+      {
+        "do": "new_channel",
+        "guild": "{env.qa_drain_guild_id}"
+      },
+      {
+        "do": "mention",
+        "text": "QA depleted: hello"
+      },
+      {
+        "do": "wait",
+        "s": 20
+      }
+    ],
+    "assert": [
+      {
+        "kind": "no_silent_drop",
+        "turn": 1,
+        "max": 15
+      },
+      {
+        "kind": "text_present",
+        "turn": 1,
+        "pattern": "(?i)/billing"
+      },
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "(?i)an operator"
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "setup[0]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon tenants credit discord {env.qa_drain_guild_id} -<balance> --note qa-deplete --id qa-deplete-{nonce}"
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel",
+        "guild": "{env.qa_drain_guild_id}"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "QA depleted: hello"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA depleted: hello",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait",
+      "source": {
+        "do": "wait",
+        "s": 20
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "setup[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[1]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "setup[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[1]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    }
+  ]
+}

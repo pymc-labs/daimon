@@ -1,0 +1,36 @@
+id: QA-D8-GITHUB-SAVED-KEY-SWITCH
+title: an agent with a saved GitHub key can be switched to the GitHub App by an admin
+  in-flow
+friction:
+- D13
+- D12
+- D11
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 1
+setup: []
+steps: []
+assert: []
+human:
+- click: 'In a QA channel with its own fork, @mention: ''give yourself access to pymc-labs/daimon-qa-fixture-private
+    using my GitHub token'' and submit a real fine-grained PAT in the repo card.'
+  expect: "Card ends in an accepted state, not 'Received. Saving\u2026'."
+- click: Run `/github connect` for that agent.
+  expect: No 'Ask your Daimon operator'. An admin-only 'Switch this agent to the GitHub
+    App' confirm appears.
+- click: Confirm the switch and finish the GitHub App picker.
+  expect: Repo picker lists the repo; the agent can read it on the next mentioned
+    message.
+- click: 'Before switching (saved PAT that can''t read the private repo): @mention
+    ''summarize README of pymc-labs/daimon-qa-fixture-private''.'
+  expect: "A clear 'can't read <repo> with the saved key' notice within 60 s, not\
+    \ minutes of work ending in 'GitHub refused access\u2026 Send your message again'\
+    \ (v2 D12)."
+- click: 'As a NON-admin member: `/github connect`.'
+  expect: 'Says a server admin (Manage Server) must approve, AND the request shows
+    up for an admin in `/github home` (latent: request reaches no admin).'
+- click: Start `/github connect`, then cancel on the GitHub page.
+  expect: No usable token is left behind (#586); /github home shows not connected.
+teardown: []

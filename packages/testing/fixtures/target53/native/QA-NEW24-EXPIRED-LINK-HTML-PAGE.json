@@ -1,0 +1,108 @@
+{
+  "scenario_id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+  "source": {
+    "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+    "sha256": "8e3c7e0021621387a6a8bfd1ad5c04030e3b450dc506be5f0371da5c70ebf0e0"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+    "sha256": "fe888733226cf71834accbac70d11d611794031440c6c6b5c2a31e54bd56fc9e"
+  },
+  "scenario": {
+    "id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+    "title": "an unknown/expired notebook or report link shows an HTML page, not raw JSON",
+    "friction": [
+      "NEW-24"
+    ],
+    "set": "A",
+    "surface": "headless",
+    "tier": "weekly",
+    "priority": "P2",
+    "est_turns": 0,
+    "setup": [],
+    "steps": [],
+    "assert": [
+      {
+        "kind": "http_check",
+        "url": "{env.notebook_host}/qa-missing-{nonce}/",
+        "expect_content_type": "text/html",
+        "body_absent": "\\{\\\"detail\\\""
+      },
+      {
+        "kind": "http_check",
+        "url": "{env.report_host}/r/qa-missing-{nonce}",
+        "expect_content_type": "text/html",
+        "body_absent": "\\{\\\"detail\\\""
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+id: QA-D22-WHO-ANSWERS-HERE
+title: '''which agent are you / who answers here'' matches the configured routing'
+friction:
+- D19
+- D36
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 2
+notes: '{env.default_agent} = the agent `daimon channels list` says answers in a new
+  QA channel (staging: daimon).'
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Which agent are you, and which agent answers in this channel? Name them exactly.
+- do: wait_done
+- do: channel_message
+  text: QA-SEED-{nonce} is the release codename.
+- do: mention
+  text: Read this channel's recent messages with your Discord tools and reply with
+    only the release codename.
+- do: wait_done
+assert:
+- kind: text_present
+  turn: 1
+  pattern: (?i)\b{env.default_agent}\b
+- kind: text_absent
+  turn: 1
+  pattern: (?i)default agent in this workspace
+- kind: text_present
+  turn: 2
+  pattern: QA-SEED-{nonce}
+- kind: text_absent
+  turn: 2
+  pattern: (?i)can'?t read|missing access|no access
+teardown: []

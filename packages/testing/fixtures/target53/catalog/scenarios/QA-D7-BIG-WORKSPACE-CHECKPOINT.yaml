@@ -1,0 +1,45 @@
+id: QA-D7-BIG-WORKSPACE-CHECKPOINT
+title: a 40 MB workspace does not burn minutes in the pre-replacement checkpoint
+friction:
+- D22
+- D1
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 3
+notes: Repro of PyMC 10-10 03:23 (368 MB, 2m34s checkpoint, files dropped). 40 MB
+  is over the 20 MB bundle cap. Pass = the checkpoint is skipped or time-capped so
+  turn 2 finishes fast; the agent may say files could not be carried (that is honest),
+  but not after minutes of dead time.
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'QA checkpoint check. Run: head -c 40M /dev/urandom > qa_big.bin in your working
+    directory, then reply with only: BIG-OK'
+- do: wait_done
+- do: admin
+  tool: cli
+  args: daimon channels skills add discord {guild_id} {channel_id} {env.qa_library_skill}
+- do: thread_reply
+  mention: true
+  text: 'Reply with only: PONG'
+- do: wait_done
+  timeout_s: 300
+assert:
+- kind: text_present
+  turn: 1
+  pattern: BIG-OK
+- kind: done_within_s
+  turn: 2
+  max: 75
+- kind: text_present
+  turn: 2
+  pattern: PONG
+- kind: card_finalized
+  turn: 2
+teardown:
+- do: admin
+  tool: cli
+  args: daimon channels skills remove discord {guild_id} {channel_id} {env.qa_library_skill}

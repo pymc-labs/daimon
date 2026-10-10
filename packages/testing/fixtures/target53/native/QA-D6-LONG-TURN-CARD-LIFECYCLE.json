@@ -1,0 +1,503 @@
+{
+  "scenario_id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+  "source": {
+    "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+    "sha256": "f9bd441447f2635b89d2c662f3d0a3f442c6fd845bfe03b2049ab1861cfef0e4"
+  },
+  "projection": {
+    "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+    "sha256": "6b8be2415b9309c7a578670cb374f1f37d186499d14e7be15a90c38df97b9641"
+  },
+  "scenario": {
+    "id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+    "title": "a 45 s turn shows progress while running and its card is finalized at the end",
+    "friction": [
+      "D1",
+      "D27"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "full",
+    "priority": "P1",
+    "est_turns": 1,
+    "notes": "Long enough to get several 10 s progress ticks, so the tick/final-edit race (D6) has room to fire. card_edits_min catches the frozen timer during a long tool call (surfaces #7).",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT"
+      },
+      {
+        "do": "wait_done",
+        "timeout_s": 180
+      },
+      {
+        "do": "wait",
+        "s": 15
+      }
+    ],
+    "assert": [
+      {
+        "kind": "reply_within_s",
+        "turn": 1,
+        "max": 10
+      },
+      {
+        "kind": "progress_seen",
+        "turn": 1,
+        "within_s": 30
+      },
+      {
+        "kind": "card_edits_min",
+        "turn": 1,
+        "min": 3,
+        "during": "running"
+      },
+      {
+        "kind": "text_present",
+        "turn": 1,
+        "pattern": "SLEPT"
+      },
+      {
+        "kind": "card_finalized",
+        "turn": 1
+      },
+      {
+        "kind": "done_within_s",
+        "turn": 1,
+        "max": 120
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done",
+        "timeout_s": 180
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "wait",
+      "source": {
+        "do": "wait",
+        "s": 15
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT",
+          "session_id": "qa-session-5b45cb3d26fafc82",
+          "root_id": "qa-openai-5b45cb3d26fafc82-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-5b45cb3d26fafc82-turn-1:running",
+              "session_id": "qa-session-5b45cb3d26fafc82",
+              "turn": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "session_id": "qa-session-5b45cb3d26fafc82",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-5b45cb3d26fafc82-turn-1:input",
+              "session_id": "qa-session-5b45cb3d26fafc82",
+              "turn": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "session_id": "qa-session-5b45cb3d26fafc82",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1:input",
+                "turn_id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-5b45cb3d26fafc82-turn-1:tool:0",
+              "session_id": "qa-session-5b45cb3d26fafc82",
+              "turn": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "session_id": "qa-session-5b45cb3d26fafc82",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1:tool:0",
+                "turn_id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "sleep 45",
+                "cwd": null,
+                "exit_code": 0,
+                "output": ""
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-5b45cb3d26fafc82-turn-1:answer",
+              "session_id": "qa-session-5b45cb3d26fafc82",
+              "turn": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "session_id": "qa-session-5b45cb3d26fafc82",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1:answer",
+                "turn_id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "SLEPT"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-5b45cb3d26fafc82-turn-1:end",
+              "session_id": "qa-session-5b45cb3d26fafc82",
+              "turn": {
+                "id": "qa-openai-5b45cb3d26fafc82-turn-1",
+                "session_id": "qa-session-5b45cb3d26fafc82",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-5b45cb3d26fafc82-turn-1",
+            "session_id": "qa-session-5b45cb3d26fafc82",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": "turn.1.tool.finished"
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must gate completion with its clock/concurrency hook."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT",
+          "session_id": "qa-session-5b45cb3d26fafc82",
+          "root_id": "qa-gemini-5b45cb3d26fafc82-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT"
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-5b45cb3d26fafc82-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-5b45cb3d26fafc82-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-5b45cb3d26fafc82-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-5b45cb3d26fafc82",
+            "steps": [
+              {
+                "id": "qa-gemini-5b45cb3d26fafc82-turn-1:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "sleep 45"
+                }
+              },
+              {
+                "id": "qa-gemini-5b45cb3d26fafc82-turn-1:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-5b45cb3d26fafc82-turn-1:tool:0",
+                "result": "",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-5b45cb3d26fafc82-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "SLEPT"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": "turn.1.tool.finished"
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must gate completion with its clock/concurrency hook."
+        }
+      ]
+    }
+  ]
+}

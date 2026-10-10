@@ -1,0 +1,41 @@
+id: QA-NEW5-THREAD-QUEUE-WHILE-BUSY
+title: a mentioned follow-up sent while a turn runs is queued visibly and then answered
+friction:
+- D26
+- NEW-5
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 2
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'QA queue. Run `sleep 30` with bash, then reply with only: FIRST-DONE'
+- do: wait
+  s: 8
+- do: thread_reply
+  mention: true
+  text: 'QA queue follow-up: also reply with only SECOND-DONE'
+- do: wait_done
+  timeout_s: 240
+assert:
+- kind: reaction_present
+  turn: 2
+  emoji: "\u231B"
+- kind: no_silent_drop
+  turn: 2
+  max: 10
+- kind: text_present
+  turn: 1
+  pattern: FIRST-DONE
+- kind: text_present
+  turn: 2
+  pattern: SECOND-DONE
+- kind: done_within_s
+  turn: 2
+  max: 150
+- kind: card_finalized
+  turn: 1
+teardown: []

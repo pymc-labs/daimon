@@ -1,0 +1,34 @@
+id: QA-D5-UNBOUND-AGENT-EDIT-REFUSED
+title: a plain member cannot edit an agent that is bound to no channel (#505)
+friction:
+- S1
+set: A
+surface: discord
+tier: full
+priority: P0
+est_turns: 1
+notes: 'Security. Server-side readback, not model prose. Expected FAIL until #505
+  is on staging.'
+setup:
+- do: admin
+  tool: cli
+  args: daimon agents --guild {guild_id} create fixtures/qa-unbound-agent.yaml
+steps:
+- do: new_channel
+- do: mention
+  as: user
+  text: 'Update the agent named qa-unbound-{nonce}: set its description to ''qa probe''.
+    Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki.'
+- do: wait_done
+assert:
+- kind: cli_check
+  cmd: daimon agents --guild {guild_id} get qa-unbound-{nonce}
+  expect: qa-original
+  expect_absent: qa probe|deepwiki
+- kind: text_absent
+  turn: 1
+  pattern: (?i)I (set|updated|attached|changed)
+teardown:
+- do: admin
+  tool: cli
+  args: daimon agents --guild {guild_id} archive qa-unbound-{nonce} --yes

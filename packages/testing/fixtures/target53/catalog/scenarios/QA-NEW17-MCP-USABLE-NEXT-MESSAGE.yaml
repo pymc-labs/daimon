@@ -1,0 +1,56 @@
+id: QA-NEW17-MCP-USABLE-NEXT-MESSAGE
+title: an MCP server attached in turn 1 is usable in the very next mentioned message
+friction:
+- D14
+- F5
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 2
+notes: Channel-own fork so no shared agent is edited. Turn 2 is sent ~5 s after turn
+  1 ends (inside the 30 s resolver cache).
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from
+    daimon
+- do: admin
+  tool: cli
+  args: daimon channels admins set discord {guild_id} {channel_id} --user {env.qa_user_id}
+- do: mention
+  text: Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent
+    as deepwiki.
+- do: wait_done
+- do: wait
+  s: 5
+- do: thread_reply
+  mention: true
+  text: Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is.
+- do: wait_done
+  timeout_s: 180
+assert:
+- kind: text_absent
+  turn: 1
+  pattern: (?i)start a new thread|open a new thread|new conversation to use|(isn't|is
+    not|aren't|are not) available in this (thread|conversation)
+- kind: text_absent
+  turn: 2
+  pattern: (?i)start a new thread|open a new thread|new conversation to use|(isn't|is
+    not|aren't|are not) available in this (thread|conversation)
+- kind: text_absent
+  turn: 2
+  pattern: (?i)can'?t use deepwiki
+- kind: log_present
+  turn: 2
+  event: session_preparation.refreshed
+- kind: text_present
+  turn: 2
+  pattern: (?i)marketing
+teardown:
+- do: admin
+  tool: archive_channel_forks
+  args:
+    channel: '{channel_id}'

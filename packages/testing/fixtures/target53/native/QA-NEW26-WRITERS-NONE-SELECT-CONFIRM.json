@@ -1,0 +1,109 @@
+{
+  "scenario_id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+  "source": {
+    "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+    "sha256": "2c344afba96bd17810e5debe5aabd7216c3efb6cbeb4ee691da9dc95d5202f88"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+    "sha256": "93aacf0d44078f443a1bbddea26cb2446b9d0edcec8d9bac297fa4b2edc79850"
+  },
+  "scenario": {
+    "id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+    "title": "setting 'Who can post: Nobody' in the Permissions panel asks for confirmation",
+    "friction": [
+      "NEW-13"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 0,
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "In a QA channel: `/agent-setup` → the channel's agent → Permissions → 'Who can post' → Nobody.",
+        "expect": "A confirm step appears before it applies."
+      },
+      {
+        "click": "Confirm, then @mention Daimon in that channel.",
+        "expect": "A visible signal (reaction or one-line notice). Total silence = FAIL."
+      },
+      {
+        "click": "Set 'Who can post' back to Anyone.",
+        "expect": "Saved."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

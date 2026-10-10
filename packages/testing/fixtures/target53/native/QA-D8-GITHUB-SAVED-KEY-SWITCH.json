@@ -1,0 +1,123 @@
+{
+  "scenario_id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+  "source": {
+    "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+    "sha256": "b69bbbfa18136846c9616b331c60052bf35ef72886ff241fed6e9177062aa6b2"
+  },
+  "projection": {
+    "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+    "sha256": "897a57bd5fb3bb9a57e7870e4c5bc8f20de3a05a69c0ee98c4f0e1de83d4ce1d"
+  },
+  "scenario": {
+    "id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+    "title": "an agent with a saved GitHub key can be switched to the GitHub App by an admin in-flow",
+    "friction": [
+      "D13",
+      "D12",
+      "D11"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 1,
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "In a QA channel with its own fork, @mention: 'give yourself access to pymc-labs/daimon-qa-fixture-private using my GitHub token' and submit a real fine-grained PAT in the repo card.",
+        "expect": "Card ends in an accepted state, not 'Received. Saving…'."
+      },
+      {
+        "click": "Run `/github connect` for that agent.",
+        "expect": "No 'Ask your Daimon operator'. An admin-only 'Switch this agent to the GitHub App' confirm appears."
+      },
+      {
+        "click": "Confirm the switch and finish the GitHub App picker.",
+        "expect": "Repo picker lists the repo; the agent can read it on the next mentioned message."
+      },
+      {
+        "click": "Before switching (saved PAT that can't read the private repo): @mention 'summarize README of pymc-labs/daimon-qa-fixture-private'.",
+        "expect": "A clear 'can't read <repo> with the saved key' notice within 60 s, not minutes of work ending in 'GitHub refused access… Send your message again' (v2 D12)."
+      },
+      {
+        "click": "As a NON-admin member: `/github connect`.",
+        "expect": "Says a server admin (Manage Server) must approve, AND the request shows up for an admin in `/github home` (latent: request reaches no admin)."
+      },
+      {
+        "click": "Start `/github connect`, then cancel on the GitHub page.",
+        "expect": "No usable token is left behind (#586); /github home shows not connected."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

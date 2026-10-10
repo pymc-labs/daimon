@@ -1,0 +1,51 @@
+id: QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS
+title: a real session replacement for a skills change keeps files and shows no preamble
+friction:
+- D1
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 3
+notes: 'RCA fix 2: the replacement notice should only show for reasons a user would
+  notice (not skills/system_prompt/tools). A channel skill add between turns forces
+  a genuine `skills` replacement (checkpoint turn on the old session is billed: est_turns
+  3). Expected to FAIL until RCA fix 2 lands; #603 alone does not hide the notice.'
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'QA replace check. Run: echo {nonce} > qa_keep.txt in your working directory,
+    then reply with only: SAVED'
+- do: wait_done
+- do: admin
+  tool: cli
+  args: daimon channels skills add discord {guild_id} {channel_id} {env.qa_library_skill}
+- do: thread_reply
+  mention: true
+  text: 'Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING'
+- do: wait_done
+  timeout_s: 240
+assert:
+- kind: log_present
+  turn: 2
+  event: session_preparation.replaced
+  fields:
+    reasons:
+    - skills
+- kind: text_absent
+  turn: 2
+  pattern: (?i)came across|conversation .{0,40}(moved|continued|carried)|working files
+    could not be saved|previous sandbox expired
+- kind: text_present
+  turn: 2
+  pattern: KEEP={nonce}
+- kind: done_within_s
+  turn: 2
+  max: 90
+- kind: card_finalized
+  turn: 2
+teardown:
+- do: admin
+  tool: cli
+  args: daimon channels skills remove discord {guild_id} {channel_id} {env.qa_library_skill}

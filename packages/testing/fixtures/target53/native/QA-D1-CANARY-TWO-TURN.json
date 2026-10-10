@@ -1,0 +1,876 @@
+{
+  "scenario_id": "QA-D1-CANARY-TWO-TURN",
+  "source": {
+    "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+    "sha256": "f27cb01435d171ed9ae253d7cbbc0ba58ca61815a5970c53832d1aed5cfd34f1"
+  },
+  "projection": {
+    "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+    "sha256": "f530be73b1f9afa75e342b4162720e6c2add1e42fc264d09aeb5ed472b78e04d"
+  },
+  "scenario": {
+    "id": "QA-D1-CANARY-TWO-TURN",
+    "title": "hourly canary: PDF mention + mentioned follow-up in one thread, file persists",
+    "friction": [
+      "D1",
+      "D22",
+      "D7",
+      "F4",
+      "F15",
+      "I7",
+      "NEW-1"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "canary",
+    "priority": "P0",
+    "est_turns": 2,
+    "notes": "Catches at once: D1 session replaced on follow-up (log + latency + preamble), stuck Working-on-it card (D6), channel-level Opening/Your chat is ready (D20), silent drop of a mention with a PDF attachment (NEW-1 / no-reply 10-09), slow first output (D16), (empty response) (I3), and lost working files (D7/F1 shape: write in turn 1, read in turn 2). The file value is random and never shown in chat, so turn 2 can only print it by reading the file. Prod: run in the dedicated canary channel of the internal guild (runner config), not a new channel.",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "file": "fixtures/canary.pdf",
+        "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>"
+      },
+      {
+        "do": "wait_done",
+        "timeout_s": 180
+      },
+      {
+        "do": "thread_reply",
+        "mention": true,
+        "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist."
+      },
+      {
+        "do": "wait_done",
+        "timeout_s": 180
+      }
+    ],
+    "assert": [
+      {
+        "kind": "no_silent_drop",
+        "turn": 1,
+        "max": 30
+      },
+      {
+        "kind": "reply_within_s",
+        "turn": 1,
+        "max": 10
+      },
+      {
+        "kind": "in_thread",
+        "turn": 1
+      },
+      {
+        "kind": "no_channel_post",
+        "turn": 1
+      },
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "(?i)opening your chat|your chat is ready"
+      },
+      {
+        "kind": "done_within_s",
+        "turn": 1,
+        "max": 60
+      },
+      {
+        "kind": "text_present",
+        "turn": 1,
+        "pattern": "CODE=TANGERINE-4471"
+      },
+      {
+        "kind": "card_finalized",
+        "turn": 1
+      },
+      {
+        "kind": "reply_within_s",
+        "turn": 2,
+        "max": 10
+      },
+      {
+        "kind": "same_thread",
+        "turn": 2,
+        "as_turn": 1
+      },
+      {
+        "kind": "done_within_s",
+        "turn": 2,
+        "max": 40
+      },
+      {
+        "kind": "text_absent",
+        "turn": 2,
+        "pattern": "(?i)came across|conversation .{0,40}(moved|continued|carried)|working files could not be saved|previous sandbox expired"
+      },
+      {
+        "kind": "text_present",
+        "turn": 2,
+        "pattern": "FILE=[0-9a-f]{12}\\b"
+      },
+      {
+        "kind": "text_absent",
+        "turn": 2,
+        "pattern": "FILE=MISSING"
+      },
+      {
+        "kind": "log_absent",
+        "turn": 2,
+        "event": "session_preparation.replaced"
+      },
+      {
+        "kind": "log_absent",
+        "turn": 2,
+        "event": "workspace_transfer.bundle_oversize"
+      },
+      {
+        "kind": "card_finalized",
+        "turn": 2
+      },
+      {
+        "kind": "attachments",
+        "turn": 2,
+        "max": 0
+      },
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "\\(empty response\\)"
+      },
+      {
+        "kind": "text_absent",
+        "turn": 2,
+        "pattern": "\\(empty response\\)"
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [
+    {
+      "path": "fixtures/canary.pdf",
+      "sha256": "035c7e590acb73d0a1b62acc86d9e96251a112f894d15abd1c93c9e5de99871e"
+    }
+  ],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "file": "fixtures/canary.pdf",
+        "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>",
+      "fixture": "fixtures/canary.pdf",
+      "fixture_sha256": "035c7e590acb73d0a1b62acc86d9e96251a112f894d15abd1c93c9e5de99871e"
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done",
+        "timeout_s": 180
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "host_turn",
+      "source": {
+        "do": "thread_reply",
+        "mention": true,
+        "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist."
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[4]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done",
+        "timeout_s": 180
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>",
+          "session_id": "qa-session-f9a8a68cd096bd45",
+          "root_id": "qa-openai-f9a8a68cd096bd45-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-1:running",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-1:input",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1:input",
+                "turn_id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-1:tool:0",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1:tool:0",
+                "turn_id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt",
+                "cwd": null,
+                "exit_code": 0,
+                "output": ""
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-1:answer",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1:answer",
+                "turn_id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "CODE=TANGERINE-4471"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-1:end",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-1",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-f9a8a68cd096bd45-turn-1",
+            "session_id": "qa-session-f9a8a68cd096bd45",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist.",
+          "session_id": "qa-session-f9a8a68cd096bd45",
+          "root_id": "qa-openai-f9a8a68cd096bd45-turn-2",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-2:running",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-2:input",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2:input",
+                "turn_id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-2:tool:0",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2:tool:0",
+                "turn_id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "cat qa_canary.txt",
+                "cwd": null,
+                "exit_code": 0,
+                "output": "a1b2c3d4e5f6\n"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-2:answer",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2:answer",
+                "turn_id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "FILE=a1b2c3d4e5f6"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-f9a8a68cd096bd45-turn-2:end",
+              "session_id": "qa-session-f9a8a68cd096bd45",
+              "turn": {
+                "id": "qa-openai-f9a8a68cd096bd45-turn-2",
+                "session_id": "qa-session-f9a8a68cd096bd45",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-f9a8a68cd096bd45-turn-2",
+            "session_id": "qa-session-f9a8a68cd096bd45",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>",
+          "session_id": "qa-session-f9a8a68cd096bd45",
+          "root_id": "qa-gemini-f9a8a68cd096bd45-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>"
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-f9a8a68cd096bd45-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-f9a8a68cd096bd45-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-f9a8a68cd096bd45",
+            "steps": [
+              {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-1:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt"
+                }
+              },
+              {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-1:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-f9a8a68cd096bd45-turn-1:tool:0",
+                "result": "",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CODE=TANGERINE-4471"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist.",
+          "session_id": "qa-session-f9a8a68cd096bd45",
+          "root_id": "qa-gemini-f9a8a68cd096bd45-turn-2",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-f9a8a68cd096bd45",
+            "input": [
+              {
+                "type": "text",
+                "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist."
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-f9a8a68cd096bd45-turn-1"
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-f9a8a68cd096bd45-turn-2:end",
+              "interaction": {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-2",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-f9a8a68cd096bd45-turn-2",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-f9a8a68cd096bd45",
+            "steps": [
+              {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-2:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "cat qa_canary.txt"
+                }
+              },
+              {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-2:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-f9a8a68cd096bd45-turn-2:tool:0",
+                "result": "a1b2c3d4e5f6\n",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-f9a8a68cd096bd45-turn-2:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "FILE=a1b2c3d4e5f6"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+  "source": {
+    "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+    "sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+    "sha256": "a41d54d93815ad8666ce0aa77416132a809c8bbb267f680a53f576f9f33b4bc8"
+  },
+  "scenario": {
+    "id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+    "title": "when the bot can't create threads, the reply names the permission instead of '@mention again'",
+    "friction": [
+      "NEW-14"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "weekly",
+    "priority": "P1",
+    "est_turns": 0,
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "admin",
+        "tool": "discord_overwrite",
+        "args": {
+          "target": "daimon_bot",
+          "deny": [
+            "CREATE_PUBLIC_THREADS"
+          ]
+        }
+      },
+      {
+        "do": "mention",
+        "text": "QA no-thread-perm: hello"
+      },
+      {
+        "do": "wait",
+        "s": 20
+      }
+    ],
+    "assert": [
+      {
+        "kind": "no_silent_drop",
+        "turn": 1,
+        "max": 20
+      },
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "(?i)@?mention Daimon again"
+      },
+      {
+        "kind": "text_present",
+        "turn": 1,
+        "pattern": "(?i)create (public )?threads"
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "discord_overwrite",
+        "args": {
+          "target": "daimon_bot",
+          "deny": [
+            "CREATE_PUBLIC_THREADS"
+          ]
+        }
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "QA no-thread-perm: hello"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA no-thread-perm: hello",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "wait",
+      "source": {
+        "do": "wait",
+        "s": 20
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[2]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[2]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    }
+  ]
+}

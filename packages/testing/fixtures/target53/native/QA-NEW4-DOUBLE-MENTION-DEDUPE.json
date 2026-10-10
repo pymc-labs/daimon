@@ -1,0 +1,429 @@
+{
+  "scenario_id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+  "source": {
+    "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+    "sha256": "6078f547156a351a5d1e5ee0ba56f5bb2cd397ab5e54f46920021b0c42de8db1"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+    "sha256": "ae31aabcc5405929e6a20b53a09f03162231a1b04e70f31907c332c248da45c4"
+  },
+  "scenario": {
+    "id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+    "title": "the same mention posted twice 1 s apart gets one answer, not two billed turns",
+    "friction": [
+      "D31"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "weekly",
+    "priority": "P2",
+    "est_turns": 2,
+    "notes": "Expected FAIL today (no dedupe). est_turns counts the worst case.",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "burst",
+        "interval_s": 1,
+        "texts": [
+          "QA dedupe: reply with only DUP-OK",
+          "QA dedupe: reply with only DUP-OK"
+        ]
+      },
+      {
+        "do": "wait_done",
+        "timeout_s": 120
+      }
+    ],
+    "assert": [
+      {
+        "kind": "answers_total",
+        "max": 1
+      },
+      {
+        "kind": "threads_created",
+        "max": 1
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1].texts[0]",
+      "operation": "host_turn",
+      "source": {
+        "do": "burst",
+        "interval_s": 1,
+        "texts": [
+          "QA dedupe: reply with only DUP-OK",
+          "QA dedupe: reply with only DUP-OK"
+        ]
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA dedupe: reply with only DUP-OK",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1].texts[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "burst",
+        "interval_s": 1,
+        "texts": [
+          "QA dedupe: reply with only DUP-OK",
+          "QA dedupe: reply with only DUP-OK"
+        ]
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": "turn2",
+      "text": "QA dedupe: reply with only DUP-OK",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done",
+        "timeout_s": 120
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1].texts[0]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA dedupe: reply with only DUP-OK",
+          "session_id": "qa-session-bfa6aa2aa5f315f5",
+          "root_id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "QA dedupe: reply with only DUP-OK"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-bfa6aa2aa5f315f5-turn-1:running",
+              "session_id": "qa-session-bfa6aa2aa5f315f5",
+              "turn": {
+                "id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+                "session_id": "qa-session-bfa6aa2aa5f315f5",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-bfa6aa2aa5f315f5-turn-1:input",
+              "session_id": "qa-session-bfa6aa2aa5f315f5",
+              "turn": {
+                "id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+                "session_id": "qa-session-bfa6aa2aa5f315f5",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-bfa6aa2aa5f315f5-turn-1:input",
+                "turn_id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "QA dedupe: reply with only DUP-OK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-bfa6aa2aa5f315f5-turn-1:answer",
+              "session_id": "qa-session-bfa6aa2aa5f315f5",
+              "turn": {
+                "id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+                "session_id": "qa-session-bfa6aa2aa5f315f5",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-bfa6aa2aa5f315f5-turn-1:answer",
+                "turn_id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "DUP-OK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-bfa6aa2aa5f315f5-turn-1:end",
+              "session_id": "qa-session-bfa6aa2aa5f315f5",
+              "turn": {
+                "id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+                "session_id": "qa-session-bfa6aa2aa5f315f5",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-bfa6aa2aa5f315f5-turn-1",
+            "session_id": "qa-session-bfa6aa2aa5f315f5",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[1].texts[1]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1].texts[0]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA dedupe: reply with only DUP-OK",
+          "session_id": "qa-session-bfa6aa2aa5f315f5",
+          "root_id": "qa-gemini-bfa6aa2aa5f315f5-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "QA dedupe: reply with only DUP-OK"
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-bfa6aa2aa5f315f5-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-bfa6aa2aa5f315f5-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-bfa6aa2aa5f315f5-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-bfa6aa2aa5f315f5",
+            "steps": [
+              {
+                "id": "qa-gemini-bfa6aa2aa5f315f5-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "DUP-OK"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[1].texts[1]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    }
+  ]
+}

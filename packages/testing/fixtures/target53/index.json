@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "target": {
+    "path": "TARGET-53.txt",
+    "sha256": "fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4"
+  },
+  "scenarios": [
+    {
+      "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
+      "sha256": "2aaf5f7da5d70bf228c98bb884219c16f4059310cb6e8649b202e4432127c417"
+    },
+    {
+      "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
+      "sha256": "4f672d918bfc01c66deb609b720bd3d2072d263dc495d870153ba8271f9cd927"
+    },
+    {
+      "path": "native/QA-D13-FILES-NOT-REPOSTED.json",
+      "sha256": "8b3ee7e4d49cb89f4cffeded763f7aa8f2cd503c5561ed49b43a83841ada9d33"
+    },
+    {
+      "path": "native/QA-D14-FORK-KEEPS-SKILLS.json",
+      "sha256": "d2c88939701b37b76c8c733d8537748ce75ea0a72fd2dc04da69f26a216bd759"
+    },
+    {
+      "path": "native/QA-D1-CANARY-TWO-TURN.json",
+      "sha256": "1a1fc4ec63bcdcfb88138ebe5dea0581e0f2d830a6c100294d7c1885b2d65e4f"
+    },
+    {
+      "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
+      "sha256": "e6c4ccefd14da965fd5bad3ea69d306103014d996eeba4207fac5f0c4d3a1d75"
+    },
+    {
+      "path": "native/QA-D1-SLACK-FOLLOWUP.json",
+      "sha256": "af59bb59537885c5b08c1b517b8aa6bc366903396679e31669538e7ea916dc1d"
+    },
+    {
+      "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
+      "sha256": "373072370ecfe206f0a1a56ce0ac28cac8ae1b51249f916542bd26e888fee0e6"
+    },
+    {
+      "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
+      "sha256": "3b19cfee537b4e791aa95a4cd493fb6abbc37c51addd703e374fd03dd7dd9134"
+    },
+    {
+      "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
+      "sha256": "81768bfffd3ddc184413b333dc2ce8d751ce0d76636dd8720f8c793d7b963fc0"
+    },
+    {
+      "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
+      "sha256": "fac68c813c5da0c2ec4ea0d393d78f03819a14d6bab4f0ea898e2efdcd2d5d39"
+    },
+    {
+      "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
+      "sha256": "768a809e0212ad2a568d856f6f5982e061564b24438cf3328b5433515025cbbb"
+    },
+    {
+      "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
+      "sha256": "9ae2b1ed8e869a8487bac74f69d65606d7b2426b31495ba7b46635a38d8b985f"
+    },
+    {
+      "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
+      "sha256": "77335c5681ee1e746bf26592deb665fba5f05c1d436dcb16a761efc06a08b69d"
+    },
+    {
+      "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
+      "sha256": "90bc5cd0d56da33d324d7b281cd8eff8b7d7e6d8f929c20af2d8bb6178087d31"
+    },
+    {
+      "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
+      "sha256": "48db4cfd7658576de26233867080fc563bcee747d00746992d031f3f3d69932f"
+    },
+    {
+      "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
+      "sha256": "402a974ee3f34cb5678f69e2fe71c2054d3636f9ee25e03c0e6c1d41a8d06ae6"
+    },
+    {
+      "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
+      "sha256": "c1c7b7ab71b3d9103fef521520dfa497ac560fc702fcf1d995fd3169ff2eae8c"
+    },
+    {
+      "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
+      "sha256": "c9c64a9493b89c7eb266e89286b03e1977df41c15694aa28ec4f030c9fd1e84f"
+    },
+    {
+      "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
+      "sha256": "1e85a481dbc862018a3f66a4663405f58cbd969a9cd9d36cc33237037a2d5d69"
+    },
+    {
+      "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
+      "sha256": "a52a84ac54325bf0c87015fb240ce1f1783f403fe5b88687f7d78b80cb07ff46"
+    },
+    {
+      "path": "native/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
+      "sha256": "90da1738f69fa5bf7295a1db26546cc3d27e0f485c8f75d9be85c917cd0d0db1"
+    },
+    {
+      "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
+      "sha256": "beddbf5c428700c1d11e78e070d1ac579728c43b76c697bef63c24d8848d3bd6"
+    },
+    {
+      "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
+      "sha256": "055a22d138983658c606403faf267f731c8e11c6310e4a6d5bfabcde667fab7d"
+    },
+    {
+      "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
+      "sha256": "b9662c201ff4b8ff3797a7a14d37ecc8e177684780bc266c090c894af3e6e3be"
+    },
+    {
+      "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
+      "sha256": "43aa223075a38e9cd7ccd8781899ec200f852cda537d940c745bac4d280aa32c"
+    },
+    {
+      "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
+      "sha256": "f0e6f0af0006fe82c456ed7e793abbac89849e8d976762fb7f6c71e3764d78dc"
+    },
+    {
+      "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
+      "sha256": "33f0826242ca20e73e5c0117f77305ed930838eed5a42185a9541fcb4cf55e20"
+    },
+    {
+      "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
+      "sha256": "0cbc4701ff76ebccaf7f3fe4f0cad4ff71cbd86daf0065b0c79493549cb6dfce"
+    },
+    {
+      "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
+      "sha256": "be982952f9b2ee848e83d31d46f9094167a5ec09cd7df6fc5db3315dfd04cb0f"
+    },
+    {
+      "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
+      "sha256": "c6a73cd0431b19cd9b5548673a7236f3add2cd7d09aa1bee0c7f79950bdf30a3"
+    },
+    {
+      "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
+      "sha256": "2ccc5773e2de6d1d30a3512fe3f60714519022ee0dea98e2accaa4ad222f44b2"
+    },
+    {
+      "path": "native/QA-NEW25-DM-NOT-SILENT.json",
+      "sha256": "530aafa04d120c45bd3bacfbe2228738057e6472b72d60a2e1bca136b0ac5884"
+    },
+    {
+      "path": "native/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
+      "sha256": "ce0975f474fea9d539b0e189b71f6b1f131ba44d161a29db6316717268d67f39"
+    },
+    {
+      "path": "native/QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
+      "sha256": "be3b22f7c9a1f32829aee1d5c4f09801f94fba74d8082681fd33516d2c165a1b"
+    },
+    {
+      "path": "native/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
+      "sha256": "d0fbc65aa7122f06d05787dc66a039790c5a3cc7c7045b960720b870e74e7249"
+    },
+    {
+      "path": "native/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
+      "sha256": "6d740ffb519123dba5181c1edd138b82acd9d8322df632189ce05a9e2ff34a09"
+    },
+    {
+      "path": "native/QA-NEW29-DM-CONVERSATION-FORM.json",
+      "sha256": "7aeebcd6e5de1a8d171fcda7b3e8bb8cb86e5bf4f4aac7bc6151a2ec0af36bcc"
+    },
+    {
+      "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
+      "sha256": "01c6987daecd8d82693f50d9bed86aab907ef2f0ff2cdef59f24a0b250e022de"
+    },
+    {
+      "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
+      "sha256": "37479f2b64d583b9afc96912474c122844e6342e46fbca74244b2255b4d00896"
+    },
+    {
+      "path": "native/QA-NEW31-PANELS-AFTER-RESTART.json",
+      "sha256": "392a206552c569ef977a83dd8870243d849c90af378923935736db88dd93c4a4"
+    },
+    {
+      "path": "native/QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
+      "sha256": "89214f1026b8604572d2a4c2de50b3e7674cb77726ea5b8ea044ab3e27a8ac89"
+    },
+    {
+      "path": "native/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
+      "sha256": "20d4a7bd7d06ab9e95153a8c4bb7ce351e5234beefb02f193fc4e81bafae8b9d"
+    },
+    {
+      "path": "native/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
+      "sha256": "02a9edb19c3d9a0e651b0a10cb4956dbc673b7a0cefbef86b204cfa1ca628555"
+    },
+    {
+      "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
+      "sha256": "c54a1a9651e8e13307325038634a908c26e9978d23ff0991a0a6df2613fe5f57"
+    },
+    {
+      "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
+      "sha256": "b5c6fbdd9c0fe6a3bfff337fafd9738932fd9e52e0b71450ef7916020859525e"
+    },
+    {
+      "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
+      "sha256": "548ea2f0ae94b792b8af76266c6201b5388ba6b0293c44a528d7f97600b8e6c7"
+    },
+    {
+      "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
+      "sha256": "2d05cf6bd474f9192a797b662d6a753dfd5f0485b3b11bc8a3decd83c4ea1271"
+    },
+    {
+      "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
+      "sha256": "d71ff1553a8f912a86737517911424181b8a49795aa04dcd5222dba44b568e59"
+    },
+    {
+      "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
+      "sha256": "5413fe4e24e229e9c261a8465454d4d8e1b169cca54bd9915de0dab817b2b465"
+    },
+    {
+      "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
+      "sha256": "45b11a77f458bcaa6e03f5c960ad66ed48171cb3dffa9116269a1482d2a4e8f9"
+    },
+    {
+      "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
+      "sha256": "f64483335a408458c0faad5b4ffd3245271e54b5ee387a389af41c09e43fd9d6"
+    },
+    {
+      "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
+      "sha256": "1840b0cb8fe3756898fbe715a32b6a7b8f0e55bbc968cae7423b990c607fe65c"
+    }
+  ]
+}

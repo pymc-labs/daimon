@@ -1,0 +1,124 @@
+{
+  "scenario_id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+  "source": {
+    "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+    "sha256": "b01e2ff21751d896972b3bdd8053182f14667dd3993573e30fd87638711d6e34"
+  },
+  "projection": {
+    "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+    "sha256": "3ef39d682d15cbb08b96ab5978976dd720ec554556682862201c3260d8457108"
+  },
+  "scenario": {
+    "id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+    "title": "Teams: the answer with the 'Ask a person' card is delivered, not 'Something went wrong'",
+    "friction": [
+      "D5",
+      "D20",
+      "F12",
+      "F13"
+    ],
+    "set": "B",
+    "surface": "teams",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 2,
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "In the staging Teams test tenant, @mention Daimon: 'reply with only TEAMS-OK'.",
+        "expect": "TEAMS-OK delivered; no 'Something went wrong. Mention me to try again.'"
+      },
+      {
+        "click": "Click 'Ask a person' on that answer.",
+        "expect": "Confirmation that a person was notified; the escalation lands in the configured support channel."
+      },
+      {
+        "click": "@mention again in the same thread: 'reply with only TEAMS-2'.",
+        "expect": "TEAMS-2 within 40 s, no 'came across' preamble."
+      },
+      {
+        "click": "@mention: 'run sleep 90 then say DONE'; driver restarts staging workers 15 s in.",
+        "expect": "Card says Daimon restarted and to @mention it again (Teams channels need a mention, F12); not 'send a message'."
+      },
+      {
+        "click": "@mention: 'run sleep 60 then say DONE', press Stop after 10 s.",
+        "expect": "Card says Stopped; no 'Done.', no 👍/👎, no ping (surfaces #8)."
+      },
+      {
+        "click": "@mention in a channel whose SharePoint files are not granted: 'make a tiny CSV and attach it'.",
+        "expect": "A visible 'files aren't enabled here, ask an admin' line, not a silent drop (R6/surfaces #12)."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

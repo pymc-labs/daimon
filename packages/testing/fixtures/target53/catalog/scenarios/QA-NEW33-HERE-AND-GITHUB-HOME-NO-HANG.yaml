@@ -1,0 +1,21 @@
+id: QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG
+title: "/here and /github home always finish (no endless 'is thinking\u2026')"
+friction:
+- F6
+- NEW-33
+set: B
+surface: discord
+tier: manual
+priority: P2
+est_turns: 0
+setup: []
+steps: []
+assert: []
+human:
+- click: Run `/here`, then `/github home`, in a QA channel.
+  expect: Both render within 10 s. Any error shows a message with a rid that appears
+    in staging logs.
+- click: Run `/privacy` from a DM with the bot.
+  expect: Not 'You have no data on file' for an account that has used Daimon; Export
+    is not a dead stub.
+teardown: []

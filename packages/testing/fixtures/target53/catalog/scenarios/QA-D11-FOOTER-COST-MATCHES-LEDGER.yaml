@@ -1,0 +1,31 @@
+id: QA-D11-FOOTER-COST-MATCHES-LEDGER
+title: the footer cost equals the ledger debit for the turn (markup included)
+friction:
+- F2
+- F1
+- D33
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'QA footer: reply with only FOOTER-OK. Do not use tools.'
+- do: wait_done
+assert:
+- kind: text_present
+  turn: 1
+  pattern: FOOTER-OK
+- kind: text_present
+  turn: 1
+  pattern: \d+s.*\$\d+\.\d{2,3}
+- kind: footer_cost_matches_ledger
+  turn: 1
+  tol_usd: 0.001
+- kind: ledger_matches_usage
+  turn: 1
+  tol_pct: 2
+teardown: []

@@ -1,0 +1,38 @@
+id: QA-D13-FILES-NOT-REPOSTED
+title: turn 2 posts only its own new file, not turn 1's files again
+friction:
+- F3
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 2
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Write the numbers 1-5 to a file qa_one.csv in an outputs folder and attach
+    it. One-line answer.
+- do: wait_done
+- do: thread_reply
+  mention: true
+  text: Now write the numbers 6-10 to qa_two.csv and attach only that file. One-line
+    answer.
+- do: wait_done
+assert:
+- kind: attachments
+  turn: 1
+  min: 1
+  name_pattern: qa_one\.csv$
+- kind: attachments
+  turn: 2
+  min: 1
+  name_pattern: qa_two\.csv$
+- kind: attachments
+  turn: 2
+  max: 0
+  name_pattern: qa_one\.csv$
+- kind: attachments
+  turn: 2
+  unique: true
+teardown: []

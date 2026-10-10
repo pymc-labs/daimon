@@ -1,0 +1,22 @@
+id: QA-NEW28-OAUTH-ABANDONED-AND-RESUME
+title: an abandoned OAuth sign-in does not freeze the card; a completed one resumes
+  the waiting task
+friction:
+- NEW-28
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 2
+setup: []
+steps: []
+assert: []
+human:
+- click: '@mention: ''connect Notion (MCP OAuth) and then list my 3 newest pages''.
+    Click ''Connect my account'', then close the tab without signing in. Wait 11 min.'
+  expect: "The card is NOT stuck on 'Received. Saving\u2026' (it shows expired/refused\
+    \ with a retry path)."
+- click: Ask again, click Connect, finish the Notion sign-in.
+  expect: Without typing anything else, Daimon continues in the thread and lists the
+    3 pages.
+teardown: []

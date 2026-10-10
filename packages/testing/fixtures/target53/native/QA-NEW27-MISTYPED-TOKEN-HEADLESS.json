@@ -1,0 +1,145 @@
+{
+  "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+  "source": {
+    "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+    "sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+    "sha256": "21dbb0f275e8770c69a2896affa7755bf74a118bb91f8a63b8e76bb4f8c3310e"
+  },
+  "scenario": {
+    "id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+    "title": "headless: a rejected MCP token does not consume the credential request",
+    "friction": [
+      "D11",
+      "NEW-27"
+    ],
+    "set": "A",
+    "surface": "headless",
+    "tier": "weekly",
+    "priority": "P1",
+    "est_turns": 0,
+    "notes": "Drives credential_modals' MCP submit path in-process with a token the probe rejects. Runner returns typed PENDING until the headless hook lands.",
+    "setup": [],
+    "steps": [
+      {
+        "do": "admin",
+        "tool": "headless",
+        "args": {
+          "call": "credential_submit.mcp_token",
+          "token": "wrong-token-123",
+          "url": "{env.qa_token_mcp_url}"
+        }
+      }
+    ],
+    "assert": [
+      {
+        "kind": "db_check",
+        "sql": "select used_at is null from credential_requests where id = '{headless.request_id}'",
+        "expect": true
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "headless",
+        "args": {
+          "call": "credential_submit.mcp_token",
+          "token": "wrong-token-123",
+          "url": "{env.qa_token_mcp_url}"
+        }
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    }
+  ]
+}

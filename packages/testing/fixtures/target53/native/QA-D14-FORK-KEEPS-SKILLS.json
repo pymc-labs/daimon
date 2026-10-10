@@ -1,0 +1,199 @@
+{
+  "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+  "source": {
+    "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+    "sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0"
+  },
+  "projection": {
+    "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+    "sha256": "ef8e4a9de2a560edb89eef5b646861fc1f83e1e7eb1fe78ab7966dd488d17f00"
+  },
+  "scenario": {
+    "id": "QA-D14-FORK-KEEPS-SKILLS",
+    "title": "a channel-own fork keeps every skill its source carries",
+    "friction": [
+      "F5",
+      "D39"
+    ],
+    "set": "A",
+    "surface": "headless",
+    "tier": "weekly",
+    "priority": "P1",
+    "est_turns": 0,
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from {env.qa_base_with_own_skill}"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "cli_check",
+        "cmd": "daimon agents --guild {guild_id} get {fork.name}",
+        "expect_all_of": "{env.qa_base_with_own_skill.skills}"
+      },
+      {
+        "kind": "cli_check",
+        "cmd": "daimon agents --guild {guild_id} get {fork.name}",
+        "expect": "{env.qa_base_with_own_skill.model}"
+      },
+      {
+        "kind": "log_absent",
+        "turn": 0,
+        "event": "agent_fork.dropped_skills"
+      }
+    ],
+    "teardown": [
+      {
+        "do": "admin",
+        "tool": "archive_channel_forks",
+        "args": {
+          "channel": "{channel_id}"
+        }
+      }
+    ]
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from {env.qa_base_with_own_skill}"
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "teardown[0]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "archive_channel_forks",
+        "args": {
+          "channel": "{channel_id}"
+        }
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    }
+  ]
+}

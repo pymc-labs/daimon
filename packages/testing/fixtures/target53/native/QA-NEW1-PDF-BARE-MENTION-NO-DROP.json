@@ -1,0 +1,413 @@
+{
+  "scenario_id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+  "source": {
+    "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+    "sha256": "2a27dc919ebf783194c926b2995771b054f7effce7422c76a2df86c477b85b85"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+    "sha256": "bf8fa8b0efa6d44ef3d8423bc26232b0858c88b931f2ff879e9ca4ecdda426ba"
+  },
+  "scenario": {
+    "id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+    "title": "'test @Daimon' with a PDF attached is answered in a thread, never silently dropped",
+    "friction": [
+      "NEW-1",
+      "F4",
+      "D7"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "full",
+    "priority": "P0",
+    "est_turns": 1,
+    "notes": "Exact 10-09 15:54 repro shape: almost no text, a 2-page PDF (275 KB in the original).",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "test",
+        "file": "fixtures/competitive-weakness.pdf"
+      },
+      {
+        "do": "wait_done"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "no_silent_drop",
+        "turn": 1,
+        "max": 15
+      },
+      {
+        "kind": "reply_within_s",
+        "turn": 1,
+        "max": 10
+      },
+      {
+        "kind": "in_thread",
+        "turn": 1
+      },
+      {
+        "kind": "no_channel_post",
+        "turn": 1
+      },
+      {
+        "kind": "done_within_s",
+        "turn": 1,
+        "max": 90
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [
+    {
+      "path": "fixtures/competitive-weakness.pdf",
+      "sha256": "061c1a699f29f7024e2ed13264791f02b7d14dee16215cbe9dccb2840871e83e"
+    }
+  ],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "test",
+        "file": "fixtures/competitive-weakness.pdf"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "test",
+      "fixture": "fixtures/competitive-weakness.pdf",
+      "fixture_sha256": "061c1a699f29f7024e2ed13264791f02b7d14dee16215cbe9dccb2840871e83e"
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "test",
+          "session_id": "qa-session-1d435f74e175aa03",
+          "root_id": "qa-openai-1d435f74e175aa03-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "test"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-1d435f74e175aa03-turn-1:running",
+              "session_id": "qa-session-1d435f74e175aa03",
+              "turn": {
+                "id": "qa-openai-1d435f74e175aa03-turn-1",
+                "session_id": "qa-session-1d435f74e175aa03",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-1d435f74e175aa03-turn-1:input",
+              "session_id": "qa-session-1d435f74e175aa03",
+              "turn": {
+                "id": "qa-openai-1d435f74e175aa03-turn-1",
+                "session_id": "qa-session-1d435f74e175aa03",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-1d435f74e175aa03-turn-1:input",
+                "turn_id": "qa-openai-1d435f74e175aa03-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "test"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-1d435f74e175aa03-turn-1:answer",
+              "session_id": "qa-session-1d435f74e175aa03",
+              "turn": {
+                "id": "qa-openai-1d435f74e175aa03-turn-1",
+                "session_id": "qa-session-1d435f74e175aa03",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-1d435f74e175aa03-turn-1:answer",
+                "turn_id": "qa-openai-1d435f74e175aa03-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "I can help review the attached document."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-1d435f74e175aa03-turn-1:end",
+              "session_id": "qa-session-1d435f74e175aa03",
+              "turn": {
+                "id": "qa-openai-1d435f74e175aa03-turn-1",
+                "session_id": "qa-session-1d435f74e175aa03",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-1d435f74e175aa03-turn-1",
+            "session_id": "qa-session-1d435f74e175aa03",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "test",
+          "session_id": "qa-session-1d435f74e175aa03",
+          "root_id": "qa-gemini-1d435f74e175aa03-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "test"
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-1d435f74e175aa03-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-1d435f74e175aa03-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-1d435f74e175aa03-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-1d435f74e175aa03",
+            "steps": [
+              {
+                "id": "qa-gemini-1d435f74e175aa03-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I can help review the attached document."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    }
+  ]
+}

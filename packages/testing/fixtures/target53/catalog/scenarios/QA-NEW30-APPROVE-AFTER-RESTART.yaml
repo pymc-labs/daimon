@@ -1,0 +1,28 @@
+id: QA-NEW30-APPROVE-AFTER-RESTART
+title: clicking Approve/Deny on a card from before a restart says it expired, not
+  'interaction failed'
+friction:
+- NEW-30
+- D6
+- F11
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 2
+notes: 'Needs a card: in a rule-held channel (readers own) a publish asks (#412).
+  Driver triggers the restart.'
+setup: []
+steps: []
+assert: []
+human:
+- click: 'In a readers-own QA channel, @mention: ''publish a one-page report titled
+    QA restart card''. Wait for the Approve card. Do NOT click.'
+  expect: Approve / Deny card shown.
+- click: Tell the driver to restart staging workers; wait for bot_ready, then click
+    Approve.
+  expect: "'This request expired / Daimon restarted, ask again' (not 'This interaction\
+    \ failed'); card no longer reads 'Expires in\u2026'."
+- click: '@mention in the same thread: ''reply with only ALIVE''.'
+  expect: ALIVE within 40 s (thread not stuck, D4).
+teardown: []

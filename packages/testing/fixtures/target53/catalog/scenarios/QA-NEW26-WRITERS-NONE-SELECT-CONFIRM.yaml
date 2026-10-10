@@ -1,0 +1,21 @@
+id: QA-NEW26-WRITERS-NONE-SELECT-CONFIRM
+title: 'setting ''Who can post: Nobody'' in the Permissions panel asks for confirmation'
+friction:
+- NEW-13
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 0
+setup: []
+steps: []
+assert: []
+human:
+- click: "In a QA channel: `/agent-setup` \u2192 the channel's agent \u2192 Permissions\
+    \ \u2192 'Who can post' \u2192 Nobody."
+  expect: A confirm step appears before it applies.
+- click: Confirm, then @mention Daimon in that channel.
+  expect: A visible signal (reaction or one-line notice). Total silence = FAIL.
+- click: Set 'Who can post' back to Anyone.
+  expect: Saved.
+teardown: []

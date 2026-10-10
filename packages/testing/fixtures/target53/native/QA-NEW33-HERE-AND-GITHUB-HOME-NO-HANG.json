@@ -1,0 +1,106 @@
+{
+  "scenario_id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+  "source": {
+    "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+    "sha256": "3706a81575ed8a7d094c29f0b0d70457e47b99ea45e41bbf7502039e8556b839"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+    "sha256": "5fb1dc2891ac5a7612f1928c51aeb3ff38d32efe05c403207eb6d3e17e4bb823"
+  },
+  "scenario": {
+    "id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+    "title": "/here and /github home always finish (no endless 'is thinking…')",
+    "friction": [
+      "F6",
+      "NEW-33"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P2",
+    "est_turns": 0,
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "Run `/here`, then `/github home`, in a QA channel.",
+        "expect": "Both render within 10 s. Any error shows a message with a rid that appears in staging logs."
+      },
+      {
+        "click": "Run `/privacy` from a DM with the bot.",
+        "expect": "Not 'You have no data on file' for an account that has used Daimon; Export is not a dead stub."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

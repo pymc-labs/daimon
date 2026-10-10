@@ -1,0 +1,36 @@
+id: QA-NEW1-PDF-BARE-MENTION-NO-DROP
+title: '''test @Daimon'' with a PDF attached is answered in a thread, never silently
+  dropped'
+friction:
+- NEW-1
+- F4
+- D7
+set: A
+surface: discord
+tier: full
+priority: P0
+est_turns: 1
+notes: 'Exact 10-09 15:54 repro shape: almost no text, a 2-page PDF (275 KB in the
+  original).'
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: test
+  file: fixtures/competitive-weakness.pdf
+- do: wait_done
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 15
+- kind: reply_within_s
+  turn: 1
+  max: 10
+- kind: in_thread
+  turn: 1
+- kind: no_channel_post
+  turn: 1
+- kind: done_within_s
+  turn: 1
+  max: 90
+teardown: []

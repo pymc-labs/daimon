@@ -1,0 +1,28 @@
+id: QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE
+title: a tool-only turn ends in a finished card, never '(empty response)' or a blank
+  message
+friction:
+- I7
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: QA tool-only. Run `true` with bash. Do not write any reply text at all.
+- do: wait_done
+assert:
+- kind: text_absent
+  turn: 1
+  pattern: \(empty response\)
+- kind: no_blank_message
+  turn: 1
+- kind: card_finalized
+  turn: 1
+- kind: done_within_s
+  turn: 1
+  max: 60
+teardown: []

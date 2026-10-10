@@ -1,0 +1,26 @@
+id: QA-NEW4-DOUBLE-MENTION-DEDUPE
+title: the same mention posted twice 1 s apart gets one answer, not two billed turns
+friction:
+- D31
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 2
+notes: Expected FAIL today (no dedupe). est_turns counts the worst case.
+setup: []
+steps:
+- do: new_channel
+- do: burst
+  interval_s: 1
+  texts:
+  - 'QA dedupe: reply with only DUP-OK'
+  - 'QA dedupe: reply with only DUP-OK'
+- do: wait_done
+  timeout_s: 120
+assert:
+- kind: answers_total
+  max: 1
+- kind: threads_created
+  max: 1
+teardown: []

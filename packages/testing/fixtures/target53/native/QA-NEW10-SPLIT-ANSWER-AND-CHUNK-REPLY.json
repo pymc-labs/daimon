@@ -1,0 +1,659 @@
+{
+  "scenario_id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+  "source": {
+    "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+    "sha256": "eb04c8d43a4dd17c481abf5dc5f2caa024d359a39fcee952377af6a7cf68d853"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+    "sha256": "7d12d48be56b679440aae77680ed243336efcef3264f4e7907d88e9d230b8550"
+  },
+  "scenario": {
+    "id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+    "title": "a long answer posts all chunks together with balanced fences, and a reply to chunk 2 is answered",
+    "friction": [
+      "D18",
+      "F17"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "full",
+    "priority": "P1",
+    "est_turns": 2,
+    "notes": "The turn-2 reply @mentions Daimon and Discord-replies to the 2nd chunk (fixed by b77ffddad; regression guard).",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools."
+      },
+      {
+        "do": "wait_done",
+        "timeout_s": 240
+      },
+      {
+        "do": "thread_reply",
+        "mention": true,
+        "reply_to": "turn1.chunk2",
+        "text": "QA chunk reply: reply with only CHUNK-OK"
+      },
+      {
+        "do": "wait_done"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "message_count",
+        "turn": 1,
+        "min": 2
+      },
+      {
+        "kind": "fences_balanced",
+        "turn": 1
+      },
+      {
+        "kind": "chunks_gap_max_s",
+        "turn": 1,
+        "max": 5
+      },
+      {
+        "kind": "footer_on_last_message",
+        "turn": 1
+      },
+      {
+        "kind": "text_present",
+        "turn": 2,
+        "pattern": "CHUNK-OK"
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools."
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done",
+        "timeout_s": 240
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "host_turn",
+      "source": {
+        "do": "thread_reply",
+        "mention": true,
+        "reply_to": "turn1.chunk2",
+        "text": "QA chunk reply: reply with only CHUNK-OK"
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA chunk reply: reply with only CHUNK-OK",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[4]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools.",
+          "session_id": "qa-session-8b917e5a82fee069",
+          "root_id": "qa-openai-8b917e5a82fee069-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-1:running",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-1",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-1:input",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-1",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-8b917e5a82fee069-turn-1:input",
+                "turn_id": "qa-openai-8b917e5a82fee069-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-1:answer",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-1",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-8b917e5a82fee069-turn-1:answer",
+                "turn_id": "qa-openai-8b917e5a82fee069-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "```python\nclass Inventory:\n    \"\"\"Toy inventory used by the QA fixture.\"\"\"\n    def item_0(self): return 0  # inventory entry 0\n    def item_1(self): return 1  # inventory entry 1\n    def item_2(self): return 2  # inventory entry 2\n    def item_3(self): return 3  # inventory entry 3\n    def item_4(self): return 4  # inventory entry 4\n    def item_5(self): return 5  # inventory entry 5\n    def item_6(self): return 6  # inventory entry 6\n    def item_7(self): return 7  # inventory entry 7\n    def item_8(self): return 8  # inventory entry 8\n    def item_9(self): return 9  # inventory entry 9\n    def item_10(self): return 10  # inventory entry 10\n    def item_11(self): return 11  # inventory entry 11\n    def item_12(self): return 12  # inventory entry 12\n    def item_13(self): return 13  # inventory entry 13\n    def item_14(self): return 14  # inventory entry 14\n    def item_15(self): return 15  # inventory entry 15\n    def item_16(self): return 16  # inventory entry 16\n    def item_17(self): return 17  # inventory entry 17\n    def item_18(self): return 18  # inventory entry 18\n    def item_19(self): return 19  # inventory entry 19\n    def item_20(self): return 20  # inventory entry 20\n    def item_21(self): return 21  # inventory entry 21\n    def item_22(self): return 22  # inventory entry 22\n    def item_23(self): return 23  # inventory entry 23\n    def item_24(self): return 24  # inventory entry 24\n    def item_25(self): return 25  # inventory entry 25\n    def item_26(self): return 26  # inventory entry 26\n    def item_27(self): return 27  # inventory entry 27\n    def item_28(self): return 28  # inventory entry 28\n    def item_29(self): return 29  # inventory entry 29\n    def item_30(self): return 30  # inventory entry 30\n    def item_31(self): return 31  # inventory entry 31\n    def item_32(self): return 32  # inventory entry 32\n    def item_33(self): return 33  # inventory entry 33\n    def item_34(self): return 34  # inventory entry 34\n    def item_35(self): return 35  # inventory entry 35\n    def item_36(self): return 36  # inventory entry 36\n    def item_37(self): return 37  # inventory entry 37\n    def item_38(self): return 38  # inventory entry 38\n    def item_39(self): return 39  # inventory entry 39\n    def item_40(self): return 40  # inventory entry 40\n    def item_41(self): return 41  # inventory entry 41\n    def item_42(self): return 42  # inventory entry 42\n    def item_43(self): return 43  # inventory entry 43\n    def item_44(self): return 44  # inventory entry 44\n    def item_45(self): return 45  # inventory entry 45\n    def item_46(self): return 46  # inventory entry 46\n    def item_47(self): return 47  # inventory entry 47\n    def item_48(self): return 48  # inventory entry 48\n    def item_49(self): return 49  # inventory entry 49\n    def item_50(self): return 50  # inventory entry 50\n    def item_51(self): return 51  # inventory entry 51\n    def item_52(self): return 52  # inventory entry 52\n    def item_53(self): return 53  # inventory entry 53\n    def item_54(self): return 54  # inventory entry 54\n    def item_55(self): return 55  # inventory entry 55\n    def item_56(self): return 56  # inventory entry 56\n    def item_57(self): return 57  # inventory entry 57\n    def item_58(self): return 58  # inventory entry 58\n    def item_59(self): return 59  # inventory entry 59\n    def item_60(self): return 60  # inventory entry 60\n    def item_61(self): return 61  # inventory entry 61\n    def item_62(self): return 62  # inventory entry 62\n    def item_63(self): return 63  # inventory entry 63\n    def item_64(self): return 64  # inventory entry 64\n    def item_65(self): return 65  # inventory entry 65\n    def item_66(self): return 66  # inventory entry 66\n    def item_67(self): return 67  # inventory entry 67\n    def item_68(self): return 68  # inventory entry 68\n    def item_69(self): return 69  # inventory entry 69\n    def item_70(self): return 70  # inventory entry 70\n    def item_71(self): return 71  # inventory entry 71\n    def item_72(self): return 72  # inventory entry 72\n    def item_73(self): return 73  # inventory entry 73\n    def item_74(self): return 74  # inventory entry 74\n    def item_75(self): return 75  # inventory entry 75\n    def item_76(self): return 76  # inventory entry 76\n    def item_77(self): return 77  # inventory entry 77\n    def item_78(self): return 78  # inventory entry 78\n    def item_79(self): return 79  # inventory entry 79\n    def item_80(self): return 80  # inventory entry 80\n    def item_81(self): return 81  # inventory entry 81\n    def item_82(self): return 82  # inventory entry 82\n    def item_83(self): return 83  # inventory entry 83\n    def item_84(self): return 84  # inventory entry 84\n    def item_85(self): return 85  # inventory entry 85\n    def item_86(self): return 86  # inventory entry 86\n    def item_87(self): return 87  # inventory entry 87\n    def item_88(self): return 88  # inventory entry 88\n    def item_89(self): return 89  # inventory entry 89\n    def item_90(self): return 90  # inventory entry 90\n    def item_91(self): return 91  # inventory entry 91\n    def item_92(self): return 92  # inventory entry 92\n    def item_93(self): return 93  # inventory entry 93\n    def item_94(self): return 94  # inventory entry 94\n    def item_95(self): return 95  # inventory entry 95\n    def item_96(self): return 96  # inventory entry 96\n    def item_97(self): return 97  # inventory entry 97\n    def item_98(self): return 98  # inventory entry 98\n    def item_99(self): return 99  # inventory entry 99\n    def item_100(self): return 100  # inventory entry 100\n    def item_101(self): return 101  # inventory entry 101\n    def item_102(self): return 102  # inventory entry 102\n    def item_103(self): return 103  # inventory entry 103\n    def item_104(self): return 104  # inventory entry 104\n    def item_105(self): return 105  # inventory entry 105\n    def item_106(self): return 106  # inventory entry 106\n    def item_107(self): return 107  # inventory entry 107\n    def item_108(self): return 108  # inventory entry 108\n    def item_109(self): return 109  # inventory entry 109\n    def item_110(self): return 110  # inventory entry 110\n    def item_111(self): return 111  # inventory entry 111\n    def item_112(self): return 112  # inventory entry 112\n    def item_113(self): return 113  # inventory entry 113\n    def item_114(self): return 114  # inventory entry 114\n    def item_115(self): return 115  # inventory entry 115\n    def item_116(self): return 116  # inventory entry 116\n    def item_117(self): return 117  # inventory entry 117\n```\n- Stores entries.\n- Lists items.\n- Counts stock.\n- Uses methods.\n- Includes docs."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-1:end",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-1",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-8b917e5a82fee069-turn-1",
+            "session_id": "qa-session-8b917e5a82fee069",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA chunk reply: reply with only CHUNK-OK",
+          "session_id": "qa-session-8b917e5a82fee069",
+          "root_id": "qa-openai-8b917e5a82fee069-turn-2",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "QA chunk reply: reply with only CHUNK-OK"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-2:running",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-2",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-2:input",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-2",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-8b917e5a82fee069-turn-2:input",
+                "turn_id": "qa-openai-8b917e5a82fee069-turn-2",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "QA chunk reply: reply with only CHUNK-OK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-2:answer",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-2",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-8b917e5a82fee069-turn-2:answer",
+                "turn_id": "qa-openai-8b917e5a82fee069-turn-2",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "CHUNK-OK"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-8b917e5a82fee069-turn-2:end",
+              "session_id": "qa-session-8b917e5a82fee069",
+              "turn": {
+                "id": "qa-openai-8b917e5a82fee069-turn-2",
+                "session_id": "qa-session-8b917e5a82fee069",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-8b917e5a82fee069-turn-2",
+            "session_id": "qa-session-8b917e5a82fee069",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools.",
+          "session_id": "qa-session-8b917e5a82fee069",
+          "root_id": "qa-gemini-8b917e5a82fee069-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Write a Python file of about 120 lines (a toy inventory class with docstrings) in one ```python fenced block, followed by a 5-bullet explanation. No tools."
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-8b917e5a82fee069-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-8b917e5a82fee069-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-8b917e5a82fee069-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-8b917e5a82fee069",
+            "steps": [
+              {
+                "id": "qa-gemini-8b917e5a82fee069-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "```python\nclass Inventory:\n    \"\"\"Toy inventory used by the QA fixture.\"\"\"\n    def item_0(self): return 0  # inventory entry 0\n    def item_1(self): return 1  # inventory entry 1\n    def item_2(self): return 2  # inventory entry 2\n    def item_3(self): return 3  # inventory entry 3\n    def item_4(self): return 4  # inventory entry 4\n    def item_5(self): return 5  # inventory entry 5\n    def item_6(self): return 6  # inventory entry 6\n    def item_7(self): return 7  # inventory entry 7\n    def item_8(self): return 8  # inventory entry 8\n    def item_9(self): return 9  # inventory entry 9\n    def item_10(self): return 10  # inventory entry 10\n    def item_11(self): return 11  # inventory entry 11\n    def item_12(self): return 12  # inventory entry 12\n    def item_13(self): return 13  # inventory entry 13\n    def item_14(self): return 14  # inventory entry 14\n    def item_15(self): return 15  # inventory entry 15\n    def item_16(self): return 16  # inventory entry 16\n    def item_17(self): return 17  # inventory entry 17\n    def item_18(self): return 18  # inventory entry 18\n    def item_19(self): return 19  # inventory entry 19\n    def item_20(self): return 20  # inventory entry 20\n    def item_21(self): return 21  # inventory entry 21\n    def item_22(self): return 22  # inventory entry 22\n    def item_23(self): return 23  # inventory entry 23\n    def item_24(self): return 24  # inventory entry 24\n    def item_25(self): return 25  # inventory entry 25\n    def item_26(self): return 26  # inventory entry 26\n    def item_27(self): return 27  # inventory entry 27\n    def item_28(self): return 28  # inventory entry 28\n    def item_29(self): return 29  # inventory entry 29\n    def item_30(self): return 30  # inventory entry 30\n    def item_31(self): return 31  # inventory entry 31\n    def item_32(self): return 32  # inventory entry 32\n    def item_33(self): return 33  # inventory entry 33\n    def item_34(self): return 34  # inventory entry 34\n    def item_35(self): return 35  # inventory entry 35\n    def item_36(self): return 36  # inventory entry 36\n    def item_37(self): return 37  # inventory entry 37\n    def item_38(self): return 38  # inventory entry 38\n    def item_39(self): return 39  # inventory entry 39\n    def item_40(self): return 40  # inventory entry 40\n    def item_41(self): return 41  # inventory entry 41\n    def item_42(self): return 42  # inventory entry 42\n    def item_43(self): return 43  # inventory entry 43\n    def item_44(self): return 44  # inventory entry 44\n    def item_45(self): return 45  # inventory entry 45\n    def item_46(self): return 46  # inventory entry 46\n    def item_47(self): return 47  # inventory entry 47\n    def item_48(self): return 48  # inventory entry 48\n    def item_49(self): return 49  # inventory entry 49\n    def item_50(self): return 50  # inventory entry 50\n    def item_51(self): return 51  # inventory entry 51\n    def item_52(self): return 52  # inventory entry 52\n    def item_53(self): return 53  # inventory entry 53\n    def item_54(self): return 54  # inventory entry 54\n    def item_55(self): return 55  # inventory entry 55\n    def item_56(self): return 56  # inventory entry 56\n    def item_57(self): return 57  # inventory entry 57\n    def item_58(self): return 58  # inventory entry 58\n    def item_59(self): return 59  # inventory entry 59\n    def item_60(self): return 60  # inventory entry 60\n    def item_61(self): return 61  # inventory entry 61\n    def item_62(self): return 62  # inventory entry 62\n    def item_63(self): return 63  # inventory entry 63\n    def item_64(self): return 64  # inventory entry 64\n    def item_65(self): return 65  # inventory entry 65\n    def item_66(self): return 66  # inventory entry 66\n    def item_67(self): return 67  # inventory entry 67\n    def item_68(self): return 68  # inventory entry 68\n    def item_69(self): return 69  # inventory entry 69\n    def item_70(self): return 70  # inventory entry 70\n    def item_71(self): return 71  # inventory entry 71\n    def item_72(self): return 72  # inventory entry 72\n    def item_73(self): return 73  # inventory entry 73\n    def item_74(self): return 74  # inventory entry 74\n    def item_75(self): return 75  # inventory entry 75\n    def item_76(self): return 76  # inventory entry 76\n    def item_77(self): return 77  # inventory entry 77\n    def item_78(self): return 78  # inventory entry 78\n    def item_79(self): return 79  # inventory entry 79\n    def item_80(self): return 80  # inventory entry 80\n    def item_81(self): return 81  # inventory entry 81\n    def item_82(self): return 82  # inventory entry 82\n    def item_83(self): return 83  # inventory entry 83\n    def item_84(self): return 84  # inventory entry 84\n    def item_85(self): return 85  # inventory entry 85\n    def item_86(self): return 86  # inventory entry 86\n    def item_87(self): return 87  # inventory entry 87\n    def item_88(self): return 88  # inventory entry 88\n    def item_89(self): return 89  # inventory entry 89\n    def item_90(self): return 90  # inventory entry 90\n    def item_91(self): return 91  # inventory entry 91\n    def item_92(self): return 92  # inventory entry 92\n    def item_93(self): return 93  # inventory entry 93\n    def item_94(self): return 94  # inventory entry 94\n    def item_95(self): return 95  # inventory entry 95\n    def item_96(self): return 96  # inventory entry 96\n    def item_97(self): return 97  # inventory entry 97\n    def item_98(self): return 98  # inventory entry 98\n    def item_99(self): return 99  # inventory entry 99\n    def item_100(self): return 100  # inventory entry 100\n    def item_101(self): return 101  # inventory entry 101\n    def item_102(self): return 102  # inventory entry 102\n    def item_103(self): return 103  # inventory entry 103\n    def item_104(self): return 104  # inventory entry 104\n    def item_105(self): return 105  # inventory entry 105\n    def item_106(self): return 106  # inventory entry 106\n    def item_107(self): return 107  # inventory entry 107\n    def item_108(self): return 108  # inventory entry 108\n    def item_109(self): return 109  # inventory entry 109\n    def item_110(self): return 110  # inventory entry 110\n    def item_111(self): return 111  # inventory entry 111\n    def item_112(self): return 112  # inventory entry 112\n    def item_113(self): return 113  # inventory entry 113\n    def item_114(self): return 114  # inventory entry 114\n    def item_115(self): return 115  # inventory entry 115\n    def item_116(self): return 116  # inventory entry 116\n    def item_117(self): return 117  # inventory entry 117\n```\n- Stores entries.\n- Lists items.\n- Counts stock.\n- Uses methods.\n- Includes docs."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA chunk reply: reply with only CHUNK-OK",
+          "session_id": "qa-session-8b917e5a82fee069",
+          "root_id": "qa-gemini-8b917e5a82fee069-turn-2",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-8b917e5a82fee069",
+            "input": [
+              {
+                "type": "text",
+                "text": "QA chunk reply: reply with only CHUNK-OK"
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-8b917e5a82fee069-turn-1"
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-8b917e5a82fee069-turn-2:end",
+              "interaction": {
+                "id": "qa-gemini-8b917e5a82fee069-turn-2",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-8b917e5a82fee069-turn-2",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-8b917e5a82fee069",
+            "steps": [
+              {
+                "id": "qa-gemini-8b917e5a82fee069-turn-2:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "CHUNK-OK"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    }
+  ]
+}

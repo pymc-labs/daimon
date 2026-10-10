@@ -1,0 +1,99 @@
+id: QA-D1-CANARY-TWO-TURN
+title: 'hourly canary: PDF mention + mentioned follow-up in one thread, file persists'
+friction:
+- D1
+- D22
+- D7
+- F4
+- F15
+- I7
+- NEW-1
+set: A
+surface: discord
+tier: canary
+priority: P0
+est_turns: 2
+notes: 'Catches at once: D1 session replaced on follow-up (log + latency + preamble),
+  stuck Working-on-it card (D6), channel-level Opening/Your chat is ready (D20), silent
+  drop of a mention with a PDF attachment (NEW-1 / no-reply 10-09), slow first output
+  (D16), (empty response) (I3), and lost working files (D7/F1 shape: write in turn
+  1, read in turn 2). The file value is random and never shown in chat, so turn 2
+  can only print it by reading the file. Prod: run in the dedicated canary channel
+  of the internal guild (runner config), not a new channel.'
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  file: fixtures/canary.pdf
+  text: 'QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this
+    bash command in your working directory and do not show its output: python3 -c
+    "import secrets;print(secrets.token_hex(6))" > qa_canary.txt ; (3) reply with
+    only one line: CODE=<the code word printed in the PDF>'
+- do: wait_done
+  timeout_s: 180
+- do: thread_reply
+  mention: true
+  text: 'QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and
+    reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file
+    does not exist.'
+- do: wait_done
+  timeout_s: 180
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 30
+- kind: reply_within_s
+  turn: 1
+  max: 10
+- kind: in_thread
+  turn: 1
+- kind: no_channel_post
+  turn: 1
+- kind: text_absent
+  turn: 1
+  pattern: (?i)opening your chat|your chat is ready
+- kind: done_within_s
+  turn: 1
+  max: 60
+- kind: text_present
+  turn: 1
+  pattern: CODE=TANGERINE-4471
+- kind: card_finalized
+  turn: 1
+- kind: reply_within_s
+  turn: 2
+  max: 10
+- kind: same_thread
+  turn: 2
+  as_turn: 1
+- kind: done_within_s
+  turn: 2
+  max: 40
+- kind: text_absent
+  turn: 2
+  pattern: (?i)came across|conversation .{0,40}(moved|continued|carried)|working files
+    could not be saved|previous sandbox expired
+- kind: text_present
+  turn: 2
+  pattern: FILE=[0-9a-f]{12}\b
+- kind: text_absent
+  turn: 2
+  pattern: FILE=MISSING
+- kind: log_absent
+  turn: 2
+  event: session_preparation.replaced
+- kind: log_absent
+  turn: 2
+  event: workspace_transfer.bundle_oversize
+- kind: card_finalized
+  turn: 2
+- kind: attachments
+  turn: 2
+  max: 0
+- kind: text_absent
+  turn: 1
+  pattern: \(empty response\)
+- kind: text_absent
+  turn: 2
+  pattern: \(empty response\)
+teardown: []

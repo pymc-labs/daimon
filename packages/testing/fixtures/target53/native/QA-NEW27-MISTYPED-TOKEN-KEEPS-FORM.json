@@ -1,0 +1,107 @@
+{
+  "scenario_id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+  "source": {
+    "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+    "sha256": "4eb9c2a17a743af883fff6020e5346247d9e4c1a74977400fa16c870ffec6bab"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+    "sha256": "f3f4567a26e316908c98c0fca9198e2d2f912cc086f906b819f100fb729f6fc2"
+  },
+  "scenario": {
+    "id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+    "title": "a wrong MCP token in a private form is rejected without using up the form or freezing the card",
+    "friction": [
+      "D11",
+      "NEW-27"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 1,
+    "notes": "MCP-token path only; the GitHub repo/PAT path is qa-cred's QA-NEW-CRED-REJECT-RETRY / QA-NEW-CRED-SAVE-HEADLESS. Headless twin: QA-NEW27-MISTYPED-TOKEN-HEADLESS.",
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "@mention: 'connect the MCP server {env.qa_token_mcp_url} with my token'. Click the form button, paste `wrong-token-123`, submit.",
+        "expect": "Private error naming the problem. The public card does NOT say 'Received. Saving…'."
+      },
+      {
+        "click": "Click the same form button again and paste the right token.",
+        "expect": "The form opens (not 'already used — ask again') and the connection is saved."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

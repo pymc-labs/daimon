@@ -1,0 +1,847 @@
+{
+  "scenario_id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+  "source": {
+    "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+    "sha256": "44d8dc0c95f90ed25961edf407844a2056bbea6f310a9cc676148e83b67ac348"
+  },
+  "projection": {
+    "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+    "sha256": "3bd7f3d2eff068d249dc6688772e81e25a62a360a13967760cab276d1707b5be"
+  },
+  "scenario": {
+    "id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+    "title": "a real session replacement for a skills change keeps files and shows no preamble",
+    "friction": [
+      "D1"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "full",
+    "priority": "P1",
+    "est_turns": 3,
+    "notes": "RCA fix 2: the replacement notice should only show for reasons a user would notice (not skills/system_prompt/tools). A channel skill add between turns forces a genuine `skills` replacement (checkpoint turn on the old session is billed: est_turns 3). Expected to FAIL until RCA fix 2 lands; #603 alone does not hide the notice.",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "QA replace check. Run: echo {nonce} > qa_keep.txt in your working directory, then reply with only: SAVED"
+      },
+      {
+        "do": "wait_done"
+      },
+      {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon channels skills add discord {guild_id} {channel_id} {env.qa_library_skill}"
+      },
+      {
+        "do": "thread_reply",
+        "mention": true,
+        "text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING"
+      },
+      {
+        "do": "wait_done",
+        "timeout_s": 240
+      }
+    ],
+    "assert": [
+      {
+        "kind": "log_present",
+        "turn": 2,
+        "event": "session_preparation.replaced",
+        "fields": {
+          "reasons": [
+            "skills"
+          ]
+        }
+      },
+      {
+        "kind": "text_absent",
+        "turn": 2,
+        "pattern": "(?i)came across|conversation .{0,40}(moved|continued|carried)|working files could not be saved|previous sandbox expired"
+      },
+      {
+        "kind": "text_present",
+        "turn": 2,
+        "pattern": "KEEP={nonce}"
+      },
+      {
+        "kind": "done_within_s",
+        "turn": 2,
+        "max": 90
+      },
+      {
+        "kind": "card_finalized",
+        "turn": 2
+      }
+    ],
+    "teardown": [
+      {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon channels skills remove discord {guild_id} {channel_id} {env.qa_library_skill}"
+      }
+    ]
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "QA replace check. Run: echo {nonce} > qa_keep.txt in your working directory, then reply with only: SAVED"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "QA replace check. Run: echo {nonce} > qa_keep.txt in your working directory, then reply with only: SAVED",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[3]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon channels skills add discord {guild_id} {channel_id} {env.qa_library_skill}"
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[4]",
+      "operation": "host_turn",
+      "source": {
+        "do": "thread_reply",
+        "mention": true,
+        "text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING"
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[5]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done",
+        "timeout_s": 240
+      },
+      "turn": 2,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "teardown[0]",
+      "operation": "unbound",
+      "source": {
+        "do": "admin",
+        "tool": "cli",
+        "args": "daimon channels skills remove discord {guild_id} {channel_id} {env.qa_library_skill}"
+      },
+      "turn": null,
+      "channel": null,
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA replace check. Run: echo qa-fixture-0001 > qa_keep.txt in your working directory, then reply with only: SAVED",
+          "session_id": "qa-session-f7caeff77b93abf8",
+          "root_id": "qa-openai-f7caeff77b93abf8-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "QA replace check. Run: echo qa-fixture-0001 > qa_keep.txt in your working directory, then reply with only: SAVED"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-1:running",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-1:input",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1:input",
+                "turn_id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "QA replace check. Run: echo qa-fixture-0001 > qa_keep.txt in your working directory, then reply with only: SAVED"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-1:tool:0",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1:tool:0",
+                "turn_id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "echo qa-fixture-0001 > qa_keep.txt",
+                "cwd": null,
+                "exit_code": 0,
+                "output": ""
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-1:answer",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1:answer",
+                "turn_id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "SAVED"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-1:end",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-1",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-f7caeff77b93abf8-turn-1",
+            "session_id": "qa-session-f7caeff77b93abf8",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[4]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING",
+          "session_id": "qa-session-f7caeff77b93abf8",
+          "root_id": "qa-openai-f7caeff77b93abf8-turn-2",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-2:running",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-2:input",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2:input",
+                "turn_id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-2:tool:0",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2:tool:0",
+                "turn_id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "type": "command_execution",
+                "status": "completed",
+                "command": "cat qa_keep.txt",
+                "cwd": null,
+                "exit_code": 0,
+                "output": "qa-fixture-0001\n"
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-2:answer",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2:answer",
+                "turn_id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "KEEP=qa-fixture-0001"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-f7caeff77b93abf8-turn-2:end",
+              "session_id": "qa-session-f7caeff77b93abf8",
+              "turn": {
+                "id": "qa-openai-f7caeff77b93abf8-turn-2",
+                "session_id": "qa-session-f7caeff77b93abf8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-f7caeff77b93abf8-turn-2",
+            "session_id": "qa-session-f7caeff77b93abf8",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[4]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "QA replace check. Run: echo qa-fixture-0001 > qa_keep.txt in your working directory, then reply with only: SAVED",
+          "session_id": "qa-session-f7caeff77b93abf8",
+          "root_id": "qa-gemini-f7caeff77b93abf8-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "QA replace check. Run: echo qa-fixture-0001 > qa_keep.txt in your working directory, then reply with only: SAVED"
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-f7caeff77b93abf8-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-f7caeff77b93abf8-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-f7caeff77b93abf8",
+            "steps": [
+              {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-1:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "echo qa-fixture-0001 > qa_keep.txt"
+                }
+              },
+              {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-1:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-f7caeff77b93abf8-turn-1:tool:0",
+                "result": "",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "SAVED"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[4]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING",
+          "session_id": "qa-session-f7caeff77b93abf8",
+          "root_id": "qa-gemini-f7caeff77b93abf8-turn-2",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": "qa-workspace-f7caeff77b93abf8",
+            "input": [
+              {
+                "type": "text",
+                "text": "Run `cat qa_keep.txt` and reply with only: KEEP=<contents> or KEEP=MISSING"
+              }
+            ],
+            "background": true,
+            "store": true,
+            "previous_interaction_id": "qa-gemini-f7caeff77b93abf8-turn-1"
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-f7caeff77b93abf8-turn-2:end",
+              "interaction": {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-2",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-f7caeff77b93abf8-turn-2",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-f7caeff77b93abf8",
+            "steps": [
+              {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-2:tool:0",
+                "type": "code_execution_call",
+                "arguments": {
+                  "command": "cat qa_keep.txt"
+                }
+              },
+              {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-2:tool:0:result",
+                "type": "code_execution_result",
+                "call_id": "qa-gemini-f7caeff77b93abf8-turn-2:tool:0",
+                "result": "qa-fixture-0001\n",
+                "is_error": false
+              },
+              {
+                "id": "qa-gemini-f7caeff77b93abf8-turn-2:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "KEEP=qa-fixture-0001"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[4]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    }
+  ]
+}

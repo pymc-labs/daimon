@@ -1,0 +1,41 @@
+id: QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY
+title: a long answer posts all chunks together with balanced fences, and a reply to
+  chunk 2 is answered
+friction:
+- D18
+- F17
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 2
+notes: The turn-2 reply @mentions Daimon and Discord-replies to the 2nd chunk (fixed
+  by b77ffddad; regression guard).
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Write a Python file of about 120 lines (a toy inventory class with docstrings)
+    in one ```python fenced block, followed by a 5-bullet explanation. No tools.
+- do: wait_done
+  timeout_s: 240
+- do: thread_reply
+  mention: true
+  reply_to: turn1.chunk2
+  text: 'QA chunk reply: reply with only CHUNK-OK'
+- do: wait_done
+assert:
+- kind: message_count
+  turn: 1
+  min: 2
+- kind: fences_balanced
+  turn: 1
+- kind: chunks_gap_max_s
+  turn: 1
+  max: 5
+- kind: footer_on_last_message
+  turn: 1
+- kind: text_present
+  turn: 2
+  pattern: CHUNK-OK
+teardown: []

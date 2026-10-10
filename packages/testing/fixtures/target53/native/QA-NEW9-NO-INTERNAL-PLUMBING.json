@@ -1,0 +1,387 @@
+{
+  "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+  "source": {
+    "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+    "sha256": "8b010f856868254bbaf5c0f39433f9628fafabdeb5295fe648c8f34ce96e5abd"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+    "sha256": "a264f4b6ad8a18262a0efbfa6e20c4dd5f68d132ff40ad9a6ce272b790aa96fc"
+  },
+  "scenario": {
+    "id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+    "title": "'what can you do?' from a non-admin shows no ids, paths, tool or config names",
+    "friction": [
+      "D25"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "full",
+    "priority": "P1",
+    "est_turns": 1,
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "hi! what can you do? I'm new here."
+      },
+      {
+        "do": "wait_done"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "rid: ?01[0-9A-Z]{20,}|agent_01[0-9A-Za-z]{10,}|sesn_01[0-9A-Za-z]{10,}|/mnt/memory/|HANDOFF\\.md|origin_context_id|daimon-mcp|DAIMON_[A-Z_]{4,}|tool_safety|approval cards are turned off|\\bon MA\\b"
+      },
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "(?i)memory is empty|you're an admin|mint-operator-token|system prompt"
+      },
+      {
+        "kind": "message_count",
+        "turn": 1,
+        "max": 2
+      },
+      {
+        "kind": "thread_name",
+        "turn": 1,
+        "pattern_absent": "(?i)^(greeting|hello|hi|help request|chat with .*)$",
+        "max_len": 50
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "hi! what can you do? I'm new here."
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "hi! what can you do? I'm new here.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": {
+    "pin": {
+      "path": "tests/judge/fixtures/catalog_anthropic.json",
+      "sha256": "4975d67964aee0461d47c80fda3b4816789b95c3d9ea6a784aad5d18a74a1d96"
+    },
+    "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+    "source_kind": "catalog-authored"
+  },
+  "anthropic_gaps": [],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "hi! what can you do? I'm new here.",
+          "session_id": "qa-session-666063e1711a65f8",
+          "root_id": "qa-openai-666063e1711a65f8-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "hi! what can you do? I'm new here."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-666063e1711a65f8-turn-1:running",
+              "session_id": "qa-session-666063e1711a65f8",
+              "turn": {
+                "id": "qa-openai-666063e1711a65f8-turn-1",
+                "session_id": "qa-session-666063e1711a65f8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-666063e1711a65f8-turn-1:input",
+              "session_id": "qa-session-666063e1711a65f8",
+              "turn": {
+                "id": "qa-openai-666063e1711a65f8-turn-1",
+                "session_id": "qa-session-666063e1711a65f8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-666063e1711a65f8-turn-1:input",
+                "turn_id": "qa-openai-666063e1711a65f8-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "hi! what can you do? I'm new here."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-666063e1711a65f8-turn-1:answer",
+              "session_id": "qa-session-666063e1711a65f8",
+              "turn": {
+                "id": "qa-openai-666063e1711a65f8-turn-1",
+                "session_id": "qa-session-666063e1711a65f8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-666063e1711a65f8-turn-1:answer",
+                "turn_id": "qa-openai-666063e1711a65f8-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "I can help you analyze data, write code, and review documents."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-666063e1711a65f8-turn-1:end",
+              "session_id": "qa-session-666063e1711a65f8",
+              "turn": {
+                "id": "qa-openai-666063e1711a65f8-turn-1",
+                "session_id": "qa-session-666063e1711a65f8",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-666063e1711a65f8-turn-1",
+            "session_id": "qa-session-666063e1711a65f8",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "hi! what can you do? I'm new here.",
+          "session_id": "qa-session-666063e1711a65f8",
+          "root_id": "qa-gemini-666063e1711a65f8-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "hi! what can you do? I'm new here."
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-666063e1711a65f8-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-666063e1711a65f8-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-666063e1711a65f8-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-666063e1711a65f8",
+            "steps": [
+              {
+                "id": "qa-gemini-666063e1711a65f8-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "I can help you analyze data, write code, and review documents."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    }
+  ]
+}

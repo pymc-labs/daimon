@@ -1,0 +1,105 @@
+{
+  "scenario_id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+  "source": {
+    "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+    "sha256": "382913b9d9d5c3087ab1a2a9405622049b4569b0b38d4bd5d55d47020a92e288"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+    "sha256": "35caf0a09150c7c813e059e49c13e94668b50ac46ba7f129a42f59c10357f30c"
+  },
+  "scenario": {
+    "id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+    "title": "an abandoned OAuth sign-in does not freeze the card; a completed one resumes the waiting task",
+    "friction": [
+      "NEW-28"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 2,
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "@mention: 'connect Notion (MCP OAuth) and then list my 3 newest pages'. Click 'Connect my account', then close the tab without signing in. Wait 11 min.",
+        "expect": "The card is NOT stuck on 'Received. Saving…' (it shows expired/refused with a retry path)."
+      },
+      {
+        "click": "Ask again, click Connect, finish the Notion sign-in.",
+        "expect": "Without typing anything else, Daimon continues in the thread and lists the 3 pages."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

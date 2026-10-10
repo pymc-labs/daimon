@@ -1,0 +1,18 @@
+id: QA-NEW32-ADD-SKILL-ON-BUILTIN
+title: Add skill on a built-in agent is hidden or offers 'make an editable copy'
+friction:
+- NEW-32
+set: B
+surface: discord
+tier: manual
+priority: P2
+est_turns: 0
+setup: []
+steps: []
+assert: []
+human:
+- click: "As a server admin: `/agent-setup` \u2192 built-in `daimon` \u2192 \u2795\
+    \ Add skill."
+  expect: Button hidden/disabled, or the refusal has a 'Make an editable copy' button.
+    Not 'Ask an admin'.
+teardown: []

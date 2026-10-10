@@ -1,0 +1,27 @@
+id: QA-I6-BARE-MENTION-THREAD-TITLE
+title: a bare @mention after a context message gets a sane thread title
+friction:
+- D35
+- F14
+set: A
+surface: discord
+tier: full
+priority: P2
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: channel_message
+  text: 'Client email: can we move the Q4 review to Thursday at 3pm?'
+- do: mention
+  text: ''
+- do: wait_done
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 15
+- kind: thread_name
+  turn: 1
+  pattern_absent: (?i)I don'?t see|no message|please share|summari[sz]e|thread title|\bempty\b
+  max_len: 60
+teardown: []

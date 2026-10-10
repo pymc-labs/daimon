@@ -1,0 +1,37 @@
+id: QA-D12-PDF-CLAIM-HAS-PDF
+title: when the answer says a PDF is attached, the PDF is attached and no working
+  file leaks
+friction:
+- F3
+- D28
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Make a one-page PDF titled 'QA PDF {nonce}' with one sentence of body text
+    and attach it to your answer. Keep the answer to one line.
+- do: wait_done
+  timeout_s: 240
+assert:
+- kind: attachments
+  turn: 1
+  min: 1
+  max: 1
+  name_pattern: (?i)\.pdf$
+- kind: attachments
+  turn: 1
+  max: 0
+  name_pattern: (?i)\.(typ|tex|py|html|md|log)$
+- kind: footer_on_last_message
+  turn: 1
+- kind: card_finalized
+  turn: 1
+- kind: text_absent
+  turn: 1
+  pattern: (?i)couldn'?t attach|could not attach
+teardown: []

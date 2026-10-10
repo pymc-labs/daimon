@@ -1,0 +1,372 @@
+{
+  "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+  "source": {
+    "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+    "sha256": "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+    "sha256": "894e1627613b87ef4cd61e4a780f6d81fca3f4f910eb5c884ac08921539860c8"
+  },
+  "scenario": {
+    "id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+    "title": "a markdown table answer is not shown as raw pipes on Discord",
+    "friction": [
+      "D29"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "weekly",
+    "priority": "P2",
+    "est_turns": 1,
+    "notes": "Expected FAIL while table_rendering defaults off. Pass = no raw pipe rows (rendered image or reformatted list).",
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "Show a 3-column table of 4 fruits with colour and price. No tools."
+      },
+      {
+        "do": "wait_done"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "text_absent",
+        "turn": 1,
+        "pattern": "(?m)^\\s*\\|.*\\|\\s*$"
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "Show a 3-column table of 4 fruits with colour and price. No tools."
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "Show a 3-column table of 4 fruits with colour and price. No tools.",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": {
+    "pin": {
+      "path": "tests/judge/fixtures/catalog_anthropic.json",
+      "sha256": "4975d67964aee0461d47c80fda3b4816789b95c3d9ea6a784aad5d18a74a1d96"
+    },
+    "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+    "source_kind": "catalog-authored"
+  },
+  "anthropic_gaps": [],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Show a 3-column table of 4 fruits with colour and price. No tools.",
+          "session_id": "qa-session-a9b0200e71fa76d2",
+          "root_id": "qa-openai-a9b0200e71fa76d2-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Show a 3-column table of 4 fruits with colour and price. No tools."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-a9b0200e71fa76d2-turn-1:running",
+              "session_id": "qa-session-a9b0200e71fa76d2",
+              "turn": {
+                "id": "qa-openai-a9b0200e71fa76d2-turn-1",
+                "session_id": "qa-session-a9b0200e71fa76d2",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-a9b0200e71fa76d2-turn-1:input",
+              "session_id": "qa-session-a9b0200e71fa76d2",
+              "turn": {
+                "id": "qa-openai-a9b0200e71fa76d2-turn-1",
+                "session_id": "qa-session-a9b0200e71fa76d2",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-a9b0200e71fa76d2-turn-1:input",
+                "turn_id": "qa-openai-a9b0200e71fa76d2-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "Show a 3-column table of 4 fruits with colour and price. No tools."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-a9b0200e71fa76d2-turn-1:answer",
+              "session_id": "qa-session-a9b0200e71fa76d2",
+              "turn": {
+                "id": "qa-openai-a9b0200e71fa76d2-turn-1",
+                "session_id": "qa-session-a9b0200e71fa76d2",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-a9b0200e71fa76d2-turn-1:answer",
+                "turn_id": "qa-openai-a9b0200e71fa76d2-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "| Fruit | Colour | Price |\n|---|---|---|\n| Apple | Red | $1 |\n| Banana | Yellow | $2 |\n| Orange | Orange | $3 |\n| Pear | Green | $4 |"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-a9b0200e71fa76d2-turn-1:end",
+              "session_id": "qa-session-a9b0200e71fa76d2",
+              "turn": {
+                "id": "qa-openai-a9b0200e71fa76d2-turn-1",
+                "session_id": "qa-session-a9b0200e71fa76d2",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-a9b0200e71fa76d2-turn-1",
+            "session_id": "qa-session-a9b0200e71fa76d2",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "07e046c73764a2151009fb46b0ecd7aff88e225d03ce36d3f89098a20bff30ba"
+      },
+      "codec_commit": "3ff23db52dee75c33a0874843fcf2d891a192081",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "Show a 3-column table of 4 fruits with colour and price. No tools.",
+          "session_id": "qa-session-a9b0200e71fa76d2",
+          "root_id": "qa-gemini-a9b0200e71fa76d2-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "Show a 3-column table of 4 fruits with colour and price. No tools."
+              }
+            ],
+            "background": true,
+            "store": true
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-a9b0200e71fa76d2-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-a9b0200e71fa76d2-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-a9b0200e71fa76d2-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-a9b0200e71fa76d2",
+            "steps": [
+              {
+                "id": "qa-gemini-a9b0200e71fa76d2-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "| Fruit | Colour | Price |\n|---|---|---|\n| Apple | Red | $1 |\n| Banana | Yellow | $2 |\n| Orange | Orange | $3 |\n| Pear | Green | $4 |"
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    }
+  ]
+}

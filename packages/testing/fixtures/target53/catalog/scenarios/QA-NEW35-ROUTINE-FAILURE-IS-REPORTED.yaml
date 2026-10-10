@@ -1,0 +1,35 @@
+id: QA-NEW35-ROUTINE-FAILURE-IS-REPORTED
+title: a routine run that dies on an invalid PDF posts a plain failure line instead
+  of nothing
+friction:
+- D16
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 2
+notes: The routine saves an HTML page as .pdf and reads it as a PDF, which reproduces
+  the upstream 400 that kills the 13:00 Decision.AI run. Pass = something lands in
+  the channel either way.
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'Create a routine that runs every minute and posts to this channel. Each run:
+    curl -sL https://example.com -o qa.pdf, then read qa.pdf as a PDF document and
+    reply ROUTINE-RAN-{nonce} plus one sentence about it.'
+- do: wait_done
+- do: wait
+  s: 150
+assert:
+- kind: channel_text_present
+  since_turn: 1
+  pattern: (?i)ROUTINE-RAN-{nonce}|routine.{0,40}(failed|didn'?t run|could not)
+- kind: channel_text_absent
+  since_turn: 1
+  pattern: The PDF specified was not valid|messages\.\d+\.content
+teardown:
+- do: admin
+  tool: delete_routines
+  args:
+    channel: '{channel_id}'
