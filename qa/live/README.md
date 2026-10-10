@@ -42,8 +42,11 @@ always use the Anthropic primary from `models.backends` (`claude-haiku-5-5`), `m
 Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 Haiku 5.5 rejects the deprecated `temperature` parameter, so requests omit it.
-Judge request or output errors become PENDING checks, preserve deterministic
-product checks and never alert root by themselves. A completed judge's failed
+Judge execution errors become PENDING checks, preserve deterministic product
+checks and record the exception type/status in run notes. Only reasons starting
+with `judge execution unavailable` suppress root alerts; model/key/GO/budget
+refusals still alert after three PENDING runs. Suppression preserves existing
+PENDING streaks. A completed judge's failed
 verdict still fails and alerts. Server/network errors retain the conservative
 judge reservation when actual usage is unavailable; requests are never retried.
 The one backend map contains Claude `claude-haiku-5-5`, OpenAI `gpt-6-luna`,

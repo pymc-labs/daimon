@@ -76,14 +76,13 @@ class Alerter:
         if (
             result.status == "PENDING"
             and unavailable
-            and all(c.kind == "judge" for c in unavailable)
+            and all(
+                c.kind == "judge" and c.reason.startswith("judge execution unavailable")
+                for c in unavailable
+            )
         ):
-            # Driver policy: judge infrastructure errors do not page root,
-            # even repeatedly. Other missing evidence still alerts after three.
-            if prior:
-                prior["pending_count"] = "0"
-                state[key] = prior
-                self._save_state(state)
+            # Suppress evaluator errors only, preserving other evidence's
+            # PENDING streak and its eventual recovery state.
             return
         now = utcnow()
         pending_count = (

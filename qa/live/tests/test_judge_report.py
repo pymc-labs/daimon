@@ -124,6 +124,68 @@ def test_judge_only_pending_never_alerts_but_failed_verdict_does(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "judge returned another model or incomplete output",
+        "ANTHROPIC_API_KEY is unavailable",
+        "judge requires the driver's GO",
+        "judge input exceeds reserved token budget",
+        "turn was not executed",
+    ],
+)
+def test_judge_policy_refusals_alert_after_three_pending_runs(
+    reason: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
+    )
+    result = Result("run", "QA-D1-TEST", "staging", "PENDING", [Check("judge", "PENDING", reason)])
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    assert not calls
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 1
+
+
+def test_judge_execution_pending_preserves_other_evidence_streak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
+    )
+    result = Result(
+        "run",
+        "QA-D1-TEST",
+        "staging",
+        "PENDING",
+        [Check("log_absent", "PENDING", "logs unavailable")],
+    )
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    before = alerts.state_path.read_text()
+    result.checks = [Check("judge", "PENDING", "judge execution unavailable: TypeError")]
+    alerts.notify(result, tmp_path / "run.json")
+    assert alerts.state_path.read_text() == before
+    result.checks = [Check("log_absent", "PENDING", "logs unavailable")]
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 1
+
+
 def test_alert_fail_dedupe_recovery_and_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -135,7 +135,10 @@ class Executor:
                         assertion.model_dump(mode="json", by_alias=True),
                     )
                 )
-                result.checks.append(evaluate(resolved, result.turns, self.backend, self.judge))
+                check = evaluate(resolved, result.turns, self.backend, self.judge)
+                result.checks.append(check)
+                if check.kind == "judge" and check.reason.startswith("judge execution unavailable"):
+                    result.notes.append(f"turn {check.turn}: {check.reason}")
         except Pending as exc:
             result.checks.append(Check("execution", "PENDING", str(exc)))
         except (KeyboardInterrupt, SystemExit) as exc:

@@ -137,6 +137,7 @@ def test_judge_failure_preserves_product_checks_and_cleanup(
     assert next(c for c in result.checks if c.kind == "judge").status == "PENDING"
     assert sum(c.kind == "text_absent" for c in result.checks) == 6
     assert "secret" not in str(result.checks)
+    assert "turn 2: judge execution unavailable: RuntimeError" in result.notes
     assert backend.events[-1] == "delete"
 
 
