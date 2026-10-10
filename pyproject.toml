@@ -76,7 +76,7 @@ forbidden_modules = ["daimon"]
 [[tool.importlinter.contracts]]
 name = "Mux contracts and profiles import no provider SDK or driver"
 type = "forbidden"
-source_modules = ["mux.contracts", "mux.profiles", "mux.errors", "mux.state", "mux.conformance.budget", "mux.conformance.live_probe", "mux.conformance.recording"]
+source_modules = ["mux.contracts", "mux.profiles", "mux.errors", "mux.state", "mux.conformance.budget", "mux.conformance.live_probe", "mux.conformance.recording", "mux.conformance.default_capability"]
 forbidden_modules = ["anthropic", "openai", "google", "mux.drivers"]
 
 # Each SDK is imported by its own driver and nowhere else in mux. The ignores

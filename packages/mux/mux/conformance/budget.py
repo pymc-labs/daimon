@@ -201,7 +201,7 @@ class BudgetConfig(ProbeModel):
 class ProbePlan(ProbeModel):
     provider: Identifier
     model: Identifier
-    fixture_id: str = Field(pattern=r"^C(0[1-9]|1[0-8])$")
+    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1)$")
     limits: TokenLimits
 
 
@@ -210,7 +210,7 @@ class SpendReceipt(ProbeModel):
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     provider: Identifier
     model: Identifier
-    fixture_id: str = Field(pattern=r"^C(0[1-9]|1[0-8])$")
+    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1)$")
     timestamp: datetime
     status: Literal[
         "reserved", "completed", "uncertain", "failed", "cancelled", "blocked", "overrun"

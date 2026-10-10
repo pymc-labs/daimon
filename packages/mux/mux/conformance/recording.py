@@ -115,7 +115,7 @@ class EventBatch(Contract):
 
 class Tape(Contract):
     version: Literal[2] = 2
-    fixture_id: str = Field(pattern=r"^C(0[1-9]|1[0-8])$")
+    fixture_id: str = Field(pattern=r"^(C(0[1-9]|1[0-8])|F1)$")
     provider: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$")
     model: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$")
     complete: bool = False

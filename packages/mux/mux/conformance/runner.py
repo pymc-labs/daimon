@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
@@ -14,6 +15,10 @@ from mux.contracts.receipts import SendReceipt
 from mux.contracts.resources import Session, SessionSpec, SkillUpload
 from mux.state.memory import CrashPoint
 from mux.state.store import StateStore
+
+if TYPE_CHECKING:
+    from mux.conformance.default_capability import DefaultCapabilityAdapter, DefaultManifest
+    from mux.conformance.recording import Recorder, Replay
 
 
 class ConformanceFailure(Exception):
@@ -185,3 +190,44 @@ async def run_fixture(fixture_id: str, adapter: Adapter) -> Result:
     except Exception as exc:
         # Do not serialize provider exception text, which can contain credentials.
         return Result(fixture_id, "fail", (f"probe raised {type(exc).__name__}",))
+
+
+async def run_default_capability(
+    manifest: DefaultManifest,
+    adapter: DefaultCapabilityAdapter,
+    *,
+    recorder: Recorder | None = None,
+) -> Result:
+    """Supplementary F1 check; the default C01-C18 matrix is unchanged."""
+    from mux.conformance.default_capability import scenario
+
+    try:
+        return await scenario(manifest, adapter, recorder)
+    except ConformanceFailure as error:
+        return Result("F1", "fail", (str(error),))
+    except Exception as error:
+        return Result("F1", "fail", (f"probe raised {type(error).__name__}",))
+
+
+async def replay_default_capability(
+    path: Path,
+    manifest: DefaultManifest,
+    factory: Callable[[Replay], DefaultCapabilityAdapter],
+) -> Result:
+    """Fresh offline provisioning plus normalized turn checks, never a verdict."""
+    from mux.conformance.recording import RecordingError, Replay
+
+    try:
+        replay = Replay.load(path)
+        if replay.tape.fixture_id != "F1":
+            raise RecordingError("not a default-capability tape")
+        adapter = factory(replay)
+        if (replay.tape.provider, replay.tape.model) != (adapter.model.provider, adapter.model.id):
+            raise RecordingError("F1 replay backend/model changed")
+        result = await run_default_capability(manifest, adapter)
+        if result.status == "pending":
+            return result
+        replay.finish()
+        return result
+    except Exception as error:
+        return Result("F1", "fail", (f"replay refused: {type(error).__name__}",))
