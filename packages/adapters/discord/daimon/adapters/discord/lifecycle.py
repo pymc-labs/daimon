@@ -44,6 +44,7 @@ from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.errors import TurnError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
@@ -221,6 +222,7 @@ class DiscordTurnLifecycle:
         self._first_post_attempted: bool = False
         self._persisted_sealed_indices: set[int] = set()
         self._was_answered: bool = False
+        self._delivery_failed = False
         # A continuity notice that belongs ABOVE the answer it explains. The
         # answer is an in-place edit of the embed posted at mention time, so a
         # notice sent as its own message always lands below it. Set before the
@@ -367,7 +369,7 @@ class DiscordTurnLifecycle:
             cost = float(debit_amount(cost, markup=self._markup))
         self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
 
-    async def _flush_terminal(self) -> None:
+    async def _flush_terminal(self, *, deliver: bool = True) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
         bypassing debounce."""
         if self._sessionmaker is not None and self._tenant_id is not None:
@@ -389,6 +391,8 @@ class DiscordTurnLifecycle:
         data = to_embed_data(self._state, now=now)
         embed = build_discord_embed(data)
         self._terminal_embed = embed
+        if not deliver:
+            return
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None)
             self._card_message_ref = self._message_ref
@@ -445,8 +449,36 @@ class DiscordTurnLifecycle:
         self._discord_mark = None  # only the terminal sends and edits close the window
         try:
             await self._deliver_success(state)
+            if self._message_ref is not None and self._card_message_ref is not self._message_ref:
+                await self._delete_card()
+        except (discord.HTTPException, discord.ClientException, OSError) as exc:
+            self._was_answered = False
+            self._delivery_failed = True
+            self._summary_ref = None
+            if self._revealed_first_chunk is None and self._card_message_ref is not None:
+                self._card_discard_failed = True
+            log.error("discord.turn.answer_delivery_failed", exc_info=True)
+            raise TurnError(
+                kind="delivery_failed", message="Could not post the complete answer.", cause=exc
+            ) from exc
         finally:
             self._mark_ended()
+
+    async def _replace_terminal(self, **kwargs: Any) -> None:  # noqa: ANN401
+        """Edit the card atomically; if it cannot be edited, post the answer below it."""
+        if self._message_ref is not None:
+            try:
+                await self._edit_message(self._message_ref, **kwargs)
+                return
+            except (discord.HTTPException, discord.ClientException, OSError):
+                # Table attachments may be the invalid payload. Let the caller
+                # retry with plain text before falling back to a new message.
+                if kwargs.get("attachments"):
+                    raise
+                log.warning("discord.turn.answer_edit_failed", exc_info=True)
+        self._message_ref = await self._send_message(**kwargs)
+        if self._card_message_ref is None:
+            self._card_message_ref = self._message_ref
 
     async def _deliver_success(self, state: TurnState) -> None:
         await self._persist_sealed_responses(state)
@@ -461,14 +493,13 @@ class DiscordTurnLifecycle:
             return
         self._apply_usage(state)
         self._state = update(self._state, EmbedEvent(kind="done", label=""))
-        await self._flush_terminal()
+        await self._flush_terminal(deliver=False)
 
         response_text = extract_final_response(state.content)
         cancelled = state.termination == TerminationReason.INTERRUPTED
         if cancelled:
             if not response_text:
-                await self._edit_message(
-                    self._message_ref,
+                await self._replace_terminal(
                     content="Stopped.\nSend a message to start again.",
                     embed=None,
                     view=None,
@@ -485,9 +516,7 @@ class DiscordTurnLifecycle:
                 done_data = dataclasses.replace(
                     to_embed_data(self._state, now=self._clock()), description="Done."
                 )
-                await self._edit_message(
-                    self._message_ref, embed=build_discord_embed(done_data), view=None
-                )
+                await self._replace_terminal(embed=build_discord_embed(done_data), view=None)
                 # The "Done." card carries the summary, so the turn's files go on it.
                 self._summary_ref = self._message_ref
                 # #79: a tool-only turn has no reply to hang the notice under,
@@ -499,8 +528,7 @@ class DiscordTurnLifecycle:
                     )
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._edit_message(
-                self._message_ref,
+            await self._replace_terminal(
                 content="Stopped.\nSend a message to start again.",
                 embed=None,
                 view=None,
@@ -553,22 +581,23 @@ class DiscordTurnLifecycle:
         summary = self._terminal_embed
 
         async def deliver_first(content: str, files: list[discord.File]) -> None:
-            if notify:
+            if notify or self._message_ref is None:
                 self._message_ref = await self._send_message(
                     content=content,
                     allowed_mentions=mentions,
                     **({"files": files} if files else {}),
                     **({"embeds": [summary]} if summary and len(chunks) == 1 else {}),
                 )
+                if self._card_message_ref is None:
+                    self._card_message_ref = self._message_ref
             else:
-                await self._edit_message(
-                    self._message_ref,
+                await self._replace_terminal(
                     content=content,
                     view=None,
                     allowed_mentions=mentions,
                     **({"attachments": files} if files else {}),
                     # A long answer ends on its last chunk, so the summary moves there.
-                    **({"embeds": []} if len(chunks) > 1 else {}),
+                    embeds=[summary] if summary and len(chunks) == 1 else [],
                 )
 
         try:
@@ -595,10 +624,6 @@ class DiscordTurnLifecycle:
             )
             if last:
                 self._summary_ref = sent
-        if notify:
-            # The ping posted the answer below the card, so the card goes.
-            await self._delete_card()
-
         log.info("turn.terminal_success")
 
     @property
@@ -780,7 +805,7 @@ class DiscordTurnLifecycle:
     def final_message_id(self) -> str | None:
         """Discord message id of the last embed the bot posted this turn, or None
         if nothing was sent (the watermark source for session-per-thread reuse)."""
-        if self._message_ref is None:
+        if self._message_ref is None or self._delivery_failed:
             return None
         return str(self._message_ref.id)
 

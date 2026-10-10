@@ -309,20 +309,58 @@ async def test_a_long_answer_overflows_into_new_messages_then_the_controls() -> 
     assert lifecycle.final_message_id == f"m-{len(sender.sent) - 1}", "the answer's last part"
 
 
-async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
+async def test_a_failed_answer_edit_posts_a_fresh_answer_and_retires_the_card() -> None:
     sender = FakeSender(fail_on={1})
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("never seen"))
 
+    assert sender.activities[2].id is None and sender.activities[2].text == "never seen"
+    assert sender.activities[3].id == "m-1"
+    assert card.ANSWERED_BELOW in _card_json(sender, 3)
+    assert lifecycle.card_closed and lifecycle.final_message_id == "m-3"
+
+
+async def test_failed_edit_and_fresh_post_raise_delivery_error_and_leave_no_watermark() -> None:
+    sender = FakeSender(fail_on={1, 2})
+    lifecycle = await _posted(sender)
+    with pytest.raises(TurnError) as error:
+        await lifecycle.on_terminal_success(_answer("never seen"))
+    assert error.value.kind == "delivery_failed"
     assert sender.activities[-1].id == "m-1"
     assert "Something went wrong." in _card_json(sender, -1)
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
 
+async def test_teams_4xx_response_details_are_logged_with_secrets_redacted() -> None:
+    class RejectedEdit(FakeSender):
+        async def send(self, conversation_id, activity, *, service_url):
+            if len(self.sent) == 1:
+                self.sent.append((conversation_id, activity.model_copy(deep=True), service_url))
+                request = httpx.Request("PUT", "https://teams.test/activities/m-1")
+                response = httpx.Response(
+                    400,
+                    json={"error": {"message": "Invalid activity", "token": "private-test-value"}},
+                    request=request,
+                )
+                raise httpx.HTTPStatusError("refused", request=request, response=response)
+            return await super().send(conversation_id, activity, service_url=service_url)
+
+    sender = RejectedEdit()
+    lifecycle = await _posted(sender)
+    with structlog.testing.capture_logs() as logs:
+        await lifecycle.on_terminal_success(_answer("The complete answer."))
+    rejected = next(log for log in logs if log["event"] == "teams.turn.send_rejected")
+    assert rejected["status_code"] == 400
+    assert "Invalid activity" in rejected["response_body"]
+    assert "private-test-value" not in rejected["response_body"]
+    assert lifecycle.final_message_id == "m-3"
+
+
 async def test_direct_chat_failure_says_send_a_message() -> None:
-    sender = FakeSender(fail_on={1})
+    sender = FakeSender(fail_on={1, 2})
     lifecycle = await _posted(sender, direct_chat=True)
-    await lifecycle.on_terminal_success(_answer("never seen"))
+    with pytest.raises(TurnError, match="delivery_failed"):
+        await lifecycle.on_terminal_success(_answer("never seen"))
 
     failure = _card_json(sender, -1)
     assert "Send a message to try again." in failure
@@ -333,7 +371,8 @@ async def test_a_failed_later_part_says_the_answer_may_be_cut_short() -> None:
     sender = FakeSender(fail_on={2})
     lifecycle = await _posted(sender)
     paragraph = "word " * 1000
-    await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
+    with pytest.raises(TurnError, match="delivery_failed"):
+        await lifecycle.on_terminal_success(_answer("\n\n".join([paragraph] * 4)))
 
     assert [a.id for a in sender.activities[1:]] == ["m-1", None, None], "answer, lost part, note"
     assert "may be missing" in _card_json(sender, -1)
@@ -356,10 +395,10 @@ async def test_an_answer_edit_that_keeps_timing_out_is_never_overwritten() -> No
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1", None], "no edit after two"
-    assert "timed out" in _card_json(sender, -1), "a new message covers an edit that never landed"
+    assert [a.id for a in sender.activities[1:]] == ["m-1", "m-1", None, None], "no edit after two"
+    assert sender.activities[3].text == "The posterior mean is 3.", "the full answer is reposted"
     assert lifecycle.card_closed, "a closed card retires its intent, so the sweep skips it"
-    assert lifecycle.final_message_id is None, "no watermark past an answer nobody may have seen"
+    assert lifecycle.final_message_id == "m-4", "the confirmed fresh answer gets the watermark"
 
 
 async def test_a_failed_retry_after_a_timed_out_edit_still_never_collapses_the_card() -> None:
@@ -368,6 +407,16 @@ async def test_a_failed_retry_after_a_timed_out_edit_still_never_collapses_the_c
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     assert all(a.id != "m-1" for a in sender.activities[3:]), "the landed edit is never replaced"
+    assert sender.activities[3].text == "The posterior mean is 3."
+    assert lifecycle.card_closed and lifecycle.final_message_id == "m-4"
+
+
+async def test_failed_fallback_after_uncertain_edit_never_overwrites_the_answer() -> None:
+    sender = FakeSender(timeout_on={1, 2}, fail_on={3})
+    lifecycle = await _posted(sender)
+    with pytest.raises(TurnError, match="delivery_failed"):
+        await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    assert all(a.id != "m-1" for a in sender.activities[3:])
     assert "timed out" in _card_json(sender, -1)
     assert lifecycle.card_closed and lifecycle.final_message_id is None
 
@@ -381,7 +430,8 @@ async def test_a_timed_out_cancel_notice_is_resent_then_collapsed_without_an_ans
 
     sender = FakeSender(timeout_on={1, 2})
     lifecycle = await _posted(sender)
-    await lifecycle.on_terminal_success(TurnState())
+    with pytest.raises(TurnError, match="delivery_failed"):
+        await lifecycle.on_terminal_success(TurnState())
     assert sender.activities[-1].id == "m-1"
     assert "Something went wrong." in _card_json(sender, -1), "no answer is claimed"
     assert lifecycle.card_closed
@@ -429,7 +479,8 @@ async def test_a_ping_whose_card_cannot_be_retired_still_delivers_the_answer() -
 async def test_a_ping_whose_answer_fails_collapses_the_card_to_the_failure() -> None:
     sender = FakeSender(fail_on={1})
     lifecycle = await _posted(sender, completion_ping=True)
-    await lifecycle.on_terminal_success(_answer("Done."))
+    with pytest.raises(TurnError, match="delivery_failed"):
+        await lifecycle.on_terminal_success(_answer("Done."))
     assert sender.activities[-1].id == "m-1" and card.ANSWERED_BELOW not in _card_json(sender, -1)
     assert lifecycle.final_message_id is None, "no watermark past an answer nobody saw"
 

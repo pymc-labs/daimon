@@ -844,6 +844,15 @@ per-hook cost contract:
 because it runs on its own task and cannot stall the pump; `on_sse_event` is
 awaited inline in the consume loop and must stay a cheap local tap.
 
+Discord replaces the working card with its answer and summary in one edit.
+Discord and Teams fall back to posting a new answer when the original card
+cannot be edited. Discord's post transport unarchives a thread and retries
+when Discord returns error 50083. If the complete answer still cannot be
+delivered, the driver preserves the work and usage and records
+`delivery_failed` in `turn_outcomes`, rather than `completed`. Teams logs
+redacted, bounded response details for 4xx sends. A Teams edit that timed out
+may already have landed, so its fallback leaves that message intact.
+
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It delivers each file before deleting its MA

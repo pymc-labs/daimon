@@ -3,15 +3,61 @@
 import asyncio
 from dataclasses import asdict
 from types import ModuleType
+from typing import cast
 
 import pytest
+from anthropic import AsyncAnthropic
 from daimon.core._models import TurnOutcome
+from daimon.core.errors import TurnError
 from daimon.core.stores.turn_outcomes import list_for_tenant, record
+from daimon.core.turn.driver import run_turn
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes, observe_turn, record_refusal
+from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
+
+from .conftest import make_agent_message, make_end_turn, make_status_idle
+
+
+async def test_delivery_failure_after_agent_completion_is_recorded_as_failure(
+    db_session: AsyncSession, db_engine: AsyncEngine
+) -> None:
+    class FailedDelivery(RecordingLifecycle):
+        async def on_terminal_success(self, state):
+            await super().on_terminal_success(state)
+            raise TurnError(kind="delivery_failed", cause=OSError("platform unavailable"))
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine)
+    client, lifecycle = FakeAnthropic(), FailedDelivery()
+    client.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(make_agent_message(event_id="answer", text="The answer is ready.")),
+            YieldEvent(make_status_idle(event_id="done", stop_reason=make_end_turn())),
+        ]
+    ]
+    with observe_turn(sm, tenant_id=tenant.id, platform="teams") as observation:
+        result = await run_turn(
+            anthropic=cast(AsyncAnthropic, client),
+            session_id="sesn_delivery",
+            user_message="answer please",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=BillingExempt(reason="test"),
+        )
+        observation.finish(state=result)
+    await drain_outcomes()
+    async with sm() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert len(rows) == 1 and rows[0].reason == TerminationReason.DELIVERY_FAILED
+    assert rows[0].error_class == "TurnError"
+    assert result.content[0].text == "The answer is ready."
+    assert lifecycle.terminal_failures == [], "the delivery adapter already handled its notice"
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams", "scheduler", "headless"])
@@ -149,7 +195,7 @@ def test_model_and_migration_reason_constraints_match_the_enum() -> None:
     ]
     assert len(checks) == 1
     created = set(re.findall(r"'([^']+)'", ast.literal_eval(checks[0].args[0])))
-    latest = _migration("0045_admission_refusal_reasons.py").OUTCOME_REASONS
+    latest = _migration("0077_delivery_failure_outcome.py").OUTCOME_REASONS
     assert created < expected, "0029 created the constraint with a subset of today's reasons"
     assert set(latest) == expected, "the latest migration that widens the constraint matches"
 

@@ -112,6 +112,61 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
 
+@pytest.mark.parametrize("status,code", [(404, 10008), (403, 50083), (500, 0)])
+async def test_answer_edit_failure_posts_a_complete_answer_and_removes_the_old_card(
+    status: int, code: int
+) -> None:
+    sends, edits, deleted = [], [], []
+
+    async def send(**kwargs):
+        sends.append(kwargs)
+        return types.SimpleNamespace(id=len(sends))
+
+    async def edit(message, **kwargs):
+        edits.append(kwargs)
+        raise discord.HTTPException(
+            types.SimpleNamespace(status=status, reason="failed"),
+            {"code": code, "message": "cannot edit"},
+        )
+
+    async def delete(message):
+        deleted.append(message.id)
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, delete=delete, agent_name="agent", model_id="m"
+    )
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(_make_success_state("The complete answer."))
+    assert len(edits) == 1, "collapse, answer and summary must be one edit"
+    assert edits[0]["content"] == "The complete answer." and edits[0]["view"] is None
+    assert sends[-1]["content"] == "The complete answer."
+    assert sends[-1]["embeds"][0].footer.text
+    assert lifecycle.final_message_id == lifecycle.feedback_message_id == "2"
+    assert lifecycle.was_answered and lifecycle.answer_message.message_id == 2
+    assert deleted == [1]
+
+
+async def test_failed_answer_fallback_raises_delivery_error_without_marking_it_answered() -> None:
+    sends = 0
+
+    async def send(**kwargs):
+        nonlocal sends
+        sends += 1
+        if sends > 1:
+            raise OSError("cannot send")
+        return types.SimpleNamespace(id=1)
+
+    async def edit(message, **kwargs):
+        raise OSError("cannot edit")
+
+    lifecycle = DiscordTurnLifecycle(send=send, edit=edit, agent_name="agent", model_id="m")
+    await lifecycle.post_initial()
+    with pytest.raises(TurnError) as error:
+        await lifecycle.on_terminal_success(_make_success_state("undelivered"))
+    assert error.value.kind == "delivery_failed"
+    assert not lifecycle.was_answered and lifecycle.answer_message is None
+
+
 @pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
 async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
     partial_text: str,
@@ -285,11 +340,9 @@ class TestDebounce:
         state = _make_success_state("done")
         await lc.on_terminal_success(state)
 
-        # message_ref is unset (on_sse_event alone performs no I/O), so
-        # _flush_terminal posts the done embed via send; the clean-replace
-        # step then edits that same message with the final text.
-        assert len(sends) == 1, "flush_terminal posts since no message_ref exists yet"
-        assert len(edits) == 1, "clean replace edits the just-posted message"
+        assert len(sends) == 1 and sends[0]["content"] == "done"
+        assert sends[0]["embeds"][0].footer.text, "answer and summary arrive together"
+        assert edits == [], "no empty collapsed card is posted first"
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +355,7 @@ class TestCleanReplace:
         """Terminal success replaces embed with plain text (clean replace)."""
         lc, sends, edits = _make_lifecycle()
 
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
         state = _make_success_state("Hello response")
         await lc.on_terminal_success(state)
@@ -379,7 +433,8 @@ class TestCleanReplace:
 
         await lc.on_terminal_success(_make_success_state())
 
-        assert "embeds" not in edits[-1][1], "a one-message answer keeps the card's summary"
+        assert len(edits) == 1, "answer and collapsed summary share one edit"
+        assert edits[0][1]["embeds"][0].footer.text, "the summary accompanies the answer"
 
     async def test_completion_ping_answer_carries_the_summary_and_the_card_goes(self) -> None:
         deleted: list[object] = []
@@ -419,6 +474,7 @@ class TestCleanReplace:
         edit must carry an AllowedMentions with everyone/roles/users all disabled."""
         lc, sends, edits = _make_lifecycle()
 
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
         state = _make_success_state("@everyone check this out")
         await lc.on_terminal_success(state)
@@ -753,6 +809,7 @@ class TestSealedResponsePersistence:
         """A sealed answer the render loop never flushed still posts at terminal,
         and the final recap posts as today."""
         lc, sends, edits = _make_lifecycle()
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
         initial_sends = len(sends)
 
@@ -827,6 +884,7 @@ class TestCancelViewWiring:
         """Terminal success clean-replace passes view=None."""
         fake_view = discord.ui.View()
         lc, sends, edits = _make_lifecycle(cancel_view=fake_view)
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
         state = _make_success_state("Hello")
         await lc.on_terminal_success(state)
@@ -858,6 +916,7 @@ class TestCancelViewWiring:
         """Cancelled turn with no content replaces embed with 'Turn cancelled.'."""
         fake_view = discord.ui.View()
         lc, sends, edits = _make_lifecycle(cancel_view=fake_view)
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
         # Empty state -- no TextBlock content (simulates cancel before any output)
         state = TurnState()
@@ -931,6 +990,7 @@ class TestFilteredExtraction:
     async def test_multi_tool_turn_shows_only_final_response(self) -> None:
         """Multi-tool turn: intermediate narration filtered, only final text shown."""
         lc, sends, edits = _make_lifecycle()
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
 
         state = TurnState(
@@ -952,6 +1012,7 @@ class TestFilteredExtraction:
     async def test_no_tool_turn_shows_all_text(self) -> None:
         """No-tool turn: all text is final, shown in clean replace."""
         lc, sends, edits = _make_lifecycle()
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
 
         state = TurnState(
@@ -990,12 +1051,13 @@ class TestZeroMessageBehavior:
 
         # Only the terminal flush edit (done embed), no clean-replace edit
         # The flush_terminal edit sets embed= (done embed). No subsequent content= edit.
-        assert "embeds" in edits[0][1], "terminal flush should have embed"
+        assert len(edits) == 1 and "embed" in edits[0][1], "Done and summary share one edit"
         assert edits[-1][1]["embed"].description == "Done."
 
     async def test_truly_cancelled_turn_shows_turn_cancelled(self) -> None:
         """Empty content (no blocks at all) still shows 'Turn cancelled.'."""
         lc, sends, edits = _make_lifecycle()
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
 
         state = TurnState()  # completely empty content
@@ -1077,11 +1139,13 @@ def _span_usage_event(
 
 
 def _terminal_embed(edits: list[tuple[Any, dict[str, Any]]]) -> discord.Embed:
-    """The discord.Embed flushed at the terminal hook (first edit carrying embeds)."""
-    for _ref, kwargs in edits:
+    """The summary embed on the final card or answer edit."""
+    for _ref, kwargs in reversed(edits):
         embeds = kwargs.get("embeds")
         if embeds:
             return embeds[0]
+        if kwargs.get("embed"):
+            return kwargs["embed"]
     raise AssertionError("no terminal embed was flushed")
 
 
@@ -1175,6 +1239,7 @@ async def test_a_long_answers_files_go_on_its_last_chunk() -> None:
 @pytest.mark.asyncio
 async def test_a_tool_only_turn_takes_its_files_on_the_done_card() -> None:
     lc, edits = _window_fixture()
+    await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
     tool = ToolUseBlock(
         kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
@@ -1295,6 +1360,7 @@ class TestWasAnswered:
         """A cancelled turn -- no text, no tool activity -- must not report an
         answer, and the rendered message must agree."""
         lc, _sends, edits = _make_lifecycle()
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
 
         state = TurnState()  # completely empty content
@@ -1369,6 +1435,7 @@ class TestTurnSummaryFooter:
                 output_tokens=300,
             ),
         )
+        state = dataclasses.replace(state, content=[TextBlock(kind="text", text="The answer.")])
         await lc.on_terminal_success(state)
 
         ledger_cost = cost_of(
@@ -1411,6 +1478,7 @@ async def test_footer_cost_is_the_debit_with_markup() -> None:
     await lc.on_render(TurnState())
     usage = dict(input_tokens=10000, cache_creation_input_tokens=0, cache_read_input_tokens=0)
     state = apply(TurnState(), _span_usage_event(event_id="u1", output_tokens=3000, **usage))
+    state = dataclasses.replace(state, content=[TextBlock(kind="text", text="The answer.")])
     await lc.on_terminal_success(state)
 
     raw = cost_of(
@@ -1418,7 +1486,11 @@ async def test_footer_cost_is_the_debit_with_markup() -> None:
         MODEL_PRICING["claude-sonnet-4-6"],
     )
     debit = format_cost(float(debit_amount(raw, markup=Decimal("1.1"))))
-    footer = [kw["embeds"][0].footer.text for kw in sends if kw.get("embeds")][-1]
+    footer = [
+        (kw["embeds"][0] if kw.get("embeds") else kw["embed"]).footer.text
+        for kw in sends
+        if kw.get("embeds") or kw.get("embed")
+    ][-1]
     assert f"{GAP}{debit} used" in footer, f"footer must show the debit {debit}"
     assert format_cost(raw) != debit, "the raw cost would understate it"
 
@@ -1664,6 +1736,7 @@ class TestDegradedTurnNotice:
         from daimon.core.turn.state import McpServerFailure
 
         lc, _sends, edits = _make_lifecycle()
+        await lc.post_initial()
         await lc.on_sse_event(_thinking_event())
         state = TurnState(
             content=[TextBlock(kind="text", text="Here is the board.")],

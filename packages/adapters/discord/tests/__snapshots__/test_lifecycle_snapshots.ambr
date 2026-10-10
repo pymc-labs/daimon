@@ -64,7 +64,7 @@
         ]),
       }),
       dict({
-        'content': None,
+        'content': 'Here is the answer.',
         'embeds': list([
           dict({
             'color': 5763719,
@@ -75,10 +75,6 @@
             'title': None,
           }),
         ]),
-      }),
-      dict({
-        'content': 'Here is the answer.',
-        'embeds': None,
       }),
     ]),
     'sends': list([

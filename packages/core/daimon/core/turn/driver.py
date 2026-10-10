@@ -1645,14 +1645,39 @@ async def _finalize_success_or_error(
             events_folded=events_folded,
             renders_failed=renders_failed,
         )
-        await lifecycle.on_terminal_success(final_state)
+        final_state = await _deliver_terminal_success(final_state, lifecycle, session_id=session_id)
+        state_cell[0] = final_state
         if (
-            final_state.content
+            final_state.error is None
+            and final_state.content
             and final_state.stop_reason is not None
             and final_state.stop_reason.type == "end_turn"
         ):
             await acknowledge(lifecycle, "done")
     return final_state
+
+
+async def _deliver_terminal_success(
+    state: TurnState, lifecycle: TurnLifecycle, *, session_id: str
+) -> TurnState:
+    """Preserve the finished work while recording an adapter's delivery failure.
+
+    The adapter already tried its fallback and terminal notice. Do not invoke
+    a second failure hook that could overwrite a partially delivered answer.
+    Unrelated hook errors still propagate.
+    """
+    try:
+        await lifecycle.on_terminal_success(state)
+    except TurnError as err:
+        if err.kind != "delivery_failed":
+            raise
+        log.error(
+            "turn.answer_delivery_failed",
+            session_id=session_id,
+            error_class=type(err.cause).__name__,
+        )
+        return dataclasses.replace(state, error=err, termination=TerminationReason.DELIVERY_FAILED)
+    return state
 
 
 async def _finalize_connection_lost(
@@ -1810,7 +1835,7 @@ async def _handle_interrupt_in_consume(
         events_folded=None,
         renders_failed=renders_failed,
     )
-    await lifecycle.on_terminal_success(state_cell[0])
+    state_cell[0] = await _deliver_terminal_success(state_cell[0], lifecycle, session_id=session_id)
     return state_cell[0]
 
 
