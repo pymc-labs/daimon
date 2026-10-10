@@ -46,9 +46,10 @@ def disjoint_observations(values: Iterable[UsageObservation]) -> tuple[UsageObse
     A closure includes its root and missing covered IDs, scoped to the native
     session. Shared absent or transitive descendants still overlap: matching
     grains do not make sibling aggregates additive. Explicit coverage removes
-    descendants; mixed uncovered grains and cycles fail closed. Ingest calls
-    this on pending history too, before capture/claim/debit. Coverage is fixed
-    per observation identity; revisions may correct amounts only.
+    descendants; mixed uncovered grains and cycles fail closed. Non-Anthropic
+    ingest calls this on pending history too, before capture/claim/debit.
+    Revisions retain coverage and accounting identity: model once set, grain,
+    basis and turn/thread attribution.
     """
     values = tuple(values)
     edges = {(value.session, value.id): value.covers for value in values}

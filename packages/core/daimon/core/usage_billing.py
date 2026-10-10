@@ -26,8 +26,9 @@ class ObservationBilled:
     posture alone does not grant provider registration or a verified price.
     The callback supplies authorized dated tariffs and actual infrastructure;
     unknown spend remains pending. Foreign compatibility display counters are
-    lower bounds: consumers omit cost without that verified pricing context,
-    rather than construct an Anthropic meter from those counters.
+    lower bounds: consumers must omit cost without that verified pricing context
+    and must not construct an Anthropic meter from those counters (the adapter
+    footers do not enforce this yet).
     """
 
     record: ObservationRecorder
