@@ -29,7 +29,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
-from daimon.core.errors import TurnError
+from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
@@ -2085,3 +2085,18 @@ async def test_terminal_overload_is_plain_and_allows_for_later_file_delivery(sta
     assert "rid:" not in text
     assert "tool calls" not in text
     assert "error'" not in text
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_terminal_failure_keeps_authored_setup_guidance(wrapped: bool) -> None:
+    lc, _, edits = _make_lifecycle()
+    await lc.on_render(TurnState())
+    copy = "This turn's setup context expired. Mention me again to continue."
+    error: Exception = UserFacingError(copy)
+    if wrapped:
+        error = TurnError(kind="connection_lost", cause=error)
+    await lc.on_terminal_failure(TurnState(), error)
+    card = edits[-1][1]["embeds"][0]
+    assert card.description == copy
+    assert "Try again in a minute" not in str(card.to_dict())
+    assert "request id" not in str(card.to_dict())

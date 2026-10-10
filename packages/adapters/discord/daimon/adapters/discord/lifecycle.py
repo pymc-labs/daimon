@@ -44,6 +44,7 @@ from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
@@ -754,6 +755,13 @@ class DiscordTurnLifecycle:
                         cause=render_error(err, request_id=request_id),
                         survived="Files that were already created may still arrive.",
                         next_step="Wait a minute, then send your message again.",
+                    )
+                guidance_error = err.cause if isinstance(err, TurnError) else err
+                if isinstance(guidance_error, UserFacingError):
+                    notice = dataclasses.replace(
+                        notice,
+                        cause="This turn couldn't continue.",
+                        next_step=render_error(guidance_error, request_id=request_id),
                     )
                 label, body = notice.headline, format_termination_notice(notice)
         except Exception:
