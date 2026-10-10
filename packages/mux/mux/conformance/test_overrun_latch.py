@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from random import Random
 
 import pytest
 from pydantic import ValidationError
@@ -122,16 +123,22 @@ def test_fresh_complete_revision_settles_actual_without_clearing_overrun(
     )
     assert receipt.status == receipt.reason == "overrun"
     assert receipt.admission_blocked
-    assert receipt.accounting_status == "actual" and receipt.held_usd == 0
+    assert receipt.actual_usd is not None
+    assert receipt.held_usd is not None
     assert receipt.actual_usd == Decimal(final_input) / 1_000_000 + Decimal(".000032")
-    assert receipt.cost_estimate_usd == receipt.actual_usd
+    floor = Decimal(max(1_000_000, final_input)) / 1_000_000 + Decimal(".000032")
+    assert receipt.held_usd == floor - receipt.actual_usd
+    assert receipt.accounting_status == (
+        "actual" if receipt.held_usd == 0 else "estimated_unverified"
+    )
+    assert receipt.cost_estimate_usd == floor
     assert receipt.tokens == newest.requests[0].tokens
     assert receipt.actual_evidence == newest and receipt.overrun_evidence == earlier
     assert guard.report() == (receipt,)
     assert guard.spend_path.read_bytes().startswith(before)
     assert len(receipts(guard)) == 2
     assert Decimal(json.loads(guard.checkpoint_path.read_text())["provider_totals"][provider]) == (
-        receipt.actual_usd
+        receipt.actual_usd + receipt.held_usd
     )
     assert_blocked(guard, plan)
 
@@ -151,9 +158,8 @@ def test_unknown_final_usage_retains_maximum_snapshot_bound_without_double_count
     )
     assert receipt.status == "overrun" and receipt.admission_blocked
     assert receipt.actual_usd is None and receipt.accounting_status == "estimated_unverified"
-    assert (
-        receipt.held_usd
-        == Decimal(max(1_000_000, partial_input or 0)) / 1_000_000 + Decimal(32768 * 4) / 1_000_000
+    assert receipt.held_usd == Decimal(max(1_000_000, partial_input or 0)) / 1_000_000 + Decimal(
+        ".000032"
     )
     assert receipt.actual_evidence == latest and receipt.overrun_evidence == earlier
     assert_blocked(guard, plan)
@@ -220,7 +226,9 @@ def test_runtime_overrun_proof_does_not_replace_fresh_actual(tmp_path: Path) -> 
     )
     assert row.status == "overrun" and row.admission_blocked
     assert row.actual_evidence == fresh and row.overrun_evidence == prior
-    assert row.actual_usd == Decimal(".030132") and row.held_usd == 0
+    assert row.actual_usd == Decimal(".030132") and row.held_usd == Decimal(".03")
+    assert row.accounting_status == "estimated_unverified"
+    assert row.cost_estimate_usd == Decimal(".060132")
     assert_blocked(guard, plan)
 
 
@@ -298,11 +306,13 @@ row = g.settle_with_overrun(r, status='failed', limits=r.receipt.limits, actual=
 if row.status != 'overrun' or not row.admission_blocked:
     raise SystemExit('overrun admission latch lost under -O')
 if n is None:
-    if row.actual_usd is not None or row.held_usd != Decimal('1.131072'):
+    if row.actual_usd is not None or row.held_usd != Decimal('1.000032'):
         raise SystemExit('unknown final lost its proven bound under -O')
 else:
-    if (row.actual_usd != Decimal(n) / 1_000_000 + Decimal('.000032')
-        or row.held_usd != 0 or row.accounting_status != 'actual'):
+    expected = Decimal(n) / 1_000_000 + Decimal('.000032')
+    held = max(Decimal('1.000032') - expected, Decimal(0))
+    if (row.actual_usd != expected or row.held_usd != held
+        or row.accounting_status != ('actual' if held == 0 else 'estimated_unverified')):
         raise SystemExit('final actual replaced by partial overrun snapshot under -O')
 try:
     g.reserve(ProbePlan.create_only(provider='gemini', model='gemini-3.8-flash', fixture_id='C07'))
@@ -392,20 +402,20 @@ def test_preupgrade_reconciled_rows_and_signed_proposal_replay_unchanged(tmp_pat
 def coverage_case(kind: str) -> tuple[ActualSpend, ActualSpend, Decimal]:
     proof = snapshot(1_000_000, complete=False)
     actual = snapshot(64, complete=True, at=AT + timedelta(hours=1))
-    held = Decimal("1.131072")
+    held = Decimal("1.000032")
     if kind in ("missing", "disjoint_large"):
         incoming = 64 if kind == "missing" else 2_000_000
         actual = snapshot(incoming, complete=True, at=AT + timedelta(hours=1))
         actual = actual.model_copy(
             update={"requests": (actual.requests[0].model_copy(update={"id": "other"}),)}
         )
-        held += Decimal(incoming) / 1_000_000
+        held += Decimal(incoming) / 1_000_000 + Decimal(".000032")
     elif kind == "stale":
         actual = snapshot(64, complete=True, at=AT - timedelta(hours=1))
     elif kind == "partial_cover":
         second = proof.requests[0].model_copy(update={"id": "missing-request"})
         proof = proof.model_copy(update={"requests": (*proof.requests, second)})
-        held += Decimal(1)
+        held += Decimal("1.000032")
     elif kind == "naive_time":
         actual = snapshot(64, complete=True, at=AT.replace(tzinfo=None))
     else:
@@ -496,3 +506,210 @@ else:
         capture_output=True,
         timeout=30,
     )
+
+
+def union_repro() -> tuple[ActualSpend, ActualSpend]:
+    a = snapshot(1_000_000, complete=False).requests[0]
+    b = a.model_copy(update={"id": "B"})
+    stale_a = snapshot(64, complete=True, at=AT - timedelta(hours=1)).requests[0]
+    c = snapshot(1_000_000, complete=True, at=AT + timedelta(hours=1)).requests[0]
+    return (
+        ActualSpend(
+            requests=(stale_a, c.model_copy(update={"id": "C"})), containers=(), usage_complete=True
+        ),
+        ActualSpend(requests=(a, b), containers=(), usage_complete=False),
+    )
+
+
+def test_stale_overlap_missing_b_and_new_c_keep_all_three_identity_bounds(tmp_path: Path) -> None:
+    guard, plan = guard_and_plan(tmp_path)
+    reservation = guard.reserve(plan)
+    actual, proof = union_repro()
+    row = guard.settle_with_overrun(
+        reservation, status="failed", limits=plan.limits, actual=actual, overrun_evidence=proof
+    )
+    assert row.actual_usd is None and row.held_usd == Decimal("3.000096")
+    assert row.cost_estimate_usd == Decimal("3.000096")
+    assert row.accounting_status == "estimated_unverified" and row.admission_blocked
+    assert Decimal(json.loads(guard.checkpoint_path.read_text())["provider_totals"]["gemini"]) == (
+        row.cost_estimate_usd
+    )
+    assert_blocked(guard, plan)
+
+
+def random_union_case(rng: Random) -> tuple[ActualSpend, ActualSpend, Decimal]:
+    # Oracle uses only primitive fixture counters and mock rates, independently
+    # of the guard's pricing, coverage and identity-union implementation.
+    proofs: list[MeasuredRequest] = []
+    actuals: list[MeasuredRequest] = []
+    bounds: dict[str, Decimal] = {}
+    for target, is_proof in ((proofs, True), (actuals, False)):
+        for id_ in ("A", "B", "C", "D", "E"):
+            if not (is_proof and id_ == "A") and rng.choice((True, False)):
+                continue
+            incoming = (
+                1_000_000
+                if is_proof and id_ == "A"
+                else rng.choice((None, 0, 64, 20_000, 1_000_000, 2_000_000))
+            )
+            outgoing = rng.choice((None, 0, 8, 1000))
+            hour = 2 if is_proof else rng.choice((1, 2, 3))
+            target.append(
+                MeasuredRequest(
+                    id=id_,
+                    observed_at=AT + timedelta(hours=hour),
+                    pricing_basis="standard-global",
+                    tokens=TokenUsage(
+                        input_tokens=incoming,
+                        output_tokens=outgoing,
+                        input_cached_tokens=rng.choice((None, 0)),
+                        input_cache_write_tokens=rng.choice((None, 0)),
+                    ),
+                )
+            )
+    complete = rng.choice((True, False))
+    if rng.randrange(4) == 0:
+        # Exercise genuinely complete fresh walks too, including settled actual
+        # below an older proof and its residual hold.
+        actuals = [
+            MeasuredRequest(
+                id=prior.id,
+                observed_at=AT + timedelta(hours=3),
+                pricing_basis="standard-global",
+                tokens=snapshot(rng.choice((64, 2_000_000)), complete=True).requests[0].tokens,
+            )
+            for prior in proofs
+        ]
+        complete = True
+    for request in (*proofs, *actuals):
+        known = sum(
+            (
+                Decimal(count) * rate / 1_000_000
+                for count, rate in (
+                    (request.tokens.input_tokens, 1),
+                    (request.tokens.output_tokens, 4),
+                )
+                if count is not None
+            ),
+            Decimal(0),
+        )
+        prior_bound = bounds.get(request.id)
+        bounds[request.id] = known if prior_bound is None else max(prior_bound, known)
+    return (
+        ActualSpend(requests=tuple(actuals), containers=(), usage_complete=complete),
+        ActualSpend(requests=tuple(proofs), containers=(), usage_complete=False),
+        sum(bounds.values(), Decimal(0)),
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 17, 91, 20261010])
+def test_random_overlap_missing_stale_union_never_understates_spend(
+    tmp_path: Path, seed: int
+) -> None:
+    rng = Random(seed)
+    for index in range(64):
+        root = tmp_path / str(index)
+        root.mkdir()
+        guard, plan = guard_and_plan(root)
+        reservation = guard.reserve(plan)
+        actual, proof, minimum = random_union_case(rng)
+        row = guard.settle_with_overrun(
+            reservation, status="failed", limits=plan.limits, actual=actual, overrun_evidence=proof
+        )
+        assert row.held_usd is not None
+        settled = row.actual_usd if row.actual_usd is not None else Decimal(0)
+        assert row.held_usd + settled >= minimum, (seed, index, actual, proof, row)
+        assert row.cost_estimate_usd == row.held_usd + settled
+        assert guard.report() == (row,)
+        assert row.admission_blocked
+        if row.actual_usd is not None:
+            assert actual.usage_complete
+        assert_blocked(guard, plan)
+
+
+def test_signed_reconciliation_can_release_residual_but_cannot_remove_settled_actual(
+    tmp_path: Path,
+) -> None:
+    guard, plan = guard_and_plan(tmp_path)
+    held = guard.reserve(plan)
+    row = guard.settle_with_overrun(
+        held,
+        status="completed",
+        limits=plan.limits,
+        actual=snapshot(64, complete=True, at=AT + timedelta(hours=1)),
+        overrun_evidence=snapshot(1_000_000, complete=False),
+    )
+    assert row.actual_usd == Decimal(".000096") and row.held_usd == Decimal(".999936")
+    approved = proposal(guard, row.run_id)
+    lower = approved.model_copy(
+        update={"actual_usd": Decimal(0), "token_usd": Decimal(0), "container_usd": Decimal(0)}
+    )
+    sign(guard, lower)
+    before = guard.spend_path.read_bytes()
+    with pytest.raises(BudgetRefused, match="verified settled dollars"):
+        guard.reconcile(lower)
+    assert guard.spend_path.read_bytes() == before
+    sign(guard, approved)
+    receipt = guard.reconcile(approved)
+    assert receipt.actual_usd == approved.actual_usd and receipt.held_usd == 0
+    assert guard.spend_path.read_bytes().startswith(before)
+    assert_blocked(guard, plan)
+
+
+def test_union_floor_and_residual_settlement_under_optimized_python(tmp_path: Path) -> None:
+    script = """
+from pathlib import Path
+from random import Random
+from decimal import Decimal
+import sys
+from mux.conformance.test_overrun_latch import guard_and_plan, union_repro, random_union_case
+rng = Random(817)
+for index in range(65):
+    root = Path(sys.argv[1]) / str(index)
+    root.mkdir()
+    g, plan = guard_and_plan(root)
+    r = g.reserve(plan)
+    if index == 0:
+        actual, proof = union_repro()
+        minimum = Decimal('3.000096')
+    else:
+        actual, proof, minimum = random_union_case(rng)
+    row = g.settle_with_overrun(r, status='failed', limits=plan.limits, actual=actual,
+                               overrun_evidence=proof)
+    settled = row.actual_usd if row.actual_usd is not None else Decimal(0)
+    if row.held_usd is None or row.held_usd + settled < minimum:
+        raise SystemExit('per-request union floor lost under -O')
+    if row.cost_estimate_usd != row.held_usd + settled or not row.admission_blocked:
+        raise SystemExit('ledger debit/admission lost under -O')
+    if index == 0 and (row.actual_usd is not None or row.held_usd != minimum):
+        raise SystemExit('Codex union repro lost under -O')
+"""
+    subprocess.run(
+        [sys.executable, "-O", "-c", script, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+
+def test_container_union_uses_max_per_identity_before_summing(tmp_path: Path) -> None:
+    guard = dated_guard(tmp_path)
+    plan = smoke_plan()
+    reservation = guard.reserve(plan)
+    proof = measured(seconds=1201)
+    assert proof.containers
+    a = proof.containers[0]
+    proof = proof.model_copy(
+        update={"containers": (a, a.model_copy(update={"id": "B"})), "usage_complete": False}
+    )
+    actual = measured(seconds=3)
+    assert actual.containers
+    actual = actual.model_copy(
+        update={"containers": (*actual.containers, a.model_copy(update={"id": "C"}))}
+    )
+    row = guard.settle_with_overrun(
+        reservation, status="failed", limits=plan.limits, actual=actual, overrun_evidence=proof
+    )
+    assert row.actual_usd is None and row.held_usd == Decimal(".180132")
+    assert row.cost_estimate_usd == row.held_usd
+    assert_blocked(guard, plan)
