@@ -216,14 +216,35 @@ async def test_cli_memory_actual_callsite_bytes_pagination_and_errors(
 
 
 @pytest.mark.parametrize("description", [None, "", "description"])
-@pytest.mark.parametrize("status", [200, 403, 409])
+@pytest.mark.parametrize(
+    "status,reply_shape",
+    [
+        (200, "full"),
+        (200, "missing_created_at"),
+        (200, "id_only"),
+        (200, "empty"),
+        (200, "null_unused"),
+        (403, "full"),
+        (409, "full"),
+    ],
+)
 async def test_environment_fork_callsite_null_description_and_error_bytes(
     monkeypatch: pytest.MonkeyPatch,
     description: str | None,
     status: int,
+    reply_shape: str,
 ) -> None:
     record = ma_environment(id="env1", name="source", tenant_id=TENANT).model_dump(mode="json")
     record["description"] = description
+    reply = dict(record)
+    if reply_shape == "missing_created_at":
+        reply.pop("created_at")
+    elif reply_shape == "id_only":
+        reply = {"id": "env-copy"}
+    elif reply_shape == "empty":
+        reply = {}
+    elif reply_shape == "null_unused":
+        reply = dict.fromkeys(record)
     before, after = ScriptedTransport(), ScriptedTransport()
     for t in (before, after):
         t.queue(
@@ -233,7 +254,7 @@ async def test_environment_fork_callsite_null_description_and_error_bytes(
                 "/v1/environments",
                 httpx.Response(
                     status,
-                    json=record
+                    json=reply
                     if status == 200
                     else {"error": {"type": "conflict_error", "message": "refused"}},
                 ),
@@ -262,6 +283,16 @@ async def test_environment_fork_callsite_null_description_and_error_bytes(
     monkeypatch.setattr(environments, "get_or_create_cli_principal", principal)
     monkeypatch.setattr(environments, "find_environment_by_daimon_tag", find)
     monkeypatch.setattr(environments, "find_environments_by_daimon_tag", matches)
+    scopes: list[Scope] = []
+    create_ignored = environments.create_environment_ignored
+
+    async def scoped_create(
+        client: AsyncAnthropic, payload: dict[str, object], *, scope: Scope
+    ) -> None:
+        scopes.append(scope)
+        await create_ignored(client, payload, scope=scope)
+
+    monkeypatch.setattr(environments, "create_environment_ignored", scoped_create)
     output = StringIO()
     errors: list[Exception | None] = []
     async with before.client() as old, after.client() as new:
@@ -296,6 +327,9 @@ async def test_environment_fork_callsite_null_description_and_error_bytes(
         except Exception as exc:
             errors.append(exc)
     equal(before, after)
+    assert len(scopes) == 1
+    assert scopes[0].tenant_id == str(TENANT)
+    assert scopes[0].platform_reason is None and scopes[0].legacy_call_site is None
     assert type(errors[0]) is type(errors[1])
     assert str(errors[0]) == str(errors[1])
     assert output.getvalue().strip() == (

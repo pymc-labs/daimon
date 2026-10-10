@@ -75,6 +75,21 @@ def environment_payload(spec: EnvironmentSpec | EnvironmentPatch) -> dict[str, o
     return result
 
 
+async def create_environment_ignored(
+    client: AsyncAnthropic,
+    scope: Scope,
+    spec: EnvironmentSpec,
+    *,
+    authorization: ResourceAuthorization,
+) -> None:
+    """Create for legacy callers that consumed no fields of the SDK reply."""
+    authorize(authorization, scope, "environment")
+    check_record(scope, "new-environment", spec.metadata)
+    await provider_call(
+        client.beta.environments.create(**cast(EnvironmentCreateParams, environment_payload(spec)))
+    )
+
+
 def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scope) -> Environment:
     # SDK response construction permits missing/null required fields. Legacy
     # identity reads only need metadata and archive state; retain their exact

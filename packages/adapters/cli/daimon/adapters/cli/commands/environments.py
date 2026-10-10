@@ -10,7 +10,11 @@ import typer
 from anthropic import APIStatusError
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
-from daimon.adapters.cli.mux_compat import delete_environment, retrieve_environment
+from daimon.adapters.cli.mux_compat import (
+    create_environment_ignored,
+    delete_environment,
+    retrieve_environment,
+)
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
@@ -331,7 +335,7 @@ async def environments_fork(
     source_cfg = source_ma.config.model_dump(mode="json")
     allowed = ("type", "networking", "packages")
     fork_cfg = {k: source_cfg[k] for k in allowed if k in source_cfg}
-    await create_environment(
+    await create_environment_ignored(
         rt.anthropic,
         {
             "name": dst,

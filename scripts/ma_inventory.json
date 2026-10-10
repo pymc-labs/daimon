@@ -187,8 +187,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
-      "line": 268,
-      "end": 268,
+      "line": 299,
+      "end": 299,
       "scope": "test_environment_fork_callsite_null_description_and_error_bytes",
       "category": "test",
       "resource": "environments.retrieve",
@@ -201,8 +201,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
-      "line": 272,
-      "end": 284,
+      "line": 303,
+      "end": 315,
       "scope": "test_environment_fork_callsite_null_description_and_error_bytes",
       "category": "test",
       "resource": "environments.create",
@@ -215,8 +215,8 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
-      "line": 359,
-      "end": 359,
+      "line": 393,
+      "end": 393,
       "scope": "test_raw_session_inspection_keeps_operator_authority_output_and_no_db",
       "category": "test",
       "resource": "sessions.retrieve",
@@ -5801,8 +5801,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 241,
-      "end": 241,
+      "line": 89,
+      "end": 89,
+      "scope": "create_environment_ignored",
+      "category": "production",
+      "resource": "environments.create",
+      "call": "client.beta.environments.create(**cast(EnvironmentCreateParams, environment_payload(spec)))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
+      "line": 256,
+      "end": 256,
       "scope": "walk",
       "category": "production",
       "resource": "environments.list",
@@ -5812,8 +5823,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 144,
-      "end": 146,
+      "line": 159,
+      "end": 161,
       "scope": "create",
       "category": "production",
       "resource": "environments.create",
@@ -5823,8 +5834,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 154,
-      "end": 154,
+      "line": 169,
+      "end": 169,
       "scope": "_retrieve_sdk",
       "category": "production",
       "resource": "environments.retrieve",
@@ -5834,8 +5845,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 180,
-      "end": 180,
+      "line": 195,
+      "end": 195,
       "scope": "list",
       "category": "production",
       "resource": "environments.list",
@@ -5845,8 +5856,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 206,
-      "end": 208,
+      "line": 221,
+      "end": 223,
       "scope": "update",
       "category": "production",
       "resource": "environments.update",
@@ -5856,8 +5867,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 216,
-      "end": 216,
+      "line": 231,
+      "end": 231,
       "scope": "archive",
       "category": "production",
       "resource": "environments.archive",
@@ -5867,8 +5878,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/resources/environments.py",
-      "line": 234,
-      "end": 234,
+      "line": 249,
+      "end": 249,
       "scope": "delete",
       "category": "production",
       "resource": "environments.delete",
@@ -9112,7 +9123,7 @@
     },
     {
       "file": "packages/adapters/cli/daimon/adapters/cli/mux_compat.py",
-      "line": 9,
+      "line": 10,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -9121,7 +9132,7 @@
     },
     {
       "file": "packages/adapters/cli/daimon/adapters/cli/mux_compat.py",
-      "line": 10,
+      "line": 11,
       "module": "anthropic.types.beta",
       "names": [
         "BetaEnvironment",
@@ -9398,7 +9409,7 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
-      "line": 315,
+      "line": 349,
       "module": "anthropic.types.beta",
       "names": [
         "BetaManagedAgentsSession"
@@ -9407,7 +9418,7 @@
     },
     {
       "file": "packages/adapters/cli/tests/commands/test_remaining_mux_parity.py",
-      "line": 270,
+      "line": 301,
       "module": "anthropic.types.beta.beta_cloud_config_params",
       "names": [
         "BetaCloudConfigParams"
