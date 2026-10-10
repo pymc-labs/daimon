@@ -39,13 +39,12 @@ def finish_observation(result: Result, backend: Backend) -> None:
                         "affects_turn": True,
                     }
                 )
-    end_probe_pending = False
     try:
         observation.end_image = backend.deployment_image()
     except Pending:
         # A verified start followed by mixed/missing workers is an active rollout.
         # The bounded settle gate determines whether a fresh attempt is possible.
-        end_probe_pending = bool(observation.start_image)
+        observation.end_probe_pending = bool(observation.start_image)
         observation.error = "deployment image unavailable: Pending"
         result.notes.append(observation.error)
     except Exception as exc:
@@ -56,26 +55,45 @@ def finish_observation(result: Result, backend: Backend) -> None:
             backend.deployment_events(observation.started_at, observation.ended_at, result.turns)
         )
     except Exception as exc:
-        observation.error = "deployment observation unavailable: " + type(exc).__name__
+        observation.events_error = "deployment observation unavailable: " + type(exc).__name__
+        observation.error = observation.events_error
         result.notes.append(redact(observation.error))
     observation.interrupted = bool(
-        end_probe_pending
+        observation.end_probe_pending
         or (
             observation.start_image
             and observation.end_image
             and observation.start_image != observation.end_image
         )
-        or any(event.get("affects_turn") is True for event in observation.events)
+        or (
+            any(event.get("affects_turn") is True for event in observation.events)
+            and not (observation.start_image and observation.start_image == observation.end_image)
+        )
     )
+    append_observation_checks(result)
+
+
+def append_observation_checks(result: Result) -> None:
+    """Retain missing log evidence even after an image probe recovers."""
+    observation = result.deployment
+    if observation is None:
+        return
     if observation.interrupted:
         result.checks.append(Check("deployment", "PENDING", "deploy-interrupted"))
-    elif observation.error:
-        result.checks.append(Check("deployment", "PENDING", observation.error))
+        return
+    matching_images = bool(
+        observation.start_image and observation.start_image == observation.end_image
+    )
+    error = observation.events_error or (observation.error if not matching_images else None)
+    if error:
+        result.checks.append(Check("deployment", "PENDING", error))
+    if matching_images and any(event.get("affects_turn") is True for event in observation.events):
+        result.checks.append(Check("deployment", "FAIL", "worker restarted on the same image"))
 
 
 def wait_for_stable_deployment(
     backend: Backend, *, timeout_s: float = 300, stable_s: float = 30
-) -> None:
+) -> str:
     deadline = time.monotonic() + timeout_s
     image: str | None = None
     stable_since: float | None = None
@@ -90,7 +108,7 @@ def wait_for_stable_deployment(
             if current != image:
                 image, stable_since = current, now
             elif stable_since is not None and now - stable_since >= stable_s:
-                return
+                return current
         time.sleep(min(10, max(0, deadline - time.monotonic())))
     raise Pending("deployment did not settle within the retry window")
 
@@ -113,14 +131,31 @@ def run_with_deploy_retry(
         on_result(result)
         if not result.deployment or not result.deployment.interrupted or attempt:
             break
-        if not retry_allowed():
-            result.notes.append("deploy-interrupted retry refused by remaining pass budget")
-            on_result(result)
-            break
         try:
-            wait_for_stable_deployment(executor.backend)
+            settled_image = wait_for_stable_deployment(executor.backend)
         except Pending as exc:
             result.notes.append(str(exc))
+            on_result(result)
+            break
+        result.deployment.settled_image = settled_image
+        if result.deployment.end_probe_pending and settled_image == result.deployment.start_image:
+            observation = result.deployment
+            observation.end_image = settled_image
+            observation.interrupted = False
+            result.checks = [
+                check
+                for check in result.checks
+                if not (check.kind == "deployment" and check.reason == "deploy-interrupted")
+            ]
+            result.notes.append(
+                "end_probe_pending: recovered starting image; normal verdict restored"
+            )
+            append_observation_checks(result)
+            result.finalize()
+            on_result(result)
+            break
+        if not retry_allowed():
+            result.notes.append("deploy-interrupted retry refused by remaining pass budget")
             on_result(result)
             break
     return attempts

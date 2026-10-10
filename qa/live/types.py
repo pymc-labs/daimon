@@ -95,6 +95,9 @@ class DeploymentEvidence:
     end_image: str | None = None
     events: list[Message] = field(default_factory=list[Message])
     interrupted: bool = False
+    end_probe_pending: bool = False
+    settled_image: str | None = None
+    events_error: str | None = None
     error: str | None = None
 
 

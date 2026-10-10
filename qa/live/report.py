@@ -62,7 +62,12 @@ def report(result: Result, directory: Path) -> Path:
                 f"run: {result.run_id}",
                 f"scenario: {result.scenario}",
                 f"environment: {result.env}",
-                f"result: {result.status} ({len(result.checks)} checks)",
+                f"result: {result.status} ({len(result.checks)} checks)"
+                + (
+                    "; end_probe_pending"
+                    if result.deployment and result.deployment.end_probe_pending
+                    else ""
+                ),
                 f"evidence: {path}",
             ]
         )
