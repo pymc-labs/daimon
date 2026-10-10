@@ -57,10 +57,23 @@ equivalent panel (Slack) or a `privacy` command (Teams, answered in your 1:1
 chat with the bot), available to any user, in DM or in a shared channel. It
 lets you:
 
-- **View** what is stored about you under the current tenant.
-- **Export** your stored data.
-- **Delete** your stored data ("delete me"), removing your per-user records
-  from that tenant.
+- **View** a summary of records linked to your account.
+- **Export** that summary.
+- **Delete** your account and its linked personal records ("delete me").
+
+Deleting your account removes your account and linked personal records across every server, workspace and organisation linked to it in this Daimon deployment.
+Daimon also deletes your conversations stored at Anthropic. The shared agents
+and their memory stay. Chat transcript deletion at Anthropic can fail. If Daimon reports a failure, ask the person who runs it to check and help remove the remaining transcripts.
+
+Deletion does not remove usage and billing records. These records can still
+contain your chat platform user ID and conversation ID. Uploaded skill files
+at Anthropic also stay, even though Daimon removes its record of your uploads.
+Shared agent memory may still contain information about you. Account deletion
+does not remove hosted charts, notebooks or reports. The GitHub
+authorization also stays on your GitHub account. Revoke it in your GitHub
+settings if you want to remove it there.
+Feedback or help requests made in a server before it was linked to your
+account may remain there. Run `/privacy` in that server to remove them.
 
 The per-user deletion flow clears account and platform-user identifiers from
 security audit rows across that account's tenants, including previously unlinked
@@ -68,10 +81,6 @@ tenants. Remaining event metadata expires under the operator's retention schedul
 Operators include audit records in privacy exports with `daimon audit list TENANT_UUID
 --account ACCOUNT_UUID --json`, paging through all records with `--limit` and
 `--offset`. Existing privacy panels do not deliver the audit JSON themselves.
-
-These actions apply to the tenant the command is run in. If you interact
-with daimon across multiple servers/workspaces, each tenant's data is
-handled independently — see the next section.
 
 ## Data isolation
 
