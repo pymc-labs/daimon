@@ -262,7 +262,7 @@ def test_deleted_state_container_is_grey() -> None:
 def test_deleted_state_container_has_no_account_copy() -> None:
     container = build_deleted_state_container("carlos")
     joined = _joined_text(container)
-    assert "You have no Daimon account." in joined
+    assert "You have no daimon account." in joined
     assert "no data on file" not in joined
 
 
@@ -275,3 +275,10 @@ def test_deleted_state_container_header_no_warning_glyphs() -> None:
     assert "⚠" not in header_text and "❌" not in header_text, (
         "Deleted-state header must NOT use warning glyphs per D-COPY-02"
     )
+
+
+def test_no_account_state_names_the_configured_bot() -> None:
+    """The no-account line uses the configured bot name, like every other platform."""
+    container = build_deleted_state_container("carlos", bot_display_name="daimon-staging")
+    texts = [c.content for c in container.walk_children() if isinstance(c, discord.ui.TextDisplay)]
+    assert "You have no daimon-staging account." in texts

@@ -86,7 +86,7 @@ def build_post_delete_container(
 
 
 def build_deleted_state_container(
-    user_name: str,
+    user_name: str, *, bot_display_name: str = "daimon"
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Grey-accent V2 container shown when /privacy is re-run after delete or no data."""
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
@@ -95,7 +95,7 @@ def build_deleted_state_container(
             subtext=f"for **{user_name}**",
         ),
         layout.hairline(),
-        discord.ui.TextDisplay("You have no Daimon account."),
+        discord.ui.TextDisplay(f"You have no {bot_display_name} account."),
         accent_colour=theme.COLOR_GREYPLE,
     )
     return container
