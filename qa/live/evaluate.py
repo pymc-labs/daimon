@@ -149,19 +149,50 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 )
                 reason = "refreshed card text " + ("matched" if passed else "did not match")
             elif kind == "card_edits_min":
-                edits = {
-                    (str(e.get("message_id")), str(e.get("edited_timestamp")))
+                samples = [
+                    e
                     for e in turn.card_history
                     if e.get("phase") == "running"
                     and e.get("message_id")
-                    and e.get("edited_timestamp")
-                }
+                    and e.get("observed_at")
+                    and isinstance(e.get("message"), dict)
+                ]
+                observed_counts: dict[str, set[str]] = {}
+                for sample in samples:
+                    observed_counts.setdefault(str(sample["message_id"]), set()).add(
+                        str(sample["observed_at"])
+                    )
+                if max((len(times) for times in observed_counts.values()), default=0) < max(
+                    2, assertion.minimum + 1
+                ):
+                    raise Pending("insufficient running card samples; edit minimum is unproven")
+                previous_cards: dict[str, str] = {}
+                edits: set[tuple[str, str]] = set()
+                for sample in samples:
+                    identity = str(sample["message_id"])
+                    card = obj(sample["message"])
+                    state = json.dumps(
+                        {
+                            key: card.get(key)
+                            for key in (
+                                "content",
+                                "embeds",
+                                "components",
+                                "attachments",
+                                "edited_timestamp",
+                            )
+                        },
+                        sort_keys=True,
+                    )
+                    if identity in previous_cards and previous_cards[identity] != state:
+                        edits.add((identity, state))
+                    previous_cards[identity] = state
                 passed = len(edits) >= assertion.minimum
                 if not passed and not turn.settled:
                     raise Pending("turn did not settle; running card-edit minimum is unproven")
                 reason = (
                     f"observed {len(edits)} distinct running card edits; "
-                    f"minimum {assertion.minimum}"
+                    f"minimum {assertion.minimum}; {len(samples)} running card samples"
                 )
             elif kind == "chunks_gap_max_s":
                 messages = answers(turn, backend)

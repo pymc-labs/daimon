@@ -46,6 +46,9 @@ class FakeDriver:
         if "/reactions/" in path and method == "GET":
             return [{"id": "1530628070405308456"}]
         if "/messages/" in path and method == "GET":
+            for message in self.current:
+                if path.endswith("/" + str(message.get("id"))):
+                    return message
             return self.trigger
         if path == "/channels/thread":
             return self.thread_metadata
@@ -690,16 +693,48 @@ def test_collect_records_distinct_running_edits_and_baseline_ids(
         "edited_timestamp": (started + timedelta(seconds=2)).isoformat(),
     }
     rows = iter([[working], [working], [second], [terminal]])
-    monkeypatch.setattr(driver, "turn_messages", lambda *args, **kwargs: next(rows, [terminal]))
+
+    def listed(*args: object, **kwargs: object) -> list[Message]:
+        driver.current = next(rows, [terminal])
+        return driver.current
+
+    monkeypatch.setattr(driver, "turn_messages", listed)
     turn = Turn(1, "123", "parent", started)
     backend.collect(turn, 0.1)
     assert turn.settled and turn.baseline_message_ids == ["old-card"]
-    assert len(turn.card_history) == 2
+    assert len(turn.card_history) == 3
     assert {e["edited_timestamp"] for e in turn.card_history} == {
         working["edited_timestamp"],
         second["edited_timestamp"],
     }
     assert all(e["phase"] == "running" for e in turn.card_history)
+    assert all(e["observed_at"] and e["message"] for e in turn.card_history)
+
+
+def test_running_card_samples_refresh_footer_and_keep_unchanged_samples(
+    backend: DiscordBackend, driver: FakeDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.owned.add("parent")
+    backend.threads.add("thread")
+    backend.thread_parents["thread"] = "parent"
+    turn = Turn(1, "123", "parent", utcnow(), thread_id="thread")
+    stale: Message = {"id": "card", "channel_id": "thread", "working": True}
+    refreshed: Message = {
+        **stale,
+        "embeds": [{"footer": {"text": "Working · 10s"}}],
+    }
+    monkeypatch.setattr(driver, "call", lambda *args, **kwargs: refreshed)
+    backend.sample_running_card(turn, stale)
+    backend.sample_running_card(turn, stale)
+    refreshed["embeds"] = [{"footer": {"text": "Working · 20s"}}]
+    backend.sample_running_card(turn, stale)
+    assert len(turn.card_history) == 3
+    assert all(e["edited_timestamp"] is None for e in turn.card_history)
+    assert turn.card_history[0]["message"] == {
+        **stale,
+        "embeds": [{"footer": {"text": "Working · 10s"}}],
+    }
+    assert turn.card_history[2]["message"] == refreshed
 
 
 @pytest.mark.parametrize(
