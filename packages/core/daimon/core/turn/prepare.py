@@ -24,7 +24,7 @@ import datetime as dt
 import functools
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -38,6 +38,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.channel_backend import BackendUnsupported
+from daimon.core.config import load_turn_settings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
@@ -79,10 +80,12 @@ from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_recording import record_turn_usage
-from mux.contracts.ids import Revision, Scope
+from mux.contracts.ids import ResourceRef, Revision, Scope
+from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import SessionSpec
 from mux.drivers.anthropic.sessions_lifecycle import SessionReads
 from mux.errors import ScopeViolation
+from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -141,6 +144,46 @@ class PreparedTurn:
     session_account_id: uuid.UUID
     _record: UsageRecorder
     continuity: ContinuityOutcome = CONTINUED
+    # Populated only by a provider-native preparation hook. Anthropic's
+    # existing field values and preparation remain unchanged.
+    backend: ManagedAgents | None = None
+    session_ref: ResourceRef | None = None
+
+
+@dataclass(frozen=True)
+class ProviderPreparationRequest:
+    deps: TurnDeps
+    admission: Admission
+    scope: Scope
+    tenant_id: uuid.UUID
+    platform: str
+    external_user_id: str
+    thread_id: str
+    session_account_id: uuid.UUID
+    reuse_existing: bool
+    capabilities: MaCapabilities
+    transfer: WorkspaceTransfer | None
+    deadline: dt.datetime
+    now: Callable[[], dt.datetime]
+
+
+ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
+_PROVIDER_PREPARATIONS: dict[str, ProviderPreparation] = {}
+
+
+def register_turn_preparation(profile: str, prepare: ProviderPreparation) -> None:
+    """Register provider-native binding; missing hooks never use Anthropic IDs."""
+    if profile == "anthropic.managed_agents" or profile in _PROVIDER_PREPARATIONS:
+        raise ValueError(f"turn preparation already registered: {profile}")
+    _PROVIDER_PREPARATIONS[profile] = prepare
+
+
+def _admitted_profile(admission: Admission) -> str:
+    return (
+        admission.backend_revision.profile
+        if admission.backend_revision is not None
+        else "anthropic.managed_agents"
+    )
 
 
 @dataclass(frozen=True)
@@ -235,6 +278,8 @@ async def create_ma_session(
     turn before any session exists, and a seal added since is stamped on the
     session and mounts memory read-only.
     """
+    if _admitted_profile(admission) != "anthropic.managed_agents":
+        raise AdmissionDenied(reason="backend_unsupported")
     admission = await reauthorize(deps, admission)
     seal: set[str] = set(admission.origin_seal_ids)
     if predecessor_session_id is not None and admission.origin_channel_id is not None:
@@ -531,8 +576,12 @@ async def bind_session(
     observation.agent_id = admission.agent.id
     try:
         with observation.activate():
-            shared = await _shared_thread(
-                deps, admission, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+            shared = (
+                await _shared_thread(
+                    deps, admission, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+                )
+                if _admitted_profile(admission) == "anthropic.managed_agents"
+                else None
             )
             if shared is not None:
                 admission = replace(admission, shared_owner=shared.owner)
@@ -675,6 +724,8 @@ async def stamp_session_seal(
     """Add `admission`'s seal to an existing session's recorded seal (`_stamp_reused_seal`)."""
     if not admission.origin_seal_ids or admission.origin_channel_id is None:
         return
+    if _admitted_profile(admission) != "anthropic.managed_agents":
+        raise AdmissionDenied(reason="backend_unsupported")
     scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=ma_session_id)
     # Publish first, in a short transaction; no MA request holds the policy lock.
     async with deps.sessionmaker.begin() as db:
@@ -789,6 +840,50 @@ async def bind_session_impl(
         )
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+
+    profile = _admitted_profile(admission)
+    if profile != "anthropic.managed_agents":
+        prepare = _PROVIDER_PREPARATIONS.get(profile)
+        if prepare is None or (deps.turn_path or load_turn_settings().path) != "mux":
+            raise AdmissionDenied(reason="backend_unsupported")
+        scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
+        request = ProviderPreparationRequest(
+            deps,
+            admission,
+            scope,
+            tenant_id,
+            platform,
+            external_user_id,
+            thread_id,
+            session_account_id,
+            reuse_existing,
+            capabilities,
+            transfer,
+            effective_deadline,
+            now,
+        )
+        try:
+            result = await asyncio.wait_for(
+                prepare(request), timeout=remaining_s(effective_deadline, now=now())
+            )
+        except TimeoutError as error:
+            raise ceiling_error() from error
+        ref = result.session_ref
+        backend = result.backend
+        if ref is None or (
+            _admitted_profile(result.admission) != profile
+            or result.admission.backend_revision != admission.backend_revision
+            or (backend is not None and backend.capabilities().profile_id != profile)
+            or ref.provider != get_profile(profile).provider
+            or ref.id != result.ma_session_id
+            or ref.kind != "session"
+            or ref.tenant_id != scope.tenant_id
+            or ref.account_id != scope.account_id
+            or result.admission.account_id != admission.account_id
+            or result.session_account_id != session_account_id
+        ):
+            raise ScopeViolation("preparation", "provider returned a foreign prepared session")
+        return result
 
     async def _bind() -> PreparedTurn:
         # Decide the admission again at the moment its session is found,

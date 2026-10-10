@@ -1010,3 +1010,19 @@ Gemini F1 maps bash, read, edit, grep, glob and write through its native
 `code_execution` tool. Native scripted records exercise each route in normalized
 replay; missing calls fail. The complete default remains typed PENDING for binary
 skill deployment and authenticated MCP/session adapters.
+
+### Provider turn composition
+
+Host turn composition dispatches by the admitted channel profile. Provider
+modules register a native preparation hook, a backend factory and a `TurnIO`
+codec. Preparation must return an authorized provider-native session reference;
+a missing hook refuses the selection before Anthropic binding. The backend
+factory must preserve that reference and the admitted profile. Explicit selection
+of another provider never falls back to Anthropic preparation or recovery.
+
+Factories and codecs receive the admitted configuration/model, caller scope,
+native session and an optional injected runtime containing the transport factory
+and durable journal/usage stores. The host does no credential discovery in this
+seam. Anthropic remains the default and keeps its existing model-less binding
+and requests. Other runnable profiles require an explicit model; registering a
+factory alone does not make its profile runnable at channel admission.

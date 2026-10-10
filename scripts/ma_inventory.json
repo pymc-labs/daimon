@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2147,
+  "files_scanned": 2148,
   "parse_errors": [],
   "calls": [
     {
@@ -5756,8 +5756,8 @@
     },
     {
       "file": "packages/core/tests/turn/test_mux_cleanup.py",
-      "line": 105,
-      "end": 105,
+      "line": 116,
+      "end": 116,
       "scope": "test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux",
       "category": "test",
       "resource": "sessions.archive",
@@ -5791,8 +5791,8 @@
     },
     {
       "file": "packages/core/tests/turn/test_turn_call_scopes.py",
-      "line": 94,
-      "end": 96,
+      "line": 96,
+      "end": 98,
       "scope": "test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_requests",
       "category": "test",
       "resource": "sessions.events.send",
@@ -5804,8 +5804,8 @@
     },
     {
       "file": "packages/core/tests/turn/test_turn_call_scopes.py",
-      "line": 97,
-      "end": 97,
+      "line": 99,
+      "end": 99,
       "scope": "test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_requests",
       "category": "test",
       "resource": "sessions.events.stream",
@@ -5817,8 +5817,8 @@
     },
     {
       "file": "packages/core/tests/turn/test_turn_call_scopes.py",
-      "line": 92,
-      "end": 92,
+      "line": 94,
+      "end": 94,
       "scope": "test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_requests",
       "category": "test",
       "resource": "sessions.events.list",
@@ -13103,7 +13103,7 @@
     },
     {
       "file": "packages/core/daimon/core/mux_backend.py",
-      "line": 7,
+      "line": 14,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
@@ -16925,6 +16925,15 @@
       "names": [
         "BetaEnvironment",
         "BetaManagedAgentsAgent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_provider_dispatch.py",
+      "line": 82,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "test"
     },

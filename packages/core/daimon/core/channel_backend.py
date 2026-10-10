@@ -97,7 +97,11 @@ def check_backend(revision: ConfigRevision) -> BackendAdmission:
         raise BackendUnsupported(str(err)) from err
     runnable = (
         revision.profile in RUNNABLE_PROFILES
-        and revision.model is None
+        and (
+            revision.model is None
+            if revision.backend == "anthropic"
+            else bool(revision.model and revision.model.strip())
+        )
         and revision.thread_mode in ("per_caller", "shared")
     )
     if not runnable:

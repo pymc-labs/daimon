@@ -16,6 +16,7 @@ from daimon.testing.ma import session_response
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.profiles.anthropic import MANAGED_AGENTS
 
 TENANT = UUID(int=7)
 ACCOUNT = UUID(int=8)
@@ -37,7 +38,12 @@ SESSION = ResourceRef(
 
 async def test_mux_orphan_cleanup_archives_through_the_bound_port() -> None:
     archive = AsyncMock(return_value=object())
-    backend = cast(ManagedAgents, SimpleNamespace(sessions=SimpleNamespace(archive=archive)))
+    backend = cast(
+        ManagedAgents,
+        SimpleNamespace(
+            sessions=SimpleNamespace(archive=archive), capabilities=lambda: MANAGED_AGENTS
+        ),
+    )
     transport = ScriptedTransport()
     async with transport.client() as client:
         await _archive_orphaned_session(
@@ -65,7 +71,12 @@ async def test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux(
             )
         )
     archive = AsyncMock(return_value=object())
-    backend = cast(ManagedAgents, SimpleNamespace(sessions=SimpleNamespace(archive=archive)))
+    backend = cast(
+        ManagedAgents,
+        SimpleNamespace(
+            sessions=SimpleNamespace(archive=archive), capabilities=lambda: MANAGED_AGENTS
+        ),
+    )
     resolver = MagicMock(return_value=SESSION)
     async with transport.client() as client:
         deps = cast(

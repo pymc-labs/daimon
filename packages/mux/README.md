@@ -366,3 +366,12 @@ profile declares it native. The adapter preserves that profile and reports the
 missing provider-appropriate scenario. Native cancellation and foreign-scope
 checks have separate regression proofs; they do not promote a partial scenario
 to a matrix pass. This report is partial evidence, not an all-pass certificate.
+
+Host profile dispatch is in `daimon.core.mux_backend` and `daimon.core.turn`.
+Provider codecs register `register_turn_preparation`, `register_turn_backend`
+and `register_turn_codec`. Preparation returns a real authorized native session;
+factories preserve its identity and codecs own provider stream ordering,
+replay/cancel truth and compatibility display records. Transport and durable
+journal/usage dependencies are injected in `TurnRuntime`; mux still imports no
+host package. Channel admission enables a profile separately, after its host
+implementation exists. The default Anthropic path and generic ports are unchanged.

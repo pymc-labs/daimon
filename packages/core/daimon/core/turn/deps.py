@@ -12,7 +12,7 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +26,7 @@ from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.config import GithubAppSettings, McpSettings, Settings, TurnSettings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
+from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
@@ -76,6 +77,9 @@ class TurnDeps:
     turn_path: Literal["legacy", "mux"] | None = None
     # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
     channel_backends: bool = False
+    # Provider owners supply transports and durable stores; no credentials
+    # or SDK clients are discovered by profile dispatch.
+    turn_runtimes: Mapping[str, TurnRuntime] = field(default_factory=dict[str, TurnRuntime])
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
