@@ -373,10 +373,19 @@ the newest accepted-root-bound, verified, freshness-checked revision, and reject
 stale or foreign cleanup responses before settlement. Complete accepted actual
 releases the hold even after a downwards correction. The receipt retains
 `status="overrun"`, `admission_blocked=True`, and separate `overrun_evidence`.
-Unknown final usage retains the largest proven snapshot charge rather than
-adding overlapping snapshots. A rejected stale response cannot replace an
+A complete actual must cover every proof request ID at an observation time no
+older than the proof, and every proven container identity/lifetime. Missing or
+older evidence remains estimated and held. Unknown final usage retains proven
+bounds without adding overlapping revisions; distinct uncovered requests and
+containers contribute their separate known bounds. A rejected stale response cannot replace an
 already accepted verified measurement. Lead reconciliation releases held dollars
 without clearing the admission latch; legacy overrun rows also latch admission.
+Legacy receipt hashes exclude fields
+absent from the original row, preserving existing signed approvals. During replay,
+a legacy row without the latch field inherits its prior latch in memory; an
+explicit false value cannot clear it. Reading never rewrites old row bytes.
+`data/legacy_reconciled_ledger.json` is a pre-upgrade fixture including unchanged
+canonical v1/v2 rows and base-produced reconciliation/approval cases.
 This API does not fetch, authorize or verify native provider revisions itself.
 
 Model price entries carry `effective_from`, optional exclusive `effective_until`

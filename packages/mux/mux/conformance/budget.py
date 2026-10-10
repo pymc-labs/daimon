@@ -812,11 +812,16 @@ class BudgetGuard:
                 if receipt.status == "blocked":
                     continue
                 previous = runs.get(receipt.run_id)
+                if previous is not None and previous.admission_blocked:
+                    if "admission_blocked" not in receipt.model_fields_set:
+                        # Old rows have no independent latch field. Carry the
+                        # proven history in memory without rewriting their bytes.
+                        object.__setattr__(receipt, "admission_blocked", True)
+                    elif not receipt.admission_blocked:
+                        raise BudgetLedgerError("overrun admission latch cannot be cleared")
                 if previous is None:
                     if receipt.status != "reserved":
                         raise BudgetLedgerError("spend receipt has no reservation")
-                elif previous.admission_blocked and not receipt.admission_blocked:
-                    raise BudgetLedgerError("overrun admission latch cannot be cleared")
                 elif receipt.status == "reconciled":
                     approval = receipt.reconcile
                     if (
@@ -1000,7 +1005,10 @@ class BudgetGuard:
 
     @staticmethod
     def receipt_digest(receipt: SpendReceipt) -> str:
-        return hashlib.sha256(receipt.model_dump_json().encode()).hexdigest()
+        # Hash the schema actually present on disk. Adding read-time defaults or
+        # inheriting an admission latch must not invalidate a pre-upgrade signature.
+        absent = {"overrun_evidence", "admission_blocked"} - receipt.model_fields_set
+        return hashlib.sha256(receipt.model_dump_json(exclude=absent).encode()).hexdigest()
 
     @staticmethod
     def _measured(
@@ -1139,7 +1147,9 @@ class BudgetGuard:
         actual snapshot, or None when none is accepted. Earlier overrun_evidence
         proves admission refusal; it never replaces actual or adds duplicate
         billable requests. Rejected stale responses must not supersede an already
-        accepted verified measurement. Native freshness checks belong to adapters.
+        accepted verified measurement. Actual must also cover every proof request
+        at a non-older observation time and every proven container lifetime;
+        otherwise known bounds stay held. Native freshness checks belong to adapters.
         """
         return self._settle(
             reservation,
@@ -1147,6 +1157,27 @@ class BudgetGuard:
             limits=limits,
             actual=actual,
             overrun_evidence=overrun_evidence,
+        )
+
+    @staticmethod
+    def _covers_proof(actual: ActualSpend, proof: ActualSpend) -> bool:
+        requests = {request.id: request for request in actual.requests}
+        for prior in proof.requests:
+            current = requests.get(prior.id)
+            if (
+                current is None
+                or prior.observed_at.tzinfo is None
+                or current.observed_at.tzinfo is None
+                or current.observed_at < prior.observed_at
+            ):
+                return False
+        containers = {container.id: container for container in actual.containers or ()}
+        return all(
+            (current := containers.get(prior.id)) is not None
+            and current.meter == prior.meter
+            and current.memory_gb == prior.memory_gb
+            and current.started_at == prior.started_at
+            for prior in proof.containers or ()
         )
 
     def _settle(
@@ -1210,6 +1241,26 @@ class BudgetGuard:
             if not self._exceeded(original, limits, overrun_evidence, proof_tokens, proof_cost):
                 raise BudgetLedgerError("overrun evidence does not prove a reservation overrun")
             exceeded = True
+            if actual is not None and not self._covers_proof(actual, overrun_evidence):
+                # A different request or an older revision cannot erase proven
+                # spend, even if that partial walk claims to be complete.
+                measured = None
+                request_ids = {request.id for request in actual.requests}
+                container_ids = {container.id for container in actual.containers or ()}
+                uncovered = ActualSpend(
+                    requests=tuple(r for r in overrun_evidence.requests if r.id not in request_ids),
+                    containers=tuple(
+                        c for c in overrun_evidence.containers or () if c.id not in container_ids
+                    ),
+                )
+                _, _, _, missing_tokens, missing_cost = self._measured(original, uncovered)
+                known_cost += missing_cost
+                lower_tokens = TokenUsage(
+                    input_tokens=(lower_tokens.minimum_input_tokens if lower_tokens else 0)
+                    + missing_tokens.minimum_input_tokens,
+                    output_tokens=((lower_tokens.output_tokens or 0) if lower_tokens else 0)
+                    + (missing_tokens.output_tokens or 0),
+                )
         if exceeded:
             terminal, reason = "overrun", "overrun"
         elif measured is not None:

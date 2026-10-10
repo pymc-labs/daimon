@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -17,8 +18,12 @@ from mux.conformance.budget import (
     BudgetGuard,
     BudgetLedgerError,
     BudgetRefused,
+    LedgerAnchor,
+    LedgerBinding,
+    LedgerCheckpoint,
     MeasuredRequest,
     ProbePlan,
+    Reconciliation,
     SpendReceipt,
     TokenLimits,
     TokenUsage,
@@ -317,6 +322,176 @@ else:
             held.model_dump_json(),
             str(final_input),
         ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+def legacy_guard(root: Path) -> tuple[BudgetGuard, dict[str, str], Reconciliation, list[str]]:
+    """Relocate only the binding of a base-produced copy; preserve every row byte."""
+    fixture = Path(__file__).with_name("data") / "legacy_reconciled_ledger.json"
+    data = json.loads(fixture.read_text())
+    config_path, ledger = root / "budget.json", root / "spend.md"
+    old_binding = LedgerBinding.model_validate(data["checkpoint"]["binding"])
+    binding = old_binding.model_copy(update={"ledger_path": ledger})
+    text: str = data["ledger"].replace(old_binding.model_dump_json(), binding.model_dump_json(), 1)
+    ledger.write_text(text)
+    data["config"]["ledger_path"] = str(ledger)
+    config_path.write_text(json.dumps(data["config"]))
+    checkpoint = LedgerCheckpoint.model_validate(data["checkpoint"]).model_copy(
+        update={"binding": binding, "ledger_sha256": hashlib.sha256(text.encode()).hexdigest()}
+    )
+    guard = BudgetGuard(config_path, ledger)
+    guard.checkpoint_path.write_text(checkpoint.model_dump_json())
+    guard.lock_path.write_text(
+        LedgerAnchor.model_validate(data["anchor"])
+        .model_copy(update={"binding": binding})
+        .model_dump_json()
+    )
+    return (
+        guard,
+        data["runs"],
+        Reconciliation.model_validate(data["staged_proposal"]),
+        data["provenance"]["copied_receipt_lines"],
+    )
+
+
+def test_preupgrade_reconciled_rows_and_signed_proposal_replay_unchanged(tmp_path: Path) -> None:
+    guard, runs, staged, copied = legacy_guard(tmp_path)
+    before = guard.spend_path.read_bytes()
+    rows = {row.run_id: row for row in guard.report()}
+    assert guard.spend_path.read_bytes() == before
+    assert all(line in before.decode().splitlines() for line in copied)
+    assert len(copied) == 4  # Real canonical v1 and v2 rows, copied unchanged.
+    ordinary = rows[runs["held_reconciled"]]
+    overrun = rows[runs["overrun_reconciled"]]
+    assert ordinary.status == overrun.status == "reconciled"
+    assert ordinary.actual_usd == overrun.actual_usd == Decimal(".031")
+    assert ordinary.held_usd == overrun.held_usd == 0
+    assert not ordinary.admission_blocked and overrun.admission_blocked
+    assert "admission_blocked" not in overrun.model_fields_set
+    assert "overrun_evidence" not in overrun.model_fields_set
+    # A proposal already signed by base code must still verify and append.
+    current = guard.propose_reconciliation(
+        staged.run_id,
+        evidence_sha256=staged.evidence_sha256,
+        basis=staged.basis,
+        token_usd=staged.token_usd,
+        container_usd=staged.container_usd,
+        price_effective_from=staged.price_effective_from,
+    )
+    assert current == staged and current.digest == staged.digest
+    assert guard.spend_path.read_bytes() == before
+    assert guard.reconcile(staged).actual_usd == staged.actual_usd
+    assert guard.spend_path.read_bytes().startswith(before)
+    plan = ProbePlan.create_only(provider="gemini", model=MODELS["gemini"], fixture_id="C07")
+    assert_blocked(guard, plan)
+
+
+def coverage_case(kind: str) -> tuple[ActualSpend, ActualSpend, Decimal]:
+    proof = snapshot(1_000_000, complete=False)
+    actual = snapshot(64, complete=True, at=AT + timedelta(hours=1))
+    held = Decimal("1.131072")
+    if kind in ("missing", "disjoint_large"):
+        incoming = 64 if kind == "missing" else 2_000_000
+        actual = snapshot(incoming, complete=True, at=AT + timedelta(hours=1))
+        actual = actual.model_copy(
+            update={"requests": (actual.requests[0].model_copy(update={"id": "other"}),)}
+        )
+        held += Decimal(incoming) / 1_000_000
+    elif kind == "stale":
+        actual = snapshot(64, complete=True, at=AT - timedelta(hours=1))
+    elif kind == "partial_cover":
+        second = proof.requests[0].model_copy(update={"id": "missing-request"})
+        proof = proof.model_copy(update={"requests": (*proof.requests, second)})
+        held += Decimal(1)
+    elif kind == "naive_time":
+        actual = snapshot(64, complete=True, at=AT.replace(tzinfo=None))
+    else:
+        raise ValueError("unknown coverage case")
+    return actual, proof, held
+
+
+@pytest.mark.parametrize(
+    "kind", ["missing", "stale", "partial_cover", "disjoint_large", "naive_time"]
+)
+def test_complete_actual_must_cover_every_proven_request_at_a_current_time(
+    tmp_path: Path, kind: str
+) -> None:
+    guard, plan = guard_and_plan(tmp_path)
+    held = guard.reserve(plan)
+    actual, proof, expected = coverage_case(kind)
+    row = guard.settle_with_overrun(
+        held, status="failed", limits=plan.limits, actual=actual, overrun_evidence=proof
+    )
+    assert row.actual_usd is None and row.accounting_status == "estimated_unverified"
+    assert row.held_usd == expected and row.admission_blocked
+    assert row.actual_evidence == actual and row.overrun_evidence == proof
+    assert_blocked(guard, plan)
+
+
+@pytest.mark.parametrize("kind", ["missing_container", "changed_container_identity"])
+def test_complete_actual_must_cover_proven_container_lifetime(tmp_path: Path, kind: str) -> None:
+    guard = dated_guard(tmp_path)
+    plan = smoke_plan()
+    held = guard.reserve(plan)
+    proof = measured(seconds=1201).model_copy(update={"usage_complete": False})
+    actual = measured()
+    containers = actual.containers
+    assert containers
+    actual = actual.model_copy(
+        update={
+            "containers": ()
+            if kind == "missing_container"
+            else (containers[0].model_copy(update={"started_at": AT + timedelta(hours=1)}),)
+        }
+    )
+    row = guard.settle_with_overrun(
+        held, status="completed", limits=plan.limits, actual=actual, overrun_evidence=proof
+    )
+    assert row.actual_usd is None and row.accounting_status == "estimated_unverified"
+    assert row.held_usd is not None and row.held_usd >= Decimal(".060132")
+    assert_blocked(guard, plan)
+
+
+@pytest.mark.parametrize("kind", ["legacy", "missing", "stale", "partial_cover", "disjoint_large"])
+def test_legacy_replay_and_proof_coverage_under_optimized_python(tmp_path: Path, kind: str) -> None:
+    script = """
+import sys
+from pathlib import Path
+from decimal import Decimal
+from mux.conformance.budget import BudgetRefused, ProbePlan
+from mux.conformance.test_overrun_latch import legacy_guard, guard_and_plan, coverage_case
+root, kind = Path(sys.argv[1]), sys.argv[2]
+if kind == 'legacy':
+    g, runs, staged, copied = legacy_guard(root)
+    before = g.spend_path.read_bytes()
+    rows = {row.run_id: row for row in g.report()}
+    if (g.spend_path.read_bytes() != before
+        or not rows[runs['overrun_reconciled']].admission_blocked
+        or rows[runs['held_reconciled']].actual_usd != Decimal('.031')):
+        raise SystemExit('legacy replay changed bytes or lost signed actual/latch under -O')
+    if g.reconcile(staged).actual_usd != staged.actual_usd:
+        raise SystemExit('pre-upgrade signed approval refused under -O')
+else:
+    g, plan = guard_and_plan(root)
+    r = g.reserve(plan)
+    a, p, charge = coverage_case(kind)
+    row = g.settle_with_overrun(r, status='failed', limits=plan.limits,
+                               actual=a, overrun_evidence=p)
+    if (row.actual_usd is not None or row.held_usd != charge
+        or row.accounting_status != 'estimated_unverified' or not row.admission_blocked):
+        raise SystemExit('proof coverage/lower bound lost under -O')
+try:
+    g.reserve(ProbePlan.create_only(provider='gemini', model='gemini-3.8-flash', fixture_id='C07'))
+except BudgetRefused:
+    pass
+else:
+    raise SystemExit('overrun admitted after upgrade under -O')
+"""
+    subprocess.run(
+        [sys.executable, "-O", "-c", script, str(tmp_path), kind],
         check=True,
         capture_output=True,
         timeout=30,

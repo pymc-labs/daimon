@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Preserve pre-upgrade reconciliation hashes and legacy ledger replay; keep proven live-probe bounds held when a complete measurement omits or predates the overrun evidence.
+
 - Settle fresh verified live-probe actual spend independently of earlier overrun evidence, releasing holds while retaining admission refusal through reconciliation.
 
 - Keep unknown Anthropic session runtime held and detect live-probe overruns from known request bounds even when other usage is missing.
