@@ -19,6 +19,7 @@ from mux.drivers.anthropic.resources._authorization import (
     check_ref,
 )
 from mux.drivers.anthropic.resources._errors import provider_call
+from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.resources._secrets import (
     CredentialFileUpload,
     SecretResolver,
@@ -29,6 +30,8 @@ from mux.errors import UnsupportedCapability
 
 
 class Artifacts(CoreArtifacts, Protocol):
+    async def retrieve_native(self, scope: Scope, ref: ResourceRef) -> NativeSnapshot: ...
+
     async def upload_credential_file(
         self, scope: Scope, config: CredentialFileUpload, *, key: str
     ) -> Artifact: ...
@@ -105,12 +108,16 @@ class AnthropicArtifacts:
 
         return self._artifact(scope, await credential_request(scope, config, self._secrets, send))
 
-    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Artifact:
+    async def _retrieve_metadata(self, scope: Scope, ref: ResourceRef) -> FileMetadata:
         authorize(self._authorization, scope, "file", ref.id)
         check_ref(scope, ref, self._account_scope_id, "file")
-        return self._artifact(
-            scope, await provider_call(self._client.beta.files.retrieve_metadata(ref.id))
-        )
+        return await provider_call(self._client.beta.files.retrieve_metadata(ref.id))
+
+    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Artifact:
+        return self._artifact(scope, await self._retrieve_metadata(scope, ref))
+
+    async def retrieve_native(self, scope: Scope, ref: ResourceRef) -> NativeSnapshot:
+        return native_snapshot(await self._retrieve_metadata(scope, ref))
 
     async def list(
         self, scope: Scope, session: ResourceRef, *, page: PageRequest, turn_id: str | None = None

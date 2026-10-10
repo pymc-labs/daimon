@@ -886,3 +886,17 @@ assembly or provider I/O. The default legacy path retains its existing requests.
 CLI and Discord memory reads retain their existing tenant authorization, pagination, formatting and errors while using the memory ports. Environment forks retain explicit null descriptions and the original native config key order. Scheduler refresh and cleanup use tenant/account scope from the session rows already read, including cleanup after an account is erased. Raw `daimon sessions get` remains a workspace operator inspection under an explicit platform scope and adds no database work. The opt-in CLI mux turn resolves and verifies the local operator's tenant/account before provider work; legacy turns retain their existing requests, deadline and billing exemption.
 
 Environment forks validate the scoped request configuration and discard the SDK create reply, preserving success when unused response fields are omitted or null. Session and vault archive cleanup likewise consumes no provider reply fields.
+
+MCP agent chat and session inspection use tenant/account scopes derived from
+verified MCP identities. Their native `anthropic.session_tools@1` extension
+provides the existing user-message/interrupt send, native session retrieval,
+lazy SDK session walk and single event-page read. Retrieval preserves nullable
+native location metadata without constructing or changing a durable provider
+binding. It preserves omitted filters, opaque cursors, partial
+SDK replies and send echoes; the adapter retains ownership checks, seals,
+mutation fences and Decimal cost folding. Scope/ref/grant mismatches fail
+before I/O, without a platform or legacy-host authorization escape. Operation
+keys pass through in M0, without a second replay cache. Bundle existence probes
+use the Artifacts native metadata projection so unused reply fields remain
+optional. Offline ScriptedTransport proofs compare raw request body bytes and
+protocol headers, as well as SDK projections and call order.
