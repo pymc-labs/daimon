@@ -334,6 +334,8 @@ def compile_agent(spec: AgentSpec) -> Object:
     result: Object = {
         "agent": BASE_AGENT,
         "agent_config": {"type": "antigravity", "model": spec.model.id},
+        # Omission would enable provider defaults, including billable web tools.
+        "tools": [],
     }
     if spec.system is not None:
         result["system_instruction"] = spec.system

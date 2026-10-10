@@ -10,8 +10,16 @@ from mux.contracts.events import NativePart, TextPart, ToolResultPayload
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Scope, ThreadRef
 from mux.contracts.ports import ManagedAgents, Steering
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, Session, SessionSpec
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    MCPConnection,
+    Session,
+    SessionSpec,
+    ToolSpec,
+)
 from mux.drivers.gemini import GeminiManagedAgents
+from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.drivers.gemini.transport import Object, close_iterator
 from mux.errors import (
@@ -93,6 +101,7 @@ async def test_two_turns_reuse_history_environment_and_immutable_default(setup: 
     first = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
     second = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="two")
     assert first.turn_id != second.turn_id
+    assert [request["tools"] for request in t.requests] == [[], []]
     assert t.requests[1]["previous_interaction_id"] == "i1"
     assert t.requests[1]["environment"] == "e1"
     assert t.requests[1]["agent_config"] == {"type": "antigravity", "model": "gemini-3.8-flash"}
@@ -222,6 +231,7 @@ async def test_required_action_continuation_keeps_root_until_real_completion(set
         key="result",
     )
     assert second.turn_id == first.turn_id
+    assert [request["tools"] for request in t.requests] == [[], []]
     assert t.requests[1]["input"] == [
         {"type": "function_result", "name": "weather", "call_id": "call", "result": "cold"}
     ]
@@ -629,3 +639,30 @@ async def test_durable_acknowledgement_recovers_projection_after_commit_crash(se
     assert [e.type for e in page.data].count("user.message") == 1
     assert [e.type for e in page.data].count("session.turn_ended") == 1
     assert len(t.requests) == 1
+
+
+@pytest.mark.parametrize("tools", [None, ()])
+def test_unconfigured_agent_compiles_an_explicit_empty_tools_list(
+    tools: tuple[ToolSpec, ...] | None,
+) -> None:
+    spec = AgentSpec(
+        name="bounded", model=ModelRef(provider="gemini", id="gemini-3.8-flash"), tools=tools
+    )
+    assert compile_agent(spec)["tools"] == []
+
+
+def test_configured_agent_compiles_only_declared_builtin_custom_and_mcp_tools() -> None:
+    spec = AgentSpec(
+        name="bounded",
+        model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+        tools=(
+            ToolSpec(name="code_execution", kind="builtin"),
+            ToolSpec(name="weather", kind="custom"),
+        ),
+        mcp_servers=(MCPConnection(name="owned", url="https://owned.example/mcp"),),
+    )
+    assert compile_agent(spec)["tools"] == [
+        {"type": "code_execution"},
+        {"type": "function", "name": "weather", "description": "", "parameters": {}},
+        {"type": "mcp_server", "name": "owned", "url": "https://owned.example/mcp"},
+    ]
