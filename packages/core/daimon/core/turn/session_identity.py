@@ -5,10 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from anthropic import APIStatusError, AsyncAnthropic
+from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
+from daimon.core.mux_backend import managed_agents, resource_ref
+from daimon.core.mux_compat import legacy_call
+from daimon.core.session_ports_compat import session_scope
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_sessions import update_agent_identity
 from daimon.core.turn.errors import SessionAgentMismatch
+from mux.drivers.anthropic.sessions_lifecycle import SessionReads
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["SessionIdentity", "check_session_agent"]
@@ -42,7 +47,23 @@ async def check_session_agent(
     observed: BetaManagedAgentsSession | None = None
     if source_agent_id is None:
         try:
-            observed = await anthropic.beta.sessions.retrieve(mapping.ma_session_id)
+            scope = session_scope(
+                tenant_id=mapping.tenant_id,
+                account_id=mapping.account_id,
+                call_site="session_identity:check_session_agent",
+            )
+            backend = managed_agents(
+                anthropic,
+                scope=scope,
+                resources=frozenset({("session", mapping.ma_session_id)}),
+            )
+            reads = backend.extension(SessionReads, namespace="anthropic.session_reads", version=1)
+            native = await legacy_call(
+                reads.read_native(
+                    scope, resource_ref(backend, "session", mapping.ma_session_id, scope=scope)
+                )
+            )
+            observed = construct_type_unchecked(value=native, type_=BetaManagedAgentsSession)
         except APIStatusError as error:
             if error.status_code == 404:
                 # There is no workspace to inspect. Let the existing event-send

@@ -970,3 +970,7 @@ pinning is an explicit capability gap, while skill pins remain required.
 Replay retains omitted tool arguments and does not certify their contents.
 The standard eighteen-case matrix stays unchanged. See the package-local
 `packages/mux/mux/conformance/README.md` for the adapter contract.
+Responder identity uses the authorized row's tenant/account scope and the native
+`anthropic.session_reads@1` extension. It retains the SDK response for configuration
+snapshot backfill, including null channel and thread metadata, without an additional
+read or a generic provider-binding projection.
