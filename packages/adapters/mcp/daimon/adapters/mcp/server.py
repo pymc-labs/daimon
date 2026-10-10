@@ -634,6 +634,8 @@ def create_mcp_app(
             sessionmaker=effective_sessionmaker,
             fernet=fernet,
             deployment_default=deployment_default,
+            anthropic=effective_anthropic,
+            group_members=group_lookups.members,
         )
         personal_start, personal_platform_callback, personal_github_callback = (
             build_personal_link_routes(

@@ -810,3 +810,141 @@ def test_agent_done_page_mentions_old_token_only_after_the_switch() -> None:
         "Add lab/work with read and write and lab/skills to finish switching."
     ) in pending
     assert "no longer uses" not in pending
+
+
+@pytest.mark.parametrize("manages", [True, False])
+async def test_agent_manager_confirms_repos_for_their_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    manages: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.scope import DeploymentDefault
+
+    sessionmaker = committing_sessionmaker
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bot")
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
+        await make_account(session, tenant=tenant, id=account_id)
+        await set_role(session, account_id, Role.USER)
+        invitation_token = await github_connect.mint_invitation(
+            session,
+            tenant_id=tenant_id,
+            requester_account_id=account_id,
+            requester_label="Ana",
+            requester_platform_user_id="123",
+            agent_id=agent_id,
+            agent_name="Bot",
+            agent_ma_id="ag_bot",
+            agent_manager_verified=True,
+            origin_platform="discord",
+        )
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "user-token"})
+        if request.url.path == "/applications/client/token":
+            return httpx.Response(204)
+        if request.url.path == "/app/installations/77":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 77,
+                    "account": {"id": 55, "login": "ana", "type": "User"},
+                    "repository_selection": "selected",
+                    "suspended_at": None,
+                },
+            )
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 17})
+        if request.url.path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "installations": [
+                        {
+                            "id": 77,
+                            "account": {"id": 55, "login": "ana", "type": "User"},
+                            "repository_selection": "selected",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/user/installations/77/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "repositories": [
+                        {
+                            "id": 101,
+                            "owner": {"id": 55},
+                            "full_name": "ana/thesis",
+                            "permissions": {"admin": True},
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected GitHub path {request.url.path}")
+
+    checked: list[dict[str, object]] = []
+
+    async def requester_manages_agent(_session: object, **kwargs: object) -> bool:
+        checked.append(kwargs)
+        return manages
+
+    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+        return SimpleNamespace(metadata={})
+
+    monkeypatch.setattr(oauth_github, "requester_manages_agent", requester_manages_agent)
+    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    key = Fernet.generate_key().decode()
+    members = object()
+    connect, callback, setup, confirm = build_oauth_github_routes(
+        settings=_settings(key),
+        sessionmaker=sessionmaker,
+        fernet=build_multifernet((key,)),
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        deployment_default=DeploymentDefault(),
+        anthropic=object(),  # type: ignore[arg-type]
+        group_members=lambda _platform, _workspace: members,  # type: ignore[arg-type,return-value]
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/callback", callback),
+            Route("/oauth/github/setup", setup),
+            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as browser:
+        start = await browser.get(f"/oauth/github/connect/{invitation_token}")
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
+        picker = await browser.get("/oauth/github/confirm", params={"state": state})
+        assert "Add repos to Bot" in picker.text
+        assert "Anyone who talks to Bot can ask it to read them." in picker.text
+        done = await browser.post(
+            "/oauth/github/confirm", data={"state": state, "repo": "101", "access": "read"}
+        )
+    assert checked and checked[0]["ma_agent_id"] == "ag_bot"
+    assert checked[0]["is_daimon_managed"] is False
+    assert checked[0]["members"] is members
+    async with sessionmaker() as session:
+        own = await github_access.list_authorized_repos(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+        shared = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
+    assert shared == []
+    if manages:
+        assert done.status_code == 200
+        assert "Added 1 repo to Bot." in done.text
+        assert [(repo.repo_id, repo.scope_agent_id) for repo in own] == [(101, agent_id)]
+    else:
+        assert "Added" not in done.text
+        assert own == []

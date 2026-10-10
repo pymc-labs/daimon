@@ -15,10 +15,14 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode
 
 import httpx
+from anthropic import APIError, AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.web_icons import icon, platform_mark
+from daimon.core.channel_admins import GroupMembers
 from daimon.core.config import Settings
+from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_app_auth import build_app_jwt, get_app_installation_details
 from daimon.core.github_connect_cards import (
     ADD_REPOS_LABEL,
@@ -624,6 +628,8 @@ def build_oauth_github_routes(
     fernet: MultiFernet,
     client_factory: ClientFactory | None = None,
     deployment_default: DeploymentDefault | None = None,
+    anthropic: AsyncAnthropic | None = None,
+    group_members: Callable[[str, str], GroupMembers | None] | None = None,
 ) -> tuple[RouteHandler, RouteHandler, RouteHandler, RouteHandler]:
     """Build connect, callback, setup and confirmation handlers."""
     config = settings.github_app
@@ -659,6 +665,20 @@ def build_oauth_github_routes(
             _log.warning("GitHub connection token revocation failed")
             return False
         return True
+
+    async def live_is_daimon_managed(invitation: github_connect.Invitation) -> bool | None:
+        """Whether the link's agent is a Daimon default agent now; None if it can't be read."""
+        if anthropic is None or invitation.agent_id is None or not invitation.agent_ma_id:
+            return None
+        try:
+            live = await find_agent_by_derived_uuid(
+                anthropic, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
+            )
+        except APIError:
+            return None
+        if live is None:
+            return None
+        return live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
 
     async def successful_page(
         state: str, cookie: str, invitation_hash: str = ""
@@ -987,6 +1007,12 @@ def build_oauth_github_routes(
                 for detail in details
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
+            is_daimon_managed = await live_is_daimon_managed(invitation)
+            members = (
+                group_members(requester.platform, requester.external_id)
+                if group_members is not None
+                else None
+            )
             activation: github_connect.ConfirmedActivation | None = None
             try:
                 async with sessionmaker.begin() as session:
@@ -1006,6 +1032,8 @@ def build_oauth_github_routes(
                             agent_name=invitation.agent_name,
                             ma_agent_id=invitation.agent_ma_id,
                             default=deployment_default,
+                            is_daimon_managed=is_daimon_managed,
+                            members=members,
                         ),
                     )
                     if saved:
