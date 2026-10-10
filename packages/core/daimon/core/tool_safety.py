@@ -266,14 +266,15 @@ class ToolSafetyPolicy(BaseModel):
         ),
     )
     confirmation_timeout_s: int = Field(
-        default=600,
+        default=300,
         ge=30,
         le=3600,
         description=(
             "How long an approval card waits for the requester's Approve or Deny, in "
-            "seconds, before it expires and the call is refused. Production keeps the "
-            "10-minute default; staging can set it short (60-90) so a precheck or load "
-            "test does not hold a turn for ten minutes."
+            "seconds, before it expires and the call is refused. The card then reads that "
+            "the approval timed out and the agent tells the requester to ask again, so an "
+            "unanswered card no longer holds the turn open. Staging can set it short "
+            "(60-90) so a precheck or load test does not wait out the 5-minute default."
         ),
     )
 

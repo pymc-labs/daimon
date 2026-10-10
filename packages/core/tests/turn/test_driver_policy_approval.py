@@ -211,6 +211,36 @@ async def test_chat_write_denied_on_the_card_is_refused() -> None:
     assert "denied" in str(sent["deny_message"])
 
 
+async def test_an_unanswered_card_times_out_and_the_agent_says_to_ask_again() -> None:
+    """PyMC 2026-10-09 13:36: nobody answered the card. The call is refused when the
+    card expires, and the agent is told to say the approval timed out, so the turn
+    ends with a visible answer instead of waiting on the card."""
+    fa = FakeAnthropic()
+    _script(fa, ("tu_write", "hubspot", "update_deal"))
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        return "expired"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="close the deal",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=PolicyApproval(
+            decide=interactive_decider(_ON, requester_platform_user_id="U1", confirm=card)
+        ),
+    )
+
+    (sent,) = _confirmations(fa)
+    assert sent["result"] == "deny"
+    assert "timed out" in str(sent["deny_message"])
+    assert "ask again" in str(sent["deny_message"])
+    assert final.error is None
+
+
 async def test_chat_read_runs_without_a_card() -> None:
     fa = FakeAnthropic()
     _script(fa, ("tu_read", "linear", "list_teams"))
@@ -820,7 +850,7 @@ async def test_the_card_expiry_follows_the_operator_setting() -> None:
         _ON, requester_platform_user_id="U1", confirm=card, now=lambda: _NOW
     )
     await default(ToolCall(tool_use_id="t2", server_name="linear", tool_name="create_issue"))
-    assert prompts[1].expires_at == _NOW + timedelta(minutes=10)
+    assert prompts[1].expires_at == _NOW + timedelta(minutes=5)
 
 
 async def test_the_card_expiry_setting_reaches_the_publish_only_path() -> None:
