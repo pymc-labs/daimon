@@ -93,7 +93,6 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
         or runtime.controls.model != "gpt-6-luna"
         or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.container_size != "small"
-        or runtime.controls.spend_limit_usd_cents is None
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
         or not isinstance(runtime.usage_store, OpenAIUsageRevisions)
     ):

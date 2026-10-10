@@ -68,6 +68,17 @@ reservation into an exact bill. Without explicit controls, existing creation
 request bodies remain unchanged. See [hosted resources](https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted)
 and [create-session parameters](https://developers.openai.com/api/reference/python/resources/beta/subresources/agents/subresources/sessions/methods/create).
 
+The 2026-10-10 reference makes `spend_control` optional and gives a positive
+integer-cent limit without a higher documented minimum. The G1 project probe
+returned HTTP 400 `invalid_request_error`, `param=spend_control`, with a one-cent
+limit. This establishes a rejected optional field in that project, not a verified
+alternative minimum or shape. G1 therefore allows omission and its live tooling
+omits the native field. The canonical guard still admits bounded accounting
+reservations (OpenAI $50 line, $40 stop); G1's probe runs at most two host turns
+with fixed whole-turn deadlines and no resend. Accounting caps and host deadlines
+are not a native token ceiling. Explicit driver callers may still supply the
+reference-shaped native setting where support has been verified.
+
 ## Identity, turns and recovery
 
 The host supplies the provider account identity, authorization callback and optional

@@ -1098,8 +1098,8 @@ late record leaves the entire batch unchanged.
 Explicit caller-private `openai.persistent_workspace` channels run `gpt-6-luna`
 through the mux turn path when channel backends are enabled and the host supplies
 `OpenAIHostRuntime`. That injection contains scoped provisioned native resource
-references, a private transport factory, small hosted-container and native spend
-controls, durable journal/revision adapters and verified accounting context.
+references, a private transport factory, explicit small hosted-container controls,
+durable journal/revision adapters and verified accounting context.
 Missing injection raises typed `AdmissionDenied(backend_unsupported)` before
 native plan resolution or key discovery. Unsupported shared/transfer and
 restricted-policy preparation also uses that visible host refusal. The unconfigured channel still
@@ -1132,3 +1132,13 @@ OpenAI command/MCP items can normalize into separate tool-use and tool-result
 records sharing one native event. Their host journal keys use each neutral event
 ID for both live append and recovery batch append; provider provenance is retained
 unchanged. Other providers keep the existing native-event journal key by default.
+
+
+OpenAI G1 no longer requires the optional native `spend_control` setting. The
+2026-10-10 Agents reference documents `spend_control.limit` as positive whole USD
+cents with no higher stated minimum, but our guarded project probe rejected the
+field with HTTP 400 and `param=spend_control`. G1 live tooling omits the field and
+uses the canonical host budget guard plus bounded turn counts and whole-turn
+deadlines. Those host limits do not create a provider token ceiling or an exact
+bill: missing final usage/container evidence remains held and unverified. Explicit
+native spend controls remain available to driver callers with verified support.
