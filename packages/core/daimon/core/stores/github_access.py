@@ -159,6 +159,9 @@ class AgentRepo(BaseModel):
     added_at: datetime
     granted_by_account_id: uuid.UUID | None
     granted_at: datetime
+    is_working_repo: bool = False
+    grant_version: int = 0
+    authorization_version: int = 0
 
 
 async def list_agent_repos(
@@ -186,6 +189,9 @@ async def list_agent_repos(
                 added_at=row.authorized_at,
                 granted_by_account_id=grant.granted_by_account_id,
                 granted_at=grant.granted_at,
+                is_working_repo=grant.is_working_repo,
+                grant_version=grant.version,
+                authorization_version=row.version,
             )
         )
     return sorted(result, key=lambda repo: repo.full_name.casefold())

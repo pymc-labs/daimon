@@ -876,9 +876,11 @@ GitHub App mode uses the agent's live grants and the current asker's linked
 GitHub permissions when assembling a turn. External askers get no App token.
 Each effective installation and permission profile gets an ID-scoped token,
 recorded before minting and checked again after delivery. The session mounts
-one repository resource per effective repo and its own vault for `GH_TOKEN`
-and Copilot. A changed repository set replaces the session; unchanged mounts
-receive refreshed tokens through resource updates. Legacy sessions continue to
+only the selected working repository, if there is one, and uses its own vault
+for `GH_TOKEN` and Copilot. Other granted repos are available through tokens
+for cloning by name. A change to the working mount or the token repository
+set replaces the session on its next turn; unchanged sets receive refreshed
+tokens through resource updates. Legacy sessions continue to
 use their existing binding and credential path.
 
 **Stage three, `run_prepared_turn()` —
@@ -1310,7 +1312,7 @@ admission before any of this runs.
   confirm step checks again that the requester still manages the agent. A
   confirmed link retires the agent's saved GitHub key only when its working
   repo (with write) and private skill repos are among its repos; otherwise the
-  repos stay staged until the agent's GitHub panel saves a complete set. An
+  repos stay staged until a later connection supplies the required repos. An
   agent limited to channels by a rule may use only repos connected for it.
   In a setup conversation the agent asks whether it should keep one working
   repo in its filesystem. `set_working_repo` selects an existing grant or
@@ -1333,8 +1335,9 @@ admission before any of this runs.
   section lists one repo per line, names its working repo (or says there is none),
   and directs changes to the setup conversation. Server-admin GitHub home screens
   list agents and repo counts without grant controls. The Connect GitHub browser
-  link remains available; `github_connect` and `set_working_repo` in the setup
-  conversation make grant and working-repo changes.
+  link opens the browser editor. The setup conversation also supports
+  `github_connect`, `remove_repo` and `set_working_repo`, with the same grant
+  stores and live manager checks.
   Connect links appear as buttons where the person asked. Discord slash
   commands answer ephemerally; a conversational mention posts a requester-bound
   button in the thread and mints the single-use invitation only when that
@@ -1346,16 +1349,28 @@ admission before any of this runs.
   Discord uses an interaction follow-up until it expires and then a count-only
   line in the origin thread or channel. Failed notices back off and expire
   after eight attempts or 24 hours.
-  The connection page offers a searchable repo picker and confirms each repo
-  against the signed-in GitHub account. For one agent it is titled "Add repos
-  to <Agent>", shows repos the agent already has ticked and greyed, defaults
-  to Read only for the repos added now, and counts only new repos on its
-  button. A repo the agent still needs before it can drop its old key stays
-  ticked and changeable ("Needs write" or "Needed"), and one that needs write
-  is added with write; adding never lowers access. The done page says how many repos were added and, only once the
-  switch to the GitHub App has finished, that the agent no longer uses its old
-  GitHub token; while it waits on a missing working or skill repo it names
-  that repo instead. Setting an agent as a default in more places adds
+  For one agent, the connection page is titled "<Agent>'s repos". It lists
+  every recorded repo grant with its access, working-repo marker, and staged
+  or unavailable status, including repos the signed-in GitHub account cannot
+  edit. The person may add repos, remove repos, and select or clear the one
+  working repo, then confirm with **Save changes**. **Add repos** opens a
+  centered dialog on desktop and a bottom sheet on mobile. Each addition has
+  its own access choice, defaulting to Read only. Added and removed rows stay
+  visible as pending changes, and removals can be undone before saving.
+  Working-repo actions live on the repo row. Adding permits at most ten repos
+  per save and never lowers existing access.
+  A missing working or skill repo remains visible as a setup requirement.
+  Repos that need more access can be confirmed again to finish setup.
+  The invitation requester must still manage the agent when the page opens
+  and when it saves. The signed-in GitHub account needs current admin access
+  to each affected repo, including the previous working repo when changing
+  or clearing that selection. Other repos stay visible without edit controls.
+  Each save consumes one invitation and applies its changes in one database
+  transaction. A signed snapshot rejects edits made against an outdated page;
+  the person reloads if chat has changed the repo list or working selection.
+  Removing the working repo clears that selection. The saved page shows the
+  current list. The read-only setup panel and chat use the same stores.
+  Setting an agent as a default in more places adds
   "<Agent>'s repos come too." to `set_agent_default`'s confirmation when the
   agent has repos. The same browser can safely repeat a
   successful submission; a signed invitation receipt also handles concurrent

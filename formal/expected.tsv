@@ -261,3 +261,7 @@ discord_webhooks	Cadence	CadenceWebhookNoDebounceUnsafe	violates:NoGlobalBacklog
 discord_webhooks	Cadence	CadenceBotNoDebounceUnsafe	violates:NoGlobalBacklog	2	-	counterfactual no-debounce bot edits overload the modeled global bucket
 discord_webhooks	Cadence	CadenceColdBurstGlobalUnsafe	violates:NoGlobalBacklog	2	-	200 simultaneous initial posts can exceed one modeled two-second global window
 discord_webhooks	Cadence	CadenceWebhookSkewUnsafe	violates:NoHookBacklog	2	-	counterfactual no-debounce posts and edits collide on one hook
+# ---- GitHub repository editor ----
+github_repo_editor	RepoEditor	RepoEditorSafe	clean	59	-	atomic browser save, stale snapshot and repeated POST
+github_repo_editor	RepoEditor	RepoEditorStale	violates:NoStaleSave	22	-	atomic browser save, stale snapshot and repeated POST
+github_repo_editor	RepoEditor	RepoEditorReplay	violates:AtMostOneSave	55	-	atomic browser save, stale snapshot and repeated POST
