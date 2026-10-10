@@ -838,3 +838,13 @@ dead tuples can still contain plaintext. Normal VACUUM makes dead tuple space
 reusable; it is not a secure erasure guarantee. Apply secret-retention controls
 to backups and storage. Application encryption protects database-only access;
 access to both the database and the key ring permits decryption.
+
+## Worker shutdown during deployment
+
+For worker compose files, set `stop_grace_period: 90s` on Discord, Slack,
+Teams and scheduler. This leaves time for the adapters' 60-second in-flight
+drain and cleanup before Docker sends SIGKILL. When recreating containers, use
+`docker compose up -d --remove-orphans --timeout 95` so the CLI timeout exceeds
+the compose grace. The managed deploy fetches its worker compose asset from
+GCS; its source lives in `pymc-labs/daimon-infra` and an operator uploads changes
+with OpenTofu before the next app deployment.
