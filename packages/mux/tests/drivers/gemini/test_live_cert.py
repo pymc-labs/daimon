@@ -947,3 +947,87 @@ async def test_sdk_opaque_paths_and_terminal_usage_survive_export_failure(
     assert receipt["verification"] == "actual" and receipt["held_usd"] == "0"
     assert receipt["reported_tokens"]["input_tokens"] == 64
     assert receipt["reported_tokens"]["output_tokens"] == 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        "offline-status-secret",
+        "AIza" + "Z" * 40,
+        "QmVhcmVyIHN5bnRoZXRpYy1jcmVkZW50aWFsLWZvci1hdWRpdA==",
+    ],
+)
+async def test_unknown_native_status_never_exports_credential_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    original = httpx.MockTransport
+
+    def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
+        def respond(request: httpx.Request) -> httpx.Response:
+            reply = native()
+            reply["status"] = status
+            return httpx.Response(200, json=reply)
+
+        return original(respond)
+
+    monkeypatch.setattr(httpx, "MockTransport", factory)
+    with pytest.raises((ProbeRunError, ValueError)):
+        await run_sdk_smoke(
+            budget(tmp_path),
+            tmp_path / "status.json",
+            SmokeSettings(model=LIVE_MODEL, timeout_s=0.1, poll_s=0),
+            key="offline-status-secret",
+            mock=True,
+        )
+    for path in tmp_path.glob("status-usage-*.json"):
+        assert json.loads(path.read_text())["interaction_status"] is None
+    assert all(status not in path.read_text() for path in tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_stale_cancel_cannot_erase_accepted_overrun_or_release_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = httpx.MockTransport
+    requests: list[httpx.Request] = []
+
+    def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(503, text="poll unavailable")
+            cancel = "cancel" in request.url.path
+            reply = native(
+                "cancelled" if cancel else "in_progress", input_=64 if cancel else 1_000_000
+            )
+            reply["updated"] = "2026-10-10T00:00:00Z" if cancel else "2026-10-10T01:00:00Z"
+            return httpx.Response(200, json=reply)
+
+        return original(respond)
+
+    monkeypatch.setattr(httpx, "MockTransport", factory)
+    guard = budget(tmp_path)
+    with pytest.raises(ProbeRunError):
+        await run_sdk_smoke(
+            guard,
+            tmp_path / "stale.json",
+            SmokeSettings(model=LIVE_MODEL),
+            key="offline-key",
+            mock=True,
+        )
+    assert [request.method for request in requests] == ["POST", "GET", "POST"]
+    receipt = json.loads((tmp_path / "stale-receipt-1.json").read_text())
+    assert receipt["spend_receipt"]["status"] == "overrun"
+    assert receipt["reported_tokens"]["input_tokens"] == 1_000_000
+    assert receipt["verification"] == "estimated_unverified" and receipt["actual_usd"] is None
+    assert Decimal(receipt["held_usd"]) > 0
+    with pytest.raises(BudgetRefused):
+        guard.reserve(
+            ProbePlan(
+                provider="gemini",
+                model=LIVE_MODEL,
+                fixture_id="C10",
+                limits=SmokeSettings(model=LIVE_MODEL).limits,
+            )
+        )

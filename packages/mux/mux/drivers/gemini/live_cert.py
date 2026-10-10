@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -274,6 +274,14 @@ async def smoke(
             usage_complete=complete,
         )
         observed_guard.latest_actual = actual
+        if (
+            tokens.minimum_input_tokens > settings.limits.input_tokens
+            or (tokens.output_tokens or 0) > settings.limits.output_tokens
+        ):
+            # Preserve observed bounds independently of newer exact-total claims.
+            # This actual object retains the original observation and its true
+            # completeness; it never invents a final billable total.
+            observed_guard.overrun_actual = observed_guard.overrun_actual or actual
         return actual
 
     def record(recorder: Recorder, events: tuple[Event, ...]) -> None:
@@ -514,15 +522,13 @@ def write_report(path: Path, value: Mapping[str, JsonValue]) -> None:
 class ReceiptGuard(BudgetGuard):
     """Observe public guard methods without changing its ledger/accounting rules."""
 
-    def __init__(
-        self, guard: BudgetGuard, *, captured_actual: Callable[[], ActualSpend | None] | None = None
-    ) -> None:
-        self.captured_actual = captured_actual
+    def __init__(self, guard: BudgetGuard) -> None:
         super().__init__(guard.config_path, guard.spend_path)
         self.reservation: Reservation | None = None
         self.receipt: SpendReceipt | None = None
         self.reported_usage: TokenUsage | None = None
         self.latest_actual: ActualSpend | None = None
+        self.overrun_actual: ActualSpend | None = None
 
     def reserve(self, plan: ProbePlan, *, fixture_exists: bool = False) -> Reservation:
         self.reservation = super().reserve(plan, fixture_exists=fixture_exists)
@@ -537,11 +543,7 @@ class ReceiptGuard(BudgetGuard):
         usage: TokenUsage | None = None,
         actual: ActualSpend | None = None,
     ) -> SpendReceipt:
-        actual = (
-            (self.captured_actual() if self.captured_actual else None)
-            or actual
-            or self.latest_actual
-        )
+        actual = self.overrun_actual or actual or self.latest_actual
         self.reported_usage = actual.requests[-1].tokens if actual and actual.requests else usage
         self.receipt = super().settle(
             reservation,
@@ -590,7 +592,6 @@ async def smoke_with_fallback(
     *,
     secrets: tuple[str, ...] = (),
     request_metadata: list[RequestMetadata] | None = None,
-    captured_actual: Callable[[str], ActualSpend | None] | None = None,
 ) -> ProbeRun:
     """Fresh driver/reservation per attempt; at most three explicit POSTs."""
     if settings.model != LIVE_MODEL:
@@ -599,12 +600,7 @@ async def smoke_with_fallback(
         validate_budget(guard.config_path, replace(settings, model=model))
     for index, model in enumerate(MODEL_CHAIN):
         attempt = AttemptTransport(source)
-        observed = ReceiptGuard(
-            guard,
-            captured_actual=(lambda selected=model: captured_actual(selected))
-            if captured_actual
-            else None,
-        )
+        observed = ReceiptGuard(guard)
         path = output if index == 0 else output.with_name(f"{output.stem}-attempt-{index + 1}.json")
         if request_metadata is not None:
             request_metadata.clear()
@@ -699,7 +695,6 @@ async def run_sdk_smoke(
     aliases = EvidenceAliases()
     active_model = settings.model
     call_index = 0
-    captured: dict[str, ActualSpend] = {}
 
     async def capture(request: httpx.Request) -> None:
         nonlocal active_model
@@ -730,63 +725,6 @@ async def run_sdk_smoke(
                 observation_sha256 = hashlib.sha256(
                     f"gemini:{interaction}:usage".encode()
                 ).hexdigest()
-                if any(
-                    counts[name] is not None
-                    for name in (
-                        "promptTokenCount",
-                        "candidatesTokenCount",
-                        "cachedContentTokenCount",
-                        "thoughtsTokenCount",
-                    )
-                ):
-
-                    def counter(name: str) -> int | None:
-                        value = counts[name]
-                        return (
-                            value
-                            if isinstance(value, int) and not isinstance(value, bool)
-                            else None
-                        )
-
-                    visible, thoughts = (
-                        counter("candidatesTokenCount"),
-                        counter("thoughtsTokenCount"),
-                    )
-                    snapshot = ActualSpend(
-                        requests=(
-                            MeasuredRequest(
-                                id=observation_sha256,
-                                observed_at=datetime.now(UTC),
-                                tokens=TokenUsage(
-                                    input_tokens=counter("promptTokenCount"),
-                                    input_cached_tokens=counter("cachedContentTokenCount"),
-                                    output_tokens=visible + thoughts
-                                    if visible is not None and thoughts is not None
-                                    else None,
-                                    input_cache_write_tokens=0,
-                                ),
-                                pricing_basis="standard-global"
-                                if active_model != "gemini-flash-latest"
-                                else None,
-                            ),
-                        ),
-                        containers=(),
-                        usage_complete=raw.get("status")
-                        in ("completed", "cancelled", "failed", "incomplete", "budget_exceeded"),
-                    )
-                    prior = captured.get(active_model)
-                    # Cancel endpoints may return sparse or older snapshots.
-                    # Never erase terminal counters with a partial cleanup reply.
-                    if (
-                        prior is None
-                        or not prior.usage_complete
-                        or snapshot.usage_complete
-                        and all(
-                            getattr(snapshot.requests[0].tokens, name) is not None
-                            for name in ("input_tokens", "output_tokens", "input_cached_tokens")
-                        )
-                    ):
-                        captured[active_model] = snapshot
         except ValueError:
             # A non-JSON refusal still has an HTTP status; retain unknown facts
             # without recording the unsafe response or blocking SDK error mapping.
@@ -805,7 +743,16 @@ async def run_sdk_smoke(
                 "usage_observation_sha256": observation_sha256,
                 "usage_basis": "cumulative interaction snapshot; never sum repeated GETs",
                 "interaction_status": raw.get("status")
-                if isinstance(raw.get("status"), str)
+                if raw.get("status")
+                in (
+                    "in_progress",
+                    "requires_action",
+                    "completed",
+                    "cancelled",
+                    "failed",
+                    "incomplete",
+                    "budget_exceeded",
+                )
                 else None,
             },
         )
@@ -870,7 +817,6 @@ async def run_sdk_smoke(
                 settings,
                 secrets=(key,),
                 request_metadata=metadata,
-                captured_actual=captured.get,
             )
         finally:
             await client.aio.aclose()
