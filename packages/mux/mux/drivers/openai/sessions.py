@@ -23,6 +23,7 @@ from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
+from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import compile_pins, decode, encode_metadata, resolve_pins
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ContinuityLost, MigrationUnsupported, ProviderError, ScopeViolation
@@ -33,8 +34,15 @@ _DELETE_POLL_INTERVAL = 1.0
 
 
 class OpenAISessions:
-    def __init__(self, context: Context, binding_lookup: BindingLookup | None = None) -> None:
+    def __init__(
+        self,
+        context: Context,
+        binding_lookup: BindingLookup | None = None,
+        *,
+        controls: SessionControls | None = None,
+    ) -> None:
         self._c, self._binding_lookup = context, binding_lookup
+        self._controls = controls if controls is not None else SessionControls()
 
     def _binding(self, scope: Scope, raw: Object) -> ProviderBinding:
         id_ = text(raw["id"])
@@ -165,6 +173,8 @@ class OpenAISessions:
         if spec.agent_revision.local != 0 or spec.agent_revision.native is not None:
             raise self._c.unsupported("agent_revision_pin")
         if self._c.profile_id == "openai.conversation_only":
+            if self._controls.container_size is not None:
+                raise self._c.unsupported("hosted_container_size")
             if spec.environment is not None or spec.resources:
                 raise self._c.unsupported("thread_workspace_persistence")
             if initial is None or not initial.content:
@@ -174,6 +184,8 @@ class OpenAISessions:
             environment: Object = {"type": "none"}
         else:
             environment = {"type": "openai_hosted"}
+            if self._controls.container_size is not None:
+                environment["container_size"] = self._controls.container_size
             if spec.environment is not None:
                 self._c.check(scope, spec.environment, "environment")
                 environment["environment_template_id"] = spec.environment.id
@@ -199,6 +211,8 @@ class OpenAISessions:
         if resolved is not None:
             metadata.update(encode_metadata(resolved, self._c))
         body: Object = {"agent_id": spec.agent.id, "environment": environment, "metadata": metadata}
+        if self._controls.spend_limit_usd_cents is not None:
+            body["spend_control"] = {"limit": self._controls.spend_limit_usd_cents}
         if vaults is not None:
             body["vault_ids"] = [value for value in vaults]
         if initial is not None:

@@ -392,3 +392,11 @@ Anthropic MA settlement requires a session allowance and measured runtime;
 missing or empty measurements retain the hold. Known request bounds still
 detect overruns when other usage is missing and block subsequent dispatch.
 See `mux/conformance/README.md` for the offline settlement and approval API.
+### OpenAI session resource controls
+
+The opt-in OpenAI driver accepts driver-owned `SessionControls` for an explicit
+hosted container size and a strictly positive integer USD-cent session spend
+limit. Omitted controls retain the existing provider/template defaults and request
+bytes. The [driver README](mux/drivers/openai/README.md) records the official
+2026-10-10 protocol audit, SDK binding boundary, nullable usage and separate Admin
+cost-accounting requirements. These controls do not register a host backend.

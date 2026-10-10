@@ -13,6 +13,7 @@ from mux.drivers.openai._common import Authorization, Context
 from mux.drivers.openai.agents import OpenAIAgents
 from mux.drivers.openai.artifacts import OpenAIArtifacts
 from mux.drivers.openai.environments import OpenAIEnvironments
+from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
 from mux.drivers.openai.skills import OpenAISkills
 from mux.drivers.openai.transport import Transport
@@ -46,6 +47,7 @@ class OpenAIDriver:
         vaults: Vaults | None = None,
         secrets: SecretResolver | None = None,
         events: Events | None = None,
+        session_controls: SessionControls | None = None,
     ) -> None:
         profiles = {p.profile_id: p for p in (PERSISTENT_WORKSPACE, CONVERSATION_ONLY)}
         if profile_id not in profiles:
@@ -54,7 +56,7 @@ class OpenAIDriver:
         context = Context(transport, account_scope_id, profile_id, authorization)
         self.agents = OpenAIAgents(context)
         self.environments = OpenAIEnvironments(context)
-        self.sessions = OpenAISessions(context, binding_lookup)
+        self.sessions = OpenAISessions(context, binding_lookup, controls=session_controls)
         self.events: Events = (
             events if events is not None else OpenAIEvents(context, self.sessions, journal)
         )
