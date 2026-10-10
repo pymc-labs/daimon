@@ -51,7 +51,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
 from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.smoke import SMOKE_TOPUP_USD, SmokeCheckError, run_smoke_check
+from daimon.core.smoke import SMOKE_MODEL, SMOKE_TOPUP_USD, SmokeCheckError, run_smoke_check
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import tenants as tenants_store
@@ -116,6 +116,7 @@ class _Workspace:
         self.agents: dict[str, dict[str, Any]] = {}
         self.environments: dict[str, dict[str, Any]] = {}
         self.agent_create_calls: list[dict[str, Any]] = []
+        self.session_create_calls: list[dict[str, Any]] = []
         self._agent_n = 0
         self._env_n = 0
 
@@ -219,6 +220,7 @@ def _register_turn_routes(
     model_id: str = _MODEL_ID,
     hang: bool = False,
     terminal_less_script: bool = False,
+    workspace: _Workspace | None = None,
 ) -> None:
     """POST /v1/sessions (create) + GET stream (SSE) + POST events (send).
 
@@ -238,7 +240,16 @@ def _register_turn_routes(
     ).model_dump(mode="json")
 
     def handle_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        return httpx.Response(200, json=session_json)
+        body = json.loads(req.content)
+        if workspace is not None:
+            workspace.session_create_calls.append(body)
+        session_payload = json.loads(json.dumps(session_json))
+        body_model = (
+            body.get("agent", {}).get("model") if isinstance(body.get("agent"), dict) else None
+        )
+        if isinstance(body_model, str):
+            session_payload["agent"]["model"]["id"] = body_model
+        return httpx.Response(200, json=session_payload)
 
     def handle_stream(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return sse_response(event_dicts)
@@ -313,6 +324,7 @@ def _build_happy_client(workspace: _Workspace, *, session_id: str = "ses_smoke")
         router,
         [e.model_dump(mode="json") for e in _happy_events(id_prefix=session_id)],
         session_id=session_id,
+        workspace=workspace,
     )
     return build_fake_anthropic(router.dispatch)
 
@@ -343,7 +355,16 @@ async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_c
 
     async with db_session_factory() as s:
         rows = await usage_events.list_for_tenant(s, tenant_id=_TENANT_ID)
+        balance = await tenant_ledger.get_balance(s, tenant_id=_TENANT_ID)
     assert len(rows) == 1, "exactly one usage_events row must exist for the smoke tenant"
+    assert rows[0].model == SMOKE_MODEL, "usage must be billed at the session's override model"
+    assert balance == Decimal("4.999996"), "Haiku rates must drive the smoke usage debit"
+    session_agent = workspace.session_create_calls[0]["agent"]
+    assert session_agent["type"] == "agent_with_overrides"
+    assert session_agent["model"] == SMOKE_MODEL
+    assert workspace.agents[result.agent_id]["model"]["id"] == _MODEL_ID, (
+        "the per-session smoke override must leave the reconciled deployment default unchanged"
+    )
 
 
 async def test_run_smoke_check_is_idempotent_when_called_twice(
