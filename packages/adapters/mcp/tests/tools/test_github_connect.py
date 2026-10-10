@@ -150,7 +150,10 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     )
     assert missing.status == "sent"
     assert "Nothing is connected yet" in missing.message
-    assert "I can't see owner/missing yet. Tap Connect GitHub and tick it." in missing.message
+    assert (
+        "I can't see owner/missing yet. Tap Connect GitHub, then click Add repos, tick owner/missing, click Add repos again and Save changes."
+        in missing.message
+    )
     delivery.assert_awaited_once()
     other_agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ma_other")
     async with committing_sessionmaker.begin() as session:

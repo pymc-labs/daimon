@@ -72,6 +72,7 @@ async def _post_discord_connect_card(
     requester_id: str,
     intent_id: uuid.UUID,
     agent_name: str,
+    requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
         raise ToolError("GitHub setup requires a Discord server.")
@@ -82,6 +83,7 @@ async def _post_discord_connect_card(
         platform="discord",
         workspace_id=auth.external_id,
         agent_name=agent_name,
+        requested_repo=requested_repo,
     )
     view = discord.ui.View(timeout=None)
     view.add_item(
@@ -112,6 +114,7 @@ async def _post_slack_connect_card(
     requester_id: str,
     url: str,
     agent_name: str,
+    requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
         raise ToolError("GitHub setup requires a Slack workspace.")
@@ -122,6 +125,7 @@ async def _post_slack_connect_card(
         platform="slack",
         workspace_id=auth.external_id,
         agent_name=agent_name,
+        requested_repo=requested_repo,
     )
     client = await slack_web_client(runtime, team_id=auth.external_id)
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -374,6 +378,7 @@ async def _github_connect_impl(
                 requester_id=auth.platform_user_id,
                 intent_id=intent_id,
                 agent_name=agent.name,
+                requested_repo=repo_name.strip() if repo_name else None,
             )
         else:
             assert token is not None
@@ -385,6 +390,7 @@ async def _github_connect_impl(
                 requester_id=auth.platform_user_id,
                 url=f"{root}/oauth/github/connect/{token}",
                 agent_name=agent.name,
+                requested_repo=repo_name.strip() if repo_name else None,
             )
     except Exception:
         async with runtime.session_factory.begin() as session:
@@ -397,7 +403,8 @@ async def _github_connect_impl(
             message="I couldn't show the GitHub connection button. Try again.",
         )
     say = (
-        f"I can't see {repo_name.strip()} yet. Tap Connect GitHub and tick it."
+        f"I can't see {repo_name.strip()} yet. Tap Connect GitHub, then click Add repos, "
+        f"tick {repo_name.strip()}, click Add repos again and Save changes."
         if repo_name
         else "Tap Connect GitHub to choose the repos I can use."
     )

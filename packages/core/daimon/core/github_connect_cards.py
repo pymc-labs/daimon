@@ -56,6 +56,7 @@ def build_connect_card(
     avatar_url: str | None,
     public_base_url: str,
     variant: Literal["A", "B", "B_NO_FOOTER"] | None = None,
+    requested_repo: str | None = None,
 ) -> ConnectCard:
     chosen = VARIANT if variant is None else variant
     if chosen not in ("A", "B", "B_NO_FOOTER"):
@@ -69,7 +70,10 @@ def build_connect_card(
         or f"{root}/web/daimon-face.png",
         description="Nothing is connected yet.\n\n"
         + (
-            f"Tap the button and tick the repos {shown or 'this agent'} can use."
+            f"Tap the button. On the page, click Add repos, tick {requested_repo}, "
+            "click Add repos again, then Save changes."
+            if requested_repo
+            else f"Tap the button and tick the repos {shown or 'this agent'} can use."
             if agent_name
             else "Tap the button and tick the repos your agents can use."
         ),
@@ -86,6 +90,7 @@ async def resolve_connect_card(
     platform: Literal["discord", "slack"],
     workspace_id: str,
     agent_name: str | None,
+    requested_repo: str | None = None,
 ) -> ConnectCard:
     """Resolve one face after the interaction is acknowledged."""
     root = settings.mcp.app_root_url
@@ -111,6 +116,7 @@ async def resolve_connect_card(
         identity_enabled=enabled,
         avatar_url=avatar_url,
         public_base_url=str(root),
+        requested_repo=requested_repo,
     )
 
 
