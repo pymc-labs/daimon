@@ -256,6 +256,7 @@ Gemini's explicitly invoked probe harness defaults to MockTransport and a privat
 spend ledger. It records the offline C-matrix separately from its narrow SDK
 smoke and cannot issue a full live certificate. Live mode uses the pinned key
 file and reviewed shared-ledger budget configuration ($30 allocation, $24 stop).
+It requires exactly `gemini-3.5-flash-lite` before reading a key or creating a client.
 See `mux/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
 MCP repository binding and vault summaries use the verified tenant/account scope
 and an exact account/agent-derived vault-name grant. Repository writes retain

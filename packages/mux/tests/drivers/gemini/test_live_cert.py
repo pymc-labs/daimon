@@ -11,6 +11,7 @@ from mux.conformance.recording import Tape
 from mux.drivers.gemini.fake import FakeTransport
 from mux.drivers.gemini.live_cert import (
     GEMINI_STOP,
+    LIVE_MODEL,
     LimitedTransport,
     SmokeSettings,
     read_key,
@@ -23,7 +24,9 @@ from mux.drivers.gemini.transport import Object
 from mux.errors import ProviderError
 
 
-def budget(root: Path, *, opening: str = "0", priced: bool = True) -> BudgetGuard:
+def budget(
+    root: Path, *, opening: str = "0", priced: bool = True, model: str = LIVE_MODEL
+) -> BudgetGuard:
     config, ledger = root / "budget.json", root / "spend.md"
     write_report(
         config,
@@ -36,7 +39,7 @@ def budget(root: Path, *, opening: str = "0", priced: bool = True) -> BudgetGuar
                     "cap_usd": "30",
                     "opening_spend_usd": opening,
                     "models": {
-                        "fixture": {
+                        model: {
                             "input": "1",
                             "cached_input": "1",
                             "cache_write_input": "1",
@@ -86,7 +89,7 @@ async def test_mock_sdk_and_recorded_matrix_never_read_real_key_or_shared_ledger
     monkeypatch.setattr("mux.drivers.gemini.live_cert.read_key", forbidden_key)
     monkeypatch.setenv("GEMINI_API_KEY", "ambient-must-not-be-used")
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-    path = await run_prepared(tmp_path, SmokeSettings(model="fixture"))
+    path = await run_prepared(tmp_path, SmokeSettings(model=LIVE_MODEL))
     report = json.loads(path.read_text())
     assert report["mode"] == "mock_transport" and report["certified"] is False
     assert report["gemini_cap_usd"] == "30" and report["gemini_stop_usd"] == "24"
@@ -121,7 +124,7 @@ async def test_24_dollar_stop_refuses_before_provider_mutation(tmp_path: Path) -
     guard = budget(tmp_path, opening=str(GEMINI_STOP))
     transport = FakeTransport()
     with pytest.raises(BudgetRefused):
-        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"))
+        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL))
     assert not transport.requests and not (tmp_path / "smoke.json").exists()
     assert '"status":"blocked"' in guard.spend_path.read_text()
 
@@ -129,7 +132,30 @@ async def test_24_dollar_stop_refuses_before_provider_mutation(tmp_path: Path) -
 def test_unreviewed_price_refuses(tmp_path: Path) -> None:
     guard = budget(tmp_path, priced=False)
     with pytest.raises(BudgetRefused, match="reviewed prices"):
-        validate_budget(guard.config_path, SmokeSettings(model="fixture"))
+        validate_budget(guard.config_path, SmokeSettings(model=LIVE_MODEL))
+
+
+@pytest.mark.asyncio
+async def test_allowed_live_model_still_requires_prices_before_key_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mux.drivers.gemini.live_cert as cert
+
+    guard = budget(tmp_path, priced=False)
+    value = json.loads(guard.config_path.read_text())
+    value["ledger_path"] = str(cert.SHARED_SPEND_PATH)
+    config = tmp_path / "unpriced-shared-budget.json"
+    write_report(config, value)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    def forbidden_key() -> str:
+        raise AssertionError("unpriced allowed model reached key loading")
+
+    monkeypatch.setattr(cert, "read_key", forbidden_key)
+    with pytest.raises(BudgetRefused, match="reviewed prices"):
+        await run_prepared(output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=config)
+    assert list(output.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -137,14 +163,14 @@ async def test_unknown_usage_retains_reservation_and_never_certifies(tmp_path: P
     guard = budget(tmp_path)
     transport = FakeTransport()
     transport.responses.append(native(input_=None, output=None))
-    probe = await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"))
+    probe = await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL))
     assert probe.receipt.status == "uncertain"
     assert probe.receipt.cost_estimate_usd == probe.receipt.reserved_usd > Decimal(0)
     assert probe.result.status == "pending"
     assert len(transport.requests) == 1
     assert transport.requests[0]["agent_config"] == {
         "type": "antigravity",
-        "model": "fixture",
+        "model": LIVE_MODEL,
         "max_total_tokens": 4096,
     }
 
@@ -161,7 +187,7 @@ async def test_timeout_cancels_known_interaction_and_retains_failed_reservation(
             transport,
             guard,
             tmp_path / "smoke.json",
-            SmokeSettings(model="fixture", timeout_s=1.0, poll_s=0.05),
+            SmokeSettings(model=LIVE_MODEL, timeout_s=1.0, poll_s=0.05),
         )
     assert transport.cancelled == ["smoke"] and len(transport.requests) == 1
     assert '"status":"failed"' in guard.spend_path.read_text()
@@ -175,7 +201,7 @@ async def test_lost_acceptance_response_is_not_retried_or_claimed_cancelled(tmp_
     transport = FakeTransport()
     transport.responses.append(ProviderError("transient_network", retryable=True))
     with pytest.raises(ProbeRunError):
-        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"))
+        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL))
     assert len(transport.requests) == 1 and not transport.cancelled
     assert '"status":"failed"' in guard.spend_path.read_text()
 
@@ -218,9 +244,9 @@ def test_key_loader_refuses_missing_symlink_permissions_and_ambient_fallback(
 
 def test_invalid_limits_and_output_overwrite_refuse(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        SmokeSettings(model="fixture", max_total_tokens=0)
+        SmokeSettings(model=LIVE_MODEL, max_total_tokens=0)
     with pytest.raises(ValueError):
-        SmokeSettings(model="fixture", limits=TokenLimits(input_tokens=1, output_tokens=1))
+        SmokeSettings(model=LIVE_MODEL, limits=TokenLimits(input_tokens=1, output_tokens=1))
     report = tmp_path / "report.json"
     write_report(report, {"certified": False})
     with pytest.raises(FileExistsError):
@@ -234,12 +260,12 @@ async def test_observed_overrun_cancels_and_blocks_later_admission(tmp_path: Pat
     transport = FakeTransport()
     transport.responses.append(native("in_progress", input_=32769))
     with pytest.raises(ProbeRunError, match="exceeded its reservation"):
-        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"))
+        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL))
     assert transport.cancelled == ["smoke"] and len(transport.requests) == 1
     assert '"status":"overrun"' in guard.spend_path.read_text()
     later = FakeTransport()
     with pytest.raises(BudgetRefused):
-        await smoke(later, guard, tmp_path / "later.json", SmokeSettings(model="fixture"))
+        await smoke(later, guard, tmp_path / "later.json", SmokeSettings(model=LIVE_MODEL))
     assert not later.requests
 
 
@@ -251,7 +277,7 @@ async def test_wrong_saved_smoke_reply_is_not_a_success(tmp_path: Path) -> None:
     response["steps"] = [{"type": "model_output", "content": [{"type": "text", "text": "wrong"}]}]
     transport.responses.append(response)
     with pytest.raises(ProbeRunError):
-        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"))
+        await smoke(transport, guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL))
     tape = Tape.model_validate_json((tmp_path / "smoke.json").read_text())
     assert not tape.complete
 
@@ -264,7 +290,7 @@ async def test_live_preparation_rejects_a_private_ledger_before_key_or_dispatch(
 
     private = tmp_path / "private"
     private.mkdir()
-    guard = budget(private)
+    guard = budget(private, model=LIVE_MODEL)
     output = tmp_path / "output"
     output.mkdir()
     original_ledger = guard.spend_path.read_bytes()
@@ -279,8 +305,66 @@ async def test_live_preparation_rejects_a_private_ledger_before_key_or_dispatch(
     monkeypatch.setattr(cert, "run_sdk_smoke", forbidden_dispatch)
     with pytest.raises(BudgetRefused, match="N9 shared spend ledger"):
         await run_prepared(
-            output, SmokeSettings(model="fixture"), live=True, budget_path=guard.config_path
+            output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=guard.config_path
         )
+    assert guard.spend_path.read_bytes() == original_ledger
+    assert list(output.iterdir()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gemini-3.8-pro",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite-latest",
+        " gemini-3.5-flash-lite",
+        "fixture",
+    ],
+)
+@pytest.mark.parametrize("entry", ["preparation", "sdk"])
+async def test_live_rejects_every_other_model_even_when_priced_before_key_or_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str, entry: str
+) -> None:
+    import httpx
+    import mux.drivers.gemini.live_cert as cert
+
+    # Synthetic test prices deliberately admit the forbidden ID financially;
+    # the model policy must refuse independently, before credentials or I/O.
+    guard = budget(tmp_path, model=model.strip())
+    original_ledger = guard.spend_path.read_bytes()
+    value = json.loads(guard.config_path.read_text())
+    value["providers"]["gemini"]["models"][model] = value["providers"]["gemini"]["models"].pop(
+        model.strip()
+    )
+    value["ledger_path"] = str(cert.SHARED_SPEND_PATH)
+    config = tmp_path / "approved-path-budget.json"
+    write_report(config, value)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    def forbidden_key() -> str:
+        raise AssertionError("forbidden model reached key loading")
+
+    def forbidden_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("forbidden model reached HTTP client creation")
+
+    monkeypatch.setattr(cert, "read_key", forbidden_key)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden_client)
+    with pytest.raises(BudgetRefused, match="gemini-3.5-flash-lite only"):
+        if entry == "preparation":
+            await run_prepared(output, SmokeSettings(model=model), live=True, budget_path=config)
+        else:
+            await cert.run_sdk_smoke(
+                BudgetGuard(config, cert.SHARED_SPEND_PATH),
+                output / "smoke.json",
+                SmokeSettings(model=model),
+                key="fake",
+                mock=False,
+            )
     assert guard.spend_path.read_bytes() == original_ledger
     assert list(output.iterdir()) == []
 
@@ -292,7 +376,7 @@ async def test_live_sdk_entry_rejects_a_private_ledger_before_client_creation(
     import httpx
     from mux.drivers.gemini.live_cert import run_sdk_smoke
 
-    guard = budget(tmp_path)
+    guard = budget(tmp_path, model=LIVE_MODEL)
 
     def forbidden_client(*args: object, **kwargs: object) -> None:
         raise AssertionError("private ledger reached HTTP client creation")
@@ -300,7 +384,7 @@ async def test_live_sdk_entry_rejects_a_private_ledger_before_client_creation(
     monkeypatch.setattr(httpx, "AsyncClient", forbidden_client)
     with pytest.raises(BudgetRefused, match="N9 shared spend ledger"):
         await run_sdk_smoke(
-            guard, tmp_path / "smoke.json", SmokeSettings(model="fixture"), key="fake", mock=False
+            guard, tmp_path / "smoke.json", SmokeSettings(model=LIVE_MODEL), key="fake", mock=False
         )
 
 
@@ -310,7 +394,7 @@ async def test_live_shared_ledger_gate_reaches_key_loading_without_ledger_io(
 ) -> None:
     import mux.drivers.gemini.live_cert as cert
 
-    guard = budget(tmp_path)
+    guard = budget(tmp_path, model=LIVE_MODEL)
     value = json.loads(guard.config_path.read_text())
     value["ledger_path"] = str(cert.SHARED_SPEND_PATH)
     config = tmp_path / "approved-path-budget.json"
@@ -330,5 +414,5 @@ async def test_live_shared_ledger_gate_reaches_key_loading_without_ledger_io(
     monkeypatch.setattr(cert, "read_key", stop_at_key)
     monkeypatch.setattr(BudgetGuard, "reserve", no_ledger_io)
     with pytest.raises(KeyRequired):
-        await run_prepared(output, SmokeSettings(model="fixture"), live=True, budget_path=config)
+        await run_prepared(output, SmokeSettings(model=LIVE_MODEL), live=True, budget_path=config)
     assert list(output.iterdir()) == []

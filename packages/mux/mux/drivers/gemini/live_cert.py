@@ -38,6 +38,9 @@ from mux.state.memory import MemoryStateStore
 
 GEMINI_CAP = Decimal("30")
 GEMINI_STOP = Decimal("24")
+# Official offline runtime model table, source-G-runtime.txt:735-749.
+# Live probes pin the cost-focused Flash-Lite tier; no default/fallback model.
+LIVE_MODEL = "gemini-3.5-flash-lite"
 SHARED_SPEND_PATH = Path("/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md")
 KEY_PATH = Path.home() / ".config/daimon-nc/gemini.env"
 SCOPE = Scope(
@@ -77,6 +80,8 @@ def validate_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
 
 
 def validate_shared_budget(path: Path, settings: SmokeSettings) -> BudgetConfig:
+    if settings.model != LIVE_MODEL:
+        raise BudgetRefused("live Gemini probes require gemini-3.5-flash-lite only")
     config = validate_budget(path, settings)
     if config.ledger_path.resolve() != SHARED_SPEND_PATH:
         raise BudgetRefused("live Gemini probes require the approved N9 shared spend ledger")
@@ -427,6 +432,8 @@ async def run_sdk_smoke(
         stamp = datetime.now(UTC).isoformat()
         if request.method == "POST":
             body = json.loads(request.content)
+            if body["agent_config"].get("model") != settings.model:
+                raise ValueError("explicit probe model missing")
             if body["agent_config"].get("max_total_tokens") != settings.max_total_tokens:
                 raise ValueError("provider token budget missing")
         return httpx.Response(

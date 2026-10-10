@@ -4,10 +4,11 @@ write the shared spend ledger, enable a host backend or make a provider call.
 From the repository root, create an empty private output directory, then run:
 
 ```bash
-uv run python -m mux.drivers.gemini.live_cert --model fixture --output /absolute/empty/output
+uv run python -m mux.drivers.gemini.live_cert --model gemini-3.5-flash-lite --output /absolute/empty/output
 ```
 
 This exercises the pinned SDK's real serialization with a synthetic response.
+The synthetic mock ledger uses the same allowed model ID, with test-only rates.
 It saves a smoke tape, eight offline fixture tapes, and a report with all eighteen
 C-matrix results. Each matrix row declares `offline_driver` as its evidence
 origin. Ten typed PENDING scenarios remain visible. The narrow smoke is tagged
@@ -17,8 +18,15 @@ returns a full live certificate.
 After lead authorization, the live command is:
 
 ```bash
-uv run python -m mux.drivers.gemini.live_cert --live --model REVIEWED_MODEL --budget /absolute/reviewed-budget.json --output /absolute/empty/output
+uv run python -m mux.drivers.gemini.live_cert --live --model gemini-3.5-flash-lite --budget /absolute/reviewed-budget.json --output /absolute/empty/output
 ```
+
+Live preparation and the direct SDK entry require exactly `gemini-3.5-flash-lite`
+before key loading or client creation, even if another model has configured prices.
+No Pro, larger Flash tier, alias or fallback is allowed. The official offline runtime
+model table (`source-G-runtime.txt:735-749`) lists Flash-Lite as the tier optimized
+for cost-sensitive tasks. It supplies no numeric rates; add only that exact ID when
+its rates have been verified. The provider's implicit 3.8 Flash default is never used.
 
 Only this mode reads `~/.config/daimon-nc/gemini.env`. The file must be owned by
 the running user, mode 0600, with one `GEMINI_API_KEY=...` assignment. No ambient
