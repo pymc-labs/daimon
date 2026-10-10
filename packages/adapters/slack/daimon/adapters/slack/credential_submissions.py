@@ -929,6 +929,9 @@ async def run_mcp_credential_submission(
         edit_retry=lambda retry, reason: edit_posted_card(
             client, row=retry, state="requested", retry_reason=reason
         ),
+        edit_pending=lambda pending, notice: edit_posted_card(
+            client, row=pending, state="received", saving_notice=notice
+        ),
     ) as attempt:
         await _mark_button_consumed(client, row=consumed)
 
@@ -1004,6 +1007,7 @@ async def run_mcp_credential_submission(
             )
             return
         except (McpAgentGoneError, McpAttachFailedError) as err:
+            attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
             # Exception class name only: a stringified SDK error can carry the
             # request envelope. Nothing was stored.
             log.warning(
@@ -1391,6 +1395,9 @@ async def run_skill_repo_credential_submission(
         edit_retry=lambda retry, reason: edit_posted_card(
             client, row=retry, state="requested", retry_reason=reason
         ),
+        edit_pending=lambda pending, notice: edit_posted_card(
+            client, row=pending, state="received", saving_notice=notice
+        ),
     ):
         await _mark_button_consumed(client, row=consumed)
 
@@ -1637,6 +1644,9 @@ async def run_repo_bind_credential_submission(
         row=consumed,
         edit_retry=lambda retry, reason: edit_posted_card(
             client, row=retry, state="requested", retry_reason=reason
+        ),
+        edit_pending=lambda pending, notice: edit_posted_card(
+            client, row=pending, state="received", saving_notice=notice
         ),
     ):
         await _mark_button_consumed(client, row=consumed)

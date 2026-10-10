@@ -2479,7 +2479,7 @@ async def test_env_file_upload_queues_its_continuation_with_the_keys(
     assert "next message" not in card, "nothing was waiting on the file, so no turn is promised"
 
 
-@pytest.mark.parametrize("failure", ["rejection", "timeout"])
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -2493,8 +2493,8 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     from daimon.core import credential_submit
     from daimon.core.mcp_oauth import McpProbe
 
-    if failure == "timeout":
-        monkeypatch.setattr(credential_submit, "CREDENTIAL_SAVE_TIMEOUT_SECONDS", 0.1)
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     row = await _seed_mcp_request(
         db_session_factory, mcp_server_url="https://mcp.notion.com/mcp", with_origin=True
     )
@@ -2506,8 +2506,8 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
 
     async def probe(url: str, token: str) -> McpProbe:
         probed.append((url, token))
-        if failure == "timeout" and not accepted:
-            await asyncio.Event().wait()
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
         return McpProbe(status_code=200 if accepted else 403, resource_metadata_url=None)
 
     runtime = dataclasses.replace(
@@ -2538,9 +2538,7 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
     assert agent_updates == [], "and the server is never attached"
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
-    assert spent is not None and spent.outcome == (
-        "token_rejected" if failure == "rejection" else "write_failed"
-    )
+    assert spent is not None and spent.outcome == "token_rejected"
     if failure == "rejection":
         text = interaction.followup.send.call_args.args[0]
         assert "did not accept" in text and "connect it with your account" in text, (
@@ -2549,11 +2547,13 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
 
     assert spent.used_at is None, "a rejected token keeps the form usable"
     card = _card_text(_card_edits(interaction)[-1])
-    assert ("That token was rejected" if failure == "rejection" else "too long") in card
+    assert "That token was rejected" in card
     assert "Try again" in card
+    if failure == "slow_rejection":
+        assert any("Still saving" in _card_text(edit) for edit in _card_edits(interaction))
     assert RECEIVED_FOOTER not in card
     accepted = True
-    monkeypatch.setattr(credential_submit, "CREDENTIAL_SAVE_TIMEOUT_SECONDS", 90.0)
+    monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
     await modal.on_submit(interaction)
     async with db_session_factory() as session:
         saved = await peek_credential_request(session, token=row.token)
@@ -2671,12 +2671,13 @@ async def test_mcp_agent_gone_before_the_attach_saves_nothing(
     await modal.on_submit(interaction)
 
     card = _card_text(_card_edits(interaction)[-1])
-    assert "Try again" in card
+    assert "not available" in card and "Try again" not in card
     assert _MCP_TOKEN not in card, "no token may reach the card"
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
         stored = await session.scalar(sql_text("SELECT count(*) FROM agent_mcp_credentials"))
     assert persisted is not None and persisted.outcome == "write_failed"
+    assert persisted.used_at is not None, "a deleted target cannot be fixed by retrying a token"
     assert stored == 0, "no agent-wide token is published without an attach"
     assert await _queued_continuation(db_session_factory, row) is None
 

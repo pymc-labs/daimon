@@ -427,6 +427,7 @@ def build_posted_card(
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
     retry_reason: str | None = None,
+    saving_notice: str | None = None,
 ) -> PostedCard:
     """Build the card for one posted control in one state.
 
@@ -450,6 +451,8 @@ def build_posted_card(
 
     if retry_reason is not None and state != "requested":
         raise ValueError("retry_reason belongs to state=requested only")
+    if saving_notice is not None and state != "received":
+        raise ValueError("saving_notice belongs to state=received only")
     repo_display = repo or target
 
     if state in ("requested", "received"):
@@ -464,7 +467,11 @@ def build_posted_card(
         )
         if state == "received":
             return PostedCard(
-                kind=kind, state=state, headline=headline, facts=facts, footer=RECEIVED_FOOTER
+                kind=kind,
+                state=state,
+                headline=headline,
+                facts=facts,
+                footer=saving_notice or RECEIVED_FOOTER,
             )
         if expires_at.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
@@ -526,6 +533,7 @@ def card_for_request(
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
     retry_reason: str | None = None,
+    saving_notice: str | None = None,
 ) -> PostedCard:
     """The card for one request row in `state`, rebuilt from the row alone.
 
@@ -553,4 +561,5 @@ def card_for_request(
         refusal_lines=refusal_lines,
         replaces=replaces,
         retry_reason=retry_reason,
+        saving_notice=saving_notice,
     )

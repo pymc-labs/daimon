@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import structlog
@@ -394,7 +394,8 @@ async def prepare_mcp_submit(
     return decision, clock()
 
 
-CREDENTIAL_SAVE_TIMEOUT_SECONDS = 90.0
+CREDENTIAL_CARD_DEADLINE_SECONDS = 90.0
+STILL_SAVING_NOTICE = "Still saving; we'll update this card when it finishes."
 
 
 @dataclass
@@ -405,11 +406,26 @@ class CredentialSaveAttempt:
     active: bool = True
     retry_allowed: bool = True
     failure_reason: str | None = None
+    card_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    notice_task: asyncio.Task[None] | None = None
 
 
 _ACTIVE_SAVE_ATTEMPT: ContextVar[CredentialSaveAttempt | None] = ContextVar(
     "credential_save_attempt", default=None
 )
+
+
+@asynccontextmanager
+async def credential_card_edit(row: CredentialRequestRow, state: CardState) -> AsyncIterator[None]:
+    """Serialize deadline notices with receipts; a final receipt stops the notice."""
+    attempt = _ACTIVE_SAVE_ATTEMPT.get()
+    if attempt is None or not attempt.active or attempt.token != row.token:
+        yield
+        return
+    async with attempt.card_lock:
+        if state != "received" and attempt.notice_task is not None:
+            attempt.notice_task.cancel()
+        yield
 
 
 def note_credential_save_failure(
@@ -434,25 +450,35 @@ async def guard_credential_save(
     *,
     row: CredentialRequestRow,
     edit_retry: Callable[[CredentialRequestRow, str], Awaitable[None]],
-    timeout_seconds: float | None = None,
+    edit_pending: Callable[[CredentialRequestRow, str], Awaitable[None]],
+    deadline_seconds: float | None = None,
 ) -> AsyncIterator[CredentialSaveAttempt]:
-    """Bound the save and repair every failed/unfinished external-write receipt.
+    """Replace the saving placeholder at the deadline without cancelling work.
 
-    Cancellation stops this attempt before its consume is released. A retry
-    rechecks all live authorization and replacement gates. Public reasons
-    are fixed strings; exceptions can contain submitted secrets.
+    Keep the form consumed while the save continues; only a finished failure
+    releases it. Slow skill imports can complete after the notice. Adapters
+    serialize notices with final receipts via credential_card_edit. Public
+    reasons are fixed strings; exceptions can contain submitted secrets.
     """
     attempt = CredentialSaveAttempt(token=row.token)
     active_token = _ACTIVE_SAVE_ATTEMPT.set(attempt)
     reason = "Saving did not finish; some changes may have been saved. Try again."
     cancelled = False
+
+    async def notice() -> None:
+        await asyncio.sleep(
+            CREDENTIAL_CARD_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+        )
+        try:
+            await edit_pending(row, STILL_SAVING_NOTICE)
+        except Exception as err:
+            structlog.get_logger().warning(
+                "credential_submit.notice_failed", kind=row.kind, err_type=type(err).__name__
+            )
+
+    attempt.notice_task = asyncio.create_task(notice())
     try:
-        async with asyncio.timeout(
-            CREDENTIAL_SAVE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-        ):
-            yield attempt
-    except TimeoutError:
-        reason = "Saving took too long; some changes may have been saved. Try again."
+        yield attempt
     except asyncio.CancelledError:
         cancelled = True
     except Exception as err:
@@ -460,23 +486,37 @@ async def guard_credential_save(
             "credential_submit.save_failed", kind=row.kind, err_type=type(err).__name__
         )
     finally:
+        attempt.notice_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await attempt.notice_task
         attempt.active = False
         _ACTIVE_SAVE_ATTEMPT.reset(active_token)
-        async with session_factory() as session, session.begin():
-            current = await credential_requests.peek_credential_request(session, token=row.token)
-            retry = None
-            if current is not None and (attempt.retry_allowed or current.outcome is None):
-                outcome = current.outcome
-                if outcome in (None, "token_rejected", "write_failed"):
-                    reason = attempt.failure_reason or reason
-                    if outcome == "token_rejected":
-                        reason = (
-                            "That token was rejected: it cannot access the requested service. "
-                            "Try again."
+        retry = None
+        try:
+            async with session_factory() as session, session.begin():
+                current = await credential_requests.peek_credential_request(
+                    session, token=row.token
+                )
+                if current is not None and (attempt.retry_allowed or current.outcome is None):
+                    outcome = current.outcome
+                    if outcome in (None, "token_rejected", "write_failed"):
+                        reason = attempt.failure_reason or reason
+                        if outcome == "token_rejected":
+                            target = (
+                                "read the requested repo"
+                                if row.kind in ("repo", "skill_repo")
+                                else "access the requested service"
+                            )
+                            reason = f"That token was rejected: it cannot {target}. Try again."
+                        retry = await credential_requests.release_failed_credential_request(
+                            session, row=row, outcome=outcome or "write_failed"
                         )
-                    retry = await credential_requests.release_failed_credential_request(
-                        session, row=row, outcome=outcome or "write_failed"
-                    )
+        except Exception as err:
+            retry = None
+            structlog.get_logger().warning(
+                "credential_submit.finalize_failed", kind=row.kind, err_type=type(err).__name__
+            )
+            await edit_pending(row, "Saving could not be confirmed. Ask Daimon for a new form.")
         if retry is not None:
             await edit_retry(retry, reason)
     if cancelled:

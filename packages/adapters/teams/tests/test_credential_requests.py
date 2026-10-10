@@ -340,15 +340,15 @@ async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
     dispatch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failure", ["rejection", "timeout"])
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     db_session_factory: async_sessionmaker[AsyncSession],
     account_id: uuid.UUID,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    if failure == "timeout":
-        monkeypatch.setattr(credential_submit, "CREDENTIAL_SAVE_TIMEOUT_SECONDS", 0.1)
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     row = await _request(db_session_factory, account_id, kind="mcp")
     async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
         unconfigured = await post_activity(service, _submit(row.token))
@@ -357,8 +357,8 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     accepted = False
 
     async def probe_impl(url: str, token: str) -> McpProbe:
-        if failure == "timeout" and not accepted:
-            await asyncio.Event().wait()
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
         return McpProbe(status_code=200 if accepted else 401, resource_metadata_url=None)
 
     probe = AsyncMock(side_effect=probe_impl)
@@ -370,19 +370,14 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
             await service.turns.drain(5)
             store.assert_not_awaited()
             dispatch.assert_not_awaited()
-            assert ("That token was rejected" if failure == "rejection" else "too long") in _edits(
-                fake
-            )[-1]
+            assert "That token was rejected" in _edits(fake)[-1]
+            if failure == "slow_rejection":
+                assert any("Still saving" in edit for edit in _edits(fake))
             async with db_session_factory() as session:
                 retry = await peek_credential_request(session, token=row.token)
-            assert (
-                retry is not None
-                and retry.used_at is None
-                and retry.outcome
-                == ("token_rejected" if failure == "rejection" else "write_failed")
-            )
+            assert retry is not None and retry.used_at is None and retry.outcome == "token_rejected"
             accepted = True
-            monkeypatch.setattr(credential_submit, "CREDENTIAL_SAVE_TIMEOUT_SECONDS", 90.0)
+            monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
             await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
 
@@ -928,12 +923,28 @@ def _imported() -> AsyncMock:
     return AsyncMock(return_value=[skill])
 
 
+@pytest.mark.parametrize("slow", [False, True])
 async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
-    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+    slow: bool,
 ) -> None:
     """Imported skills attach to the agent; the working repo is untouched."""
     row = await _request(db_session_factory, account_id, kind="skill_repo")
     fake, sync, updates = TeamsApiFake(), _imported(), list[dict[str, Any]]()
+    started, finish = asyncio.Event(), asyncio.Event()
+    imported = sync.return_value
+
+    async def import_skills(*args: Any, **kwargs: Any) -> list[ResourceOutcome]:
+        started.set()
+        if slow:
+            await finish.wait()
+        return imported
+
+    sync.side_effect = import_skills
+    if slow:
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.01)
     runtime = _admin_runtime(db_session_factory, updates=updates)
     with (
         patch.object(module, "pat_can_access_repo", AsyncMock(return_value=True)),
@@ -941,7 +952,21 @@ async def test_a_skill_repo_token_imports_and_attaches_without_binding_the_repo(
     ):
         async with _running(fake, runtime) as (service, dispatch):
             await post_activity(service, _submit(row.token, secret="ghp_skills"))
-            await service.turns.drain(5)
+            try:
+                if slow:
+                    async with asyncio.timeout(10):
+                        await started.wait()
+                        while not any("Still saving" in edit for edit in _edits(fake)):
+                            await asyncio.sleep(0.01)
+                    async with db_session_factory() as session:
+                        held = await peek_credential_request(session, token=row.token)
+                    assert held is not None and held.used_at is not None and held.outcome is None
+                    assert "ghp_skills" not in _edits(fake)[-1]
+                    assert not updates, "the slow import is still running, not cancelled"
+                    dispatch.assert_not_awaited()
+            finally:
+                finish.set()
+                await service.turns.drain(5)
 
     assert sync.await_args is not None, "the import ran"
     where = (sync.await_args.kwargs["branch"], sync.await_args.kwargs["path"])

@@ -849,6 +849,9 @@ class McpCredentialModal(discord.ui.Modal):
             edit_retry=lambda retry, reason: edit_posted_card(
                 interaction.client, row=retry, state="requested", retry_reason=reason
             ),
+            edit_pending=lambda pending, notice: edit_posted_card(
+                interaction.client, row=pending, state="received", saving_notice=notice
+            ),
         ) as attempt:
             await edit_posted_card(interaction.client, row=consumed_row, state="received")
             if connect.refused:
@@ -903,6 +906,7 @@ class McpCredentialModal(discord.ui.Modal):
                 await self._refuse_replacement(interaction, consumed_row)
                 return
             except (McpAgentGoneError, McpAttachFailedError) as err:
+                attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
                 # Exception class name only; SDK failures can include the request
                 # envelope. Nothing was stored.
                 _log.warning(
@@ -1058,6 +1062,9 @@ class SkillRepoModal(discord.ui.Modal):
             row=consumed_row,
             edit_retry=lambda retry, reason: edit_posted_card(
                 interaction.client, row=retry, state="requested", retry_reason=reason
+            ),
+            edit_pending=lambda pending, notice: edit_posted_card(
+                interaction.client, row=pending, state="received", saving_notice=notice
             ),
         ):
             await edit_posted_card(interaction.client, row=consumed_row, state="received")
@@ -1413,6 +1420,9 @@ class RepoBindModal(discord.ui.Modal):
             row=consumed_row,
             edit_retry=lambda retry, reason: edit_posted_card(
                 interaction.client, row=retry, state="requested", retry_reason=reason
+            ),
+            edit_pending=lambda pending, notice: edit_posted_card(
+                interaction.client, row=pending, state="received", saving_notice=notice
             ),
         ):
             await edit_posted_card(interaction.client, row=consumed_row, state="received")

@@ -1651,7 +1651,7 @@ async def test_success_paths_send_no_ephemeral_receipt(
     )
 
 
-@pytest.mark.parametrize("failure", ["rejection", "timeout"])
+@pytest.mark.parametrize("failure", ["rejection", "slow_rejection"])
 async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_write(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1665,8 +1665,8 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
     from daimon.core import credential_submit
     from daimon.core.mcp_oauth import McpProbe
 
-    if failure == "timeout":
-        monkeypatch.setattr(credential_submit, "CREDENTIAL_SAVE_TIMEOUT_SECONDS", 0.1)
+    if failure == "slow_rejection":
+        monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 0.1)
     tenant_id, fernet_key = await _seed_team(db_session)
     live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id)
@@ -1693,8 +1693,8 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
     accepted = False
 
     async def probe(url: str, value: str) -> McpProbe:
-        if failure == "timeout" and not accepted:
-            await asyncio.Event().wait()
+        if failure == "slow_rejection" and not accepted:
+            await asyncio.sleep(0.2)
         return McpProbe(status_code=200 if accepted else 401, resource_metadata_url=None)
 
     runtime = dataclasses.replace(
@@ -1718,12 +1718,14 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
     assert not any(c.startswith("POST") for c in ma_calls), "nothing is written to MA"
     async with db_session_factory() as session:
         request_row = await peek_credential_request(session, token=token)
-    assert request_row is not None and request_row.outcome == (
-        "token_rejected" if failure == "rejection" else "write_failed"
-    )
+    assert request_row is not None and request_row.outcome == "token_rejected"
     card = _chat_updates(fake_slack_web_client)[-1]
-    assert ("That token was rejected" if failure == "rejection" else "too long") in card["text"]
+    assert "That token was rejected" in card["text"]
     assert "Try again" in card["text"]
+    if failure == "slow_rejection":
+        assert any(
+            "Still saving" in json.dumps(edit) for edit in _chat_updates(fake_slack_web_client)
+        )
     if failure == "rejection":
         assert any(
             "connect it with your account" in t for t in _ephemeral_texts(fake_slack_web_client)
@@ -1733,7 +1735,7 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
     assert RECEIVED_FOOTER not in json.dumps(card)
     assert any(block["type"] == "actions" for block in card["blocks"])
     accepted = True
-    monkeypatch.setattr(credential_submit, "CREDENTIAL_SAVE_TIMEOUT_SECONDS", 90.0)
+    monkeypatch.setattr(credential_submit, "CREDENTIAL_CARD_DEADLINE_SECONDS", 90.0)
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -1963,8 +1965,9 @@ async def test_mcp_agent_gone_before_the_attach_saves_nothing(
     assert request_row is not None and request_row.outcome == "write_failed"
     assert stored == 0
     card = _chat_updates(fake_slack_web_client)[-1]
-    assert "Try again" in card["text"]
-    assert request_row.used_at is None
+    assert "Try again" not in card["text"]
+    assert not any(block["type"] == "actions" for block in card["blocks"])
+    assert request_row.used_at is not None, "a deleted target cannot be fixed by retrying a token"
     assert await _pending_continuations(db_session_factory, tenant_id=tenant_id) == []
 
 

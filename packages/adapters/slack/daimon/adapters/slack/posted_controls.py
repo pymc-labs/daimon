@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 import structlog
 from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.credential_submit import note_credential_save_failure
+from daimon.core.credential_submit import credential_card_edit, note_credential_save_failure
 from daimon.core.posted_controls import (
     CardState,
     RefusalReason,
@@ -47,6 +47,7 @@ async def edit_posted_card(
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
     retry_reason: str | None = None,
+    saving_notice: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -58,30 +59,32 @@ async def edit_posted_card(
     edit is a downgrade in feedback, not in correctness — the request row is
     already spent, and the lifecycle the card announces has already happened.
     """
-    if state == "partial":
-        note_credential_save_failure(row, outcome)
-    if row.posted_message_id is None:
-        return
-    card = card_for_request(
-        row,
-        state=state,
-        outcome=outcome,
-        refusal=refusal,
-        refusal_lines=refusal_lines,
-        replaces=replaces,
-        retry_reason=retry_reason,
-    )
-    try:
-        await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-            channel=row.parent_channel_id or row.channel_id,
-            ts=row.posted_message_id,
-            text=card_notification_text(card),
-            blocks=build_card_blocks(card, token=row.token if state == "requested" else None),
-        )
-    except SlackApiError as err:
-        log.warning(
-            "posted_card.edit_failed",
+    async with credential_card_edit(row, state):
+        if state == "partial":
+            note_credential_save_failure(row, outcome)
+        if row.posted_message_id is None:
+            return
+        card = card_for_request(
+            row,
             state=state,
-            kind=row.kind,
-            error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
+            outcome=outcome,
+            refusal=refusal,
+            refusal_lines=refusal_lines,
+            replaces=replaces,
+            retry_reason=retry_reason,
+            saving_notice=saving_notice,
         )
+        try:
+            await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                channel=row.parent_channel_id or row.channel_id,
+                ts=row.posted_message_id,
+                text=card_notification_text(card),
+                blocks=build_card_blocks(card, token=row.token if state == "requested" else None),
+            )
+        except SlackApiError as err:
+            log.warning(
+                "posted_card.edit_failed",
+                state=state,
+                kind=row.kind,
+                error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
+            )

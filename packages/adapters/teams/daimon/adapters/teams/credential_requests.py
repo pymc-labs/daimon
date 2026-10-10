@@ -53,6 +53,7 @@ from daimon.core.credential_submit import (
     apply_env_submit,
     begin_oauth_submit,
     consume_credential_submit,
+    credential_card_edit,
     env_name_refusal,
     guard_credential_save,
     note_credential_save_failure,
@@ -555,31 +556,38 @@ class TeamsCredentialRequests:
         replaces: str | None = None,
         refusal_lines: Sequence[str] = (),
         retry_reason: str | None = None,
+        saving_notice: str | None = None,
     ) -> None:
         """Edit the posted card. Best effort: the outcome is already recorded."""
-        if state == "partial":
-            note_credential_save_failure(row, outcome)
-        if row.posted_message_id is None:
-            return
-        card = card_for_request(
-            row,
-            state=state,
-            outcome=outcome,
-            refusal=reason,
-            replaces=replaces,
-            refusal_lines=refusal_lines,
-            retry_reason=retry_reason,
-        )
-        attachment = Attachment(
-            content_type=ADAPTIVE_CARD_TYPE,
-            content=build_adaptive_card(card, token=row.token if state == "requested" else None),
-        )
-        edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
-        try:
-            conversation_id = conversation_of(row.channel_id)
-            await self._sender.send(conversation_id, edit, service_url=service_url)
-        except TEAMS_SEND_ERRORS as err:
-            log.warning("teams.credential.edit_failed", state=state, err_type=type(err).__name__)
+        async with credential_card_edit(row, state):
+            if state == "partial":
+                note_credential_save_failure(row, outcome)
+            if row.posted_message_id is None:
+                return
+            card = card_for_request(
+                row,
+                state=state,
+                outcome=outcome,
+                refusal=reason,
+                replaces=replaces,
+                refusal_lines=refusal_lines,
+                retry_reason=retry_reason,
+                saving_notice=saving_notice,
+            )
+            attachment = Attachment(
+                content_type=ADAPTIVE_CARD_TYPE,
+                content=build_adaptive_card(
+                    card, token=row.token if state == "requested" else None
+                ),
+            )
+            edit = MessageActivityInput(id=row.posted_message_id).add_attachments(attachment)
+            try:
+                conversation_id = conversation_of(row.channel_id)
+                await self._sender.send(conversation_id, edit, service_url=service_url)
+            except TEAMS_SEND_ERRORS as err:
+                log.warning(
+                    "teams.credential.edit_failed", state=state, err_type=type(err).__name__
+                )
 
     async def _resume(self, row: CredentialRequestRow, service_url: str | None) -> None:
         if row.origin_thread_id is not None:
@@ -767,6 +775,9 @@ class TeamsCredentialRequests:
             edit_retry=lambda retry, reason: self._edit(
                 retry, "requested", service_url, retry_reason=reason
             ),
+            edit_pending=lambda pending, notice: self._edit(
+                pending, "received", service_url, saving_notice=notice
+            ),
         ):
             await self._edit(consumed, "received", service_url)
             repo_url, branch, _path = split_skill_repo_target(consumed.target)
@@ -820,6 +831,9 @@ class TeamsCredentialRequests:
             row=consumed,
             edit_retry=lambda retry, reason: self._edit(
                 retry, "requested", service_url, retry_reason=reason
+            ),
+            edit_pending=lambda pending, notice: self._edit(
+                pending, "received", service_url, saving_notice=notice
             ),
         ):
             await self._edit(consumed, "received", service_url)
@@ -984,10 +998,14 @@ class TeamsCredentialRequests:
             edit_retry=lambda retry, reason: self._edit(
                 retry, "requested", service_url, retry_reason=reason
             ),
+            edit_pending=lambda pending, notice: self._edit(
+                pending, "received", service_url, saving_notice=notice
+            ),
         ) as attempt:
             await self._edit(consumed, "received", service_url)
             url = consumed.mcp_server_url
             if url is None:
+                attempt.retry_allowed = False
                 log.error("teams.credential.mcp_missing_server_url")
                 return await self._refuse(consumed, "target_unavailable", service_url)
             if connect.refused:
@@ -1021,6 +1039,7 @@ class TeamsCredentialRequests:
                 attempt.retry_allowed = False
                 return await self._refuse(consumed, "replacement_admin_required", service_url)
             except (McpAgentGoneError, McpAttachFailedError) as err:
+                attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
                 log.warning(
                     "teams.credential.mcp_attach_failed",
                     err_type=type(err.__cause__ or err).__name__,

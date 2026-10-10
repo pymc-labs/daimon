@@ -23,7 +23,7 @@ import structlog
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.core.continuity.messages import ConfigurationChange
-from daimon.core.credential_submit import note_credential_save_failure
+from daimon.core.credential_submit import credential_card_edit, note_credential_save_failure
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
 from daimon.core.stores.domain import CredentialRequestRow
 
@@ -44,6 +44,7 @@ async def edit_posted_card(
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
     retry_reason: str | None = None,
+    saving_notice: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -55,48 +56,50 @@ async def edit_posted_card(
     Returns silently for a row with no posted message to edit; the ids are
     recorded right after the post, so a row without them never had a card.
     """
-    if state == "partial":
-        note_credential_save_failure(row, outcome)
-    if row.origin_thread_id is None or row.posted_message_id is None:
-        return
-    view = build_card_view(
-        card_for_request(
-            row,
-            state=state,
-            outcome=outcome,
-            refusal=refusal,
-            refusal_lines=refusal_lines,
-            replaces=replaces,
-            retry_reason=retry_reason,
+    async with credential_card_edit(row, state):
+        if state == "partial":
+            note_credential_save_failure(row, outcome)
+        if row.origin_thread_id is None or row.posted_message_id is None:
+            return
+        view = build_card_view(
+            card_for_request(
+                row,
+                state=state,
+                outcome=outcome,
+                refusal=refusal,
+                refusal_lines=refusal_lines,
+                replaces=replaces,
+                retry_reason=retry_reason,
+                saving_notice=saving_notice,
+            )
         )
-    )
-    message = client.get_partial_messageable(int(row.origin_thread_id)).get_partial_message(
-        int(row.posted_message_id)
-    )
-    try:
-        fetched: discord.Message | None = None
-        if isinstance(message, discord.PartialMessage):  # pyright: ignore[reportUnnecessaryIsInstance]
-            with suppress(discord.HTTPException):
-                fetched = await message.fetch()
-        if isinstance(fetched, discord.Message) and fetched.webhook_id is not None:
-            channel = client.get_channel(int(row.origin_thread_id)) or await client.fetch_channel(
-                int(row.origin_thread_id)
-            )
-            if not isinstance(channel, discord.abc.Messageable):
-                return
-            transport = DiscordPostTransport(
-                client,
-                channel,
-                name=fetched.author.name,
-                avatar_url=None,
-                builtin=False,
-            )
-            await transport.edit(
-                fetched, view=view, allowed_mentions=discord.AllowedMentions.none()
-            )
-        else:
-            await message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
-    except discord.HTTPException as err:
-        _log.warning(
-            "posted_card.edit_failed", err_type=type(err).__name__, state=state, kind=row.kind
+        message = client.get_partial_messageable(int(row.origin_thread_id)).get_partial_message(
+            int(row.posted_message_id)
         )
+        try:
+            fetched: discord.Message | None = None
+            if isinstance(message, discord.PartialMessage):  # pyright: ignore[reportUnnecessaryIsInstance]
+                with suppress(discord.HTTPException):
+                    fetched = await message.fetch()
+            if isinstance(fetched, discord.Message) and fetched.webhook_id is not None:
+                channel = client.get_channel(
+                    int(row.origin_thread_id)
+                ) or await client.fetch_channel(int(row.origin_thread_id))
+                if not isinstance(channel, discord.abc.Messageable):
+                    return
+                transport = DiscordPostTransport(
+                    client,
+                    channel,
+                    name=fetched.author.name,
+                    avatar_url=None,
+                    builtin=False,
+                )
+                await transport.edit(
+                    fetched, view=view, allowed_mentions=discord.AllowedMentions.none()
+                )
+            else:
+                await message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException as err:
+            _log.warning(
+                "posted_card.edit_failed", err_type=type(err).__name__, state=state, kind=row.kind
+            )
