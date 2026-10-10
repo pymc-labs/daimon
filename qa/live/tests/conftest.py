@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,12 @@ class FakeBackend:
 
     def classify(self, message: Message) -> str:
         return "working" if message.get("working") else self.verdict
+
+    def deployment_image(self) -> str:
+        return "a" * 40
+
+    def deployment_events(self, start: datetime, end: datetime, turns: list[Turn]) -> list[Message]:
+        return []
 
 
 @pytest.fixture

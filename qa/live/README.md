@@ -291,3 +291,24 @@ PENDING without stopping other assertions. CLI checks can inspect Discord-surfac
 setup state without a billed turn; headless CLI workflows remain PENDING.
 
 Timer and manual entrypoints must share `live_lock`; the default is `~/.local/state/daimon-qa/live-run.lock`. A held lock refuses a second session before any live action. File-only alerts use `alerts.command=[]` and a local `alerts.inbox`. `Ledger.charged(run_ids)` sums final receipts and excludes reservation changes from reported charges.
+
+Staging runs require a read-only `staging.deployment_probe` argv hook. JSON stdin
+contains `env: staging`, the QA `guild_id`, and `read_only: true`. Return JSON
+`{"image":"<full SHA>","workers":{"daimon-discord-1":"<full SHA>",
+"daimon-slack-1":"<full SHA>","daimon-teams-1":"<full SHA>",
+"daimon-scheduler-1":"<full SHA>"}}` only after checking all running worker
+images. Missing, mixed, or unavailable workers remain PENDING before any trigger.
+
+Results record start/end images, scoped draining and orphan-retirement events,
+and restart cards under `deployment`. A verified start followed by a missing or
+mixed end probe also counts as an active rollout. Changed images or restart evidence affecting
+the observed turn force `deploy-interrupted` PENDING, preserving original checks
+for triage. These attempts never alert or change the pending-alert streak.
+The CLI retries once with a fresh backend and judge after all worker images stay
+equal for 30 seconds (bounded to five minutes), within the remaining pass and daily
+budgets. Both attempts retain receipts and JSON evidence; the retry records
+`retry_of`. Custom operator entrypoints should use `run_with_deploy_retry` or apply
+the same bounded policy. This checks image stability, not boot or orphan-sweep
+readiness. Missing observation evidence remains PENDING and never proves a product
+PASS; an event-log outage with matching verified images preserves a product FAIL.
+Production execution is unchanged.

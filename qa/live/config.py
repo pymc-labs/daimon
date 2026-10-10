@@ -28,6 +28,7 @@ class Target(Contract):
     context: dict[str, str] = Field(default_factory=dict)
     warm_url: str = "https://staging-daimon-mcp-251774259661.us-east4.run.app/readyz"
     model_probe: list[str] = Field(default_factory=list)
+    deployment_probe: list[str] = Field(default_factory=list)
     qa_agent_name: str | None = None
     backend: BackendName = "anthropic"
 

@@ -87,6 +87,17 @@ class Check:
     evidence: list[str] = field(default_factory=list[str])
 
 
+@dataclass
+class DeploymentEvidence:
+    started_at: datetime = field(default_factory=utcnow)
+    ended_at: datetime | None = None
+    start_image: str | None = None
+    end_image: str | None = None
+    events: list[Message] = field(default_factory=list[Message])
+    interrupted: bool = False
+    error: str | None = None
+
+
 class Pending(RuntimeError):
     """Unavailable capability; must never become a passing assertion."""
 
@@ -121,6 +132,10 @@ class Backend(Protocol):
     def channel_messages(self, turn: Turn) -> list[Message]: ...
     def cli_read(self, command: str) -> str: ...
     def classify(self, message: Message) -> str: ...
+    def deployment_image(self) -> str: ...
+    def deployment_events(
+        self, start: datetime, end: datetime, turns: list[Turn]
+    ) -> list[Message]: ...
 
 
 class Judge(Protocol):

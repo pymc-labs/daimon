@@ -16,12 +16,22 @@ from pathlib import Path
 from qa.live.config import Pricing
 from qa.live.context import Context
 from qa.live.cost import Ledger, estimate
+from qa.live.deployment import finish_observation
 from qa.live.errors import exception_evidence
 from qa.live.evaluate import evaluate
 from qa.live.models import BackendName, ModelPolicy
 from qa.live.report import Result
 from qa.live.schema import Assertion, CatalogScenario, ProposedScenario, Step
-from qa.live.types import Backend, Check, Judge, Pending, Turn, WatchTimeout, utcnow
+from qa.live.types import (
+    Backend,
+    Check,
+    DeploymentEvidence,
+    Judge,
+    Pending,
+    Turn,
+    WatchTimeout,
+    utcnow,
+)
 
 GLOBAL_PATTERNS = (
     r"\(empty response\)",
@@ -138,7 +148,15 @@ class Executor:
         self.created = []
         self.trigger_attempted = False
         harness_failed = False
+        if self.env == "staging":
+            result.deployment = DeploymentEvidence()
         try:
+            if result.deployment:
+                try:
+                    result.deployment.start_image = self.backend.deployment_image()
+                except Pending:
+                    result.deployment.error = "deployment image unavailable before any trigger"
+                    raise
             self.backend.preflight(
                 {s.role for s in [*scenario.setup, *scenario.steps, *scenario.teardown]}
             )
@@ -276,6 +294,8 @@ class Executor:
             usages = [t.usage for t in result.turns] + self.judge.usage
             fixture_dir.cleanup()
             self.ledger.receipt(run_id, usages, estimated, spend_possible=self.trigger_attempted)
+            if result.deployment:
+                finish_observation(result, self.backend)
         result.finalize()
         return result
 
