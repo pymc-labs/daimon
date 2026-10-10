@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 
 import httpx
@@ -14,6 +15,7 @@ from daimon.core.pricing import (
     AGENT_MODEL_PRICING,
     AGENT_PRICING_CHECKED_ON,
     AGENT_PRICING_SOURCE,
+    LONG_CONTEXT_PROMPT_TOKENS,
     MODEL_PRICING,
     TOOL_MODEL_PRICING,
     ModelRates,
@@ -158,7 +160,7 @@ def test_cost_of_gemini_catalog_name_returns_none() -> None:
 # The published list price of every agent model, as read from
 # AGENT_PRICING_SOURCE on the date below. Changing a row in pricing.py without
 # changing it here fails, so a price edit always comes with a fresh check.
-_PUBLISHED_AGENT_PRICES_2026_10_08: dict[str, ModelRates] = {
+_PUBLISHED_AGENT_PRICES_2026_10_10: dict[str, ModelRates] = {
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-8": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -166,15 +168,22 @@ _PUBLISHED_AGENT_PRICES_2026_10_08: dict[str, ModelRates] = {
     "claude-sonnet-5-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.10),
     "claude-sonnet-5": ModelRates(input=2.0, output=10.0, cache_write=2.50, cache_read=0.20),
     "claude-sonnet-4-6": ModelRates(input=3.0, output=15.0, cache_write=3.75, cache_read=0.30),
+    "claude-haiku-5-5": ModelRates(
+        input=0.10,
+        output=0.50,
+        cache_write=0.125,
+        cache_read=0.01,
+        long_context=ModelRates(input=0.50, output=2.50, cache_write=0.625, cache_read=0.05),
+    ),
     "claude-haiku-4-5": ModelRates(input=1.0, output=5.0, cache_write=1.25, cache_read=0.10),
 }
 
 
 def test_agent_rows_match_the_dated_price_list() -> None:
-    assert AGENT_PRICING_CHECKED_ON == "2026-10-08", (
+    assert AGENT_PRICING_CHECKED_ON == "2026-10-10", (
         "re-check every row against the pricing page, then move this date and the table name"
     )
-    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_10_08, (
+    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_10_10, (
         "an agent price changed: check it against AGENT_PRICING_SOURCE and update both tables"
     )
 
@@ -209,9 +218,14 @@ def test_agent_rows_match_the_live_pricing_page() -> None:
         )
     for model_id, rates in AGENT_MODEL_PRICING.items():
         name = _display_name(model_id)
-        assert published.get(name) == rates, (
-            f"{model_id} is billed at {rates}, the pricing page lists {published.get(name)}"
-        )
+        if rates.long_context is None:
+            listed = published.get(name)
+        else:
+            # Priced by prompt length: one row per tier, labelled in parentheses.
+            short = published.get(f"{name} (for prompts up to 100,000 tokens)")
+            long = published.get(f"{name} (for prompts over 100,000 tokens)")
+            listed = dataclasses.replace(short, long_context=long) if short else None
+        assert listed == rates, f"{model_id} is billed at {rates}, the pricing page lists {listed}"
 
 
 def test_a_dated_snapshot_id_prices_at_its_alias_row() -> None:
@@ -229,3 +243,40 @@ def test_an_unknown_model_still_prices_at_none() -> None:
     assert MODEL_PRICING.get("claude-haiku-4-5-2025") is None, (
         "only an 8-digit date suffix falls back"
     )
+
+
+def _usage(*, input: int = 0, write: int = 0, read: int = 0, output: int = 0):
+    return BetaManagedAgentsSpanModelUsage(
+        input_tokens=input,
+        cache_creation_input_tokens=write,
+        cache_read_input_tokens=read,
+        output_tokens=output,
+    )
+
+
+def test_haiku_5_5_prices_a_prompt_of_exactly_100k_at_the_base_rate() -> None:
+    rates = MODEL_PRICING["claude-haiku-5-5"]
+    cost = cost_of(_usage(input=LONG_CONTEXT_PROMPT_TOKENS, output=1_000_000), rates)
+    assert cost is not None
+    assert abs(cost - (0.10 * 0.1 + 0.50)) < 1e-9, "100,000 is not over the threshold"
+
+
+def test_haiku_5_5_counts_cache_reads_and_writes_toward_the_threshold() -> None:
+    """The page counts a request's prompt as input plus cache reads and writes."""
+    rates = MODEL_PRICING["claude-haiku-5-5"]
+    usage = _usage(input=1_000, write=9_000, read=90_001, output=1_000_000)
+    cost = cost_of(usage, rates)
+    assert cost is not None
+    expected = (1_000 * 0.50 + 9_000 * 0.625 + 90_001 * 0.05) / 1_000_000 + 2.50
+    assert abs(cost - expected) < 1e-9, "a 100,001-token prompt pays every long-context rate"
+
+
+def test_a_model_without_a_long_context_tier_keeps_one_rate() -> None:
+    rates = MODEL_PRICING["claude-sonnet-5-5"]
+    cost = cost_of(_usage(read=500_000), rates)
+    assert cost is not None
+    assert abs(cost - 500_000 * 0.10 / 1_000_000) < 1e-9
+
+
+def test_haiku_5_5_snapshot_ids_keep_the_long_context_tier() -> None:
+    assert MODEL_PRICING["claude-haiku-5-5-20261001"] == MODEL_PRICING["claude-haiku-5-5"]
