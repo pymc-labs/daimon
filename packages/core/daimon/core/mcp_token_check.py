@@ -47,5 +47,6 @@ def rejected_token_message(mcp_server_url: str) -> str:
     return (
         f"`{mcp_server_url}` did not accept that token, so nothing was saved. "
         "If this server signs people in through a browser (Notion does), ask the agent "
-        "to connect it with your account instead; otherwise check the token and ask again."
+        "to connect it with your account instead; otherwise check the token "
+        "and try again using the same form."
     )

@@ -23,6 +23,7 @@ import structlog
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.core.continuity.messages import ConfigurationChange
+from daimon.core.credential_submit import note_credential_save_failure
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
 from daimon.core.stores.domain import CredentialRequestRow
 
@@ -42,6 +43,7 @@ async def edit_posted_card(
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
+    retry_reason: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -53,6 +55,8 @@ async def edit_posted_card(
     Returns silently for a row with no posted message to edit; the ids are
     recorded right after the post, so a row without them never had a card.
     """
+    if state == "partial":
+        note_credential_save_failure(row, outcome)
     if row.origin_thread_id is None or row.posted_message_id is None:
         return
     view = build_card_view(
@@ -63,6 +67,7 @@ async def edit_posted_card(
             refusal=refusal,
             refusal_lines=refusal_lines,
             replaces=replaces,
+            retry_reason=retry_reason,
         )
     )
     message = client.get_partial_messageable(int(row.origin_thread_id)).get_partial_message(

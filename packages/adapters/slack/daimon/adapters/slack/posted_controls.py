@@ -20,6 +20,7 @@ from collections.abc import Sequence
 
 import structlog
 from daimon.core.continuity.messages import ConfigurationChange
+from daimon.core.credential_submit import note_credential_save_failure
 from daimon.core.posted_controls import (
     CardState,
     RefusalReason,
@@ -45,6 +46,7 @@ async def edit_posted_card(
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
+    retry_reason: str | None = None,
 ) -> None:
     """Re-render the request's own message into `state`.
 
@@ -56,6 +58,8 @@ async def edit_posted_card(
     edit is a downgrade in feedback, not in correctness — the request row is
     already spent, and the lifecycle the card announces has already happened.
     """
+    if state == "partial":
+        note_credential_save_failure(row, outcome)
     if row.posted_message_id is None:
         return
     card = card_for_request(
@@ -65,6 +69,7 @@ async def edit_posted_card(
         refusal=refusal,
         refusal_lines=refusal_lines,
         replaces=replaces,
+        retry_reason=retry_reason,
     )
     try:
         await client.chat_update(  # pyright: ignore[reportUnknownMemberType]

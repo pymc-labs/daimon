@@ -32,10 +32,9 @@ documents:
   keeps no copy of the file and never puts a parsed value in a message, a
   log record or a rejection — `EnvProblem` has no field for one.
 
-The atomic single-use consume runs BEFORE every write, so a request can
-only ever produce one write no matter how many times its modal is
-(re)submitted — the loser of a race, or any resubmission, gets `None` back
-and writes nothing.
+The atomic consume runs BEFORE every write and permits one in-flight attempt.
+A successful save keeps the request spent. Failed external saves release only
+their own attempt and restore the form; every retry rechecks authorization.
 
 Every `on_submit` acks with a bare `defer()`, never `thinking=True`. On a
 modal opened from a component click that is a `deferred_message_update`,
@@ -125,6 +124,7 @@ from daimon.core.credential_submit import (
     apply_env_file_submit,
     apply_env_submit,
     consume_credential_submit,
+    guard_credential_save,
     prepare_env_submit,
     prepare_mcp_submit,
     settle_credential_submit,
@@ -843,117 +843,128 @@ class McpCredentialModal(discord.ui.Modal):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
-        await edit_posted_card(interaction.client, row=consumed_row, state="received")
-        if connect.refused:
-            await self._refuse_replacement(interaction, consumed_row)
-            return
+        async with guard_credential_save(
+            self._runtime.sessionmaker,
+            row=consumed_row,
+            edit_retry=lambda retry, reason: edit_posted_card(
+                interaction.client, row=retry, state="requested", retry_reason=reason
+            ),
+        ) as attempt:
+            await edit_posted_card(interaction.client, row=consumed_row, state="received")
+            if connect.refused:
+                attempt.retry_allowed = False
+                await self._refuse_replacement(interaction, consumed_row)
+                return
 
-        mcp_server_url = consumed_row.mcp_server_url
-        if mcp_server_url is None:
-            _log.error(
-                "credential_modal.mcp_missing_server_url", agent_id=str(consumed_row.agent_id)
-            )
-            await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
-            await interaction.followup.send(
-                "This request is missing its server URL — please ask again.", ephemeral=True
-            )
-            return
+            mcp_server_url = consumed_row.mcp_server_url
+            if mcp_server_url is None:
+                _log.error(
+                    "credential_modal.mcp_missing_server_url", agent_id=str(consumed_row.agent_id)
+                )
+                await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
+                await interaction.followup.send(
+                    "This request is missing its server URL — please ask again.", ephemeral=True
+                )
+                return
 
-        _log.info(
-            "credential_modal.mcp.submit",
-            mcp_server_url=mcp_server_url,
-            token_present=bool(token_value),
-        )
-        # Ask the server first. A token it rejects would otherwise be stored,
-        # mirrored into every caller's vault and attached, and every turn from
-        # then on would carry a failed MCP init (#79). A server that cannot be
-        # reached is not a verdict: the save proceeds and MA reports later.
-        if await is_token_rejected(
-            self._runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=token_value
-        ):
-            await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
-            await interaction.followup.send(rejected_token_message(mcp_server_url), ephemeral=True)
-            return
-        try:
-            await write_mcp_submit(
-                self._runtime.anthropic,
-                session_factory=self._runtime.sessionmaker,
-                row=consumed_row,
-                fernet=self._runtime.turn_deps.fernet,
-                value=token_value,
-                replace_allowed=connect.replace_allowed,
-                jwt_secret=jwt_secret_setting.get_secret_value().encode(),
-                public_url=str(public_url_setting),
-                now=now,
-                connect=connect_mcp_server_with_token,
-            )
-        except McpServerReplaceRefusedError:
-            # A server or token for this URL appeared after the pre-consume check.
-            await self._refuse_replacement(interaction, consumed_row)
-            return
-        except (McpAgentGoneError, McpAttachFailedError) as err:
-            # Exception class name only; SDK failures can include the request
-            # envelope. Nothing was stored.
-            _log.warning(
-                "credential_modal.mcp_attach_failed",
+            _log.info(
+                "credential_modal.mcp.submit",
                 mcp_server_url=mcp_server_url,
-                err_type=type(err.__cause__ or err).__name__,
+                token_present=bool(token_value),
             )
-            await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
-            await interaction.followup.send(
-                f"This request was used, but `{mcp_server_url}` could not be attached to the "
-                "agent. Nothing was saved. Ask for a new request to retry.",
-                ephemeral=True,
-            )
-            return
-        except McpTokenWriteFailedError as err:
-            _log.warning(
-                "credential_modal.mcp_write_failed",
-                mcp_server_url=mcp_server_url,
-                err_type=type(err.__cause__ or err).__name__,
-            )
-            is_queued = await _settle_spent_request(
-                self._runtime,
-                row=consumed_row,
-                outcome="write_failed",
-                carries_work=False,
+            # Ask the server first. A token it rejects would otherwise be stored,
+            # mirrored into every caller's vault and attached, and every turn from
+            # then on would carry a failed MCP init (#79). A server that cannot be
+            # reached is not a verdict: the save proceeds and MA reports later.
+            if await is_token_rejected(
+                self._runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=token_value
+            ):
+                await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
+                await interaction.followup.send(
+                    rejected_token_message(mcp_server_url), ephemeral=True
+                )
+                return
+            try:
+                await write_mcp_submit(
+                    self._runtime.anthropic,
+                    session_factory=self._runtime.sessionmaker,
+                    row=consumed_row,
+                    fernet=self._runtime.turn_deps.fernet,
+                    value=token_value,
+                    replace_allowed=connect.replace_allowed,
+                    jwt_secret=jwt_secret_setting.get_secret_value().encode(),
+                    public_url=str(public_url_setting),
+                    now=now,
+                    connect=connect_mcp_server_with_token,
+                )
+            except McpServerReplaceRefusedError:
+                attempt.retry_allowed = False
+                # A server or token for this URL appeared after the pre-consume check.
+                await self._refuse_replacement(interaction, consumed_row)
+                return
+            except (McpAgentGoneError, McpAttachFailedError) as err:
+                # Exception class name only; SDK failures can include the request
+                # envelope. Nothing was stored.
+                _log.warning(
+                    "credential_modal.mcp_attach_failed",
+                    mcp_server_url=mcp_server_url,
+                    err_type=type(err.__cause__ or err).__name__,
+                )
+                await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
+                await interaction.followup.send(
+                    f"`{mcp_server_url}` could not be attached to the "
+                    "agent. Nothing was saved. Try again using the same form.",
+                    ephemeral=True,
+                )
+                return
+            except McpTokenWriteFailedError as err:
+                _log.warning(
+                    "credential_modal.mcp_write_failed",
+                    mcp_server_url=mcp_server_url,
+                    err_type=type(err.__cause__ or err).__name__,
+                )
+                is_queued = await _settle_spent_request(
+                    self._runtime,
+                    row=consumed_row,
+                    outcome="write_failed",
+                    carries_work=False,
+                )
+                await edit_posted_card(
+                    interaction.client,
+                    row=consumed_row,
+                    state="partial",
+                    outcome=ConfigurationChange(
+                        target_name=_agent_name(consumed_row),
+                        kind="mcp",
+                        availability="preparation_failed",
+                        detail=consumed_row.target,
+                    ),
+                )
+                await interaction.followup.send(
+                    f"`{mcp_server_url}` is attached, but saving its token did not finish. "
+                    "Try again using the same form.",
+                    ephemeral=True,
+                )
+                if is_queued:
+                    await _dispatch_origin_thread(interaction, consumed_row)
+                return
+
+            is_continuation_queued = await _settle_spent_request(
+                self._runtime, row=consumed_row, outcome="applied", carries_work=True
             )
             await edit_posted_card(
                 interaction.client,
                 row=consumed_row,
-                state="partial",
+                state="applied",
                 outcome=ConfigurationChange(
                     target_name=_agent_name(consumed_row),
                     kind="mcp",
-                    availability="preparation_failed",
+                    availability="next_message",
                     detail=consumed_row.target,
                 ),
             )
-            await interaction.followup.send(
-                f"`{mcp_server_url}` is attached, but saving its token did not finish. "
-                "Ask for a new request to retry.",
-                ephemeral=True,
-            )
-            if is_queued:
+            if is_continuation_queued:
                 await _dispatch_origin_thread(interaction, consumed_row)
-            return
-
-        is_continuation_queued = await _settle_spent_request(
-            self._runtime, row=consumed_row, outcome="applied", carries_work=True
-        )
-        await edit_posted_card(
-            interaction.client,
-            row=consumed_row,
-            state="applied",
-            outcome=ConfigurationChange(
-                target_name=_agent_name(consumed_row),
-                kind="mcp",
-                availability="next_message",
-                detail=consumed_row.target,
-            ),
-        )
-        if is_continuation_queued:
-            await _dispatch_origin_thread(interaction, consumed_row)
 
 
 class SkillRepoModal(discord.ui.Modal):
@@ -1042,165 +1053,177 @@ class SkillRepoModal(discord.ui.Modal):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
-        await edit_posted_card(interaction.client, row=consumed_row, state="received")
+        async with guard_credential_save(
+            self._runtime.sessionmaker,
+            row=consumed_row,
+            edit_retry=lambda retry, reason: edit_posted_card(
+                interaction.client, row=retry, state="requested", retry_reason=reason
+            ),
+        ):
+            await edit_posted_card(interaction.client, row=consumed_row, state="received")
 
-        url, branch, path = split_skill_repo_target(consumed_row.target)
-        owner_repo = normalize_owner_repo(url)
-        # The token appears only as a masked tail, never in full, and never
-        # the (now-consumed) request token either.
-        _log.info(
-            "credential_modal.skill_repo.submit",
-            repo_url=url,
-            branch=branch,
-            path=path,
-            pat_present=bool(pat),
-        )
-
-        is_token_saved = False
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as http_client:
-                # Verify BEFORE storing: a token that cannot read this repo is
-                # not a credential for it, and storing it would shadow a
-                # working one on the next `get_pat` (the overlay is
-                # last-write-wins, and tier 1 short-circuits the rest).
-                if not await pat_can_access_repo(
-                    http_client, owner_repo=normalize_owner_repo(url), pat=pat
-                ):
-                    await interaction.followup.send(
-                        f"That token cannot read `{normalize_owner_repo(url)}`. Nothing was "
-                        "stored, and the request was used up — ask again to retry.",
-                        ephemeral=True,
-                    )
-                    return
-                # Reuse the repo kind's resolver rather than calling
-                # `store_inline_pat` directly: it returns the `ma_secret_ref`
-                # AND the access proof that `set_binding` requires, so the two
-                # writes cannot disagree about what was established.
-                ma_secret_ref, proof = await resolve_repo_binding_credential(
-                    self._runtime,
-                    http_client,
-                    agent_id=consumed_row.agent_id,
-                    account_id=consumed_row.account_id,
-                    repo_url=url,
-                    pasted_pat=pat,
-                    now=now,
-                )
-                is_token_saved = True
-                # The skill repo's own credential row, keyed by (tenant,
-                # agent, repo): a later sync of this repo resolves its token
-                # from here. Without it the stored PAT is unreachable and
-                # every sync falls back to an anonymous 404 that asks for the
-                # credential again.
-                async with self._runtime.sessionmaker.begin() as session:
-                    seeded_skill_names = await write_skill_repo_submit(
-                        session, row=consumed_row, ma_secret_ref=ma_secret_ref, proof=proof
-                    )
-                outcomes = await run_skill_sync(
-                    self._runtime.anthropic,
-                    http_client,
-                    url=url,
-                    branch=branch,
-                    path=path,
-                    tenant_id=consumed_row.tenant_id,
-                    seeded_skill_names=seeded_skill_names,
-                    is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
-                    token=pat,
-                )
-        except DaimonError as err:
-            # Validation can fail before storage; preserve only confirmed saves.
-            progress = (
-                "Token saved, but the skill import did not finish."
-                if is_token_saved
-                else "Could not finish saving the token and importing skills. "
-                "Some changes may have been saved."
-            )
-            await interaction.followup.send(
-                f"{progress} {err} This request was used; ask again to retry the import.",
-                ephemeral=True,
-            )
-            if is_token_saved:
-                await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
-            return
-        except Exception as err:
-            _log.exception(
-                "credential_modal.skill_repo_sync_failed",
+            url, branch, path = split_skill_repo_target(consumed_row.target)
+            owner_repo = normalize_owner_repo(url)
+            # The token appears only as a masked tail, never in full, and never
+            # the (now-consumed) request token either.
+            _log.info(
+                "credential_modal.skill_repo.submit",
                 repo_url=url,
-                err_type=type(err).__name__,
+                branch=branch,
+                path=path,
+                pat_present=bool(pat),
             )
-            progress = (
-                "Token saved, but the skill import did not finish."
-                if is_token_saved
-                else "Could not finish saving the token and importing skills. "
-                "Some changes may have been saved."
-            )
-            await interaction.followup.send(
-                f"{progress} Ask again to retry the import for `{owner_repo}`.",
-                ephemeral=True,
-            )
-            if is_token_saved:
-                await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
-            return
 
-        imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
-        failure_detail = summarize_failed_imports(outcomes)
-        if not imported:
-            # Nothing reached the library (an empty repo, or every skill
-            # refused or failed), which the `applied` card must not claim.
-            await self._render_import_failed(
-                interaction, consumed_row, repo=owner_repo, detail=failure_detail
-            )
-            return
+            is_token_saved = False
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    # Verify BEFORE storing: a token that cannot read this repo is
+                    # not a credential for it, and storing it would shadow a
+                    # working one on the next `get_pat` (the overlay is
+                    # last-write-wins, and tier 1 short-circuits the rest).
+                    if not await pat_can_access_repo(
+                        http_client, owner_repo=normalize_owner_repo(url), pat=pat
+                    ):
+                        async with self._runtime.sessionmaker.begin() as session:
+                            await credential_requests.set_credential_request_outcome(
+                                session, token=consumed_row.token, outcome="token_rejected"
+                            )
+                        await interaction.followup.send(
+                            f"That token cannot read `{normalize_owner_repo(url)}`. Nothing was "
+                            "stored. Try again using the same form.",
+                            ephemeral=True,
+                        )
+                        return
+                    # Reuse the repo kind's resolver rather than calling
+                    # `store_inline_pat` directly: it returns the `ma_secret_ref`
+                    # AND the access proof that `set_binding` requires, so the two
+                    # writes cannot disagree about what was established.
+                    ma_secret_ref, proof = await resolve_repo_binding_credential(
+                        self._runtime,
+                        http_client,
+                        agent_id=consumed_row.agent_id,
+                        account_id=consumed_row.account_id,
+                        repo_url=url,
+                        pasted_pat=pat,
+                        now=now,
+                    )
+                    is_token_saved = True
+                    # The skill repo's own credential row, keyed by (tenant,
+                    # agent, repo): a later sync of this repo resolves its token
+                    # from here. Without it the stored PAT is unreachable and
+                    # every sync falls back to an anonymous 404 that asks for the
+                    # credential again.
+                    async with self._runtime.sessionmaker.begin() as session:
+                        seeded_skill_names = await write_skill_repo_submit(
+                            session, row=consumed_row, ma_secret_ref=ma_secret_ref, proof=proof
+                        )
+                    outcomes = await run_skill_sync(
+                        self._runtime.anthropic,
+                        http_client,
+                        url=url,
+                        branch=branch,
+                        path=path,
+                        tenant_id=consumed_row.tenant_id,
+                        seeded_skill_names=seeded_skill_names,
+                        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
+                        token=pat,
+                    )
+            except DaimonError:
+                # Validation can fail before storage; preserve only confirmed saves.
+                progress = (
+                    "Token saved, but the skill import did not finish."
+                    if is_token_saved
+                    else "Could not finish saving the token and importing skills. "
+                    "Some changes may have been saved."
+                )
+                await interaction.followup.send(
+                    f"{progress} Try again using the same form.",
+                    ephemeral=True,
+                )
+                if is_token_saved:
+                    await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
+                return
+            except Exception as err:
+                _log.warning(
+                    "credential_modal.skill_repo_sync_failed",
+                    repo_url=url,
+                    err_type=type(err).__name__,
+                )
+                progress = (
+                    "Token saved, but the skill import did not finish."
+                    if is_token_saved
+                    else "Could not finish saving the token and importing skills. "
+                    "Some changes may have been saved."
+                )
+                await interaction.followup.send(
+                    f"{progress} Try again using the same form.",
+                    ephemeral=True,
+                )
+                if is_token_saved:
+                    await self._render_import_failed(interaction, consumed_row, repo=owner_repo)
+                return
 
-        attach_failure = await self._attach_to_requested_agent(
-            tenant_id=consumed_row.tenant_id,
-            agent_id=consumed_row.agent_id,
-            outcomes=imported,
-        )
-        if attach_failure is not None:
-            # The skills are in the library but not on the agent: the waiting
-            # task gets nothing to resume with, and the card says so.
-            await interaction.followup.send(
-                f"Skills imported to the library, but not added to {_agent_name(consumed_row)}. "
-                f"{attach_failure}",
-                ephemeral=True,
+            imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
+            failure_detail = summarize_failed_imports(outcomes)
+            if not imported:
+                # Nothing reached the library (an empty repo, or every skill
+                # refused or failed), which the `applied` card must not claim.
+                await self._render_import_failed(
+                    interaction, consumed_row, repo=owner_repo, detail=failure_detail
+                )
+                return
+
+            attach_failure = await self._attach_to_requested_agent(
+                tenant_id=consumed_row.tenant_id,
+                agent_id=consumed_row.agent_id,
+                outcomes=imported,
             )
-            is_queued = await _settle_spent_request(
-                self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+            if attach_failure is not None:
+                # The skills are in the library but not on the agent: the waiting
+                # task gets nothing to resume with, and the card says so.
+                await interaction.followup.send(
+                    "Skills imported to the library, but not added to "
+                    f"{_agent_name(consumed_row)}. "
+                    f"{attach_failure}",
+                    ephemeral=True,
+                )
+                is_queued = await _settle_spent_request(
+                    self._runtime, row=consumed_row, outcome="write_failed", carries_work=False
+                )
+                await edit_posted_card(
+                    interaction.client,
+                    row=consumed_row,
+                    state="partial",
+                    outcome=ConfigurationChange(
+                        target_name=_agent_name(consumed_row),
+                        kind="skills_bulk",
+                        availability="saved",
+                        count=len(imported),
+                        repo=owner_repo,
+                        detail="\n".join(line for line in (attach_failure, failure_detail) if line),
+                    ),
+                )
+                if is_queued:
+                    await _dispatch_origin_thread(interaction, consumed_row)
+                return
+            is_continuation_queued = await _settle_spent_request(
+                self._runtime, row=consumed_row, outcome="applied", carries_work=True
             )
             await edit_posted_card(
                 interaction.client,
                 row=consumed_row,
-                state="partial",
+                state="applied",
                 outcome=ConfigurationChange(
                     target_name=_agent_name(consumed_row),
                     kind="skills_bulk",
-                    availability="saved",
+                    availability="next_message",
                     count=len(imported),
                     repo=owner_repo,
-                    detail="\n".join(line for line in (attach_failure, failure_detail) if line),
+                    detail=failure_detail,
                 ),
             )
-            if is_queued:
+            if is_continuation_queued:
                 await _dispatch_origin_thread(interaction, consumed_row)
-            return
-        is_continuation_queued = await _settle_spent_request(
-            self._runtime, row=consumed_row, outcome="applied", carries_work=True
-        )
-        await edit_posted_card(
-            interaction.client,
-            row=consumed_row,
-            state="applied",
-            outcome=ConfigurationChange(
-                target_name=_agent_name(consumed_row),
-                kind="skills_bulk",
-                availability="next_message",
-                count=len(imported),
-                repo=owner_repo,
-                detail=failure_detail,
-            ),
-        )
-        if is_continuation_queued:
-            await _dispatch_origin_thread(interaction, consumed_row)
 
     async def _render_import_failed(
         self,
@@ -1295,7 +1318,7 @@ class SkillRepoModal(discord.ui.Modal):
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
             )
-            return "Attaching them did not finish. Ask again to retry."
+            return "Attaching them did not finish. Try again using the same form."
         return None
 
 
@@ -1385,83 +1408,89 @@ class RepoBindModal(discord.ui.Modal):
             await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
             return
 
-        await edit_posted_card(interaction.client, row=consumed_row, state="received")
-
-        # The row's target packs the branch the card promised; unpack it here
-        # rather than asking for it again, so the binding cannot disagree with
-        # what the person was shown.
-        repo_url, branch, _path = split_skill_repo_target(consumed_row.target)
-
-        # Log the repo and branch, and the token ONLY as a masked tail when
-        # present — never the plain value, never the (now-consumed) request
-        # token.
-        _log.info(
-            "credential_modal.repo.submit",
-            repo_url=repo_url,
-            branch=branch,
-            pat_present=bool(pat),
-        )
-
-        try:
-            async with httpx.AsyncClient() as http_client:
-                ma_secret_ref, proof = await resolve_repo_binding_credential(
-                    self._runtime,
-                    http_client,
-                    agent_id=consumed_row.agent_id,
-                    account_id=consumed_row.account_id,
-                    repo_url=repo_url,
-                    pasted_pat=pat or None,
-                    now=now,
-                )
-            async with self._runtime.sessionmaker.begin() as session:
-                await write_repo_submit(
-                    session,
-                    row=consumed_row,
-                    ma_secret_ref=ma_secret_ref,
-                    proof=proof,
-                    write=set_binding,
-                )
-        except DaimonError as err:
-            # This copy is written for the user -- surface it verbatim, plus
-            # the fact that the request itself was used up either way.
-            await interaction.followup.send(
-                f"{err} The request was used up — ask again to retry.",
-                ephemeral=True,
-            )
-            return
-        except Exception as err:
-            _log.exception(
-                "credential_modal.repo_write_failed",
-                repo_url=repo_url,
-                err_type=type(err).__name__,
-            )
-            # Keep exception details in the operator log; SDK failures can
-            # include the request envelope.
-            await interaction.followup.send(
-                "This request was used, but connecting the working repo did not finish. "
-                "Some changes may have been saved. Ask for a new request to retry.",
-                ephemeral=True,
-            )
-            return
-
-        is_continuation_queued = await _settle_spent_request(
-            self._runtime, row=consumed_row, outcome="applied", carries_work=True
-        )
-        await edit_posted_card(
-            interaction.client,
+        async with guard_credential_save(
+            self._runtime.sessionmaker,
             row=consumed_row,
-            state="applied",
-            outcome=ConfigurationChange(
-                target_name=_agent_name(consumed_row),
-                kind="repo",
-                availability="next_message",
-                repo=normalize_owner_repo(repo_url),
-                branch=branch,
-                # Never `copy` or `leave`: this form binds a repo to an agent
-                # that had none of this person's uncommitted work to carry, so
-                # a card claiming either would be inventing one.
-                unsaved_work=None,
+            edit_retry=lambda retry, reason: edit_posted_card(
+                interaction.client, row=retry, state="requested", retry_reason=reason
             ),
-        )
-        if is_continuation_queued:
-            await _dispatch_origin_thread(interaction, consumed_row)
+        ):
+            await edit_posted_card(interaction.client, row=consumed_row, state="received")
+
+            # The row's target packs the branch the card promised; unpack it here
+            # rather than asking for it again, so the binding cannot disagree with
+            # what the person was shown.
+            repo_url, branch, _path = split_skill_repo_target(consumed_row.target)
+
+            # Log the repo and branch, and the token ONLY as a masked tail when
+            # present — never the plain value, never the (now-consumed) request
+            # token.
+            _log.info(
+                "credential_modal.repo.submit",
+                repo_url=repo_url,
+                branch=branch,
+                pat_present=bool(pat),
+            )
+
+            try:
+                async with httpx.AsyncClient() as http_client:
+                    ma_secret_ref, proof = await resolve_repo_binding_credential(
+                        self._runtime,
+                        http_client,
+                        agent_id=consumed_row.agent_id,
+                        account_id=consumed_row.account_id,
+                        repo_url=repo_url,
+                        pasted_pat=pat or None,
+                        now=now,
+                    )
+                async with self._runtime.sessionmaker.begin() as session:
+                    await write_repo_submit(
+                        session,
+                        row=consumed_row,
+                        ma_secret_ref=ma_secret_ref,
+                        proof=proof,
+                        write=set_binding,
+                    )
+            except DaimonError:
+                # Only fixed copy: domain errors can carry upstream details.
+                await interaction.followup.send(
+                    "Repository access could not be saved. Try again using the same form.",
+                    ephemeral=True,
+                )
+                return
+            except Exception as err:
+                _log.warning(
+                    "credential_modal.repo_write_failed",
+                    repo_url=repo_url,
+                    err_type=type(err).__name__,
+                )
+                # Keep exception details in the operator log; SDK failures can
+                # include the request envelope.
+                await interaction.followup.send(
+                    "Connecting the working repo did not finish. "
+                    "Some changes may have been saved. Try again using the same form.",
+                    ephemeral=True,
+                )
+                return
+
+            is_continuation_queued = await _settle_spent_request(
+                self._runtime, row=consumed_row, outcome="applied", carries_work=True
+            )
+            await edit_posted_card(
+                interaction.client,
+                row=consumed_row,
+                state="applied",
+                outcome=ConfigurationChange(
+                    target_name=_agent_name(consumed_row),
+                    kind="repo",
+                    availability="next_message",
+                    repo=normalize_owner_repo(repo_url),
+                    branch=branch,
+                    # Never `copy` or `leave`: this form binds a repo to an agent
+                    # that had none of this person's uncommitted work to carry, so
+                    # a card claiming either would be inventing one.
+                    unsaved_work=None,
+                ),
+            )
+            if is_continuation_queued:
+                await _dispatch_origin_thread(interaction, consumed_row)

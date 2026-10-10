@@ -7,15 +7,20 @@ Discord's savepoint and Slack/Teams' rollback-and-consume sequence are retained.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_pins import consume_form_unless_pinned
 from daimon.core.continuity.continuation import record_input_continuation
+from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.credential_requests import CredentialRequestOutcome, split_skill_repo_target
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
@@ -260,6 +265,17 @@ async def settle_credential_submit(
         await credential_requests.set_credential_request_outcome(
             session, token=row.token, outcome=outcome
         )
+        attempt = _ACTIVE_SAVE_ATTEMPT.get()
+        if (
+            not carries_work
+            and attempt is not None
+            and attempt.active
+            and attempt.token == row.token
+            and attempt.retry_allowed
+        ):
+            # The failure outcome is the audit. A save-only continuation would
+            # occupy the retry's idempotency key without resuming its work.
+            return False
         return await record(session, row, platform=platform, carries_work=carries_work)
 
 
@@ -376,3 +392,92 @@ async def prepare_mcp_submit(
     """
     decision = await decide()
     return decision, clock()
+
+
+CREDENTIAL_SAVE_TIMEOUT_SECONDS = 90.0
+
+
+@dataclass
+class CredentialSaveAttempt:
+    """A policy refusal remains terminal even inside a guarded external save."""
+
+    token: str
+    active: bool = True
+    retry_allowed: bool = True
+    failure_reason: str | None = None
+
+
+_ACTIVE_SAVE_ATTEMPT: ContextVar[CredentialSaveAttempt | None] = ContextVar(
+    "credential_save_attempt", default=None
+)
+
+
+def note_credential_save_failure(
+    row: CredentialRequestRow, outcome: ConfigurationChange | None
+) -> None:
+    """Keep the adapter's safe partial-progress receipt on its retry card."""
+    attempt = _ACTIVE_SAVE_ATTEMPT.get()
+    if (
+        attempt is not None
+        and attempt.active
+        and attempt.token == row.token
+        and outcome is not None
+    ):
+        attempt.failure_reason = (
+            f"{render_change_confirmation(outcome)}\nTry again using the same form."
+        )
+
+
+@asynccontextmanager
+async def guard_credential_save(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    row: CredentialRequestRow,
+    edit_retry: Callable[[CredentialRequestRow, str], Awaitable[None]],
+    timeout_seconds: float | None = None,
+) -> AsyncIterator[CredentialSaveAttempt]:
+    """Bound the save and repair every failed/unfinished external-write receipt.
+
+    Cancellation stops this attempt before its consume is released. A retry
+    rechecks all live authorization and replacement gates. Public reasons
+    are fixed strings; exceptions can contain submitted secrets.
+    """
+    attempt = CredentialSaveAttempt(token=row.token)
+    active_token = _ACTIVE_SAVE_ATTEMPT.set(attempt)
+    reason = "Saving did not finish; some changes may have been saved. Try again."
+    cancelled = False
+    try:
+        async with asyncio.timeout(
+            CREDENTIAL_SAVE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        ):
+            yield attempt
+    except TimeoutError:
+        reason = "Saving took too long; some changes may have been saved. Try again."
+    except asyncio.CancelledError:
+        cancelled = True
+    except Exception as err:
+        structlog.get_logger().warning(
+            "credential_submit.save_failed", kind=row.kind, err_type=type(err).__name__
+        )
+    finally:
+        attempt.active = False
+        _ACTIVE_SAVE_ATTEMPT.reset(active_token)
+        async with session_factory() as session, session.begin():
+            current = await credential_requests.peek_credential_request(session, token=row.token)
+            retry = None
+            if current is not None and (attempt.retry_allowed or current.outcome is None):
+                outcome = current.outcome
+                if outcome in (None, "token_rejected", "write_failed"):
+                    reason = attempt.failure_reason or reason
+                    if outcome == "token_rejected":
+                        reason = (
+                            "That token was rejected: it cannot access the requested service. "
+                            "Try again."
+                        )
+                    retry = await credential_requests.release_failed_credential_request(
+                        session, row=row, outcome=outcome or "write_failed"
+                    )
+        if retry is not None:
+            await edit_retry(retry, reason)
+    if cancelled:
+        raise asyncio.CancelledError

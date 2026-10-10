@@ -15,7 +15,11 @@ from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import CredentialRequest
-from daimon.core.credential_requests import CredentialRequestKind, CredentialRequestOutcome
+from daimon.core.credential_requests import (
+    DEFAULT_TTL,
+    CredentialRequestKind,
+    CredentialRequestOutcome,
+)
 from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,7 +136,7 @@ async def consume_credential_request(
             CredentialRequest.used_at.is_(None),
             CredentialRequest.expires_at > now,
         )
-        .values(used_at=now)
+        .values(used_at=now, outcome=None)
         .returning(CredentialRequest)
     )
     result = await session.execute(stmt)
@@ -273,3 +277,35 @@ async def update_credential_request_message(
         .where(CredentialRequest.token == token)
         .values(posted_message_id=posted_message_id)
     )
+
+
+async def release_failed_credential_request(
+    session: AsyncSession,
+    *,
+    row: CredentialRequestRow,
+    outcome: CredentialRequestOutcome,
+) -> CredentialRequestRow | None:
+    """Release only this failed attempt; a later attempt must never be reset.
+
+    Retain the failure outcome until the next atomic consume clears it.
+    Successful and superseded requests are never made reusable.
+    """
+    if row.used_at is None:
+        raise ValueError("releasing a credential save requires a consumed attempt")
+    stmt = (
+        update(CredentialRequest)
+        .where(
+            CredentialRequest.token == row.token,
+            CredentialRequest.used_at == row.used_at,
+            CredentialRequest.outcome.is_(None)
+            | CredentialRequest.outcome.in_(("write_failed", "token_rejected")),
+        )
+        .values(
+            used_at=None,
+            outcome=outcome,
+            expires_at=func.greatest(CredentialRequest.expires_at, func.now() + DEFAULT_TTL),
+        )
+        .returning(CredentialRequest)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    return None if orm is None else CredentialRequestRow.model_validate(orm)

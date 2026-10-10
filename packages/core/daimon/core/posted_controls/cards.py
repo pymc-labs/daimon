@@ -426,6 +426,7 @@ def build_posted_card(
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
+    retry_reason: str | None = None,
 ) -> PostedCard:
     """Build the card for one posted control in one state.
 
@@ -447,6 +448,8 @@ def build_posted_card(
     if refusal_lines and refusal != "env_file_invalid":
         raise ValueError("refusal_lines belong to refusal='env_file_invalid' only")
 
+    if retry_reason is not None and state != "requested":
+        raise ValueError("retry_reason belongs to state=requested only")
     repo_display = repo or target
 
     if state in ("requested", "received"):
@@ -471,8 +474,8 @@ def build_posted_card(
         return PostedCard(
             kind=kind,
             state=state,
-            headline=headline,
-            facts=facts,
+            headline=f"⚠️ {retry_reason.splitlines()[0]}" if retry_reason else headline,
+            facts=(*retry_reason.splitlines()[1:], *facts) if retry_reason else facts,
             buttons=(button,),
             footer=FOOTER_TEMPLATE,
             requester_platform_user_id=requester_platform_user_id,
@@ -522,6 +525,7 @@ def card_for_request(
     refusal: RefusalReason | None = None,
     refusal_lines: Sequence[str] = (),
     replaces: str | None = None,
+    retry_reason: str | None = None,
 ) -> PostedCard:
     """The card for one request row in `state`, rebuilt from the row alone.
 
@@ -548,4 +552,5 @@ def card_for_request(
         refusal=refusal,
         refusal_lines=refusal_lines,
         replaces=replaces,
+        retry_reason=retry_reason,
     )

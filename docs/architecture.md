@@ -20,6 +20,16 @@ opens. If naming and creation take over three seconds, the mention gets a ⌛
 reaction, removed once the thread exists. A thread that cannot be opened gets
 one plain reply under the mention.
 
+Credential cards on Discord, Slack and Teams remove their form button while
+saving an MCP or GitHub token. A rejected token or failed save records an
+outcome, updates the card with a short error and restores the same form for a
+retry, with a fresh 30-minute form expiry. Each retry rechecks the requester, expiry, agent rules and replacement
+permissions. External saves have a 90-second deadline; a timeout stops the
+attempt before restoring the form and warns that some changes may have been
+saved. Confirmed partial progress stays on the card. Successful saves consume
+the request and resume waiting work once; failed attempts do not queue work.
+Browser OAuth flows have their own lifecycle.
+
 ## The shape
 
 ```mermaid
