@@ -44,6 +44,9 @@ approvals	Approvals	ApprovalsQuietLateBeyondBound	violates:ApprovedRunsInTurn	42
 approvals	Approvals	ApprovalsEarlyCard	clean	1034	-	retiring an unsent approval on refusal restores eventual card truth
 approvals	Approvals	ApprovalsEarlyCardOld	violates:EventualCardTruth	1061	-	old refusal path leaves an unsent approved card after turn end
 approvals	Approvals	ApprovalsReplayQueued	violates:NoFalseNotAccepted	1566	-	pre-fix replay counts queued confirmations as taken; the next one-per-pause idle ends the turn as a re-ask
+# ---- test schema cleanup ----
+test_schema_cleanup	SchemaCleanup	SchemaCleanupSafe	clean	9	-	face transaction rollback completes before test schema drop
+test_schema_cleanup	SchemaCleanup	SchemaCleanupUnsafe	violates:NoDropDuringFaceTransaction	6	-	old fixture starts table drop while queued face still holds a transaction
 # ---- scheduler ----
 privacy_delete	PrivacyDelete	PrivacyDeleteSafe	clean	49	-	durable local commit keeps upstream work across crashes and failures
 privacy_delete	PrivacyDelete	PrivacyDeleteUnsafe	violates:LocalDeletionTracked	2	-	old local commit loses the target immediately
