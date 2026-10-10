@@ -8,8 +8,11 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import anthropic
+import httpx
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
+from daimon.core.errors import TurnError
 from daimon.core.stores.domain import Role
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
@@ -237,3 +240,60 @@ async def test_excluded_workspace_dm_skips_agent_identity_lookup(
     find_agent.assert_not_awaited()
     kwargs = client.chat_postMessage.await_args.kwargs
     assert "username" not in kwargs and "icon_url" not in kwargs
+
+
+async def test_a_failed_dm_turn_never_shows_the_provider_text(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn error carrying a provider body is shown as its cause lines and a Ref."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="slack")
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key=f"{_TEAM}:D_PROVIDER_ERROR",
+            external_user_id="U1",
+            workspace_id=_TEAM,
+            source_channel_id=_CHANNEL,
+        )
+    leak = "see https://api.internal.example/v1?access_token=sk-ant-private-0000"
+    provider_error = anthropic.APIStatusError(
+        message=leak,
+        response=httpx.Response(
+            502, request=httpx.Request("POST", "https://api.anthropic.com"), text=leak
+        ),
+        body={"error": {"message": leak}},
+    )
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock()
+    monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
+    monkeypatch.setattr(
+        dm_module,
+        "reply_to_dm",
+        AsyncMock(side_effect=TurnError(kind="upstream", cause=provider_error)),
+    )
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+
+    await dm_module.handle_direct_message(
+        runtime,
+        {
+            "type": "message",
+            "channel_type": "im",
+            "channel": "D_PROVIDER_ERROR",
+            "user": "U1",
+            "ts": "3.1",
+            "text": "hello",
+        },
+        team_id=_TEAM,
+    )
+
+    text = client.chat_postMessage.await_args.kwargs["text"]
+    assert text.startswith(
+        "Daimon couldn't reach its AI service.\n\nTry again in a minute.\n\n_Ref "
+    )
+    for private in ("sk-ant", "access_token", "api.internal.example"):
+        assert private not in text, private

@@ -15,9 +15,7 @@ from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 def _denial_text(reason: AdmissionDenialReason) -> str:
     settings = MagicMock()
     settings.slack.bot_display_name = "daimon"
-    return _error_message(
-        AdmissionDenied(reason=reason), "fallback", settings=settings, team_id="T1"
-    )
+    return _error_message(AdmissionDenied(reason=reason), settings=settings, team_id="T1")
 
 
 @pytest.mark.parametrize("reason", get_args(AdmissionDenialReason))

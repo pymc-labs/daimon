@@ -736,7 +736,8 @@ async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
     embed = edits[-1][1]["embeds"][0]
     assert embed.colour.value == COLOR_RED
     assert embed.title == "Something went wrong."
-    assert embed.fields[0].value == "Something went wrong on our side."
+    # The fallback joins its lines with a blank line; Discord drops the trailing one.
+    assert embed.fields[0].value.rstrip() == "Something went wrong on our side."
     assert embed.description == "Try again. If it keeps happening, tell an admin."
     assert not any("upstream timeout" in str(field.value) for field in embed.fields)
 

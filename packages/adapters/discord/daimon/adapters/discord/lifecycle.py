@@ -871,7 +871,7 @@ class DiscordTurnLifecycle:
         self._apply_usage(state)
         label = "Something went wrong"
         # The card draws the `**Next:**` line as its description.
-        body = "\n**Next:** ".join(error_lines(err))
+        body = "\n\n**Next:** ".join(error_lines(err))
         reason = request_id = None
         # The notice is words on top of the red card, never a reason not to
         # draw it: if building it fails, the card keeps the plain fallback copy.

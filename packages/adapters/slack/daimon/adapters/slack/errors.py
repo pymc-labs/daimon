@@ -100,7 +100,7 @@ def _guidance(exc: BaseException) -> str | None:
     if isinstance(exc, AgentNameCollision):
         return "This workspace already has an agent with that name. Pick a different name."
     if isinstance(exc, UserFacingError):
-        return escape_mrkdwn(str(exc))
+        return str(exc)
     if isinstance(exc, DirectMessageBusy):
         return (
             "A reply is still running. Wait for it to finish before starting another conversation."
@@ -151,12 +151,20 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     return _OUR_SIDE
 
 
-def _rendered(exc: Exception, request_id: str) -> tuple[str, str | None]:
-    """The message and its `Ref` line (None without a request id), logging the full id."""
+def _rendered(exc: Exception, request_id: str, *, mrkdwn: bool = True) -> tuple[str, str | None]:
+    """The message and its `Ref` line (None without a request id), logging the full id.
+
+    With `mrkdwn` the message is escaped for a mrkdwn field, so `UserFacingError`
+    text can never turn into a live mention or link; without it the message is
+    plain text for a field that escapes on its own.
+    """
     if isinstance(exc, SessionAgentMismatch):
         return _SESSION_AGENT_MISMATCH, None  # its own wording, unchanged
     guidance = _guidance(exc)
-    message = guidance if guidance is not None else "\n\n".join(_cause_lines(exc))
+    if guidance is not None:
+        message = escape_mrkdwn(guidance) if mrkdwn else guidance
+    else:
+        message = "\n\n".join(_cause_lines(exc))
     if not request_id:
         return message, None
     ref = short_ref(request_id)
@@ -190,6 +198,15 @@ def _error_blocks(message: str, ref: str | None) -> list[dict[str, Any]]:
     if ref is not None:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": ref}]})
     return blocks
+
+
+def render_error_text(exc: Exception, *, request_id: str) -> str:
+    """`render_error` as plain text, for a field that escapes its own content.
+
+    Same lines and the same logged ref, without mrkdwn escaping or italics.
+    """
+    message, ref = _rendered(exc, request_id, mrkdwn=False)
+    return message if ref is None else f"{message}\n\n{ref}"
 
 
 def render_error_payload(exc: Exception, *, request_id: str) -> dict[str, Any]:

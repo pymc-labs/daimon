@@ -504,6 +504,11 @@ async def test_privacy_command_replaces_loading_modal_with_error_on_failure(
     assert update_calls, "the Loading… modal must be replaced after account resolution fails"
     body: dict[str, Any] = update_calls[-1].kwargs["json"]
     assert body["view"]["title"]["text"] == "Privacy"
-    text = body["view"]["blocks"][0]["text"]["text"]
-    assert "identity store unavailable" in text
-    assert "rid:" in text
+    blocks = body["view"]["blocks"]
+    assert blocks[0]["text"]["text"] == (
+        "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
+    )
+    assert blocks[1]["type"] == "context", "the ref is drawn small"
+    assert blocks[1]["elements"][0]["text"].startswith("Ref ")
+    assert len(blocks[1]["elements"][0]["text"]) == len("Ref ") + 6
+    assert "identity store unavailable" not in str(body["view"]), "exception text stays in the logs"
