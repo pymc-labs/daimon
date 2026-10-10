@@ -8,7 +8,20 @@ import anthropic
 import discord
 import httpx
 from daimon.adapters.discord.errors import generate_request_id, render_error
-from daimon.core.errors import AgentNameCollision, DaimonError, SpecError, StoreError, TurnError
+from daimon.core.channel_admins import InvalidChannelAdminIds
+from daimon.core.channel_budget import ChannelBudgetError
+from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
+from daimon.core.cron import InvalidScheduleError
+from daimon.core.errors import (
+    AgentNameCollision,
+    DaimonError,
+    SpecError,
+    StoreError,
+    TurnError,
+    UserFacingError,
+)
+from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.stores.direct_messages import DirectMessageBusy
 from sqlalchemy.exc import DBAPIError
 
 TEST_RID = "01JTZXTEST000000000000000"
@@ -18,6 +31,12 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
     body = "sesn_private agent_private access_token=private SELECT secret"
     for error, expected in [
         (SpecError(body), "Daimon couldn't read this setup."),
+        (ChannelBudgetError(body), "That spending budget isn't valid."),
+        (InvalidScheduleError(body), "That schedule isn't valid."),
+        (InvalidChannelAdminIds(body), "That admin selection isn't valid."),
+        (NotebookRateLimitError(body), "The notebook publishing limit has been reached."),
+        (DirectMessageBusy(body), "A reply is still running."),
+        (HandoffRefusedInSetupThread(body), "This setup conversation can't change agents."),
         (AgentNameCollision(body), "This workspace already has an agent with that name."),
         (StoreError(body), "Daimon couldn't load or save this change."),
         (DaimonError(body), "Something went wrong while handling your request."),
@@ -97,3 +116,12 @@ class TestGenerateRequestId:
         rid1 = generate_request_id()
         rid2 = generate_request_id()
         assert rid1 != rid2, "consecutive ULIDs should be unique"
+
+
+def test_audited_user_guidance_keeps_its_next_step_without_retry_later() -> None:
+    for copy in (
+        "This turn's setup context expired. Mention me again to continue.",
+        "This server is not registered. Ask a server admin to finish setup.",
+        "The agent was created but is not listed yet. Reopen `/agent-setup` to see it.",
+    ):
+        assert render_error(UserFacingError(copy), request_id=TEST_RID) == copy

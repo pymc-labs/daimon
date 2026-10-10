@@ -1843,3 +1843,9 @@ The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+
+Discord passes through only explicitly audited `UserFacingError` guidance. Raise
+that marker with deliberate copy, never exception text, provider bodies, secrets
+or internal identifiers. Known domain errors map to fixed next steps; unmarked
+exceptions keep a generic public fallback and diagnostics in logs. Both Discord
+and shared New Agent creators use the typed name-collision refusal.

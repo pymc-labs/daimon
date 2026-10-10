@@ -33,7 +33,7 @@ from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.channel_admins import load_administered_channel_ids
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
@@ -155,7 +155,7 @@ async def load_roster_state(
     assert interaction.guild_id is not None, "the setup panel is guild-only"
     channel_id, channel_name, thread_id = _panel_location(interaction)
     if channel_id is None:
-        raise DaimonError("Run `/agent-setup` in a server channel.")
+        raise UserFacingError("Run `/agent-setup` in a server channel.")
 
     async with runtime.sessionmaker() as session:
         principal = await get_or_create_platform_principal(

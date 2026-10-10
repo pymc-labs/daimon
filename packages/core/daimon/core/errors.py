@@ -30,6 +30,14 @@ class DaimonError(Exception):
     """Base class for all daimon-raised errors. Adapters catch this at the edge."""
 
 
+class UserFacingError(DaimonError):
+    """Audited, authored guidance safe to show without exception diagnostics.
+
+    Raise with deliberate copy, never provider bodies, credentials, internal
+    identifiers or another exception's text. Unmarked errors stay private.
+    """
+
+
 class AgentNameCollision(DaimonError):
     """An agent already uses the requested name in this workspace."""
 

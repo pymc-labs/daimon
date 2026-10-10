@@ -88,7 +88,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
-from daimon.core.errors import DaimonError, TurnError
+from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -2784,7 +2784,7 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise DaimonError(
+                raise UserFacingError(
                     "This turn's setup context expired. Mention me again to continue."
                 )
             return (
@@ -3694,7 +3694,7 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise DaimonError(
+                raise UserFacingError(
                     "This turn's setup context expired. Mention me again to continue."
                 )
             return (

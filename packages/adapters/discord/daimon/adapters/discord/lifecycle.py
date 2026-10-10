@@ -49,7 +49,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.notices import is_stuck_session, render_termination_notice
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -737,12 +737,16 @@ class DiscordTurnLifecycle:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
             notice = render_termination_notice(
-                reason, state=state, request_id=request_id, error=err
+                reason,
+                state=state,
+                request_id=request_id,
+                error=err,
+                support_hint="If it keeps happening, ask an admin for help.",
             )
             if notice is not None:
                 if (
                     reason is TerminationReason.UPSTREAM
-                    and notice.headline != "Conversation stuck"
+                    and not is_stuck_session(reason, err)
                     and spend_limit_error(err) is None
                 ):
                     notice = dataclasses.replace(

@@ -8,13 +8,21 @@ from __future__ import annotations
 
 import anthropic
 import structlog
+from daimon.core.channel_admins import InvalidChannelAdminIds
+from daimon.core.channel_budget import ChannelBudgetError
+from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.continuity.messages import render_responder_changed_without_handoff
+from daimon.core.cron import InvalidScheduleError
 from daimon.core.errors import (
     AgentNameCollision,
     SpecError,
     StoreError,
     TurnError,
+    UserFacingError,
 )
+from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.stores.direct_messages import DirectMessageBusy
+from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
 from sqlalchemy.exc import SQLAlchemyError
 from ulid import ULID
@@ -92,6 +100,29 @@ def render_error(
         return "Daimon couldn't read this setup. Ask an admin to check it."
     if isinstance(exc, AgentNameCollision):
         return "This workspace already has an agent with that name. Pick a different name."
+    if isinstance(exc, UserFacingError):
+        return str(exc)
+    if isinstance(exc, DirectMessageBusy):
+        return (
+            "A reply is still running. Wait for it to finish before starting another conversation."
+        )
+    if isinstance(exc, HandoffRefusedInSetupThread):
+        return (
+            "This setup conversation can't change agents. Start a new thread to use another agent."
+        )
+    if isinstance(exc, ThreadHandoffRefused):
+        return (
+            "This conversation can't change agents. "
+            "Ask an admin to check the agent and channel settings."
+        )
+    if isinstance(exc, ChannelBudgetError):
+        return "That spending budget isn't valid. Check its amount and time window, then try again."
+    if isinstance(exc, NotebookRateLimitError):
+        return "The notebook publishing limit has been reached. Try again later."
+    if isinstance(exc, InvalidScheduleError):
+        return "That schedule isn't valid. Check its cron expression and timezone, then try again."
+    if isinstance(exc, InvalidChannelAdminIds):
+        return "That admin selection isn't valid. Check the selected people and try again."
     if isinstance(exc, ValueError):
         return "Daimon couldn't use that input. Check it and try again."
     return "Something went wrong while handling your request. Try again in a minute."

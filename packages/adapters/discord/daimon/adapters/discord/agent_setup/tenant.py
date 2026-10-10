@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import get_tenant
 
@@ -23,10 +23,10 @@ async def resolve_tenant_for_panel(
 ) -> uuid.UUID:
     """Resolve the interaction's guild tenant_id, per-interaction."""
     if interaction.guild_id is None:
-        raise DaimonError("Panel interaction has no guild_id; cannot resolve tenant.")
+        raise UserFacingError("Open `/agent-setup` in a server channel.")
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
     async with runtime.sessionmaker() as session:
         row = await get_tenant(session, tenant_id)
     if row is None:
-        raise DaimonError("This server is not registered.")
+        raise UserFacingError("This server is not registered. Ask a server admin to finish setup.")
     return tenant_id
