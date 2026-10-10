@@ -9,10 +9,11 @@ from types import FrameType
 
 from qa.live.config import load_config, write_example
 from qa.live.cost import Ledger, estimate
+from qa.live.deployment import run_with_deploy_retry
 from qa.live.discord import DiscordBackend
 from qa.live.judge import HaikuJudge
 from qa.live.locking import live_run_lock
-from qa.live.report import Alerter, report
+from qa.live.report import Alerter, Result, report
 from qa.live.runner import Executor
 from qa.live.schema import ProposedScenario, Scenario, load_catalog
 
@@ -77,28 +78,47 @@ def main() -> int:
     with live_run_lock(Path(config.live_lock)):
         ledger.claim_schedule(args.command, args.env)
         failed = False
+        attempted_ids: set[str] = set()
         for scenario in scenarios:
-            backend = DiscordBackend(config, args.env)
-            judge = HaikuJudge(config.pricing, go=args.go, models=config.models)
-            executor = Executor(
-                backend,
-                judge,
-                ledger,
-                config.pricing,
-                args.env,
-                models=config.models,
-                model_backend=backend.target.backend,
-            )
-            result = executor.run(scenario)
-            path = report(result, args.results)
-            try:
-                Alerter(config.alerts, args.results / "alert-state.json").notify(result, path)
-            except Exception as exc:
-                result.notes.append(
-                    f"alert inbox unavailable: {type(exc).__name__}; pass continues"
+
+            def factory() -> Executor:
+                backend = DiscordBackend(config, args.env)
+                return Executor(
+                    backend,
+                    HaikuJudge(config.pricing, go=args.go, models=config.models),
+                    ledger,
+                    config.pricing,
+                    args.env,
+                    models=config.models,
+                    model_backend=backend.target.backend,
                 )
-                report(result, args.results)
-                print("alert inbox unavailable; pass continues with retained result evidence")
+
+            def persist(result: Result) -> None:
+                attempted_ids.add(result.run_id)
+                path = report(result, args.results)
+                try:
+                    Alerter(config.alerts, args.results / "alert-state.json").notify(result, path)
+                except Exception as exc:
+                    result.notes.append(
+                        f"alert inbox unavailable: {type(exc).__name__}; pass continues"
+                    )
+                    report(result, args.results)
+                    print("alert inbox unavailable; pass continues with retained result evidence")
+
+            def retry_allowed(
+                scenario_estimate: float = estimate(scenario, config.pricing)
+                if isinstance(scenario, Scenario)
+                else 0,
+            ) -> bool:
+                return (
+                    ledger.charged(attempted_ids) + scenario_estimate
+                    <= config.schedule.catalog_budget_usd
+                )
+
+            attempts = run_with_deploy_retry(
+                scenario, factory, persist, retry_allowed=retry_allowed
+            )
+            result = attempts[-1]
             failed |= result.status != "PASS"
             if result.status != "PASS":
                 break  # Stop spending after failure or an unavailable capability.

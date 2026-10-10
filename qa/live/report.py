@@ -13,7 +13,7 @@ from typing import cast
 from qa.live.config import Alerts
 from qa.live.errors import redact
 from qa.live.schema import Status
-from qa.live.types import Check, Message, Turn, utcnow
+from qa.live.types import Check, DeploymentEvidence, Message, Turn, utcnow
 
 
 @dataclass
@@ -28,8 +28,13 @@ class Result:
     notes: list[str] = field(default_factory=list[str])
     channel_id: str | None = None
     errors: list[Message] = field(default_factory=list[Message])
+    deployment: DeploymentEvidence | None = None
+    retry_of: str | None = None
 
     def finalize(self) -> None:
+        if self.deployment and (self.deployment.interrupted or self.deployment.error):
+            self.status = "PENDING"
+            return
         statuses = [c.status for c in self.checks]
         self.status = (
             "FAIL"
@@ -68,6 +73,10 @@ class Alerter:
             self._notify(result, evidence_path)
 
     def _notify(self, result: Result, evidence_path: Path) -> None:
+        # A deployment interruption is external to the product and runner.
+        # Preserve the previous streak/dedupe state; never alert or recover it.
+        if result.deployment and result.deployment.interrupted:
+            return
         state = (
             cast(dict[str, dict[str, str]], json.loads(self.state_path.read_text()))
             if self.state_path.exists()

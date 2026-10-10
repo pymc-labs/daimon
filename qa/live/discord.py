@@ -603,6 +603,105 @@ class DiscordBackend:
             raise Pending("CLI readback exceeds bounded observation")
         return redact(response.stdout)
 
+    def deployment_image(self) -> str:
+        import re
+
+        if self.env != "staging":
+            raise Pending("deployment observation is staging-only")
+        hook = self.target.deployment_probe
+        if not hook:
+            raise Pending("read-only staging deployment probe is not configured")
+        try:
+            response = subprocess.run(
+                hook,
+                input=json.dumps(
+                    {"guild_id": self.target.guild_id, "env": "staging", "read_only": True}
+                ),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if response.returncode:
+                raise Pending("staging workers are not ready for observation")
+            if len(response.stdout) > 16384:
+                raise Pending("deployment probe exceeded its evidence bound")
+            data = obj(cast(JsonValue, json.loads(response.stdout)))
+            image = data.get("image")
+            if not isinstance(image, str) or re.fullmatch(r"[a-f0-9]{40}", image) is None:
+                raise Pending(
+                    "deployment probe requires one verified full image SHA for all workers"
+                )
+            workers = obj(data.get("workers"))
+            if set(workers) != {
+                "daimon-discord-1",
+                "daimon-slack-1",
+                "daimon-teams-1",
+                "daimon-scheduler-1",
+            } or any(value != image for value in workers.values()):
+                raise Pending("deployment probe found missing or mixed worker images")
+            return image
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise Pending("read-only deployment probe unavailable") from exc
+
+    def deployment_events(self, start: datetime, end: datetime, turns: list[Turn]) -> list[Message]:
+        if self.env != "staging":
+            return []
+        delay = self.config.log_ingestion_delay_s - (utcnow() - end).total_seconds()
+        if delay > 0:
+            time.sleep(delay)
+        message_ids = {
+            str(message["id"]) for turn in turns for message in turn.messages if message.get("id")
+        }
+        events = [log_scope("event", "discord.draining")]
+        if message_ids:
+            messages = " OR ".join(log_scope("message_id", mid) for mid in sorted(message_ids))
+            orphans = " OR ".join(
+                log_scope("event", event)
+                for event in (
+                    "turn.card_orphan_retirement_issued",
+                    "turn.card_orphan_retirement_completed",
+                )
+            )
+            events.append(f"(({orphans}) AND ({messages}))")
+        query = (
+            f"timestamp>={json.dumps(start.isoformat())} AND "
+            f"timestamp<={json.dumps(end.isoformat())} AND ({' OR '.join(events)})"
+        )
+        evidence: list[Message] = []
+        for row in self._read_logs(query):
+            payload = obj(row.get("jsonPayload"))
+            event = payload.get("event")
+            stamp = str(payload.get("timestamp") or row.get("timestamp") or "")
+            try:
+                at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise Pending("deployment event timestamp is unavailable") from exc
+            if at.tzinfo is None or not start <= at <= end:
+                continue
+            if event == "discord.draining":
+                affects = any(turn.started_at <= at <= (turn.ended_at or end) for turn in turns)
+            elif (
+                event
+                in {"turn.card_orphan_retirement_issued", "turn.card_orphan_retirement_completed"}
+                and str(payload.get("message_id")) in message_ids
+            ):
+                affects = True
+            else:
+                continue
+            evidence.append(
+                {
+                    **{
+                        key: payload[key]
+                        for key in ("event", "rid", "thread_id", "message_id", "turn_id", "source")
+                        if key in payload
+                    },
+                    "timestamp": stamp,
+                    "affects_turn": affects,
+                }
+            )
+        return evidence
+
     def logs(self, assertion: Assertion, turn: Turn) -> list[Message]:
         if not turn.thread_id or not turn.ended_at:
             raise Pending("logs require a thread id and bounded turn window")
