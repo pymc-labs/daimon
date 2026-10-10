@@ -428,7 +428,7 @@ async def delete_sessions_for_account(
 ) -> SessionDeletionReport:
     """Hard-delete every MA session tagged for `account_id` under `tenant_id`.
 
-    Enumeration: list the tenant's agents (list_agents_by_tenant), then
+    Enumeration: list the tenant's live and archived agents, then
     sessions.list(agent_id=...) per agent, client-side filter on
     metadata[MA_METADATA_KEY_ACCOUNT] == str(account_id). Best-effort:
     per-session failures are counted, not raised. 404 = already gone
@@ -436,10 +436,10 @@ async def delete_sessions_for_account(
     """
     # Local imports break the circular dependency:
     # ma.py <-> defaults/__init__ -> apply -> reconcile_skills -> ma.py
-    from daimon.core.defaults.ma_index import list_agents_by_tenant
+    from daimon.core.defaults.ma_index import list_agents_for_privacy_deletion
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 
-    agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    agents = await list_agents_for_privacy_deletion(client, tenant_id=tenant_id)
 
     target_ids: set[str] = set()
     for agent in agents:
