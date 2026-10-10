@@ -210,10 +210,14 @@ app header. A missing face is queued for generation after the turn proceeds;
 the current picture remains in use until it is stored. Slack is expected to keep the header when the status card is edited into an
 answer; each new turn post is recorded under the turn's agent and card intent.
 
-Discord renders known failures as plain sentences with a next step. Provider
-JSON, exception bodies, request IDs and tool details stay out of failure copy;
-request IDs remain in turn logs. A failed reply can still be followed by files
-created during the turn. The output sweep suppresses an oversize notice when
+Discord and Slack render a failure as two plain lines, what happened and what
+to do, chosen by cause: the AI service busy, unreachable or refusing the
+request, the usage limit, a missing Slack permission or unreadable token, a
+platform rejection, or "Something went wrong on our side." A small third line,
+`Ref` and the last six characters of the request id, lets support find the
+`error.rendered` log line that carries the full id and the exception. Provider
+JSON, exception bodies and tool details stay out of failure copy. A failed
+reply can still be followed by files created during the turn. The output sweep suppresses an oversize notice when
 the same filename and size were already attached by Daimon in that turn.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or

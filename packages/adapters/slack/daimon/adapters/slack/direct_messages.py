@@ -12,6 +12,7 @@ import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.channel_admin_groups import user_group_ids
+from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
@@ -31,7 +32,7 @@ from daimon.core.direct_messages import (
     sealed_channel_ids,
     start_dm,
 )
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -67,24 +68,52 @@ def is_direct_message_event(event: dict[str, Any]) -> bool:
 
 
 _REAUTHORIZE = (
-    "A workspace admin must reinstall or reauthorize daimon to grant im:history and im:write. "
-    "Update the app manifest to subscribe to message.im and enable the Messages tab."
+    "Daimon can't use DMs in this workspace yet.\n\n"
+    "Ask a workspace admin to finish Daimon's DM setup."
 )
-
-
-def _error_message(exc: Exception, fallback: str, *, settings: Settings) -> str:
-    if isinstance(exc, SlackApiError) and exc.response.get("error") in {  # pyright: ignore[reportUnknownMemberType]  # SlackApiError.response is untyped
+#: What an operator does about `_REAUTHORIZE`; logged, never posted.
+DM_SETUP_STEPS = (
+    "Reinstall or reauthorize the Slack app to grant the im:history and im:write bot scopes, "
+    "subscribe it to the message.im event, and enable the App Home Messages tab."
+)
+DM_SETUP_DOCS = "https://pymc-labs.github.io/daimon/slack/#dm-setup"
+_SCOPE_ERRORS = frozenset(
+    {
         "missing_scope",
         "token_revoked",
         "token_expired",
         "invalid_auth",
         "not_authed",
         "account_inactive",
-    }:
-        return _REAUTHORIZE
+    }
+)
+
+
+def _log_dm_setup_needed(*, team_id: str, cause: str) -> None:
+    log.warning(
+        "slack.dm.setup_incomplete",
+        team_id=team_id,
+        cause=cause,
+        steps=DM_SETUP_STEPS,
+        docs=DM_SETUP_DOCS,
+    )
+
+
+def _error_message(exc: Exception, *, settings: Settings, team_id: str) -> str:
+    """What a /dm or DM failure tells the person.
+
+    Missing DM scopes and admission refusals have their own words. Everything
+    else goes through `render_error`: `UserFacingError` text is shown, any
+    other failure gets its cause lines and a Ref, never the exception's text.
+    """
+    if isinstance(exc, SlackApiError):
+        code = exc.response.get("error")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # SlackApiError.response is untyped
+        if code in _SCOPE_ERRORS:
+            _log_dm_setup_needed(team_id=team_id, cause=str(code))  # pyright: ignore[reportUnknownArgumentType]  # SlackApiError.response is untyped
+            return _REAUTHORIZE
     if isinstance(exc, AdmissionDenied):
         return admission_refusal_message(exc.reason, settings, in_dm=True)
-    return str(exc) if isinstance(exc, DaimonError) else fallback
+    return render_error(exc, request_id=bound_request_id())
 
 
 async def _live_role(
@@ -97,7 +126,8 @@ async def _live_role(
             (str(value) for key, value in headers.items() if key.lower() == "x-oauth-scopes"), ""
         )
         if not {"im:history", "im:write"} <= {scope.strip() for scope in granted.split(",")}:
-            raise DaimonError(_REAUTHORIZE)
+            _log_dm_setup_needed(team_id=team_id, cause="im_scopes_not_granted")
+            raise UserFacingError(_REAUTHORIZE)
     user = cast(dict[str, Any], response.get("user", {}))
     if (
         user.get("team_id") != team_id
@@ -105,7 +135,9 @@ async def _live_role(
         or user.get("is_bot")
         or user.get("is_stranger")
     ):
-        raise DaimonError("Only current members of this workspace can use its DM conversations.")
+        raise UserFacingError(
+            "Only current members of this workspace can use its DM conversations."
+        )
     return (
         Role.ADMIN
         if any(user.get(key) for key in ("is_admin", "is_owner", "is_primary_owner"))
@@ -131,7 +163,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         if action in {"enable", "disable"}:
             if role is not Role.ADMIN:
-                raise DaimonError("Only a workspace admin can change the DM policy.")
+                raise UserFacingError("Only a workspace admin can change the DM policy.")
             async with runtime.sessionmaker.begin() as session:
                 await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
             reply = (
@@ -140,7 +172,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
         elif action in {"", "move"}:
             await require_dm_enabled(runtime.turn_deps, tenant_id=tenant_id)
             if channel_id.startswith("D"):
-                raise DaimonError("Run /dm in the workspace channel you want to continue from.")
+                raise UserFacingError("Run /dm in the workspace channel you want to continue from.")
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -199,15 +231,15 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,
-                text=(
-                    f"Continuing from <{source_url}|this channel>. Send your next message here. "
-                    "Run /dm in a channel again to start a new private conversation."
-                ),
+                text=f"Continuing from <#{channel_id}>.\n\nSend your next message here.",
                 unfurl_links=False,
             )
             reply = "Ready in your DMs."
         else:
-            reply = "Use /dm to continue privately, or /dm enable|disable for the workspace policy."
+            reply = (
+                "Run `/dm` in a channel to carry on in private.\n\n"
+                "Admins: `/dm enable` or `/dm disable`."
+            )
         await client.chat_postEphemeral(channel=channel_id, user=user_id, text=reply)  # pyright: ignore[reportUnknownMemberType]
     except _ERRORS as exc:
         log.warning("slack.dm.command_failed", error_type=type(exc).__name__)
@@ -216,11 +248,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
                     user=user_id,
-                    text=_error_message(
-                        exc,
-                        "Couldn't open that private conversation. Please retry.",
-                        settings=runtime.settings,
-                    ),
+                    text=_error_message(exc, settings=runtime.settings, team_id=team_id),
                 )
 
 
@@ -310,10 +338,6 @@ async def handle_direct_message(
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
-                    text=_error_message(
-                        exc,
-                        "Couldn't complete this private conversation. Please retry.",
-                        settings=runtime.settings,
-                    ),
+                    text=_error_message(exc, settings=runtime.settings, team_id=team_id),
                     **thread_kwargs,
                 )

@@ -13,12 +13,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import anthropic
 import httpx
 import pytest
 import yarl
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.agent_setup import submit as submit_module
 from daimon.adapters.slack.agent_setup.state import (
     PanelMetadata,
     decode_panel_metadata,
@@ -451,7 +453,7 @@ async def test_run_new_agent_when_name_collides_restores_form_with_inputs_and_ba
     assert len(restored) == 1, "a refused create re-renders the form and nothing else"
     assert restored[0]["view_id"] == "V2", "the form comes back where it was submitted from"
     rendered = json.dumps(restored[0]["view"])
-    assert "already has an agent named" in rendered, "the banner says why it failed"
+    assert "already has an agent with that name" in rendered, "the banner says why it failed"
     assert "Explain churn" in rendered, "what was typed comes back with the form"
     restored_meta = decode_panel_metadata(restored[0]["view"]["private_metadata"])
     assert restored_meta is not None and restored_meta.root_view_id == _ROOT_VIEW_ID, (
@@ -535,3 +537,44 @@ async def test_run_new_agent_queues_its_face_once_it_exists(
 
     tenant_id = submit_mod.derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
     assert queued == [(tenant_id, "Atlas Birch")]
+
+
+@pytest.mark.asyncio
+async def test_run_new_agent_when_the_provider_fails_shows_plain_lines_not_its_body(
+    fake_slack_web_client: Any,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider body (URLs, tokens, long JSON) never reaches the form banner."""
+    client_fake: Any = fake_slack_web_client
+    runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
+    leak = "https://api.internal.example/v1?access_token=sk-ant-private-0000 " + "x" * 4000
+    provider_error = anthropic.APIStatusError(
+        message=leak,
+        response=httpx.Response(
+            500, request=httpx.Request("POST", "https://api.anthropic.com"), text=leak
+        ),
+        body={"error": {"message": leak}},
+    )
+    monkeypatch.setattr(submit_module, "create_blank_agent", AsyncMock(side_effect=provider_error))
+
+    await run_new_agent_submission(
+        runtime,
+        client_fake.client,
+        view_id="V1",
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        meta=_panel_meta(),
+        name="provider-fails",
+        purpose="Explain churn",
+        model="claude-sonnet-4-6",
+    )
+
+    [restored] = _views(client_fake, "views.update")
+    rendered = json.dumps(restored["view"])
+    assert "Daimon couldn't reach its AI service." in rendered
+    assert "Try again in a minute." in rendered
+    assert "Ref " in rendered, "the banner carries a short ref for the logs"
+    for private in ("sk-ant", "access_token", "api.internal.example", "xxxx"):
+        assert private not in rendered, private

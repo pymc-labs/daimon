@@ -1,13 +1,15 @@
 """Plain error rendering for Discord adapter responses.
 
-Maps known failures to plain copy. Exception bodies and trace identifiers
-stay in the logs; they are never interpolated into a chat response.
+Maps known failures to plain copy. Exception bodies stay in the logs; they
+are never interpolated into a chat response. A failure shows a short `Ref`,
+the last six characters of the request id, and the full id is logged with it.
 """
 
 from __future__ import annotations
 
 import anthropic
 import structlog
+from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_admins import InvalidChannelAdminIds
 from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
@@ -15,8 +17,6 @@ from daimon.core.continuity.messages import render_responder_changed_without_han
 from daimon.core.cron import InvalidScheduleError
 from daimon.core.errors import (
     AgentNameCollision,
-    SpecError,
-    StoreError,
     TurnError,
     UserFacingError,
 )
@@ -24,10 +24,11 @@ from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
-from sqlalchemy.exc import SQLAlchemyError
 from ulid import ULID
 
 import discord
+
+log = structlog.get_logger(__name__)
 
 
 def generate_request_id() -> str:
@@ -44,60 +45,48 @@ def bound_request_id() -> str:
     return rid if isinstance(rid, str) and rid else generate_request_id()
 
 
-def render_error(
-    exc: Exception,
-    *,
-    request_id: str,
-    new_responder: str | None = None,
-    owner: str | None = None,
-    channel: str | None = None,
-    offer_button: bool = False,
-) -> str:
-    """Map known exceptions to plain sentences without exposing their bodies.
+# "Daimon can't answer here": the same words on every platform; only the
+# command name differs (Teams says `setup`).
+NOT_SET_UP_NOTICE = (
+    "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
+)
+SETUP_OUT_OF_DATE_NOTICE = (
+    "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+)
+USAGE_LIMIT_LINES = (
+    "Daimon has reached its usage limit.",
+    "Ask the team running it to check the limit.",
+)
 
-    `new_responder`/`owner`/`channel` are the contextual facts a
-    `SessionAgentMismatch` render needs (who answers now, whose work this
-    conversation belongs to, where). Resolving them (an async agent-name
-    lookup) is the caller's job -- this function stays synchronous -- so
-    every other caller omits them and gets a generic fallback phrasing.
-    `offer_button` says the notice carries the Hand over button.
+_AI_BUSY = ("Daimon's AI service is busy.", "Try again in a minute.")
+_AI_UNREACHABLE = ("Daimon couldn't reach its AI service.", "Try again in a minute.")
+_AI_REFUSED = ("Daimon's AI service couldn't accept the request.", "Ask an admin to check it.")
+_PLATFORM_REFUSED = ("Discord didn't accept that.", "Try again.")
+_OUR_SIDE = (
+    "Something went wrong on our side.",
+    "Try again. If it keeps happening, tell an admin.",
+)
+
+
+def short_ref(request_id: str) -> str:
+    """The last six characters of a request id: the `Ref` a person can quote."""
+    return request_id[-6:].upper()
+
+
+def _guidance(exc: BaseException) -> str | None:
+    """Fixed, reviewed copy for our own errors, or None for every other failure.
+
+    `UserFacingError` is the one class whose text is shown: it is raised only
+    with copy written for people. Every other branch is a fixed sentence.
     """
-    # Keep this argument for existing callers that bind the same id in logs.
-    # Exception text can contain provider JSON, credentials and internal ids.
-    del request_id
-    if isinstance(exc, SessionAgentMismatch):
-        return render_responder_changed_without_handoff(
-            new_responder=new_responder or "the current responder",
-            owner=owner or "the previous agent",
-            channel=channel or "this channel",
-            offer_button=offer_button,
-        )
     if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
-        return render_error(exc.cause, request_id="")
-    if isinstance(exc, anthropic.APIStatusError):
-        if exc.status_code in {503, 529}:
-            return "Claude is overloaded right now. Try again in a minute."
-        if exc.status_code == 429:
-            return "Too many requests right now. Try again in a minute."
-        if exc.status_code in {401, 403}:
-            return "Daimon couldn't connect to Claude. Ask an admin to check the connection."
-        if exc.status_code == 400:
-            return "Claude couldn't accept this request. Try sending it again."
-        return "Claude is unavailable right now. Try again in a minute."
-    if isinstance(exc, anthropic.APIConnectionError):
-        return "Daimon couldn't reach Claude. Try again in a minute."
-    if isinstance(exc, anthropic.APIError):
-        return "Daimon couldn't get a reply from Claude. Try again in a minute."
+        return _guidance(exc.cause)
     if isinstance(exc, discord.HTTPException):
         if exc.code == 160004:
             return "A conversation already exists for this message. Continue in its thread."
         if exc.status == 403:
             return "Daimon doesn't have permission to post here. Ask a server admin for help."
-        return "Daimon couldn't update a message in Discord. Try again in a minute."
-    if isinstance(exc, (SQLAlchemyError, StoreError)):
-        return "Daimon couldn't load or save this change. Try again in a minute."
-    if isinstance(exc, SpecError):
-        return "Daimon couldn't read this setup. Ask an admin to check it."
+        return None
     if isinstance(exc, AgentNameCollision):
         return "This workspace already has an agent with that name. Pick a different name."
     if isinstance(exc, UserFacingError):
@@ -123,6 +112,73 @@ def render_error(
         return "That schedule isn't valid. Check its cron expression and timezone, then try again."
     if isinstance(exc, InvalidChannelAdminIds):
         return "That admin selection isn't valid. Check the selected people and try again."
-    if isinstance(exc, ValueError):
-        return "Daimon couldn't use that input. Check it and try again."
-    return "Something went wrong while handling your request. Try again in a minute."
+    return None
+
+
+def _cause_lines(exc: BaseException) -> tuple[str, str]:
+    """What happened and what to do, by cause. Never the exception's text."""
+    if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
+        return _cause_lines(exc.cause)
+    if spend_limit_error(exc) is not None:
+        return USAGE_LIMIT_LINES
+    if isinstance(exc, anthropic.APIStatusError):
+        if exc.status_code in {429, 529}:
+            return _AI_BUSY
+        if 400 <= exc.status_code < 500:
+            return _AI_REFUSED
+        return _AI_UNREACHABLE
+    if isinstance(exc, anthropic.APIError):
+        # Connection failures, timeouts and errors with no status.
+        return _AI_UNREACHABLE
+    if isinstance(exc, discord.HTTPException):
+        return _PLATFORM_REFUSED
+    return _OUR_SIDE
+
+
+def error_lines(exc: BaseException) -> tuple[str, ...]:
+    """The plain lines for `exc` without the `Ref` line, for surfaces that draw their own."""
+    guidance = _guidance(exc)
+    return (guidance,) if guidance is not None else _cause_lines(exc)
+
+
+def render_error(
+    exc: Exception,
+    *,
+    request_id: str,
+    new_responder: str | None = None,
+    owner: str | None = None,
+    channel: str | None = None,
+    offer_button: bool = False,
+) -> str:
+    """Map known exceptions to plain sentences without exposing their bodies.
+
+    A failure reads as two lines, what happened and what to do, then a small
+    `Ref` line: the last six characters of `request_id`. The full id and the
+    exception are logged here, so support can find the failure from the ref.
+    Fixed guidance for our own errors keeps its one line, and the ref.
+
+    `new_responder`/`owner`/`channel` are the contextual facts a
+    `SessionAgentMismatch` render needs (who answers now, whose work this
+    conversation belongs to, where). Resolving them (an async agent-name
+    lookup) is the caller's job -- this function stays synchronous -- so
+    every other caller omits them and gets a generic fallback phrasing.
+    `offer_button` says the notice carries the Hand over button.
+    """
+    if isinstance(exc, SessionAgentMismatch):
+        return render_responder_changed_without_handoff(
+            new_responder=new_responder or "the current responder",
+            owner=owner or "the previous agent",
+            channel=channel or "this channel",
+            offer_button=offer_button,
+        )
+    lines = list(error_lines(exc))
+    if request_id:
+        log.warning(
+            "error.rendered",
+            rid=request_id,
+            ref=short_ref(request_id),
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
+        lines.append(f"-# Ref {short_ref(request_id)}")
+    return "\n\n".join(lines)

@@ -270,8 +270,11 @@ Discord, Slack and Teams channels; a Teams 1:1 chat has none.
   their last turn match a granted role, a Slack user group or Teams team
   only if a live lookup still lists them), or the server admins when the
   channel has none, at most ten people, on Discord, Slack and Teams
-  (`daimon.core.channel_budget_notice`). A monthly budget's window is the
-  month; any other budget's is the budget itself. Setting or raising the
+  (`daimon.core.channel_budget_notice`). It reads "#team-020 has used its
+  $5.00 monthly budget." then "Raise the budget to resume now, or wait until
+  next month."; a budget that never resets drops "monthly" and the wait. A
+  monthly budget's window is the month; any other budget's is the budget
+  itself. Setting or raising the
   budget re-arms it (`channel_budgets.exhausted_notice_key`), and so does a
   notice no admin received, so a later refusal tries again. It is sent in
   the background, follows the tenant's DM policy, never changes or delays

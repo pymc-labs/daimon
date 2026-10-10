@@ -127,7 +127,7 @@ async def test_delivery_uploads_via_three_request_flow_without_content_type(
 async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
     fake_slack_web_client: Any,
 ) -> None:
-    """missing_scope aborts the sweep: one actionable notice naming files:write,
+    """missing_scope aborts the sweep: one notice asking to allow file uploads,
     no deletion, and the dedup key lands in notice_keys."""
     mock = fake_slack_web_client.mock
     mock.post(_GET_URL, payload={"ok": False, "error": "missing_scope"})
@@ -181,8 +181,10 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
 
     notices = _post_message_calls(mock)
     assert len(notices) == 1, "exactly one in-thread notice must be posted"
-    assert "files:write" in str(notices[0].kwargs), "the notice must name the missing scope"
-    assert "reinstall" in str(notices[0].kwargs), "the notice must tell the admin to reinstall"
+    assert notices[0].kwargs["json"]["text"] == (
+        "I couldn't attach the file.\n\n"
+        "Ask a workspace admin to allow file uploads and reinstall Daimon."
+    ), "plain words, a blank line between the two lines"
     assert deletes == [], "an aborted sweep must delete nothing"
     assert "notice:T_SCOPE:C1:1.2:missing_scope" in notice_keys, (
         "the dedup key must be recorded after the notice posts"
@@ -246,11 +248,10 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
 
     notices = _post_message_calls(mock)
     assert len(notices) == 1, "exactly one in-thread notice must be posted"
-    notice_text = str(notices[0].kwargs)
-    assert "file-storage limit" in notice_text, (
-        "the storage notice must be about the workspace being out of file storage"
-    )
-    assert "scope" not in notice_text, "the storage notice must not talk about scopes"
+    assert notices[0].kwargs["json"]["text"] == (
+        "I couldn't attach the file. This Slack workspace is out of file space.\n\n"
+        "Ask a workspace admin to free some up."
+    ), "the storage notice is about file space, not scopes"
     assert deletes == [], "an aborted sweep must delete nothing"
     assert "notice:T_STORE:C1:1.2:storage_limit_reached" in notice_keys, (
         "the dedup key must be recorded after the notice posts"

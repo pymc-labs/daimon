@@ -35,7 +35,7 @@ from daimon.adapters.discord.embed import (
     update,
     update_activity,
 )
-from daimon.adapters.discord.errors import bound_request_id, render_error
+from daimon.adapters.discord.errors import USAGE_LIMIT_LINES, bound_request_id, error_lines
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
@@ -860,7 +860,8 @@ class DiscordTurnLifecycle:
             return
         self._apply_usage(state)
         label = "Something went wrong"
-        body = render_error(err, request_id="")
+        # The card draws the `**Next:**` line as its description.
+        body = "\n\n**Next:** ".join(error_lines(err))
         reason = request_id = None
         # The notice is words on top of the red card, never a reason not to
         # draw it: if building it fails, the card keeps the plain fallback copy.
@@ -875,25 +876,31 @@ class DiscordTurnLifecycle:
                 support_hint="If it keeps happening, ask an admin for help.",
             )
             if notice is not None:
-                if (
-                    reason is TerminationReason.UPSTREAM
-                    and not is_stuck_session(reason, err)
-                    and spend_limit_error(err) is None
-                ):
+                if spend_limit_error(err) is not None:
+                    # The approved two lines, with no tenant or limit detail:
+                    # those go to the ops alert and the log above.
+                    cause, next_step = USAGE_LIMIT_LINES
                     notice = dataclasses.replace(
-                        notice,
-                        cause=render_error(err, request_id=request_id),
-                        survived="Files that were already created may still arrive.",
-                        next_step="Wait a minute, then send your message again.",
+                        notice, cause=cause, survived="", next_step=next_step
                     )
-                guidance_error = err.cause if isinstance(err, TurnError) else err
-                if isinstance(guidance_error, UserFacingError):
-                    notice = dataclasses.replace(
-                        notice,
-                        cause="This turn couldn't continue.",
-                        next_step=render_error(guidance_error, request_id=request_id),
-                    )
-                label, body = notice.headline, format_termination_notice(notice)
+                    label, body = notice.headline, format_termination_notice(notice)
+                else:
+                    if reason is TerminationReason.UPSTREAM and not is_stuck_session(reason, err):
+                        lines = error_lines(err)
+                        notice = dataclasses.replace(
+                            notice,
+                            cause=lines[0],
+                            survived="Files that were already created may still arrive.",
+                            next_step=lines[1] if len(lines) > 1 else "Send your message again.",
+                        )
+                    guidance_error = err.cause if isinstance(err, TurnError) else err
+                    if isinstance(guidance_error, UserFacingError):
+                        notice = dataclasses.replace(
+                            notice,
+                            cause="This turn couldn't continue.",
+                            next_step=" ".join(error_lines(guidance_error)),
+                        )
+                    label, body = notice.headline, format_termination_notice(notice)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)
         self._state = update(self._state, EmbedEvent(kind="error", label=label))

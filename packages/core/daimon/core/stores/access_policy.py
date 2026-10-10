@@ -16,7 +16,7 @@ from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
@@ -24,7 +24,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-class AccessPolicyUnreadable(DaimonError):
+class AccessPolicyUnreadable(UserFacingError):
     """The stored policy does not parse; callers must refuse, never assume open."""
 
     def __init__(self, *, tenant_id: uuid.UUID) -> None:

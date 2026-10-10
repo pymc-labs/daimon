@@ -50,13 +50,14 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
 )
 from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
+from daimon.adapters.slack.errors import generate_request_id, render_error_text
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_identity import identity_enabled_for, queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
@@ -280,7 +281,7 @@ async def run_new_agent_submission(
                 public_url=public_mcp_url(runtime),
             )
             if outcome.anthropic_id is None:
-                raise DaimonError(
+                raise UserFacingError(
                     "Agent creation did not return an identity. Reopen setup and retry."
                 )
         except (DaimonError, anthropic.APIError, SQLAlchemyError) as exc:
@@ -294,7 +295,8 @@ async def run_new_agent_submission(
                     initial_name=name,
                     initial_purpose=purpose,
                     initial_model=model,
-                    error=str(exc),
+                    # Plain lines and a Ref; the form escapes them itself.
+                    error=render_error_text(exc, request_id=generate_request_id()),
                 ),
             )
             return

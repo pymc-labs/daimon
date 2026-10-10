@@ -244,6 +244,7 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
 
     assert render_error(caught.value, request_id="private-rid") == (
         "This workspace already has an agent with that name. Pick a different name."
+        "\n\n-# Ref TE-RID"
     )
 
 
@@ -294,6 +295,7 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
 
     assert render_error(caught.value, request_id="private-rid") == (
         "This workspace already has an agent with that name. Pick a different name."
+        "\n\n-# Ref TE-RID"
     )
     assert reconcile_calls == [], (
         "create must raise before reconcile when another owner holds the name"

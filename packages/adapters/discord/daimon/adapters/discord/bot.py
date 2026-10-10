@@ -28,7 +28,12 @@ from daimon.adapters.discord.context import (
     build_delta_xml,
 )
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
-from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.errors import (
+    NOT_SET_UP_NOTICE,
+    SETUP_OUT_OF_DATE_NOTICE,
+    generate_request_id,
+    render_error,
+)
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
     HintCooldown,
@@ -310,7 +315,7 @@ def _responder_handle(settings: Settings) -> str:
 
 
 def _setting_up_message(bot_display_name: str) -> str:
-    """Distinct from the MAResolverMissError "no longer exists" message so a
+    """Distinct from the MAResolverMissError "out of date" message so a
     still-provisioning state is never confused with a genuine misconfiguration."""
     return f"{bot_display_name.capitalize()} is setting up this server — try again in a moment."
 
@@ -3116,20 +3121,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
-            hints: list[str] = []
-            if "agent" in err.missing:
-                hints.append(
-                    "An admin can tell Daimon: make an agent answer in this channel or the "
-                    "whole server. Run `/agent-setup` to see who answers where."
-                )
-            if "environment" in err.missing:
-                hints.append(
-                    "An admin of this server or channel can pick an environment in "
-                    "`/agent-setup` → Who answers where."
-                )
-            await target.send(
-                f"No {' or '.join(err.missing)} configured for this channel. " + " ".join(hints)
-            )
+            await target.send(NOT_SET_UP_NOTICE)
             return
         except MAResolverMissError as err:
             log.warning(
@@ -3141,10 +3133,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return
             target = thread or message.channel
-            await target.send(
-                "The configured agent or environment no longer exists. An admin of this "
-                "server or channel can pick another in `/agent-setup`."
-            )
+            await target.send(SETUP_OUT_OF_DATE_NOTICE)
             return
         except AdmissionDenied as err:
             if unprompted:

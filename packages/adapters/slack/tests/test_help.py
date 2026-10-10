@@ -137,8 +137,8 @@ async def test_handle_help_command_drops_silently_when_no_token(
 
 
 async def test_handle_help_command_reports_failure_ephemerally() -> None:
-    """When the help post fails, the invoker gets an error notice with a rid
-    instead of silence."""
+    """When the help post fails, the invoker gets an error notice with a short
+    ref instead of silence."""
     from daimon.adapters.slack.help import handle_help_command
     from slack_sdk.errors import SlackApiError
     from slack_sdk.web.async_client import AsyncWebClient
@@ -170,7 +170,12 @@ async def test_handle_help_command_reports_failure_ephemerally() -> None:
     notice = client.chat_postEphemeral.await_args_list[1].kwargs
     assert notice["channel"] == "C_HELP_TEST"
     assert notice["user"] == "U_HELP_TEST"
-    assert "rid:" in notice["text"], "the notice must carry a rid for log lookup"
+    assert notice["text"].startswith("Slack didn't accept that.\n\nTry again.\n\n_Ref "), (
+        "the notice carries the plain words and a short ref for log lookup"
+    )
+    assert "down" not in notice["text"], "exception text stays in the logs"
+    assert notice["blocks"][-1]["type"] == "context", "the ref is drawn small"
+    assert notice["blocks"][-1]["elements"][0]["text"].startswith("Ref ")
 
 
 def test_help_uses_the_configured_bot_name() -> None:

@@ -23,7 +23,7 @@ from typing import Final
 
 import structlog
 from daimon.core.channel_admins import GroupMembers, GroupMembersFor, channel_admin_user_ids
-from daimon.core.channel_budget import describe_budget, get_channel_budget_status
+from daimon.core.channel_budget import get_channel_budget_status
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.stores.accounts import list_platform_user_ids
 from daimon.core.stores.channel_budgets import claim_exhausted_notice, release_exhausted_notice
@@ -45,7 +45,8 @@ class BudgetNotice:
     platform: str
     channel_id: str
     recipient_ids: tuple[str, ...]
-    budget_line: str
+    limit_line: str
+    """The budget's limit in dollars, e.g. `$5.00`."""
     monthly: bool
     budget_id: uuid.UUID
     window_key: str
@@ -55,14 +56,15 @@ class BudgetNotice:
         return tuple(r for r in self.recipient_ids if policy.allows(r))
 
     def text(self, channel_ref: str) -> str:
-        until = (
-            "the month ends or a server admin raises it"
-            if self.monthly
-            else "a server admin raises it"
-        )
+        """Two lines with a blank line between; only a monthly budget offers the wait."""
+        if self.monthly:
+            return (
+                f"{channel_ref} has used its {self.limit_line} monthly budget.\n\n"
+                "Raise the budget to resume now, or wait until next month."
+            )
         return (
-            f"{channel_ref}'s budget is used up: {self.budget_line}. "
-            f"New turns there are refused until {until}."
+            f"{channel_ref} has used its {self.limit_line} budget.\n\n"
+            "Raise the budget to resume now."
         )
 
 
@@ -108,7 +110,7 @@ async def claim_budget_notice(
         platform=platform,
         channel_id=channel_id,
         recipient_ids=(),
-        budget_line=describe_budget(status),
+        limit_line=f"${budget.limit_usd:,.2f}",
         monthly=budget.window == "monthly",
         budget_id=budget.id,
         window_key=key,

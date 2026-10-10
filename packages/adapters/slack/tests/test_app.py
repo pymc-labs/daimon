@@ -40,6 +40,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -924,7 +925,7 @@ async def test_handle_app_mention_failure_posts_error_into_thread(
     fake_slack_web_client: Any,
 ) -> None:
     """When the turn body raises at the listener boundary, the thread gets a
-    rendered error with a rid instead of nothing."""
+    plain error with a short ref instead of nothing."""
     team_id = "T_APP_MENTION_ERR"
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
@@ -974,8 +975,12 @@ async def test_handle_app_mention_failure_posts_error_into_thread(
     body = posts[0].kwargs["json"]
     assert body["channel"] == "C_TEST"
     assert body["thread_ts"] == "1000000000.000001", "the error must land in the mention's thread"
-    assert "agent config is broken" in body["text"]
-    assert "rid:" in body["text"]
+    assert "agent config is broken" not in body["text"], "exception text stays in the logs"
+    assert body["text"].startswith(
+        "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
+    )
+    assert body["blocks"][-1]["type"] == "context", "the ref is drawn small"
+    assert body["blocks"][-1]["elements"][0]["text"].startswith("Ref ")
 
 
 async def test_handle_app_mention_failure_uses_event_ts_as_thread_for_root_mention(
@@ -4370,10 +4375,10 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         "breach must leave exactly two posts -- the card, then the failure notice"
     )
     first_body = posts[0].kwargs["json"]
-    assert "rid:" not in first_body.get("text", ""), (
+    assert "_Ref " not in first_body.get("text", ""), (
         "the FIRST post must be the pre-bind status card, not the failure notice"
     )
-    failure_posts = [p for p in posts if "rid:" in p.kwargs["json"].get("text", "")]
+    failure_posts = [p for p in posts if "_Ref " in p.kwargs["json"].get("text", "")]
     assert len(failure_posts) == 1, "exactly one post must be the boundary's failure notice"
     body = failure_posts[0].kwargs["json"]
     assert body["channel"] == channel
@@ -7128,3 +7133,44 @@ async def test_orchestrate_over_the_tenant_cap_queues_behind_the_ordinary_card(
             mock_run_turn.assert_awaited_once()
     assert app.turn_queue.in_flight() == 0
     assert app.turn_queue.depth() == 0
+
+
+async def test_orchestrate_with_a_stale_setup_posts_the_out_of_date_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A setup whose agent is gone gets the two plain lines, a blank line between."""
+    team_id = "T_ORCH_STALE"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(
+        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    )
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": "9000000077.000001",
+        "event_ts": "9000000077.000001",
+        "channel": "C_TEST",
+        "user": "U_STALE",
+        "text": "<@U_BOT> hello",
+    }
+    with patch(
+        "daimon.core.turn.admission.resolve_agent",
+        new_callable=AsyncMock,
+        side_effect=MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag="gone"),
+    ):
+        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
+            event,
+            team_id=team_id,
+            channel="C_TEST",
+            event_ts="9000000077.000001",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+        )
+
+    posts = fake_slack_web_client.mock.requests[
+        ("POST", URL("https://slack.com/api/chat.postMessage"))
+    ]
+    assert posts[-1].kwargs["json"]["text"] == (
+        "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+    )

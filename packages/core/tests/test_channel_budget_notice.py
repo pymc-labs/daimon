@@ -97,8 +97,8 @@ async def test_the_notice_goes_to_the_channel_admins_once_per_window(
     )
     assert notice.workspace_id == tenant.external_id
     assert notice.text("<#chan-1>") == (
-        "<#chan-1>'s budget is used up: $1.00 of $0.00 (monthly). "
-        "New turns there are refused until the month ends or a server admin raises it."
+        "<#chan-1> has used its $0.00 monthly budget.\n\n"
+        "Raise the budget to resume now, or wait until next month."
     )
     assert await _claim(db_session, tenant) is None, "one notice per window"
     assert await _claim(db_session, tenant, now=datetime(2026, 8, 1, tzinfo=UTC)) is not None, (
@@ -218,7 +218,7 @@ def test_the_dm_policy_filters_recipients() -> None:
         platform="discord",
         channel_id="c",
         recipient_ids=("a", "b"),
-        budget_line="",
+        limit_line="$5.00",
         monthly=False,
         budget_id=uuid.uuid4(),
         window_key="window",
@@ -226,7 +226,7 @@ def test_the_dm_policy_filters_recipients() -> None:
     allow_b = DirectMessagePolicy(mode="allowlist", recipient_ids=["b"])
     assert notice.allowed_recipients(allow_b) == ("b",)
     assert notice.allowed_recipients(DirectMessagePolicy(mode="disabled")) == ()
-    assert "until a server admin raises it." in notice.text("c")
+    assert notice.text("c") == "c has used its $5.00 budget.\n\nRaise the budget to resume now."
 
 
 async def _slack_channel_with_group_admin(session: AsyncSession) -> TenantRow:

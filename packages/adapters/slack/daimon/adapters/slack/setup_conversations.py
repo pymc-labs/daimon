@@ -10,7 +10,7 @@ from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.errors import DaimonError
+from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.setup_conversations import (
     SETUP_ACTION_LABEL,
@@ -72,7 +72,9 @@ async def create_setup_conversation(
 ) -> str:
     """Validate immutable identities, persist a public root, then announce readiness."""
     if not channel_id.startswith(("C", "G")):
-        raise DaimonError("Open /agent-setup in a workspace channel to start a setup conversation.")
+        raise UserFacingError(
+            "Open /agent-setup in a workspace channel to start a setup conversation."
+        )
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     responder, target = await resolve_setup_agents(
         runtime.anthropic, tenant_id=tenant_id, target_ma_agent_id=target_ma_agent_id
@@ -80,7 +82,7 @@ async def create_setup_conversation(
     auth = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
     bot_user_id = str(auth.get("user_id") or "")
     if not bot_user_id:
-        raise DaimonError("Slack did not identify the bot. Retry opening setup.")
+        raise UserFacingError("Slack did not identify the bot. Retry opening setup.")
     target_name = str(target.metadata.get(MA_METADATA_KEY_NAME) or target.name) if target else None
     async with runtime.sessionmaker.begin() as session:
         principal = await get_or_create_platform_principal(
@@ -97,7 +99,7 @@ async def create_setup_conversation(
     )
     thread_id = str(posted.get("ts") or "")
     if not thread_id:
-        raise DaimonError("Slack did not return the setup message identity. Please retry.")
+        raise UserFacingError("Slack did not return the setup message identity. Please retry.")
     opener_ts: str | None = None
     try:
         async with runtime.sessionmaker.begin() as session:
@@ -120,13 +122,13 @@ async def create_setup_conversation(
         )
         opener_ts = str(reply.get("ts") or "")
         if not opener_ts:
-            raise DaimonError("Slack did not return the setup reply identity. Please retry.")
+            raise UserFacingError("Slack did not return the setup reply identity. Please retry.")
         permalink = await client.chat_getPermalink(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
             channel=channel_id, message_ts=opener_ts
         )
         link = str(permalink.get("permalink") or "")
         if not link:
-            raise DaimonError(
+            raise UserFacingError(
                 "Slack did not return a link to the setup conversation. Please retry."
             )
         heading = setup_thread_name(escape_mrkdwn(target_name) if target_name else None)

@@ -1,9 +1,10 @@
-"""Structured error rendering for Slack adapter responses.
+"""Plain error rendering for Slack adapter responses.
 
-Maps known exception types to user-facing mrkdwn with an emoji prefix, a bold
-label, and a ULID request ID suffix for cross-referencing with logs. Slack
-counterpart of ``discord/errors.py``; adapters cannot share the module
-because they must not import each other.
+Maps known failures to two plain lines, what happened and what to do, and a
+small `Ref`: the last six characters of the request id, logged in full with
+the exception. Exception text never reaches the chat. Slack counterpart of
+``discord/errors.py``; adapters cannot share the module because they must
+not import each other.
 """
 
 from __future__ import annotations
@@ -15,12 +16,21 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.errors import DaimonError, SpecError, StoreError
+from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_admins import InvalidChannelAdminIds
+from daimon.core.channel_budget import ChannelBudgetError
+from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
+from daimon.core.cron import InvalidScheduleError
+from daimon.core.errors import AgentNameCollision, TurnError, UserFacingError
+from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.stores.direct_messages import DirectMessageBusy
+from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
-from sqlalchemy.exc import SQLAlchemyError
 from ulid import ULID
+
+log = structlog.get_logger(__name__)
 
 
 def generate_request_id() -> str:
@@ -38,51 +48,174 @@ def bound_request_id() -> str:
     return rid if isinstance(rid, str) and rid else generate_request_id()
 
 
-def render_error(exc: Exception, *, request_id: str) -> str:
-    """Map known exceptions to mrkdwn with emoji, label, and rid.
+# "Daimon can't answer here": the same words on every platform; only the
+# command name differs (Teams says `setup`).
+NOT_SET_UP_NOTICE = (
+    "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
+)
+SETUP_OUT_OF_DATE_NOTICE = (
+    "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+)
 
-    Exception text is mrkdwn-escaped so a message that quotes user input can
-    never turn into a live mention or link.
+_USAGE_LIMIT = (
+    "Daimon has reached its usage limit.",
+    "Ask the team running it to check the limit.",
+)
+_AI_BUSY = ("Daimon's AI service is busy.", "Try again in a minute.")
+_AI_UNREACHABLE = ("Daimon couldn't reach its AI service.", "Try again in a minute.")
+_AI_REFUSED = ("Daimon's AI service couldn't accept the request.", "Ask an admin to check it.")
+_NO_PERMISSION = (
+    "Daimon doesn't have permission to do that in Slack.",
+    "Ask a workspace admin to check Daimon's permissions and reinstall it.",
+)
+_CANT_CONNECT = (
+    "Daimon can't connect to this Slack workspace.",
+    "Tell the team running Daimon.",
+)
+_PLATFORM_REFUSED = ("Slack didn't accept that.", "Try again.")
+_OUR_SIDE = (
+    "Something went wrong on our side.",
+    "Try again. If it keeps happening, tell an admin.",
+)
+_SESSION_AGENT_MISMATCH = (
+    "This conversation's session belongs to another responder. "
+    "Your existing work is preserved. Continuing with this responder currently "
+    "requires a new conversation."
+)
+
+
+def short_ref(request_id: str) -> str:
+    """The last six characters of a request id: the `Ref` a person can quote."""
+    return request_id[-6:].upper()
+
+
+def _guidance(exc: BaseException) -> str | None:
+    """Fixed, reviewed copy for our own errors, or None for every other failure.
+
+    `UserFacingError` is the one class whose text is shown: it is raised only
+    with copy written for people. Every other branch is a fixed sentence.
     """
-    rid = f"`rid: {request_id}`"
-    if isinstance(exc, SessionAgentMismatch):
+    if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
+        return _guidance(exc.cause)
+    if isinstance(exc, AgentNameCollision):
+        return "This workspace already has an agent with that name. Pick a different name."
+    if isinstance(exc, UserFacingError):
+        return str(exc)
+    if isinstance(exc, DirectMessageBusy):
         return (
-            "This conversation's session belongs to another responder. "
-            "Your existing work is preserved. Continuing with this responder currently "
-            "requires a new conversation."
+            "A reply is still running. Wait for it to finish before starting another conversation."
         )
-    if isinstance(exc, SpecError):
-        return f"⚠️ *Spec validation failed*: {escape_mrkdwn(str(exc))}\n{rid}"
-    if isinstance(exc, StoreError):
-        return f"⚠️ *Store error*: {escape_mrkdwn(str(exc))}\n{rid}"
-    if isinstance(exc, DaimonError):
-        return f"⚠️ *Error*: {escape_mrkdwn(str(exc))}\n{rid}"
+    if isinstance(exc, HandoffRefusedInSetupThread):
+        return (
+            "This setup conversation can't change agents. Start a new thread to use another agent."
+        )
+    if isinstance(exc, ThreadHandoffRefused):
+        return (
+            "This conversation can't change agents. "
+            "Ask an admin to check the agent and channel settings."
+        )
+    if isinstance(exc, ChannelBudgetError):
+        return "That spending budget isn't valid. Check its amount and time window, then try again."
+    if isinstance(exc, NotebookRateLimitError):
+        return "The notebook publishing limit has been reached. Try again later."
+    if isinstance(exc, InvalidScheduleError):
+        return "That schedule isn't valid. Check its cron expression and timezone, then try again."
+    if isinstance(exc, InvalidChannelAdminIds):
+        return "That admin selection isn't valid. Check the selected people and try again."
+    return None
+
+
+def _cause_lines(exc: BaseException) -> tuple[str, str]:
+    """What happened and what to do, by cause. Never the exception's text."""
+    if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
+        return _cause_lines(exc.cause)
+    if spend_limit_error(exc) is not None:
+        return _USAGE_LIMIT
     if isinstance(exc, anthropic.APIStatusError):
-        return f"❌ *API Error ({exc.status_code})*: {escape_mrkdwn(exc.message)}\n{rid}"
-    if isinstance(exc, anthropic.APIConnectionError):
-        return (
-            "\U0001f50c *Connection Error*: "
-            "Could not connect to Anthropic API. Please try again.\n"
-            f"{rid}"
-        )
+        if exc.status_code in {429, 529}:
+            return _AI_BUSY
+        if 400 <= exc.status_code < 500:
+            return _AI_REFUSED
+        return _AI_UNREACHABLE
     if isinstance(exc, anthropic.APIError):
-        return f"❌ *API Error*: {escape_mrkdwn(exc.message)}\n{rid}"
+        # Connection failures, timeouts and errors with no status.
+        return _AI_UNREACHABLE
     if isinstance(exc, SlackApiError):
         response = cast(Any, exc.response)  # pyright: ignore[reportUnknownMemberType]  # SlackApiError.response is untyped
-        code = str(response.get("error") or "unknown_error")
-        return f"❌ *Slack Error*: `{escape_mrkdwn(code)}`. Please try again.\n{rid}"
-    if isinstance(exc, SQLAlchemyError):
-        # Never `{exc}` here: DBAPIError stringifies to the failing statement
-        # plus its bound parameters, which would publish both to the channel.
-        # The rid is the handle for the real detail, which stays in the logs.
-        return f"❌ *Database error* ({type(exc).__name__}). Please try again.\n{rid}"
+        if response.get("error") == "missing_scope":
+            return _NO_PERMISSION
+        return _PLATFORM_REFUSED
     if isinstance(exc, InvalidToken):
-        # Fernet failures mean a stored bot token could not be decrypted; the
-        # detail is operator-facing and belongs in the logs, not the channel.
-        return f"❌ *Slack token error*: the workspace token could not be read.\n{rid}"
-    if isinstance(exc, ValueError):
-        return f"⚠️ *Invalid input*: {escape_mrkdwn(str(exc))}\n{rid}"
-    return f"❌ *Unexpected error*: {escape_mrkdwn(str(exc))}\n{rid}"
+        # A stored bot token could not be decrypted: an operator problem.
+        return _CANT_CONNECT
+    return _OUR_SIDE
+
+
+def _rendered(exc: Exception, request_id: str, *, mrkdwn: bool = True) -> tuple[str, str | None]:
+    """The message and its `Ref` line (None without a request id), logging the full id.
+
+    With `mrkdwn` the message is escaped for a mrkdwn field, so `UserFacingError`
+    text can never turn into a live mention or link; without it the message is
+    plain text for a field that escapes on its own.
+    """
+    if isinstance(exc, SessionAgentMismatch):
+        return _SESSION_AGENT_MISMATCH, None  # its own wording, unchanged
+    guidance = _guidance(exc)
+    if guidance is not None:
+        message = escape_mrkdwn(guidance) if mrkdwn else guidance
+    else:
+        message = "\n\n".join(_cause_lines(exc))
+    if not request_id:
+        return message, None
+    ref = short_ref(request_id)
+    log.warning(
+        "error.rendered",
+        rid=request_id,
+        ref=ref,
+        error_type=type(exc).__name__,
+        exc_info=exc,
+    )
+    return message, f"Ref {ref}"
+
+
+def render_error(exc: Exception, *, request_id: str) -> str:
+    """Plain mrkdwn for a failure: what happened, what to do, then `Ref XXXXXX`.
+
+    Lines are separated by a blank line. The ref is the last six characters
+    of `request_id`; the full id and the exception are logged here so support
+    can find the failure from it. No exception text reaches the chat. Where
+    the message can carry blocks, use `render_error_payload` so the ref is
+    drawn small.
+    """
+    message, ref = _rendered(exc, request_id)
+    return message if ref is None else f"{message}\n\n_{ref}_"
+
+
+def _error_blocks(message: str, ref: str | None) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": message}}
+    ]
+    if ref is not None:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": ref}]})
+    return blocks
+
+
+def render_error_text(exc: Exception, *, request_id: str) -> str:
+    """`render_error` as plain text, for a field that escapes its own content.
+
+    Same lines and the same logged ref, without mrkdwn escaping or italics.
+    """
+    message, ref = _rendered(exc, request_id, mrkdwn=False)
+    return message if ref is None else f"{message}\n\n{ref}"
+
+
+def render_error_payload(exc: Exception, *, request_id: str) -> dict[str, Any]:
+    """`text` and `blocks` for a failure message: the ref in a small context block."""
+    message, ref = _rendered(exc, request_id)
+    return {
+        "text": message if ref is None else f"{message}\n\n_{ref}_",
+        "blocks": _error_blocks(message, ref),
+    }
 
 
 def build_error_view(exc: Exception, *, title: str, request_id: str) -> dict[str, Any]:
@@ -95,12 +228,7 @@ def build_error_view(exc: Exception, *, title: str, request_id: str) -> dict[str
         "type": "modal",
         "title": {"type": "plain_text", "text": title},
         "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": render_error(exc, request_id=request_id)},
-            }
-        ],
+        "blocks": render_error_payload(exc, request_id=request_id)["blocks"],
     }
 
 
@@ -132,5 +260,5 @@ async def surface_command_error(
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 user=user_id,
-                text=render_error(exc, request_id=request_id),
+                **render_error_payload(exc, request_id=request_id),
             )

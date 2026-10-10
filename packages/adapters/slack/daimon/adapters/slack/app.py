@@ -111,7 +111,12 @@ from daimon.adapters.slack.direct_messages import (
     handle_dm_command,
     is_direct_message_event,
 )
-from daimon.adapters.slack.errors import generate_request_id, render_error
+from daimon.adapters.slack.errors import (
+    NOT_SET_UP_NOTICE,
+    SETUP_OUT_OF_DATE_NOTICE,
+    generate_request_id,
+    render_error_payload,
+)
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
     FeedbackTextDecision,
@@ -206,7 +211,7 @@ from daimon.core.continuity.messages import (
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -1545,7 +1550,7 @@ class SlackApp:
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,
                         thread_ts=event.get("thread_ts") or event_ts,
-                        text=render_error(exc, request_id=request_id),
+                        **render_error_payload(exc, request_id=request_id),
                     )
 
     async def _bot_user_id(self, team_id: str, client: AsyncWebClient) -> str:
@@ -2058,23 +2063,10 @@ class SlackApp:
                 channel_id=channel,
                 missing=list(err.missing),
             )
-            hints: list[str] = []
-            if "agent" in err.missing:
-                hints.append(
-                    "Ask a workspace admin to tell Daimon which agent should answer here "
-                    "(/agent-setup shows who answers where)."
-                )
-            if "environment" in err.missing:
-                hints.append(
-                    "A workspace admin, or an admin of this channel, can pick an environment "
-                    "in /agent-setup → Who answers where."
-                )
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=(
-                    f"No {' or '.join(err.missing)} configured for this channel. " + " ".join(hints)
-                ),
+                text=NOT_SET_UP_NOTICE,
             )
             return
         except MAResolverMissError as err:
@@ -2087,10 +2079,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=(
-                    "The configured agent or environment no longer exists. A workspace "
-                    "admin, or an admin of this channel, can pick another in /agent-setup."
-                ),
+                text=SETUP_OUT_OF_DATE_NOTICE,
             )
             return
         except AdmissionDenied as err:
@@ -2665,7 +2654,7 @@ class SlackApp:
                         now=datetime.now(UTC),
                     )
                 if recovery_origin is None:
-                    raise DaimonError(
+                    raise UserFacingError(
                         "This turn's setup context expired. Please retry your message."
                     )
                 return (
@@ -3218,7 +3207,9 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise DaimonError("This turn's setup context expired. Please retry your message.")
+                raise UserFacingError(
+                    "This turn's setup context expired. Please retry your message."
+                )
             return (
                 render_turn_origin(
                     recovery_origin,

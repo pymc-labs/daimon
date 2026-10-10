@@ -802,8 +802,11 @@ async def test_slack_missing_im_grants_refuses_before_open_or_policy_write(
             if "chat.postEphemeral" in str(url)
             for call in calls
         ]
-        assert len(replies) == 1 and "reauthorize" in replies[0]
-        assert "im:history" in replies[0] and "im:write" in replies[0]
+        assert len(replies) == 1
+        assert replies[0].startswith(
+            "Daimon can't use DMs in this workspace yet.\n\n"
+            "Ask a workspace admin to finish Daimon's DM setup."
+        ), "the scope names and setup steps go to the log, not the chat"
     async with db_session_factory() as session:
         assert not await dm_enabled(session, tenant_id=tenant.id)
         assert (
@@ -851,7 +854,8 @@ async def test_slack_open_failure_requires_reauthorization_without_creating_rout
             if "chat.postEphemeral" in str(url)
             for call in calls
         ]
-        assert len(replies) == 1 and "reauthorize" in replies[0]
+        assert len(replies) == 1
+        assert replies[0].startswith("Daimon can't use DMs in this workspace yet.")
     async with db_session_factory() as session:
         assert (
             await session.scalar(sql_text("SELECT count(*) FROM direct_message_conversations")) == 0
