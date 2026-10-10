@@ -3026,9 +3026,10 @@
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
-        For 'give this agent access to owner/repo', first confirm in the thread:
-        'Give <Agent> read access to owner/repo?' Use write only if asked.
-        Then pass repo_name and confirmed=true. A connected repo is granted
+        For 'give this agent access to owner/repo', first call with repo_name and
+        confirmed=false. Ask the returned question in the thread. Only after
+        that person answers yes in a later turn, call again with confirmed=true.
+        Use write only if asked. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.

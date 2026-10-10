@@ -51,6 +51,7 @@ from daimon.core.stores.github_connect import (
     revoke_invitation,
     set_invitation_encrypted_token,
 )
+from daimon.core.stores.github_grant_proposals import consume, propose
 from daimon.core.stores.security_audit import append_event
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -60,7 +61,7 @@ from pydantic import BaseModel, ConfigDict
 class ConnectResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "granted", "ask_admin", "delivery_failed", "client_agent"]
+    status: Literal["sent", "proposed", "granted", "ask_admin", "delivery_failed", "client_agent"]
     message: str
 
 
@@ -145,8 +146,6 @@ async def _github_connect_impl(
     required_ability: Literal["read", "write"] = "read",
     confirmed: bool = False,
 ) -> ConnectResult:
-    if repo_name is not None and not confirmed:
-        raise ToolError("First ask in the thread: Give this agent read access to owner/repo?")
     if auth.platform not in ("discord", "slack") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord and Slack.")
     if auth.is_external:
@@ -237,6 +236,42 @@ async def _github_connect_impl(
             requested_repo = repo_name.strip()
             if requested_repo.count("/") != 1 or any(c.isspace() for c in requested_repo):
                 raise ToolError("Name one repo as owner/repo.")
+            question = (
+                f"Give {agent.name} "
+                f"{'read and change' if required_ability == 'write' else 'read'} "
+                f"access to {requested_repo}?"
+            )
+            if not confirmed:
+                await propose(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    account_id=auth.account_id,
+                    platform_user_id=auth.platform_user_id,
+                    platform=auth.platform,
+                    thread_id=origin.thread_id,
+                    agent_id=agent_id,
+                    repo_name=requested_repo,
+                    ability=required_ability,
+                    origin_id=origin.id,
+                )
+                return ConnectResult(status="proposed", message=question)
+            if not await consume(
+                session,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform_user_id=auth.platform_user_id,
+                platform=auth.platform,
+                thread_id=origin.thread_id,
+                agent_id=agent_id,
+                repo_name=requested_repo,
+                ability=required_ability,
+                origin_id=origin.id,
+                origin_created_at=origin.created_at,
+            ):
+                return ConnectResult(
+                    status="proposed",
+                    message=f"Please confirm in a new message: {question}",
+                )
             mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=agent_id)
             can_activate = mode == "app" or not await has_saved_github_state(
                 session, tenant_id=auth.tenant_id, agent_id=agent_id
@@ -419,9 +454,10 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.
-        For 'give this agent access to owner/repo', first confirm in the thread:
-        'Give <Agent> read access to owner/repo?' Use write only if asked.
-        Then pass repo_name and confirmed=true. A connected repo is granted
+        For 'give this agent access to owner/repo', first call with repo_name and
+        confirmed=false. Ask the returned question in the thread. Only after
+        that person answers yes in a later turn, call again with confirmed=true.
+        Use write only if asked. A connected repo is granted
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.

@@ -14,6 +14,7 @@ from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
+from daimon.core.stores.github_grant_proposals import resolve as resolve_github_grant_proposals
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from pydantic import BaseModel, ConfigDict
@@ -198,6 +199,7 @@ async def turn_origin(
             await resolve_pending_skill_adds(
                 session, origin=origin, message_text=message_text, now=now
             )
+            await resolve_github_grant_proposals(session, origin=origin, message_text=message_text)
     origin_context = current_origin_id.set(origin.id)
     try:
         yield origin
