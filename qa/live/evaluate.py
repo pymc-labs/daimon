@@ -96,6 +96,11 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 passed = any(
                     obj(r.get("emoji")).get("name") == assertion.emoji
                     for r in turn.trigger_reactions
+                    + [
+                        r
+                        for sample in turn.trigger_reaction_history
+                        for r in objects(sample.get("reactions"))
+                    ]
                     + [r for m in turn.messages for r in objects(m.get("reactions"))]
                 )
                 reason = f"reaction {assertion.emoji}"
