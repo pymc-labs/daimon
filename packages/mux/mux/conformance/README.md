@@ -364,6 +364,21 @@ independent inclusive-input, output and dated-charge lower bounds. A proven
 overrun enlarges the conservative hold and blocks the provider's next dispatch,
 including a zero-token plan, while actual dollars remain nullable.
 
+An earlier overrun snapshot is admission evidence, not a replacement for the
+newest billable measurement. Adapters call
+`guard.settle_with_overrun(..., actual=latest_actual, overrun_evidence=earlier_overrun)`;
+the required overrun evidence uses the same `ActualSpend` schema and must prove an
+overrun against the pinned token/runtime/cost limits. The adapter still selects
+the newest accepted-root-bound, verified, freshness-checked revision, and rejects
+stale or foreign cleanup responses before settlement. Complete accepted actual
+releases the hold even after a downwards correction. The receipt retains
+`status="overrun"`, `admission_blocked=True`, and separate `overrun_evidence`.
+Unknown final usage retains the largest proven snapshot charge rather than
+adding overlapping snapshots. A rejected stale response cannot replace an
+already accepted verified measurement. Lead reconciliation releases held dollars
+without clearing the admission latch; legacy overrun rows also latch admission.
+This API does not fetch, authorize or verify native provider revisions itself.
+
 Model price entries carry `effective_from`, optional exclusive `effective_until`
 and the official `source`. Rates are pinned into the reservation; later config
 changes cannot retroactively lower them. `short_prompt` selects a price tier per
