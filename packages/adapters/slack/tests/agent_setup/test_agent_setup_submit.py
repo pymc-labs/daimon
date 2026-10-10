@@ -262,17 +262,11 @@ def _views(client_fake: Any, method: str) -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_run_new_agent_when_created_updates_same_view_to_details_and_refreshes_root_page(
+async def test_run_new_agent_when_member_creates_confirms_and_refreshes_root_page(
     fake_slack_web_client: Any,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Creation lands on the new agent's Details, with the list behind it fresh.
-
-    Two updates and no ephemeral: the view the form became shows what was
-    created, and the root view is re-rendered so the new row is there when the
-    person goes back. Creation stays open to every member — the conftest
-    users.info default is a non-admin and nothing here refuses it.
-    """
+    """Creation stays open, while unrouted details stay out of the member roster."""
     client_fake: Any = fake_slack_web_client
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
 
@@ -295,12 +289,13 @@ async def test_run_new_agent_when_created_updates_same_view_to_details_and_refre
     )
     details_meta = decode_panel_metadata(updates[0]["view"]["private_metadata"])
     assert details_meta is not None, "the Details view carries typed panel metadata"
-    assert (details_meta.view, details_meta.agent_name) == ("details", "churn-explorer"), (
+    assert (details_meta.view, details_meta.agent_name) == ("creating", "churn-explorer"), (
         "the created agent is the one shown"
     )
     assert not _ephemeral_texts(client_fake), (
         "the outcome is the view itself; no success ephemeral beside it"
     )
+    assert "churn-explorer" not in json.dumps(updates[1]["view"])
 
 
 @pytest.mark.asyncio

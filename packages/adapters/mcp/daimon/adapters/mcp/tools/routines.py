@@ -24,7 +24,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._rule_view import CallerView, load_caller_view
+from daimon.adapters.mcp.tools._rule_view import CallerView, load_isolation_view
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -498,7 +498,7 @@ async def _create_routine_impl(
         )
 
     origin = await get_verified_origin(runtime, auth, origin_context_id)
-    caller = await load_caller_view(runtime, auth, location_channel_id=origin_channel_id(origin))
+    caller = await load_isolation_view(runtime, auth, location_channel_id=origin_channel_id(origin))
     match = await find_agent_by_daimon_tag(
         runtime.client,
         tenant_id=tenant_id,
@@ -549,7 +549,7 @@ async def _list_routines_impl(
     auth: AuthIdentity,
 ) -> list[RoutineRow]:
     tenant_id = auth.tenant_id
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
     return [row for row in rows if _may_read(auth, row) and _sees_routine(caller, row)]
@@ -567,7 +567,7 @@ async def _get_routine_impl(
     if (
         row is None
         or not _may_read(auth, row)
-        or not _sees_routine(await load_caller_view(runtime, auth), row)
+        or not _sees_routine(await load_isolation_view(runtime, auth), row)
     ):
         raise ToolError("routine not found")
     return row
@@ -594,7 +594,7 @@ async def _update_routine_impl(
     new_destination_channel_id = await _check_destination(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not _sees_routine(caller, row):
@@ -706,7 +706,7 @@ async def _delete_routine_impl(
     routine_id: UUID,
 ) -> DeleteResult:
     tenant_id = auth.tenant_id
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not _sees_routine(caller, row):

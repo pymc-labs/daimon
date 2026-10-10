@@ -19,7 +19,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._rule_view import load_caller_view
+from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.channel_environments import load_hidden_environment_names
 from daimon.core.errors import StoreError
@@ -35,7 +35,7 @@ async def _hide_across_homes(
     """Blank the names the caller's channel keeps from it; an operator sees all."""
     if auth.is_operator:
         return summary
-    caller = await load_caller_view(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
     if not caller.is_active:
         return summary
     async with runtime.session_factory() as session:

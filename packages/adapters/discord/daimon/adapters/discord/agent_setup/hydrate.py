@@ -179,6 +179,9 @@ async def load_roster_state(
                 tenant_id=tenant_id,
                 channel_id=channel_id,
                 is_admin=is_admin,
+                platform="discord",
+                thread_id=thread_id,
+                default=runtime.deployment_default,
             ),
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
@@ -313,6 +316,9 @@ async def panel_viewer(
         tenant_id=_tenant_id(state),
         channel_id=str(state.channel_id) if state.channel_id else None,
         is_admin=state.is_admin,
+        platform="discord",
+        thread_id=str(state.thread_id) if state.thread_id else None,
+        default=runtime.deployment_default,
     )
 
 

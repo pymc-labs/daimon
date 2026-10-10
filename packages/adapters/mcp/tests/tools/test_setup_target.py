@@ -13,9 +13,11 @@ from daimon.adapters.mcp.tools.setup_target import (
     require_turn_origin,
     resolve_setup_agent,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.turn_origins import create_origin, get_active_origin
@@ -58,6 +60,11 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
         configuration_target_ma_agent_id="agent_original",
         configuration_target_name="original",
         creator_account_id=caller.id,
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"new": ("parent",)}),
     )
     await db_session.commit()
     target = ma_agent(
@@ -194,7 +201,11 @@ async def test_identity_pin_refuses_deleted_recreated_namesake(
     )
     runtime = _runtime(sessionmaker, build_fake_anthropic(router.dispatch))
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, platform="discord"
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        platform="discord",
     )
     with pytest.raises(ToolError, match="missing or changed"):
         await resolve_setup_agent(
@@ -314,6 +325,8 @@ async def test_model_change_uses_specialist_identity_and_retains_admin_gate(
         role=Role.ADMIN if is_admin else Role.USER,
         is_admin=is_admin,
         platform="discord",
+        agent_id=None if is_admin else uuid.uuid4(),
+        bound_channel_id=None if is_admin else "parent",
     )
     if is_admin:
         result = await _update_agent_impl(
@@ -364,6 +377,11 @@ async def test_setup_target_refuses_in_a_handoff_thread_and_names_who_answers(
         responder_ma_agent_id="agent_research",
         responder_name="research-bot",
         kind="handoff",
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"new": ("parent",)}),
     )
     await db_session.commit()
     target = ma_agent(
@@ -417,6 +435,11 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
     configured here' costs the caller the turn and the next one too."""
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"new": ("parent",)}),
+    )
     await db_session.commit()
     target = ma_agent(
         id="agent_new",

@@ -75,10 +75,12 @@ from daimon.core.channel_admins import confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import agent_permissions, any_own_readers
+from daimon.core.permissions import agent_permissions
+from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
+from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.tenants import get_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -134,36 +136,45 @@ async def _agents_by_tenant(
         try:
             async with runtime.session_factory() as session:
                 policy = await load_access_policy(session, tenant_id=tenant.tenant_id)
-                stored = (
-                    await read_stored_admin(
-                        session,
-                        tenant_id=tenant.tenant_id,
-                        platform=hub.platform,
-                        account_id=tenant.account_id,
-                        platform_user_id=hub.platform_user_id,
-                    )
-                    if any_own_readers(policy)
-                    else None
+                stored = await read_stored_admin(
+                    session,
+                    tenant_id=tenant.tenant_id,
+                    platform=hub.platform,
+                    account_id=tenant.account_id,
+                    platform_user_id=hub.platform_user_id,
+                )
+                config = await resolve(
+                    session,
+                    context=ScopeContext(tenant_id=tenant.tenant_id),
+                    default=runtime.deployment_default,
                 )
         except AccessPolicyUnreadable:
             log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
             continue
         # Looked up after the session closes: a slow platform must not hold it.
-        subject = (
-            await confirm_stored_subject(
-                stored, stored_group_members(runtime, hub.platform, tenant.workspace_id)
-            )
-            if stored is not None
-            else Subject()
+        subject = await confirm_stored_subject(
+            stored, stored_group_members(runtime, hub.platform, tenant.workspace_id)
         )
         agents = by_id[tenant.tenant_id]
-        out.append((tenant, [a for a in agents if _hub_sees(policy, subject, a)]))
+        out.append(
+            (tenant, [a for a in agents if _hub_sees(policy, subject, a, config.agent_name)])
+        )
     return out
 
 
-def _hub_sees(policy: TenantAccessPolicy, subject: Subject, agent: BetaManagedAgentsAgent) -> bool:
-    owner = agent_permissions(policy, agent_pin_names(agent)).home
-    return owner is None or subject.is_admin or owner in subject.administered_channel_ids
+def _hub_sees(
+    policy: TenantAccessPolicy,
+    subject: Subject,
+    agent: BetaManagedAgentsAgent,
+    responder: str | None,
+) -> bool:
+    names = agent_pin_names(agent)
+    permissions = agent_permissions(policy, names)
+    if subject.is_admin or permissions.home in subject.administered_channel_ids:
+        return True
+    # A member's hub is outside every channel: only its effective workspace
+    # responder answers here, and channel-only agents cannot answer here.
+    return not permissions.runs_in and responder is not None and responder in names
 
 
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:

@@ -260,7 +260,9 @@ async def _list_agent_keys_impl(
         name=agent_name,
         expected_ma_agent_id=expected_ma_agent_id,
         require_identity=False,
+        discovery=True,
         location_channel_id=origin_channel_id(origin),
+        location_thread_id=origin.thread_id if origin is not None else None,
     )
     agent_id: uuid.UUID = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory() as session:

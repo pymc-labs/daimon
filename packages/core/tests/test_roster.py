@@ -356,3 +356,86 @@ async def test_load_roster_returns_an_empty_roster_when_the_tenant_has_no_agents
     )
 
     assert roster == Roster(), "a tenant with no agents yields the empty roster"
+
+
+@pytest.mark.parametrize("platform", ["slack", "discord"])
+@pytest.mark.parametrize("is_admin", [False, True])
+@pytest.mark.parametrize("channel_id", ["CLOCAL", "COTHER", None])
+async def test_member_roster_hides_agents_that_cannot_answer_at_its_location(
+    db_session: AsyncSession, platform: str, is_admin: bool, channel_id: str | None
+) -> None:
+    tenant = await make_tenant(db_session)
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(id="ag_shared", name="shared", tenant_id=tenant.id),
+        ma_agent(id="ag_local", name="local", tenant_id=tenant.id),
+        ma_agent(
+            id="ag_other", name="renamed", tenant_id=tenant.id, metadata={"daimon_name": "other"}
+        ),
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            agent_channel_pins={
+                "local": ("CLOCAL",),
+                "other": ("COTHER",),
+            }
+        ),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    viewer = await load_rule_viewer(
+        db_session,
+        client,
+        tenant_id=tenant.id,
+        channel_id=channel_id,
+        is_admin=is_admin,
+        platform=platform,
+        default=DeploymentDefault(agent_name="shared"),
+    )
+    roster = await load_roster(
+        db_session,
+        client,
+        tenant_id=tenant.id,
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=None,
+        default=DeploymentDefault(agent_name="shared"),
+        viewer=viewer,
+    )
+    expected = {"shared"} if channel_id is not None or is_admin else set()
+    if is_admin:
+        expected |= {"local", "renamed"}
+    elif channel_id == "CLOCAL":
+        expected.add("local")
+    elif channel_id == "COTHER":
+        expected.add("renamed")
+    assert {row.name for row in roster.rows} == expected
+
+
+@pytest.mark.parametrize("platform", ["slack", "discord"])
+async def test_member_viewer_recognizes_explicit_rules_for_the_current_thread(
+    db_session: AsyncSession, platform: str
+) -> None:
+    tenant = await make_tenant(db_session)
+    router = MARouter()
+    agent = ma_agent(id="ag_thread", name="thread-only", tenant_id=tenant.id)
+    router.add_agent_list(agent)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={"thread-only": ("123.456",)}),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    for thread_id, visible in ((None, False), ("other-thread", False), ("123.456", True)):
+        viewer = await load_rule_viewer(
+            db_session,
+            client,
+            tenant_id=tenant.id,
+            channel_id="CLOCAL",
+            thread_id=thread_id,
+            platform=platform,
+            is_admin=False,
+        )
+        assert viewer is not None
+        assert viewer.sees_agent(agent) == visible

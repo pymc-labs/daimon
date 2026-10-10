@@ -415,7 +415,14 @@ async def load_here_card(
     """Load the current routing and credential names for one caller's place."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
     viewer = await load_rule_viewer(
-        session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+        session,
+        anthropic,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        is_admin=is_admin,
+        platform=platform,
+        thread_id=thread_id,
+        default=default,
     )
     roster = await load_roster(
         session,

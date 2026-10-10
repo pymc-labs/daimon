@@ -159,6 +159,7 @@ async def _drive_submit(
     monkeypatch: pytest.MonkeyPatch,
     *,
     account_id: uuid.UUID,
+    is_admin: bool = True,
 ) -> tuple[PanelState, MagicMock, list[str]]:
     """Run a successful submit end to end and hand back the state and the MA traffic."""
     await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD_ID), id=_TENANT_ID)
@@ -180,6 +181,7 @@ async def _drive_submit(
     )
 
     state = _state(account_id)
+    state.is_admin = is_admin
     modal = _modal(state, runtime=runtime)
     _fill(modal)
     interaction = _interaction()
@@ -288,7 +290,7 @@ async def test_submit_renders_the_created_agents_details_not_the_roster(
     )
 
 
-async def test_created_details_show_the_unrouted_note_and_the_routing_request(
+async def test_member_creation_confirms_success_without_showing_hidden_details(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -296,18 +298,15 @@ async def test_created_details_show_the_unrouted_note_and_the_routing_request(
 ) -> None:
     """ "Created" must not imply "available by mention"."""
     _state_after, interaction, _seen = await _drive_submit(
-        db_session, db_session_factory, monkeypatch, account_id=account_id
+        db_session, db_session_factory, monkeypatch, account_id=account_id, is_admin=False
     )
 
-    view = interaction.edit_original_response.call_args.kwargs["view"]
-    text = _text(view)
-    assert "Not answering in any channel yet." in text, (
-        "a freshly created agent answers nowhere and must say so"
-    )
-    assert f"An admin can tell Daimon: make {_CREATED_NAME} answer in #growth." in text, (
-        "a member gets the exact request to hand an admin"
-    )
-    assert "answers in" not in text, "nothing may claim the new agent is reachable"
+    interaction.edit_original_response.assert_not_called()
+    interaction.followup.send.assert_called_once()
+    text = interaction.followup.send.call_args.args[0]
+    assert "Not answering in any channel yet" in text
+    assert "An admin can make it answer" in text
+    assert _state_after.selected_agent is None
 
 
 async def test_submit_opens_no_session_and_checks_no_admission(

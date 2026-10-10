@@ -24,9 +24,9 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.scope import ChannelScopeRef
+from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.accounts import set_platform_role_ids
+from daimon.core.stores.accounts import set_platform_role_ids, set_role
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
@@ -82,6 +82,13 @@ async def _two_tenant_hub(db_session: AsyncSession) -> HubIdentity:
     t2 = await make_tenant(db_session, platform="discord", workspace_id="g2")
     p1 = await make_platform_principal(db_session, platform="discord", external_id="u1", tenant=t1)
     p2 = await make_platform_principal(db_session, platform="discord", external_id="u1", tenant=t2)
+    for tenant in (t1, t2):
+        await set_fields(
+            db_session,
+            tenant_id=tenant.id,
+            scope=TenantScopeRef(tenant_id=tenant.id),
+            agent_name="helper",
+        )
     await db_session.commit()
     return HubIdentity(
         platform="discord",
@@ -125,6 +132,12 @@ async def test_list_daimons_leaves_out_only_a_tenant_whose_policy_cant_be_read(
 ) -> None:
     hub = await _two_tenant_hub(db_session)
     t1, t2 = hub.tenants
+    await set_fields(
+        db_session,
+        tenant_id=t2.tenant_id,
+        scope=TenantScopeRef(tenant_id=t2.tenant_id),
+        agent_name="b",
+    )
     await db_session.execute(
         text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null'::jsonb)"),
         {"t": t1.tenant_id},
@@ -264,6 +277,13 @@ async def test_list_daimons_pages_the_org_once_however_many_tenants_the_caller_h
     """The org agent listing is the expensive call; a login spanning several workspaces
     must not pay for it once per workspace."""
     hub = await _two_tenant_hub(db_session)
+    await set_fields(
+        db_session,
+        tenant_id=hub.tenants[1].tenant_id,
+        scope=TenantScopeRef(tenant_id=hub.tenants[1].tenant_id),
+        agent_name="ops",
+    )
+    await db_session.commit()
     listings: list[str] = []
     router = _agents_router(
         {
@@ -314,3 +334,29 @@ async def test_auth_for_acts_as_the_callers_account_in_that_tenant(
     assert auth.agent_id == derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_1")
     assert auth.platform == "discord" and auth.platform_user_id == "u1" and auth.external_id == "g1"
     assert auth.role is Role.USER and auth.is_admin is False, "hub identities never carry admin"
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_hub_member_lists_only_workspace_responder_while_admin_sees_drafts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    admin: bool,
+) -> None:
+    hub = await _two_tenant_hub(db_session)
+    tenant = hub.tenants[0]
+    await set_role(db_session, tenant.account_id, Role.ADMIN if admin else Role.USER)
+    await db_session.commit()
+    client = build_fake_anthropic(
+        _agents_router(
+            {
+                tenant.tenant_id: [("ag_helper", "helper"), ("ag_draft", "draft")],
+            }
+        ).dispatch
+    )
+    runtime = _runtime(client, db_session_factory)
+    listed = await _list_daimons_impl(runtime, hub)
+    assert {agent.name for agent in listed} == ({"helper", "draft"} if admin else {"helper"})
+    hidden = str(derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id="ag_draft"))
+    if not admin:
+        with pytest.raises(ToolError, match="not found"):
+            await _resolve_daimon(runtime, hub, hidden)

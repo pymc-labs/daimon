@@ -262,7 +262,14 @@ async def load_agent_details(
         anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id
     )
     viewer = await load_rule_viewer(
-        session, anthropic, tenant_id=tenant_id, channel_id=channel_id, is_admin=is_admin
+        session,
+        anthropic,
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        is_admin=is_admin,
+        platform=platform,
+        thread_id=thread_id,
+        default=deployment_default,
     )
     if viewer is not None and not viewer.sees_agent(agent):
         raise UserFacingError(

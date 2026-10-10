@@ -3,8 +3,9 @@
 The rules are defined in `daimon.core.permissions` and decided by
 `daimon.core.authz.authorize`. This module holds what the agent and setup
 surfaces show of them: who is listed where (`RuleViewer`), routines kept
-inside, default bindings. A tenant with no channel only its own agents read
-loads its policy and nothing more.
+inside, default bindings. Members see only the responders and explicit local
+rules at their location,
+even when no channel limits its readers.
 
 Everything here is pure but `load_rule_viewer` and `is_thread_turn_refused`;
 `daimon.core.channel_rules` sets the rules.
@@ -34,6 +35,7 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
     listed_at,
+    runs_at,
 )
 from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -257,9 +259,21 @@ class RuleViewer:
     )
     """Every name each agent carries (`agent_aliases`), for places that record one."""
 
+    location_channel_id: str | None = None
+    location_thread_id: str | None = None
+    restrict_to_location: bool = False
+    """Member reads also require the agent to run at the verified location.
+
+    No location is outside every explicit agent rule, so omitting a location
+    never exposes agents restricted to other channels.
+    """
+
+    routed_agent_names: frozenset[str] = frozenset()
+    """Effective responders at the location; unrestricted drafts are hidden."""
+
     @property
     def is_active(self) -> bool:
-        return any_own_readers(self.policy)
+        return any_own_readers(self.policy) or self.restrict_to_location
 
     def names_of(self, agent_name: str | None) -> tuple[str | None, ...]:
         """`agent_name` and every other name its agent carries."""
@@ -268,7 +282,19 @@ class RuleViewer:
         return (agent_name, *self.aliases.get(agent_name, ()))
 
     def sees_names(self, agent_names: tuple[str | None, ...]) -> bool:
-        return listed_at(agent_permissions(self.policy, agent_names), self.inside_channel_id)
+        agent = agent_permissions(self.policy, agent_names)
+        if not listed_at(agent, self.inside_channel_id):
+            return False
+        if not self.restrict_to_location:
+            return True
+        return runs_at(
+            agent,
+            channel_permissions(
+                self.policy,
+                channel_id=self.location_thread_id or self.location_channel_id,
+                parent_channel_id=self.location_channel_id if self.location_thread_id else None,
+            ),
+        ) and (bool(agent.runs_in) or bool(self.routed_agent_names.intersection(agent_names)))
 
     def sees(self, agent_name: str | None) -> bool:
         """For a place that records one name (a routing row, a binding, a routine)."""
@@ -290,20 +316,77 @@ async def load_rule_viewer(
     tenant_id: uuid.UUID,
     channel_id: str | None,
     is_admin: bool,
+    platform: str | None = None,
+    thread_id: str | None = None,
+    default: DeploymentDefault | None = None,
 ) -> RuleViewer | None:
     """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
 
-    Admins see everything, and so does everyone while no channel is kept to its own agents.
+    Admins see everything. Members see agents that may run at this location,
+    retaining the visibility boundary of channels kept to their own agents.
     The tenant's agents are listed so a place that records one name counts
     every name its agent carries.
     """
     if is_admin:
         return None
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not any_own_readers(policy):
-        return None
     agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-    return RuleViewer(policy, home_of(policy, channel_id), agent_aliases(agents))
+    return RuleViewer(
+        policy,
+        home_of(policy, channel_id),
+        agent_aliases(agents),
+        location_channel_id=channel_id,
+        location_thread_id=thread_id,
+        restrict_to_location=True,
+        routed_agent_names=await load_location_responders(
+            session,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            platform=platform,
+            thread_id=thread_id,
+            default=default or DeploymentDefault(),
+        ),
+    )
+
+
+async def load_location_responders(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str | None,
+    platform: str | None,
+    thread_id: str | None,
+    default: DeploymentDefault,
+) -> frozenset[str]:
+    """Effective channel and current thread responders, never the tenant roster.
+
+    Without a verified location there is no proven responder. Resolve the
+    real cascade: a channel override hides the workspace/deployment default.
+    """
+    if channel_id is None:
+        return frozenset()
+    names: set[str] = set()
+    for current_thread in (None, thread_id) if thread_id is not None else (None,):
+        try:
+            config = await resolve(
+                session,
+                context=ScopeContext(
+                    tenant_id=tenant_id,
+                    channel_id=channel_id,
+                    platform=platform,
+                    thread_id=current_thread,
+                ),
+                default=default,
+            )
+        except DaimonError:
+            if current_thread is None:
+                raise
+            # A deleted conversation contributes no active responder. The
+            # parent channel's roster remains readable.
+            continue
+        if config.agent_name is not None:
+            names.add(config.agent_name)
+    return frozenset(names)
 
 
 async def is_thread_turn_refused(
@@ -365,6 +448,7 @@ __all__ = [
     "is_routine_parent_unknown",
     "keeps_routine_inside",
     "load_rule_viewer",
+    "load_location_responders",
     "routine_destination_channel",
     "routine_destination_place",
 ]

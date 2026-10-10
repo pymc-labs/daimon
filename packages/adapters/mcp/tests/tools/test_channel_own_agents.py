@@ -92,6 +92,7 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
@@ -447,6 +448,48 @@ async def test_explain_agent_resolution_stays_on_the_callers_side(
     there = await _explain_agent_resolution_impl(runtime, outside, OTHER)
     assert there.effective_agent_name == "shared"
     assert there.deployment_environment == "sandbox", "outside, they are shown as before"
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_admin_routing_explanation_keeps_configuration_targets_inside_isolation(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], deleted: bool
+) -> None:
+    world, runtime = await _world(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            parent_channel_id=ROOM,
+            thread_id="isolated-thread",
+            responder_ma_agent_id="agent_local",
+            responder_name="local",
+            configuration_target_ma_agent_id="agent_shared",
+            configuration_target_name="shared",
+        )
+        if deleted:
+            await update_lifecycle(
+                session,
+                tenant_id=world.tenant_id,
+                platform="discord",
+                parent_channel_id=ROOM,
+                thread_id="isolated-thread",
+                deleted=True,
+            )
+    auth = world.auth(executing="agent_local")
+    assert auth.is_admin
+    if deleted:
+        with pytest.raises(ToolError, match="was deleted") as error:
+            await _explain_agent_resolution_impl(runtime, auth, ROOM, "isolated-thread")
+        assert "shared" not in str(error.value)
+    else:
+        explanation = await _explain_agent_resolution_impl(runtime, auth, ROOM, "isolated-thread")
+        assert explanation.configuration_target_name is None
+        assert explanation.configuration_target_ma_agent_id is None
+        assert "shared" not in explanation.explanation
+        assert all(
+            row.configuration_target_name is None for row in explanation.recent_setup_conversations
+        )
 
 
 async def test_posts_and_direct_messages_stay_on_their_side(

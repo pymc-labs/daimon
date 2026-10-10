@@ -140,5 +140,5 @@ async def test_hub_refuses_a_members_turn_and_exempts_an_admins_on_a_pinned_agen
             create_session.assert_not_awaited()
         return
     assert payload["isError"], f"a pinned agent must be refused over the hub, got {payload!r}"
-    assert "rule runs it only in certain channels" in str(payload)
+    assert "not found" in str(payload)
     create_session.assert_not_awaited()

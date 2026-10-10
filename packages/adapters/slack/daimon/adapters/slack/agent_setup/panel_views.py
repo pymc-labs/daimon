@@ -536,8 +536,8 @@ def build_agents_view(
     """The root view: who answers here, then everyone else, then the actions.
 
     `is_admin` is accepted and deliberately unused in the block layout —
-    members and admins see the same roster and the same entries, because
-    entering a conversation about a change is not the change.
+    the loader filters member rosters to local responders before rendering.
+    Entering a conversation about a change is not the change.
 
     `routed_agent_names` is every agent this install routes to somewhere. It
     is optional because the roster alone cannot tell "answers in another
@@ -1460,7 +1460,7 @@ def build_creating_view(*, agent_name: str, meta: PanelMetadata) -> dict[str, An
 
 
 def build_created_view(
-    *, agent_name: str, meta: PanelMetadata, isolated_here: bool
+    *, agent_name: str, meta: PanelMetadata, isolated_here: bool, member_here: bool = False
 ) -> dict[str, Any]:
     """What the placeholder becomes when the new agent can't be shown to its creator here."""
     name = escape_mrkdwn(agent_name)
@@ -1468,7 +1468,12 @@ def build_created_view(
         f"*{name}* was created. This channel is kept to its own agents, so it shows here once it "
         "is set as the channel's agent."
         if isolated_here
-        else f"*{name}* was created but is not listed yet. Reopen setup to see it."
+        else (
+            f"*{name}* was created. Not answering in any channel yet. "
+            "An admin can make it answer in this channel; it will then appear in setup here."
+            if member_here
+            else f"*{name}* was created but is not listed yet. Reopen setup to see it."
+        )
     )
     return finish_modal(
         title="New agent",
