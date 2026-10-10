@@ -16,5 +16,6 @@
       "models": {}
     }
   },
-  "approved_reconciliations": []
+  "approved_reconciliations": [],
+  "approved_latch_recoveries": []
 }
