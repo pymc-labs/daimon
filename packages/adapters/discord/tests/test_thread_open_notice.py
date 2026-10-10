@@ -104,3 +104,17 @@ async def test_the_failure_reply_is_plain_and_survives_its_own_failure() -> None
 
     message.reply.side_effect = discord.HTTPException(MagicMock(status=403), "forbidden")
     await _explain_thread_open_failure(message)
+
+
+async def test_acknowledged_mention_does_not_add_an_hourglass() -> None:
+    message = _message()
+    thread = MagicMock(spec=discord.Thread)
+
+    async def opening() -> discord.Thread:
+        return thread
+
+    assert (
+        await _open_thread_with_notice(message, opening(), after_s=0, acknowledged=True) is thread
+    )
+    message.add_reaction.assert_not_awaited()
+    message.remove_reaction.assert_not_awaited()

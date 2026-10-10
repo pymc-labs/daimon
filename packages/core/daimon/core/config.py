@@ -1330,7 +1330,9 @@ class Settings(BaseSettings):
         default_factory=dict[uuid.UUID, bool],
         description=(
             "Per-tenant completion notification policy, keyed by tenant UUID. "
-            "True enables accepted/done reactions and posts the final answer as a fresh reply "
+            "Discord and Slack acknowledge mentions independently of this setting and clear "
+            "the acknowledgment when the turn settles. True adds a success check mark and "
+            "posts the final answer as a fresh reply "
             "mentioning only the requester "
             "on Discord and Slack. On Teams it closes the status card and posts the answer "
             "fresh, mentioning the requester in channels (Teams bots cannot react). "

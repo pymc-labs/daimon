@@ -1722,11 +1722,11 @@ async def test_reactions_target_trigger_not_thread_root(fake_slack_web_client, e
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
     await lifecycle.on_acknowledgment("done")
     urls = [str(url) for method, url in fake.mock.requests if "reactions." in str(url)]
-    assert len(urls) == (3 if enabled else 1)
+    assert len(urls) == (3 if enabled else 2)
     assert all("timestamp=1700000000.000999" in url for url in urls)
     assert any("name=eyes" in url and "reactions.add" in url for url in urls)
     assert any("name=white_check_mark" in url for url in urls) is enabled
-    assert any("reactions.remove" in url for url in urls) is enabled
+    assert any("reactions.remove" in url for url in urls)
 
 
 @pytest.mark.parametrize("notify", [False, True])
@@ -1887,3 +1887,52 @@ async def test_code_is_raw_in_the_block_and_escaped_in_the_notification_text(
     assert body["text"] == "Try `&lt;!channel&gt; &lt;@U2&gt; a&lt;b`", (
         "the mrkdwn fallback parses code too, so nothing in it may ping"
     )
+
+
+@pytest.mark.parametrize("notify", [False, True])
+@pytest.mark.parametrize("outcome", ["done", "failed", "cancelled", "delivery_failed"])
+async def test_terminal_hooks_clear_eyes_without_completion_hook(
+    fake_slack_web_client, notify, outcome
+):
+    import re
+
+    fake = fake_slack_web_client
+    pattern = re.compile(r"https://slack\.com/api/reactions\.remove.*")
+    fake.mock.post(pattern, payload={"ok": True})
+    lifecycle, _, deregistered, _ = _make_lifecycle(
+        fake, trigger_ts="1700000000.000999", notify_on_completion=notify
+    )
+    await lifecycle.post_initial()
+    state = TurnState(content=[TextBlock(kind="text", text="done")])
+    if outcome == "failed":
+        await lifecycle.on_terminal_failure(state, RuntimeError("upstream failed"))
+    else:
+        if outcome == "cancelled":
+            state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
+        if outcome == "delivery_failed":
+            fake.mock.clear()
+            fake.mock.post(
+                _UPDATE_URL, exception=aiohttp.ClientConnectionError("disconnected"), repeat=True
+            )
+            fake.mock.post(pattern, payload={"ok": True})
+        await lifecycle.on_terminal_success(state)
+    removals = [url for method, url in fake.mock.requests if "reactions.remove" in str(url)]
+    assert len(removals) == 1
+    assert "timestamp=1700000000.000999" in str(removals[0])
+    assert "name=eyes" in str(removals[0])
+    assert deregistered
+
+
+async def test_eye_cleanup_failure_does_not_break_terminal_delivery(fake_slack_web_client):
+    import re
+
+    fake = fake_slack_web_client
+    fake.mock.post(
+        re.compile(r"https://slack\.com/api/reactions\.remove.*"),
+        payload={"ok": False, "error": "missing_scope"},
+    )
+    lifecycle, _, deregistered, _ = _make_lifecycle(fake, trigger_ts="1700000000.000999")
+    await lifecycle.post_initial()
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="done")]))
+    assert lifecycle.final_ts is not None
+    assert deregistered
