@@ -30,7 +30,7 @@ from daimon.core.stores.tenants import (
 )
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent, ma_environment, ma_session
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
 
@@ -40,6 +40,13 @@ def _make_runtime(
 ) -> DiscordRuntime:
     # runtime no longer carries tenant_id; on_message resolves it per-message.
     from decimal import Decimal
+
+    # Self-heal seeds in the background while admission records the notice.
+    # Match production's independent connections instead of sharing the
+    # single AsyncConnection the fixture reserves for serial store tests.
+    bind = sessionmaker.kw.get("bind")
+    if isinstance(bind, AsyncConnection):
+        sessionmaker = async_sessionmaker(bind.engine, expire_on_commit=False)
 
     settings = MagicMock()
     settings.mcp.public_url = None

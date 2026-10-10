@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord replays missed mentions and replies from recently active channels after a restart, with durable message deduplication across workers. Interrupted turns edit their existing card once; completed provider replies are recovered without starting another turn.
+- Discord recovers its worker ownership after transient database failures before draining on sustained loss. Restart recovery preserves already delivered answers, retries temporary card-edit failures, and deduplicates setup notices; replay receipts are pruned outside the recovery window.
+
 - Rejected or failed MCP and GitHub token forms on Discord, Slack and Teams now show an error with a usable retry button. After 90 seconds the card says it is still saving and will update when finished; long skill imports continue until success or error.
 - Slack, Discord and Teams members now see only locally routed responders and agents explicitly allowed in their channel, across setup panels, agent tools, skill reads and routing explanations. Unrouted agents and agents belonging to other channels stay hidden; admin visibility and channel isolation are unchanged.
 - Discord form, credential and app install buttons now check private thread membership before posting for someone.

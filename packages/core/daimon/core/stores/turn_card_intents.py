@@ -8,6 +8,7 @@ from typing import cast
 
 from daimon.core._models import TurnCardIntent
 from daimon.core.stores.domain import TurnCardIntentRow
+from daimon.core.stores.worker_ownership import owner_is_alive
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
@@ -26,6 +27,7 @@ async def create_turn_card_intent(
     thread_id: str,
     turn_token: uuid.UUID,
     channel_id: str | None = None,
+    owner_key: int | None = None,
 ) -> TurnCardIntentRow:
     """Create or return the intent identified by this turn's stable token.
 
@@ -41,6 +43,7 @@ async def create_turn_card_intent(
             thread_id=thread_id,
             turn_token=turn_token,
             channel_id=channel_id,
+            owner_key=owner_key,
         )
         .on_conflict_do_nothing(
             index_elements=[TurnCardIntent.tenant_id, TurnCardIntent.turn_token]
@@ -179,6 +182,7 @@ async def list_recoverable_turn_card_intents(
     session: AsyncSession,
     *,
     platform: str,
+    exclude_live_owners: bool = False,
 ) -> list[TurnCardIntentRow]:
     """List every active intent for one adapter's boot recovery.
 
@@ -196,7 +200,16 @@ async def list_recoverable_turn_card_intents(
             .order_by(TurnCardIntent.created_at, TurnCardIntent.id)
         )
     ).scalars()
-    return [TurnCardIntentRow.model_validate(row) for row in rows]
+    result: list[TurnCardIntentRow] = []
+    for row in rows:
+        if (
+            exclude_live_owners
+            and row.owner_key is not None
+            and await owner_is_alive(session, row.owner_key)
+        ):
+            continue
+        result.append(TurnCardIntentRow.model_validate(row))
+    return result
 
 
 async def delete_retired_turn_card_intents(

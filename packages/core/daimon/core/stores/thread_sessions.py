@@ -32,6 +32,7 @@ from daimon.core.errors import SessionRetired
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
+from daimon.core.stores.worker_ownership import owner_is_alive
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -349,6 +350,7 @@ async def mark_turn_active(
     id: _uuid.UUID,
     active_turn_message_id: str,
     now: datetime,
+    owner_key: int | None = None,
     active_turn_channel_id: str | None = None,
 ) -> None:
     """Record that a turn is running and which message is rendering it.
@@ -367,6 +369,7 @@ async def mark_turn_active(
         .where(ThreadSession.id == id)
         .values(
             active_turn_message_id=active_turn_message_id,
+            active_turn_owner_key=owner_key,
             active_turn_started_at=now,
             active_turn_channel_id=active_turn_channel_id,
         )
@@ -381,7 +384,7 @@ async def clear_active_turn(
 ) -> None:
     """Clear the in-flight marker. Call on every terminal path, including failure.
 
-    All three marker columns are cleared together so a cleared row carries no
+    All marker columns are cleared together so a cleared row carries no
     dead channel id.
     """
     await session.execute(
@@ -389,6 +392,7 @@ async def clear_active_turn(
         .where(ThreadSession.id == id)
         .values(
             active_turn_message_id=None,
+            active_turn_owner_key=None,
             active_turn_started_at=None,
             active_turn_channel_id=None,
         )
@@ -429,6 +433,7 @@ async def clear_active_turn_if_message_id(
         )
         .values(
             active_turn_message_id=None,
+            active_turn_owner_key=None,
             active_turn_started_at=None,
             active_turn_channel_id=None,
         )
@@ -449,7 +454,8 @@ async def list_orphaned_turns(
     rendering it, so any marker still set when we boot belongs to a turn that
     died with the previous container.
 
-    ponytail: assumes one adapter process per platform. With two, this would
+    Discord recovery additionally checks the process owner advisory lock.
+    Other adapter callers still assume one adapter process per platform. With two, this would
     reap the other's in-flight turns -- and the boot sweeps now also send each
     reaped row's MA session a `user.interrupt`, so they would stop those live
     turns outright. Gate on an owner id before scaling out.
@@ -707,3 +713,28 @@ async def read_session_seals(
         )
     ).scalars()
     return frozenset(seal for value in values for seal in value or ())
+
+
+async def lock_orphaned_turn(
+    session: AsyncSession, *, row: ThreadSessionRow
+) -> ThreadSessionRow | None:
+    """Serialize recovery edits, while allowing a new turn to move its marker."""
+    from sqlalchemy import func
+
+    if not await session.scalar(
+        select(func.pg_try_advisory_xact_lock(func.hashtextextended(f"daimon:orphan:{row.id}", 0)))
+    ):
+        return None
+    orm = await session.scalar(
+        select(ThreadSession).where(
+            ThreadSession.id == row.id,
+            ThreadSession.active_turn_message_id == row.active_turn_message_id,
+        )
+    )
+    if orm is None:
+        return None
+    if orm.active_turn_owner_key is not None and await owner_is_alive(
+        session, orm.active_turn_owner_key
+    ):
+        return None
+    return ThreadSessionRow.model_validate(orm)
