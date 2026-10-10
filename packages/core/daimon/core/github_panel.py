@@ -112,8 +112,8 @@ async def requester_manages_agent(
     Reads the requester's stored role and channel admin grants, and counts a
     group or Discord role only as `members` confirms it now. The caller reads
     `is_daimon_managed` from the live agent. Fails closed: an unknown managed
-    status, a link without the agent's Managed Agents id or a failed group
-    lookup is no.
+    status, a link without the agent's Managed Agents id, a non-admin without
+    a platform user ID or a failed group lookup is no.
     """
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
@@ -126,6 +126,9 @@ async def requester_manages_agent(
     )
     if stored.is_admin:
         return True
+    if platform_user_id is None:
+        # No one to look up: a stored role would count unchecked.
+        return False
     try:
         role_ids = (
             await confirm_stored_group_ids(

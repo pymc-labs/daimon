@@ -761,13 +761,15 @@ async def test_confirm_recheck_uses_live_roles_and_managed_status(
     async def unreachable(user_id: str) -> frozenset[str]:
         raise GroupLookupFailed("Discord did not answer")
 
-    async def manages(members: GroupMembers | None, managed: bool | None = False) -> bool:
+    async def manages(
+        members: GroupMembers | None, managed: bool | None = False, user_id: str | None = "u1"
+    ) -> bool:
         return await requester_manages_agent(
             db_session,
             tenant_id=world.tenant_id,
             account_id=world.channel_admin_id,
             platform="discord",
-            platform_user_id="u1",
+            platform_user_id=user_id,
             agent_name="TeamA",
             ma_agent_id="ma_team_a",
             default=DEFAULT,
@@ -784,6 +786,8 @@ async def test_confirm_recheck_uses_live_roles_and_managed_status(
     # Managed status must be known, and a managed agent is a server admin's.
     assert not await manages(holds, managed=None)
     assert not await manages(holds, managed=True)
+    # Without the requester's platform ID their stored role can't be checked.
+    assert not await manages(holds, user_id=None)
 
 
 @pytest.mark.asyncio
