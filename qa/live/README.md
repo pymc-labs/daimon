@@ -42,12 +42,15 @@ Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 The one backend map contains Claude `claude-haiku-5-5`, OpenAI `gpt-6-luna`,
 and Gemini `gemini-3.8-flash`. Unknown or expensive replacements refuse.
-Gemini fallback selection advances to `gemini-flash-latest`, then
+The Gemini fallback helper advances to `gemini-flash-latest`, then
 `gemini-3.5-flash-lite`, only for HTTP 503. The shipped judge transport is
 Anthropic only; the other backends do not enable new paid judge transports.
 A temporary staging-only override admits `claude-haiku-4-5` and its dated
 `claude-haiku-4-5-20251001` snapshot until the driver confirms Haiku 5.5
-deployment. Judges and production canaries never use that override. Every trigger first runs the target's read-only
+deployment. Staging also accepts the primary throughout that transition.
+Exact Haiku 5.5 snapshots with a valid `YYYYMMDD` suffix are admitted in model
+evidence and judge responses; requests still use the primary alias. Judges
+and production canaries never use the staging override. Every trigger first runs the target's read-only
 `model_probe` argv command, passing the owned channel/guild/category as JSON on
 stdin. Set `qa_agent_name` to the dedicated QA agent. The shipped
 `python -m qa.live.model_probe` helper must execute with the chosen deployment's

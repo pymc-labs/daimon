@@ -9,10 +9,6 @@ from typing import Literal, Self, cast, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
-from qa.live.models import APPROVED_MODELS
-
-# Compatibility for existing offline fixtures; all runtime guards use Config.models.
-MODEL = APPROVED_MODELS["anthropic"].staging_aliases[0]
 Status = Literal["PASS", "FAIL", "PENDING"]
 
 

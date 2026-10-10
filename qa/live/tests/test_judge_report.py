@@ -15,7 +15,7 @@ from qa.live.models import ModelPolicy
 from qa.live.report import Alerter, Result, report
 from qa.live.types import Check, Pending, utcnow
 
-MODEL = ModelPolicy().backends["anthropic"].primary
+JUDGE_MODEL = ModelPolicy().backends["anthropic"].primary
 
 
 def test_judge_needs_go_and_exact_model(pricing: Pricing) -> None:
@@ -31,8 +31,9 @@ def test_judge_needs_go_and_exact_model(pricing: Pricing) -> None:
         HaikuJudge(pricing, go=False).evaluate("rubric", "answer")
 
 
+@pytest.mark.parametrize("response_model", [JUDGE_MODEL, JUDGE_MODEL + "-20261001"])
 def test_fixed_judge_request_and_actual_usage(
-    monkeypatch: pytest.MonkeyPatch, pricing: Pricing
+    response_model: str, monkeypatch: pytest.MonkeyPatch, pricing: Pricing
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-offline-test-key")
     calls: list[dict[str, object]] = []
@@ -43,7 +44,7 @@ def test_fixed_judge_request_and_actual_usage(
         return io.BytesIO(
             json.dumps(
                 {
-                    "model": MODEL,
+                    "model": response_model,
                     "stop_reason": "end_turn",
                     "content": [{"type": "text", "text": '{"pass":true,"reason":"matches"}'}],
                     "usage": {"input_tokens": 80, "output_tokens": 20},
@@ -55,7 +56,8 @@ def test_fixed_judge_request_and_actual_usage(
     judge = HaikuJudge(pricing, go=True)
     assert judge.evaluate("contains APPLE", "APPLE") == (True, "matches")
     assert judge.usage[0].usd == pytest.approx(0.00018)
-    assert calls[0]["model"] == MODEL
+    assert judge.usage[0].models == [response_model]
+    assert calls[0]["model"] == JUDGE_MODEL
     assert calls[0]["max_tokens"] == 300
     assert calls[0]["temperature"] == 0
     assert calls[0]["output_config"]

@@ -14,9 +14,10 @@ from qa.live.cost import Ledger
 from qa.live.discord import CHANNEL_MARKER, DiscordBackend
 from qa.live.evaluate import evaluate
 from qa.live.model_probe import ModelEvidence, ProbeRequest, probe
+from qa.live.models import STAGING_LEGACY_MODEL
 from qa.live.report import Alerter, Result
 from qa.live.runner import Executor
-from qa.live.schema import MODEL, Assertion, Scenario
+from qa.live.schema import Assertion, Scenario
 from qa.live.tests.conftest import FakeBackend, FakeJudge
 from qa.live.tests.test_discord import FakeDriver
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, utcnow
@@ -123,8 +124,9 @@ def test_model_refusal_is_before_trigger_and_free(
     "model,pinned,passes",
     [
         ("claude-haiku-5-5", True, True),
+        ("claude-haiku-5-5-20261001", True, True),
         ("claude-haiku-5-5", False, False),
-        (MODEL, True, False),
+        (STAGING_LEGACY_MODEL, True, False),
         ("claude-opus-4-6", True, False),
         ("", True, False),
     ],
@@ -376,7 +378,7 @@ async def test_model_probe_reads_actual_cascade_and_agent_metadata(
 
     async def agent(*args, **kwargs):
         assert kwargs["name"] == "haiku-qa"
-        return SimpleNamespace(id="agent-qa", model=SimpleNamespace(id=MODEL))
+        return SimpleNamespace(id="agent-qa", model=SimpleNamespace(id=STAGING_LEGACY_MODEL))
 
     monkeypatch.setattr(tenants, "get_tenant", tenant)
     monkeypatch.setattr(scoped_config_read, "resolve", resolved)
@@ -386,5 +388,5 @@ async def test_model_probe_reads_actual_cascade_and_agent_metadata(
             guild_id="745261709622771773", channel_id="qa-channel", category_id="qa-category"
         )
     )
-    assert evidence.model == MODEL and evidence.channel_pinned
+    assert evidence.model == STAGING_LEGACY_MODEL and evidence.channel_pinned
     assert statements == ["SET TRANSACTION READ ONLY", "SET LOCAL statement_timeout = '15000ms'"]

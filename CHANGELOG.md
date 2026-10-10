@@ -7,14 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Live QA now shares one approved cheap-model map across the judge and pre/post-turn guards, with a temporary staging-only Haiku 4.5 exception and HTTP-503-only Gemini fallback selection.
-- QA catalog validation now refuses unknown kinds in hourly canaries while preserving isolated PENDING entries for other tiers.
-
 ### Added
 
 - An operator live QA runner validates external scenario catalogs, exercises disposable Discord QA channels, verifies Haiku model pins before triggers, evaluates collected evidence even on silent/stuck watches, records guarded daily costs, and alerts on failures or repeated unavailable checks. Shared hourly canary/daily catalog cadence, offline tests, and an uninstalled timer template are included; production canary remains disabled pending approval.
 
 ### Changed
+
+- Live QA now shares one approved cheap-model map across the judge and pre/post-turn guards, with a temporary staging-only Haiku 4.5 exception and HTTP-503-only Gemini fallback helper.
+- QA catalog validation now refuses unknown kinds in hourly canaries while preserving isolated PENDING entries for other tiers.
 
 - The scheduler's headless usage sweep is off by default (`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`). It listed every session in the shared Managed Agents workspace and drained its request rate limit, stalling admission. While it's off, headless MCP turns aren't metered and usage a live adapter missed isn't recovered; turning it back on backfills sessions still present in the workspace (and restores the full scan until the scoped sweep ships). `--once` honours the same switch.
 - Teams 👍/👎 are now emoji buttons beside Ask a person instead of Teams' built-in thumbs. Older answers keep the built-in thumbs, which still work.
@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
+- Live QA admits the primary alongside its temporary staging override and accepts exact Haiku 5.5 dated snapshots in deployment evidence and judge replies.
 
 - The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
 - Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress. Unknown catalog kinds mark their scenario PENDING without blocking supported scenarios.

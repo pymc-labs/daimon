@@ -4,6 +4,7 @@
     "backends": {
       "anthropic": {
         "primary": "claude-haiku-5-5",
+        "dated_snapshots": true,
         "fallback": [],
         "fallback_status": null,
         "staging_override": "claude-haiku-4-5",
@@ -13,6 +14,7 @@
       },
       "openai": {
         "primary": "gpt-6-luna",
+        "dated_snapshots": false,
         "fallback": [],
         "fallback_status": null,
         "staging_override": null,
@@ -20,6 +22,7 @@
       },
       "gemini": {
         "primary": "gemini-3.8-flash",
+        "dated_snapshots": false,
         "fallback": [
           "gemini-flash-latest",
           "gemini-3.5-flash-lite"
