@@ -1160,6 +1160,12 @@ through `replaced_by_id`, and `retired` is an explicit fresh start. That
 lineage is why a thread can survive a session replacement with its context
 intact.
 
+Each caller has their own row per thread. A channel configured for shared
+threads (`thread_mode="shared"`, with `DAIMON_TURN__CHANNEL_BACKENDS` on)
+instead keys the row on an owner derived from the thread, so everyone in it
+uses one session with the agent's own credentials, and records the binding
+in the state store (`packages/core/daimon/core/shared_threads.py`).
+
 What MA holds is the agent, the environment, the skills and the session
 transcript. What Postgres holds is metadata: identity, the mapping above, the
 config cascade, credentials and billing. An MA session freezes its agent spec

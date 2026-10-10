@@ -261,6 +261,7 @@ source_modules = [
     "daimon.core.session_update_ops",
     "daimon.core.sessions",
     "daimon.core.setup_conversations",
+    "daimon.core.shared_threads",
     "daimon.core.skill_sync",
     "daimon.core.skill_zip",
     "daimon.core.skills",

@@ -717,7 +717,7 @@ async def _prepare_session_for_turn_locked(
             environment_id=admission.environment.id,
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
-            account_id=admission.account_id,
+            account_id=admission.shared_owner or admission.account_id,
             github_app=deps.agent_github_app,
             fernet=deps.fernet,
             is_external=admission.is_external,
@@ -844,10 +844,15 @@ async def _prepare_session_for_turn_locked(
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()
-        if not any(isinstance(op, RemirrorVaultCredentials) for op in applying):
+        if admission.shared_owner is None and not any(
+            isinstance(op, RemirrorVaultCredentials) for op in applying
+        ):
             # Every reused session has re-mirrored the caller's vault on every
             # turn since that path existed; a compatible session keeps doing so.
             applying = (*applying, RemirrorVaultCredentials())
+        if admission.shared_owner is not None:
+            # A shared thread's workspace never takes any one caller's vault.
+            applying = tuple(op for op in applying if not isinstance(op, RemirrorVaultCredentials))
 
         async def run_ops() -> AppliedOps | SessionBusy:
             return await apply_update_ops(
@@ -859,7 +864,7 @@ async def _prepare_session_for_turn_locked(
                 agent=admission.agent,
                 tenant_id=tenant_id,
                 agent_uuid=agent_uuid,
-                account_id=admission.account_id,
+                account_id=admission.shared_owner or admission.account_id,
                 mcp=deps.mcp,
                 tool_safety=deps.tool_safety,
                 fernet=deps.fernet,
