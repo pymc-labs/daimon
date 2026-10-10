@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Isolate neutral-state UUID defaults in the offline oracle so lease persistence preserves the immutable legacy turn-control sequence.
 - Use the real read-only Daimon MCP tools `describe_agent` and `list_my_sessions` in the default-capability contract and provider replays.
+- Refuse alternate-provider usage corrections that change coverage and sibling aggregates with overlapping coverage before host capture or settlement; preserve default Anthropic accounting.
 
 - Restrict live budget admission to Haiku 5.5, Gemini 3.8 Flash and its approved 503 fallback IDs, and GPT-6 Luna; reviewed prices remain required and fallback enforcement stays in the Gemini harness.
 - Dispatch opt-in host turn preparation, backend composition and codecs by the admitted profile, with authorized native binding and injected transport/journal/usage context; preserve default Anthropic requests.
@@ -39,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist prepared mux turns through binding-owned StateStore leases, claimed operations and normalized journals; keep legacy turns free of these reads and writes.
 
 - Pin Gemini live smoke to 3.8 Flash with create-503-only Flash fallbacks, dated reviewed prices, separate attempt receipts and nullable per-call usage capture; retain unverified alias holds.
+- Preserve revisioned Gemini interaction and OpenAI turn/session usage in host accounting and outcomes; settle verified dated prices plus actual infrastructure atomically, retaining unknown spend for reconciliation.
 - Register the real Anthropic driver with the offline C01–C18 conformance runner using actual SDK wire scripts; report sixteen typed provider/host gaps and withhold certification.
 - Refuse a default-capability turn whose running record omits or mismatches its declared root identity, or whose records name another root before or after running.
 - Route responder-identity reads through scoped native session ports, preserving SDK null metadata and reuse of the observed response for snapshot backfill.

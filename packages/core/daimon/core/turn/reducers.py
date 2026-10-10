@@ -74,6 +74,11 @@ from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
 
 
+def apply_usage_observation(state: TurnState, usage: UsageObservation) -> TurnState:
+    """Fold a real neutral usage snapshot independently of display/native events."""
+    return dataclasses.replace(state, usage_totals=state.usage_totals.add_observation(usage))
+
+
 def apply(
     state: TurnState, event: SessionEvent, *, usage: UsageObservation | None = None
 ) -> TurnState:

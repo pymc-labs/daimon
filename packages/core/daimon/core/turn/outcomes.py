@@ -16,11 +16,19 @@ from importlib.metadata import version
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.context_prompt import TurnContext
-from daimon.core.pricing import MODEL_PRICING, cost_of, uncached_input_tokens
+from daimon.core.pricing import (
+    MODEL_PRICING,
+    ProviderPrice,
+    cost_of,
+    provider_cost_of,
+    provider_uncached_input_tokens,
+    uncached_input_tokens,
+)
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_compat import event_observation
 from mux.contracts.usage import UsageObservation
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
@@ -64,6 +72,7 @@ class UsageSample:
     model_id: str | None
     cost: Decimal | None
     metered: bool
+    provider_price: ProviderPrice | None = None
 
 
 @dataclass
@@ -109,7 +118,46 @@ class TurnObservation:
         event: BetaManagedAgentsSpanModelRequestEndEvent | UsageObservation,
         *,
         metered: bool = False,
+        provider_price: ProviderPrice | None = None,
+        infrastructure_usd: Decimal | None = None,
     ) -> None:
+        if isinstance(event, UsageObservation) and event.session.provider != "anthropic":
+            if event.session.kind != "session" or event.session.tenant_id != (
+                str(self.tenant_id) if self.tenant_id is not None else None
+            ):
+                raise ValueError("usage observation belongs to another tenant/session")
+            if self.session_id is not None and event.session.id != self.session_id:
+                raise ValueError("usage observation belongs to another session")
+            values = tuple(sample.usage for sample in self._samples.values())
+            updated = replace_observation(values, event)
+            disjoint_observations(updated)
+            if any(
+                value.session == event.session
+                and value.id == event.id
+                and value.revision > event.revision
+                for value in updated
+            ):
+                return
+            key = (event.session.id, event.id)
+            prior = self._samples.get(key)
+            price = provider_price or (prior.provider_price if prior is not None else None)
+            cost = (
+                provider_cost_of(event, price, infrastructure_usd=infrastructure_usd)
+                if price is not None
+                else None
+            )
+            if prior is not None and prior.usage.revision == event.revision and cost is None:
+                cost = prior.cost
+            self._usage[key] = {"session_id": key[0], "event_id": key[1]}
+            self._samples[key] = UsageSample(
+                event,
+                event.model.id if event.model is not None else None,
+                cost,
+                metered or (prior.metered if prior is not None else False),
+                price,
+            )
+            self.usage_available = True
+            return
         if self.session_id is not None:
             if isinstance(event, UsageObservation):
                 if event.session.id != self.session_id:
@@ -160,9 +208,17 @@ class TurnObservation:
         )
         terminal_error = error or (state.error if state else None)
         samples = list(self._samples.values())
+        if any(sample.usage.session.provider != "anthropic" for sample in samples):
+            selected = disjoint_observations(sample.usage for sample in samples)
+            identities = {(usage.session, usage.id) for usage in selected}
+            samples = [
+                sample
+                for sample in samples
+                if (sample.usage.session, sample.usage.id) in identities
+            ]
 
-        def total(getter: Callable[[UsageObservation], int | None]) -> int | None:
-            counts = [getter(sample.usage) for sample in samples]
+        def total(getter: Callable[[UsageSample], int | None]) -> int | None:
+            counts = [getter(sample) for sample in samples]
             if any(count is None for count in counts):
                 return None
             return sum(count for count in counts if count is not None)
@@ -195,11 +251,26 @@ class TurnObservation:
             recovered=recovered,
             error_class=type(terminal_error).__name__ if terminal_error else None,
             release=_RELEASE,
-            usage_refs=list(self._usage.values()),
-            input_tokens=total(uncached_input_tokens),
-            output_tokens=total(lambda usage: usage.output_tokens),
-            cache_read_input_tokens=total(lambda usage: usage.input_cached_tokens),
-            cache_creation_input_tokens=total(lambda usage: usage.input_cache_write_tokens),
+            usage_refs=[
+                self._usage[(sample.usage.session.id, sample.usage.id)] for sample in samples
+            ],
+            input_tokens=total(
+                lambda sample: (
+                    provider_uncached_input_tokens(sample.usage, sample.provider_price)
+                    if sample.provider_price is not None
+                    else uncached_input_tokens(sample.usage)
+                )
+            ),
+            output_tokens=total(lambda sample: sample.usage.output_tokens),
+            cache_read_input_tokens=total(lambda sample: sample.usage.input_cached_tokens),
+            cache_creation_input_tokens=total(
+                lambda sample: (
+                    0
+                    if sample.provider_price is not None
+                    and sample.provider_price.cache_write is None
+                    else sample.usage.input_cache_write_tokens
+                )
+            ),
             model_calls=len(samples),
             model_ids=sorted(
                 {sample.model_id for sample in samples if sample.model_id is not None}

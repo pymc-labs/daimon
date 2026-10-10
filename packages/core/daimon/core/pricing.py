@@ -10,6 +10,8 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, localcontext
 from typing import Protocol
 
 from mux.contracts.usage import UsageObservation
@@ -151,3 +153,105 @@ def format_cost(amount: float | None) -> str | None:
         return "<$0.001"
     s = f"{amount:.3f}".rstrip("0").rstrip(".")
     return f"${s}"
+
+
+@dataclass(frozen=True)
+class ProviderPrice:
+    """Dated USD/M rates for an explicitly selected backend.
+
+    A None cache-write rate declares that billing stage inapplicable, rather
+    than asserting that the provider reported a zero count. Reasoning is
+    already included in output. Actual infrastructure cost is supplied
+    separately for the observation's grain and revision.
+    """
+
+    provider: str
+    model: str
+    checked_on: date
+    input: Decimal
+    output: Decimal
+    cache_read: Decimal
+    cache_write: Decimal | None = None
+    verified: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.provider or not self.model:
+            raise ValueError("provider pricing requires provider and model identity")
+        for rate in (self.input, self.output, self.cache_read, self.cache_write):
+            if rate is not None and (not rate.is_finite() or rate < 0):
+                raise ValueError("provider rates must be finite nonnegative Decimals")
+
+
+def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice) -> int | None:
+    """Validate attribution and project the input stage independently."""
+    if usage.model is None or (usage.session.provider, usage.model.provider, usage.model.id) != (
+        price.provider,
+        price.provider,
+        price.model,
+    ):
+        raise ValueError("usage and dated provider pricing identity differ")
+    written = usage.input_cache_write_tokens
+    if price.cache_write is None:
+        if written not in (None, 0):
+            raise ValueError("provider reported an inapplicable cache-write stage")
+        written = 0
+    if usage.input_tokens is None or usage.input_cached_tokens is None or written is None:
+        return None
+    uncached = usage.input_tokens - usage.input_cached_tokens - written
+    if uncached < 0:
+        raise ValueError("cached input exceeds inclusive input tokens")
+    return uncached
+
+
+def provider_usage_tokens(usage: UsageObservation, price: ProviderPrice) -> UsageTokens | None:
+    """Project measured stages to host columns without altering the native DTO."""
+    uncached = provider_uncached_input_tokens(usage, price)
+    if uncached is None or usage.output_tokens is None:
+        return None
+    return UsageTokens(
+        uncached,
+        usage.output_tokens,
+        usage.input_cache_write_tokens or 0,
+        usage.input_cached_tokens or 0,
+    )
+
+
+def provider_cost_of(
+    usage: UsageObservation,
+    price: ProviderPrice,
+    *,
+    infrastructure_usd: Decimal | None,
+) -> Decimal | None:
+    """Verified total cost, including actual session/container charges.
+
+    Missing counts or infrastructure remain unverified, never a free turn.
+    A caller may explicitly supply zero for inapplicable infrastructure.
+    Equal cached/uncached rates permit exact inclusive-input pricing even
+    when the split is unreported. No missing native count is filled in.
+    """
+    tokens = provider_usage_tokens(usage, price)
+    if not price.verified or infrastructure_usd is None:
+        return None
+    if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
+        raise ValueError("actual infrastructure cost must be finite and nonnegative")
+    with localcontext() as context:
+        context.prec = 80
+        if tokens is None:
+            if (
+                usage.input_tokens is None
+                or usage.output_tokens is None
+                or usage.input_cached_tokens is not None
+                or price.cache_read != price.input
+                or price.cache_write is not None
+            ):
+                return None
+            incoming = Decimal(usage.input_tokens) * price.input
+        else:
+            incoming = (
+                Decimal(tokens.input_tokens) * price.input
+                + Decimal(tokens.cache_read_input_tokens) * price.cache_read
+                + Decimal(tokens.cache_creation_input_tokens) * (price.cache_write or Decimal(0))
+            )
+        return (incoming + Decimal(usage.output_tokens or 0) * price.output) / Decimal(
+            1_000_000
+        ) + infrastructure_usd

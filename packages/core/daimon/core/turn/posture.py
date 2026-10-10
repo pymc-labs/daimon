@@ -54,6 +54,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.tool_safety import ToolCall
+from daimon.core.usage_billing import ObservationBilled
 
 ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-caller"]
 
@@ -72,7 +73,7 @@ class BillingExempt:
     reason: ExemptReason
 
 
-BillingPosture = Billed | BillingExempt
+BillingPosture = Billed | ObservationBilled | BillingExempt
 
 
 @dataclass(frozen=True)
