@@ -68,9 +68,6 @@ jobs:
       - name: web CSS check
         run: uv run python scripts/generate_web_css.py --check
 
-  # Core and MCP exercise thousands of short-lived test schemas. PG18 keeps
-  # PGDATA under /var/lib/postgresql; the bounded tmpfs avoids runner disk I/O
-  # while leaving PostgreSQL's transaction and WAL settings unchanged.
   pytest-core:
     name: pytest-core (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
@@ -88,7 +85,6 @@ jobs:
           POSTGRES_DB: daimon
         ports: ["5432:5432"]
         options: >-
-          --tmpfs /var/lib/postgresql:rw,noexec,nosuid,size=2g
           --health-cmd="pg_isready -U daimon"
           --health-interval=5s
           --health-timeout=3s
@@ -144,7 +140,6 @@ jobs:
           POSTGRES_DB: daimon
         ports: ["5432:5432"]
         options: >-
-          --tmpfs /var/lib/postgresql:rw,noexec,nosuid,size=2g
           --health-cmd="pg_isready -U daimon"
           --health-interval=5s
           --health-timeout=3s
