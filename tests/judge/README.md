@@ -85,3 +85,50 @@ concurrency and reply-to-chunk routing retain adapter gaps. Placeholders expand
 only from explicitly supplied values, once; no environment variable is read.
 
 Focused verification: `uv run pytest tests/judge/test_catalog_runner.py`.
+
+`headless_executor.py` executes the frozen scored matrix offline, starting with
+Anthropic. It always rebuilds plans from catalog files with the frozen target
+pin, checks each authored tape's source hash and exact expanded request text,
+and passes every original/global assertion to `daimon.testing.outcome_oracle`.
+
+```sh
+uv run python tests/judge/headless_executor.py /path/to/catalog \
+  --replays tests/judge/fixtures/catalog_anthropic.json \
+  --integration-sha <40-character-integration-head> --run-id qa-replay \
+  --output results.json
+```
+
+The actual core `turn.driver.run_turn(path="mux")` uses the real SDK with a
+closed scripted HTTP transport, per-channel backend admission, explicit
+`TurnBackendRequest`, and a fenced `TurnPersistence` journal in `MemoryStateStore`.
+The fixture's prepared session is fetched and its frozen agent model checked.
+Terminals come from journal records belonging to the acknowledged submitted
+input, with host lifecycle closure checked separately. Timing includes setup and
+closure, conservatively bounding root completion. Every scripted HTTP reply and
+SSE record must be consumed; corruption refuses the run, including under Python
+`-O`. A mentioned follow-up selects its persisted thread binding and reuses the
+session. This executor owns all binding selections in its capture window;
+production admission, replacements/recovery, billing and platform delivery need
+separate bindings.
+
+Authored tapes prove host protocol replay, not model instruction following or
+remote tool/file effects. The initial tapes cover five catalog scenarios and six
+turns, including a tool-only completion and a mentioned follow-up. Commands in
+provider tool records are never executed locally. Administrative setup, context
+fetch, attachments, burst concurrency, waits and special reply routing remain
+explicit execution gaps. Original setup/teardown commands are never run, and
+no workspace cleanup occurs. Preview/reconnect tapes need a later capture slice.
+OpenAI and Gemini dispatch zero requests and remain typed PENDING until G1/G2
+host wiring is available. The matrix planner still tracks the 30 extras separately;
+the executor report scores only the frozen 159 cells.
+
+Results distinguish full-cell status from `catalog_outcome` (all original/global
+checks) and `host_outcome` (supplemental completion/session checks). A passing
+supplemental check never replaces a missing catalog assertion. With oracle #675,
+the initial frozen run has **1 original check PASS and 13 supplemental checks
+PASS**, while **all 159 full cells remain PENDING** for uncaptured/unsupported
+predicates. Text/card/platform capture will bind to N3's subsequent oracle slices.
+All provider calls here use SDK mock transports; no key, database, live provider
+or judge is contacted.
+
+Focused verification: `uv run pytest tests/judge/test_headless_executor.py -q -n 2`.

@@ -1,0 +1,290 @@
+[
+  {
+    "scenario_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+    "scenario_sha256": "ce22c80b0b6a8ec1f580f87ea22861a089ab8bc227feb999ab25bea0dc604199",
+    "turns": [
+      {
+        "turn": 1,
+        "request_text": "QA tool-only. Run `true` with bash. Do not write any reply text at all.",
+        "events": [
+          {
+            "id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE:turn:1:input",
+            "type": "user.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "QA tool-only. Run `true` with bash. Do not write any reply text at all."
+              }
+            ]
+          },
+          {
+            "id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE:turn:1:running",
+            "type": "session.status_running",
+            "processed_at": "2026-10-10T00:00:00Z"
+          },
+          {
+            "id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE:turn:1:bash",
+            "type": "agent.tool_use",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "name": "bash",
+            "input": {
+              "command": "true"
+            },
+            "evaluated_permission": "allow"
+          },
+          {
+            "id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE:turn:1:result",
+            "type": "agent.tool_result",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "tool_use_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE:turn:1:bash",
+            "content": [
+              {
+                "type": "text",
+                "text": ""
+              }
+            ],
+            "is_error": false
+          },
+          {
+            "id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE:turn:1:ended",
+            "type": "session.status_idle",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "stop_reason": {
+              "type": "end_turn"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+    "scenario_sha256": "9baa102bb4e21b61cac0d139157bad5c1def055846b2e1452c3d9bcfae7f8de0",
+    "turns": [
+      {
+        "turn": 1,
+        "request_text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit",
+        "events": [
+          {
+            "id": "QA-NEW8-LINK-PAGE-THREAD-TITLE:turn:1:input",
+            "type": "user.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit"
+              }
+            ]
+          },
+          {
+            "id": "QA-NEW8-LINK-PAGE-THREAD-TITLE:turn:1:running",
+            "type": "session.status_running",
+            "processed_at": "2026-10-10T00:00:00Z"
+          },
+          {
+            "id": "QA-NEW8-LINK-PAGE-THREAD-TITLE:turn:1:message",
+            "type": "agent.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Hello."
+              }
+            ]
+          },
+          {
+            "id": "QA-NEW8-LINK-PAGE-THREAD-TITLE:turn:1:ended",
+            "type": "session.status_idle",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "stop_reason": {
+              "type": "end_turn"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+    "scenario_sha256": "8b010f856868254bbaf5c0f39433f9628fafabdeb5295fe648c8f34ce96e5abd",
+    "turns": [
+      {
+        "turn": 1,
+        "request_text": "hi! what can you do? I'm new here.",
+        "events": [
+          {
+            "id": "QA-NEW9-NO-INTERNAL-PLUMBING:turn:1:input",
+            "type": "user.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "hi! what can you do? I'm new here."
+              }
+            ]
+          },
+          {
+            "id": "QA-NEW9-NO-INTERNAL-PLUMBING:turn:1:running",
+            "type": "session.status_running",
+            "processed_at": "2026-10-10T00:00:00Z"
+          },
+          {
+            "id": "QA-NEW9-NO-INTERNAL-PLUMBING:turn:1:message",
+            "type": "agent.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Hello."
+              }
+            ]
+          },
+          {
+            "id": "QA-NEW9-NO-INTERNAL-PLUMBING:turn:1:ended",
+            "type": "session.status_idle",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "stop_reason": {
+              "type": "end_turn"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+    "scenario_sha256": "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca",
+    "turns": [
+      {
+        "turn": 1,
+        "request_text": "Show a 3-column table of 4 fruits with colour and price. No tools.",
+        "events": [
+          {
+            "id": "QA-NEW37-MARKDOWN-TABLE-READABLE:turn:1:input",
+            "type": "user.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Show a 3-column table of 4 fruits with colour and price. No tools."
+              }
+            ]
+          },
+          {
+            "id": "QA-NEW37-MARKDOWN-TABLE-READABLE:turn:1:running",
+            "type": "session.status_running",
+            "processed_at": "2026-10-10T00:00:00Z"
+          },
+          {
+            "id": "QA-NEW37-MARKDOWN-TABLE-READABLE:turn:1:message",
+            "type": "agent.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Fruit | Color | Taste\nApple | Red | Sweet\nPear | Green | Sweet\nLemon | Yellow | Sour\nGrape | Purple | Sweet"
+              }
+            ]
+          },
+          {
+            "id": "QA-NEW37-MARKDOWN-TABLE-READABLE:turn:1:ended",
+            "type": "session.status_idle",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "stop_reason": {
+              "type": "end_turn"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+    "scenario_sha256": "af23998ac1b11962b18be8817a9ff84a57d05345a00db13cacc3bf0ec649d496",
+    "turns": [
+      {
+        "turn": 1,
+        "request_text": "Write the numbers 1-5 to a file qa_one.csv in an outputs folder and attach it. One-line answer.",
+        "events": [
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:1:input",
+            "type": "user.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Write the numbers 1-5 to a file qa_one.csv in an outputs folder and attach it. One-line answer."
+              }
+            ]
+          },
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:1:running",
+            "type": "session.status_running",
+            "processed_at": "2026-10-10T00:00:00Z"
+          },
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:1:message",
+            "type": "agent.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Offline artifact delivery remains unbound."
+              }
+            ]
+          },
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:1:ended",
+            "type": "session.status_idle",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "stop_reason": {
+              "type": "end_turn"
+            }
+          }
+        ]
+      },
+      {
+        "turn": 2,
+        "request_text": "Now write the numbers 6-10 to qa_two.csv and attach only that file. One-line answer.",
+        "events": [
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:2:input",
+            "type": "user.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Now write the numbers 6-10 to qa_two.csv and attach only that file. One-line answer."
+              }
+            ]
+          },
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:2:running",
+            "type": "session.status_running",
+            "processed_at": "2026-10-10T00:00:00Z"
+          },
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:2:message",
+            "type": "agent.message",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "content": [
+              {
+                "type": "text",
+                "text": "Offline artifact delivery remains unbound."
+              }
+            ]
+          },
+          {
+            "id": "QA-D13-FILES-NOT-REPOSTED:turn:2:ended",
+            "type": "session.status_idle",
+            "processed_at": "2026-10-10T00:00:00Z",
+            "stop_reason": {
+              "type": "end_turn"
+            }
+          }
+        ]
+      }
+    ]
+  }
+]
