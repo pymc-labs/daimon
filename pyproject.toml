@@ -297,6 +297,7 @@ source_modules = [
     "daimon.core.usage_aggregation",
     "daimon.core.usage_billing",
     "daimon.core.usage_totals",
+    "daimon.core.usage_reconciliation",
     "daimon.core.accounting_outbox",
     "daimon.core.usage_compat",
     "daimon.core.usage_sweep",

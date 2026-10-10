@@ -25,6 +25,13 @@ Install a driver's SDK with its extra: `daimon-mux[anthropic]`,
 The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
+OpenAI probe holds can be proposed for reconciliation by the host's offline
+`daimon.core.usage_reconciliation` command using captured Admin Usage/Costs
+exports. Only an externally audited isolated project/day window with one run and
+finalized billing qualifies. Unknown or mixed attribution keeps the hold; the
+command never discovers an Admin key or approves/applies a ledger correction.
+The existing `BudgetGuard` remains the sole append-only application path.
+
 Conformance adapters can declare individual fixtures PENDING with typed capability,
 live-key or dependency reasons. Declarations remain visible and never certify.
 The host can consume durable accounting outbox rows through its existing database
