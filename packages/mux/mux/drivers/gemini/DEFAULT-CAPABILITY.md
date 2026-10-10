@@ -15,13 +15,18 @@ The Gemini API supports remote MCP over streamable HTTP, with optional headers
 `.agents/skills/` (`source-G-runtime.txt:751-752`). The driver's public MCP mapping
 works, but authenticated daimon-mcp requires a credential resolver the driver
 does not provide. The shared F1 session also needs the driver's required explicit
-binding/thread extension. Missing logical builtin routes remain explicit through
-the shared capability mapping. These are adapter gaps, not claims that Gemini
-has no native MCP or skills support.
+binding/thread extension. All six logical builtins route through native
+`code_execution` (`source-G-runtime.txt:231,242-243`); native filesystem tool
+identities are not modelled by the driver. The remaining gaps concern the
+adapters for complete skills, authenticated MCP and session binding.
 
 No upstream deployment evidence or successful default turn is fabricated.
 Removing the pending declaration cannot pass the current full scenario.
-Incomplete replay tapes fail. F1 is separate from C01–C18; the existing Gemini
+A component test scripts the real driver with native code-execution calls and
+results, records normalized events and replays all six builtin routes twice.
+Dropping any builtin call fails the turn check. This component supplies no
+whole-default deployment evidence; full F1 stays typed PENDING. Incomplete replay
+tapes fail. F1 is separate from C01–C18; the existing Gemini
 matrix remains eight PASS and ten typed PENDING. No full live certificate exists.
 
 Future live F2 requires an explicit lead GO, the pinned key file and reviewed

@@ -1,31 +1,54 @@
 """Real default inputs and driver limits: honest F1 deferral before I/O."""
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import yaml
 from mux.conformance.default_capability import (
+    BASH_RESULT,
     DEFAULT_SKILLS,
     DEFAULT_TOOLS,
+    FINAL_MESSAGE,
+    PROMPT,
+    DefaultCapabilityReplayEvents,
     DefaultManifest,
     NamedSkill,
+    check_turn,
+    request_metadata,
     skill_text,
 )
-from mux.conformance.recording import Tape
+from mux.conformance.recording import Recorder, Replay, Tape
 from mux.conformance.runner import (
     ConformanceFailure,
     PendingKind,
     replay_default_capability,
     run_default_capability,
 )
-from mux.contracts.ids import ModelRef
-from mux.contracts.resources import AgentSpec, MCPConnection, SkillUpload, SkillUploadFile, ToolSpec
+from mux.contracts.actions import UserMessage
+from mux.contracts.events import TextPart, ToolUsePayload
+from mux.contracts.extensions import ExtensionConfig
+from mux.contracts.ids import ChannelRef, ModelRef, ThreadRef
+from mux.contracts.resources import (
+    AgentSpec,
+    MCPConnection,
+    SessionSpec,
+    SkillUpload,
+    SkillUploadFile,
+    ToolSpec,
+)
 from mux.drivers.gemini.bundles import MAX_BUNDLE_BYTES
 from mux.drivers.gemini.core import compile_agent
-from mux.drivers.gemini.default_capability import PENDING, PendingTransport, adapter
+from mux.drivers.gemini.default_capability import (
+    BUILTIN_MAPPING,
+    PENDING,
+    PendingTransport,
+    adapter,
+)
+from mux.drivers.gemini.transport import Object
 from mux.errors import UnsupportedCapability
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 ROOT = Path(__file__).resolve().parents[5]
 
@@ -116,13 +139,10 @@ async def test_removing_pending_does_not_fake_a_default_pass(manifest: DefaultMa
     # default. The other genuine preflight/provisioning gaps remain explicit.
     result = await run_default_capability(
         manifest,
-        replace(
-            instance,
-            pending=None,
-            builtin_mapping={name: ToolSpec(name=name, kind="builtin") for name in DEFAULT_TOOLS},
-        ),
+        replace(instance, pending=None),
     )
     assert result.status == "fail"
+    assert result.evidence == ("probe raised ValueError",)
     instance.transport.assert_consumed()
 
 
@@ -195,3 +215,163 @@ async def test_incomplete_f1_tape_cannot_be_certified_by_the_pending_adapter(
     result = await replay_default_capability(path, manifest, adapter)
     assert result.status == "fail"
     assert result.evidence == ("replay refused: RecordingError",)
+
+
+def test_all_logical_builtins_route_to_documented_code_execution() -> None:
+    instance = adapter()
+    assert tuple(instance.builtin_mapping) == DEFAULT_TOOLS
+    assert instance.builtin_mapping == BUILTIN_MAPPING
+    assert all(
+        tool == ToolSpec(name="code_execution", kind="builtin")
+        for tool in instance.builtin_mapping.values()
+    )
+    spec = AgentSpec(
+        name="builtin-probe", model=instance.model, tools=(instance.builtin_mapping["bash"],)
+    )
+    assert compile_agent(spec)["tools"] == [{"type": "code_execution"}]
+    assert instance.pending == PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", [None, *DEFAULT_TOOLS])
+async def test_native_builtin_turn_replays_all_six_routes_and_rejects_missing_calls(
+    manifest: DefaultManifest, tmp_path: Path, missing: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Stable host-local IDs avoid recording a random UUID as an opaque blob.
+    # These are logical resource IDs, not invented native tool call identities.
+    logical_ids = iter(("agent-f1", "sess-f1", "root-f1"))
+    monkeypatch.setattr("mux.drivers.gemini.core.uuid4", lambda: next(logical_ids))
+    # Component-only evidence: no full skill deployment or authenticated MCP
+    # provisioning is invented. The full adapter remains ADAPTER_DEPENDENCY.
+    instance = adapter()
+    transport = instance.transport
+    assert isinstance(transport, PendingTransport)
+    public = manifest.mcp.model_copy(update={"credential_ref": None})
+    agent = await instance.driver.agents.create(
+        instance.scope,
+        AgentSpec(
+            name="builtin-probe",
+            model=instance.model,
+            tools=(instance.builtin_mapping["bash"],),
+            mcp_servers=(public,),
+        ),
+        key="builtin-probe",
+    )
+    thread = ThreadRef(
+        channel=ChannelRef(tenant_id=instance.scope.tenant_id, platform="discord", channel_id="f1"),
+        thread_id="builtin-component",
+    )
+    session = await instance.driver.sessions.create(
+        instance.scope,
+        SessionSpec(
+            agent=agent.ref,
+            agent_revision=agent.revision,
+            config_revision=0,
+            extensions={
+                "gemini.session": ExtensionConfig(
+                    namespace="gemini.session",
+                    version=1,
+                    value={
+                        "thread": thread.model_dump(mode="json"),
+                        "binding_id": "builtin-component",
+                    },
+                )
+            },
+        ),
+        key="builtin-session",
+    )
+    steps: list[JsonValue] = []
+    instructions = skill_text(manifest)
+    operations = (
+        ("skill-read", "cat .agents/skills/file-handling/SKILL.md", instructions),
+        ("write", "printf f1-initial > f1.txt", ""),
+        ("edit", "sed -i s/f1-initial/f1-edited/ f1.txt", ""),
+        ("read", "cat f1.txt", "f1-edited"),
+        ("grep", "grep -n f1-edited f1.txt", "1:f1-edited"),
+        ("glob", "printf '%s' f1*.txt", "f1.txt"),
+        ("bash", "printf f1-bash-ok", BASH_RESULT),
+    )
+    for name, command, output in operations:
+        if name == missing:
+            continue
+        steps.extend(
+            (
+                {
+                    "type": "code_execution_call",
+                    "id": name,
+                    "arguments": {"language": "bash", "code": command},
+                },
+                {"type": "code_execution_result", "call_id": name, "result": output},
+            )
+        )
+    for name in ("client_context", "list_events"):
+        steps.extend(
+            (
+                {
+                    "type": "mcp_server_tool_call",
+                    "id": name,
+                    "name": name,
+                    "server_name": "daimon-mcp",
+                    "arguments": {},
+                },
+                {"type": "mcp_server_tool_result", "call_id": name, "result": "read-only-ok"},
+            )
+        )
+    steps.append({"type": "model_output", "content": [{"type": "text", "text": FINAL_MESSAGE}]})
+    stamp = datetime(2026, 10, 10, tzinfo=UTC).isoformat()
+    started: Object = {
+        "id": "builtin-turn",
+        "status": "in_progress",
+        "created": stamp,
+        "updated": stamp,
+        "environment_id": "builtin-env",
+        "steps": [],
+    }
+    transport.responses.append(started)
+    transport.reads["builtin-turn"] = [{**started, "status": "completed", "steps": steps}]
+    transport.streams["builtin-turn"] = [{"event_type": "interaction.completed"}]
+    inputs = (UserMessage(content=(TextPart(text=PROMPT),)),)
+    await instance.driver.events.send(instance.scope, session.ref, inputs, key="builtin-turn")
+    events = tuple(
+        [event async for event in instance.driver.events.stream(instance.scope, session.ref)]
+    )
+    assert transport.requests[0]["tools"] == [
+        {"type": "code_execution"},
+        {"type": "mcp_server", "name": "daimon-mcp", "url": "https://daimon.invalid/mcp"},
+    ]
+    assert len(transport.requests) == 1 and transport.read_requests == ["builtin-turn"]
+    recorder = Recorder()
+    recorder.record(request_metadata(session.ref, stream=False), ())
+    recorder.record(request_metadata(session.ref, stream=True), events)
+    path = tmp_path / "builtin-component.json"
+    recorder.save(
+        path,
+        fixture_id="F1",
+        provider=instance.model.provider,
+        model=instance.model.id,
+        complete=True,
+    )
+    for _ in range(2):
+        replay = Replay.load(path)
+        port = DefaultCapabilityReplayEvents(replay)
+        await port.send(instance.scope, session.ref, inputs, key="replay")
+        observed = tuple([event async for event in port.stream(instance.scope, session.ref)])
+        uses = tuple(event.typed_payload() for event in observed if event.type == "agent.tool_use")
+        code_uses = tuple(
+            call for call in uses if isinstance(call, ToolUsePayload) and call.executor == "agent"
+        )
+        assert {call.call_id for call in code_uses} == {
+            name for name, _, _ in operations if name != missing
+        }
+        assert all(
+            call.tool_name == "code_execution" and call.input == {"input_omitted": True}
+            for call in code_uses
+        )
+        if missing is None:
+            check_turn(observed, session.ref, instructions, instance.builtin_mapping)
+        else:
+            with pytest.raises(ConformanceFailure):
+                check_turn(observed, session.ref, instructions, instance.builtin_mapping)
+        replay.finish()
+    result = await replay_default_capability(path, manifest, adapter)
+    assert result.status == "pending" and result.pending_reason == PENDING

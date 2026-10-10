@@ -981,3 +981,8 @@ MCP/session seams. Tests load the actual default YAML and complete skill trees;
 supported text-only subsets cannot pass the full-default scenario. This offline
 adapter supplies no live path and does not change the C01–C18 matrix or host
 backend selection.
+
+Gemini F1 maps bash, read, edit, grep, glob and write through its native
+`code_execution` tool. Native scripted records exercise each route in normalized
+replay; missing calls fail. The complete default remains typed PENDING for binary
+skill deployment and authenticated MCP/session adapters.

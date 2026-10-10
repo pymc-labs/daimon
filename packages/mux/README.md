@@ -325,3 +325,8 @@ typed PENDING before provisioning while complete binary skill deployment and
 authenticated MCP/session seams are unavailable. Ten complete text skill bundles
 are supported; that subset cannot certify the full authored default. See
 `mux/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
+
+Gemini F1 maps bash, read, edit, grep, glob and write through its native
+`code_execution` tool. Native scripted records exercise each route in normalized
+replay; missing calls fail. The complete default remains typed PENDING for binary
+skill deployment and authenticated MCP/session adapters.

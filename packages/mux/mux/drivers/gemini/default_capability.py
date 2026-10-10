@@ -1,10 +1,14 @@
 """Explicit offline F1 adapter; missing default capabilities never certify."""
 
-from mux.conformance.default_capability import DefaultCapabilityAdapter
+from mux.conformance.default_capability import (
+    DEFAULT_TOOLS,
+    BuiltinCapability,
+    DefaultCapabilityAdapter,
+)
 from mux.conformance.recording import Replay
 from mux.conformance.runner import ConformanceFailure, PendingKind, PendingReason, require
 from mux.contracts.ids import ModelRef, Scope
-from mux.contracts.resources import Agent, AgentSpec, SkillUpload
+from mux.contracts.resources import Agent, AgentSpec, SkillUpload, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.state.memory import MemoryStateStore
@@ -14,8 +18,14 @@ PENDING = PendingReason(
     "Full default skill bundles need binary deployment beyond the text-only 2 MiB limit; "
     "authenticated daimon-mcp needs a credential resolver; inline sessions need a "
     "binding/thread scenario seam. Native remote MCP is supported, but these driver "
-    "and scenario adapters are absent.",
+    "and scenario adapters are absent; see mux/drivers/gemini/DEFAULT-CAPABILITY.md.",
 )
+
+
+# source-G-runtime.txt:231,242-243: shell commands cover these file operations.
+# Native filesystem tool identities are not modelled by this driver.
+_CODE = ToolSpec(name="code_execution", kind="builtin")
+BUILTIN_MAPPING: dict[BuiltinCapability, ToolSpec] = {name: _CODE for name in DEFAULT_TOOLS}
 
 
 class PendingTransport(FakeTransport):
@@ -73,6 +83,6 @@ def adapter(replay: Replay | None = None) -> DefaultCapabilityAdapter:
         environment=None,
         transport=transport,
         pending=PENDING,
-        builtin_mapping={},
+        builtin_mapping=BUILTIN_MAPPING,
         atomic_revision_pin=False,
     )
