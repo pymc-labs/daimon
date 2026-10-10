@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Preserve authoritative OpenAI and Gemini root failure reasons in terminal delivery and stored turn outcomes; Anthropic completion compatibility is unchanged.
+  Gemini native incomplete outcomes retain `session_terminated` through stream/replay refusal instead of being stored as generic upstream failures.
+
 - Lead-signed, append-only live-probe latch recovery retains unknown actuals, all known usage evidence and an explicit conservative hold while clearing only the recovered admission latch. Holds below the reservation or proven spend are refused; legacy ledger rows and signed reconciliations remain unchanged.
 - Document the existing per-tenant table-rendering opt-in for Anthropic, OpenAI and Gemini host turns, retaining plain-text defaults.
 

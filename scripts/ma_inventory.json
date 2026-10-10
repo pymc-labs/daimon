@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2213,
+  "files_scanned": 2214,
   "parse_errors": [],
   "calls": [
     {
@@ -17135,6 +17135,15 @@
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_provider_termination.py",
+      "line": 10,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsSessionRetriesExhausted"
       ],
       "category": "test"
     },

@@ -1215,3 +1215,14 @@ Discord consumes neutral message snapshots and ordered previews through an optio
 Slack also consumes root neutral snapshots and ordered previews through the optional local tap. Authoritative snapshots replace draft fragments; terminal output comes from host state. Existing status-card replacement, Cancel routing, generic confirmation controls, and Anthropic pricing remain unchanged. An unverified alternate-provider cost is omitted.
 
 Teams renders root neutral snapshots and ordered previews locally, retaining its debounce, unprompted silence and existing terminal card retirement. Host state owns final answers. Alternate-provider observations and missing observations bypass Anthropic display meters, so unknown cost is omitted; the native Anthropic path is unchanged.
+
+### Provider terminal outcomes
+
+On explicitly selected OpenAI and Gemini channels, authoritative root outcomes
+`errored` and `terminated` reach terminal failure delivery and the persisted turn
+outcome as `upstream` and `session_terminated`, respectively. Display compatibility
+records do not replace that provider truth. Preview, gap and child-frame metadata
+cannot promote a root failure. Anthropic's existing outcome behavior is unchanged.
+Gemini native `incomplete` is `session_terminated`, including when its real stream
+or restart replay refuses the failed root before display delivery. That refusal
+remains nonretryable and does not permit billing success or a recovery send.

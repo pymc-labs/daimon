@@ -107,6 +107,7 @@ from daimon.core.turn.provider_actions import ProviderActionApproval
 from daimon.core.turn.reducers import apply, apply_usage_observation
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import (
+    ProviderTerminalFailure,
     TerminationReason,
     normalized_stop_reason,
     normalized_termination_reason,
@@ -1635,6 +1636,27 @@ async def _consume_with_reconnect(
                 reason = normalized_termination_reason(normalized)
                 if reason is not None:
                     normalized_terminal_cell[0] = reason
+                    if (
+                        normalized.native.provider != "anthropic"
+                        and normalized.thread_id is None
+                        and reason.is_failure
+                    ):
+                        # SDK-shaped display records are not foreign-provider
+                        # outcome truth. Preserve Anthropic's legacy finalizer,
+                        # including its retries_exhausted compatibility, while
+                        # retaining the admitted provider's authoritative end.
+                        state_cell[0] = dataclasses.replace(
+                            state_cell[0],
+                            termination=reason,
+                            error=TurnError(
+                                kind="upstream",
+                                message=(
+                                    "provider terminated the session"
+                                    if reason == TerminationReason.SESSION_TERMINATED
+                                    else "provider ended the turn with an error"
+                                ),
+                            ),
+                        )
             if event.type == "session.status_terminated":
                 return
             # Unknown root idle reasons stay opaque in normalization. The
@@ -1890,7 +1912,9 @@ async def _finalize_upstream(
         stop_reason=None,  # Clear stale stop_reason -- prevents infinite loops in callers
         rate_limit_until=rate_limit_until or state_cell[0].rate_limit_until,
         termination=(
-            TerminationReason.RATE_LIMITED
+            err.reason
+            if isinstance(err, ProviderTerminalFailure)
+            else TerminationReason.RATE_LIMITED
             if isinstance(err, _anthropic.RateLimitError)
             or (isinstance(err, ProviderError) and err.category == "rate_limited")
             else TerminationReason.UPSTREAM

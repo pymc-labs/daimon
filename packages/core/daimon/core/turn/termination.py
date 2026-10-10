@@ -37,6 +37,7 @@ from daimon.core.turn.errors import (
 )
 from mux.contracts.events import Event, TurnEndedPayload
 from mux.contracts.receipts import StopObservation
+from mux.errors import ProviderError
 
 __all__ = ["TerminationReason", "denial_termination_reason", "termination_reason"]
 
@@ -108,6 +109,20 @@ class TerminationReason(StrEnum):
 _NOT_FAILURES = frozenset({TerminationReason.COMPLETED, TerminationReason.INTERRUPTED})
 
 
+class ProviderTerminalFailure(ProviderError):
+    """An accepted foreign root failed before its display frame could be delivered.
+
+    Remains a nonretryable upstream refusal for billing and recovery callers,
+    while carrying the authoritative terminal distinction to host persistence.
+    """
+
+    def __init__(self, reason: TerminationReason) -> None:
+        if reason not in {TerminationReason.UPSTREAM, TerminationReason.SESSION_TERMINATED}:
+            raise ValueError("provider terminal failure requires a failed root outcome")
+        super().__init__("upstream", retryable=False, native_code="host_root_failed")
+        self.reason = reason
+
+
 def stop_termination_reason(stop: StopObservation) -> TerminationReason:
     """Map observed root truth; a receipt or missing outcome is not completion."""
     if not stop.stopped:
@@ -154,6 +169,8 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
     match err:
         case None:
             return TerminationReason.COMPLETED
+        case ProviderTerminalFailure():
+            return err.reason
         case TurnError():
             return _BY_VALUE.get(str(err.kind), TerminationReason.UNKNOWN)
         case AdmissionDenied():

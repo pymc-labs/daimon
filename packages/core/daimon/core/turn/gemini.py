@@ -33,6 +33,7 @@ from daimon.core.turn.io import (
     neutral_inputs,
 )
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
+from daimon.core.turn.termination import ProviderTerminalFailure, normalized_termination_reason
 from mux.contracts.actions import InputEvent, UserMessage, UserToolResult
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import (
@@ -382,13 +383,21 @@ class GeminiTurnIO:
         return TurnEvent(_DISPLAY.validate_python(display), event, usage)
 
     def check_terminal(self, event: Event, *, replay: bool = False) -> None:
-        if event.authority not in {"record", "reconciled"} or event.turn_id != self.root:
+        if (
+            event.authority not in {"record", "reconciled"}
+            or event.turn_id != self.root
+            or event.thread_id is not None
+            or event.session_id != self.session.id
+            or event.native.provider != "gemini"
+        ):
             return
         payload = event.typed_payload()
         if not isinstance(payload, TurnEndedPayload) or payload.root_turn_id != self.root:
             return
         if payload.outcome in {"errored", "terminated"}:
-            raise ProviderError("upstream", retryable=False, native_code="host_root_failed")
+            reason = normalized_termination_reason(event)
+            assert reason is not None  # A typed authoritative root ending has a closed outcome.
+            raise ProviderTerminalFailure(reason)
         if replay and payload.outcome == "interrupted":
             from daimon.core.turn.driver import InterruptedDuringRecovery
 
