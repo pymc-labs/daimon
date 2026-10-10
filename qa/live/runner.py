@@ -151,6 +151,11 @@ class Executor:
         if self.env == "staging":
             result.deployment = DeploymentEvidence()
         try:
+            for step in [*scenario.setup, *scenario.steps]:
+                if step.guild is not None:
+                    requested = self.context.resolve(step.guild)
+                    if requested != self.context.values.get("guild_id"):
+                        raise Pending("new_channel guild requires a separately approved QA target")
             if result.deployment:
                 try:
                     result.deployment.start_image = self.backend.deployment_image()
@@ -353,6 +358,8 @@ class Executor:
             step = self.context.step(step)
         kind = step.do
         if kind == "new_channel":
+            if step.guild and step.guild != self.backend.context().get("guild_id"):
+                raise Pending("new_channel guild requires a separately approved QA target")
             if step.ref:
                 if step.ref in self.channels:
                     raise ValueError("channel reference must be unique")

@@ -1,0 +1,144 @@
+from datetime import timedelta
+
+import pytest
+from pydantic import ValidationError
+
+from qa.live.config import Pricing
+from qa.live.cost import Ledger, estimate
+from qa.live.evaluate import evaluate
+from qa.live.runner import Executor
+from qa.live.schema import Assertion, Scenario, Step
+from qa.live.tests.conftest import FakeBackend, FakeJudge
+from qa.live.types import Message, Turn, utcnow
+
+
+def observed(number: int, identity: str, *, settled: bool = True) -> Turn:
+    turn = Turn(
+        number, str(number), "parent", utcnow(), thread_id=f"thread-{number}", settled=settled
+    )
+    turn.messages = [{"id": identity, "content": "ANSWER"}]
+    return turn
+
+
+@pytest.mark.parametrize("kind", ["answers_total", "threads_created"])
+def test_whole_run_counts_prove_violation_but_not_timed_out_upper_bound(kind: str) -> None:
+    backend, judge = FakeBackend(), FakeJudge()
+    assertion = Assertion.model_validate({"kind": kind, "max": 1})
+    turns = [observed(1, "a"), observed(2, "b", settled=False)]
+    assert evaluate(assertion, turns, backend, judge).status == "FAIL"
+    turns[1].thread_id = turns[0].thread_id
+    turns[1].messages = turns[0].messages
+    assert evaluate(assertion, turns, backend, judge).status == "PENDING"
+    turns[1].settled = True
+    assert evaluate(assertion, turns, backend, judge).status == "PASS"
+
+
+@pytest.mark.parametrize(
+    "pattern,missing,expected",
+    [("ANSWER", True, "PASS"), ("OTHER", True, "PENDING"), ("OTHER", False, "FAIL")],
+)
+def test_any_of_three_valued_evidence(pattern: str, missing: bool, expected: str) -> None:
+    assertion = Assertion.model_validate(
+        {
+            "kind": "any_of",
+            "of": [
+                {"kind": "text_present", "turn": 1, "pattern": pattern},
+                {"kind": "text_present", "turn": 2 if missing else 1, "pattern": "NO"},
+            ],
+        }
+    )
+    assert evaluate(assertion, [observed(1, "a")], FakeBackend(), FakeJudge()).status == expected
+
+
+def test_component_reads_nested_labels_and_refresh_reads_current_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeBackend()
+    turn = observed(1, "card")
+    turn.messages[0]["components"] = [
+        {"type": 1, "components": [{"type": 2, "label": "Connect GitHub"}]}
+    ]
+    assert (
+        evaluate(
+            Assertion(kind="component_present", turn=1, label_pattern="(?i)connect github"),
+            [turn],
+            backend,
+            FakeJudge(),
+        ).status
+        == "PASS"
+    )
+    monkeypatch.setattr(
+        backend, "current_messages", lambda turn: [{"id": "card", "content": "Expired"}]
+    )
+    check = Assertion(
+        kind="card_text_now", turn=1, pattern="(?i)expired", pattern_absent="received"
+    )
+    assert evaluate(check, [turn], backend, FakeJudge()).status == "PASS"
+    assert turn.messages[0]["content"] == "ANSWER"
+
+
+def test_running_edits_are_distinct_and_exclude_terminal_edits() -> None:
+    turn = observed(1, "card")
+    edit: Message = {
+        "message_id": "card",
+        "edited_timestamp": utcnow().isoformat(),
+        "phase": "running",
+    }
+    turn.card_history = [edit, edit, {**edit, "edited_timestamp": "later", "phase": "terminal"}]
+    assertion = Assertion(kind="card_edits_min", turn=1, minimum=2, during="running")
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+    turn.settled = False
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+    turn.card_history.append({**edit, "edited_timestamp": "next"})
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+
+
+def test_chunk_gap_uses_answer_edit_instead_of_progress_card_creation() -> None:
+    turn = observed(1, "1")
+    turn.messages = [
+        {
+            "id": "1",
+            "content": "one",
+            "timestamp": turn.started_at.isoformat(),
+            "edited_timestamp": (turn.started_at + timedelta(seconds=40)).isoformat(),
+        },
+        {
+            "id": "2",
+            "content": "two",
+            "timestamp": (turn.started_at + timedelta(seconds=43)).isoformat(),
+        },
+    ]
+    assertion = Assertion(kind="chunks_gap_max_s", turn=1, maximum=5)
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+    turn.settled = False
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+    turn.messages[1]["timestamp"] = (turn.started_at + timedelta(seconds=47)).isoformat()
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+
+
+def test_foreign_or_unresolved_guild_refuses_before_setup_mutation(
+    scenario: Scenario, ledger: Ledger, pricing: Pricing
+) -> None:
+    scenario.setup = [Step(do="admin", tool="cli", args="daimon tenants credit forbidden")]
+    scenario.steps[0].guild = "other-guild"
+    backend = FakeBackend()
+    result = Executor(backend, FakeJudge(), ledger, pricing, "staging").run(scenario)
+    assert result.status == "PENDING" and not backend.events
+    assert ledger.charged({result.run_id}) == 0
+
+
+def test_step_scope_validation_and_nested_judge_budget(
+    scenario: Scenario, pricing: Pricing
+) -> None:
+    with pytest.raises(ValidationError):
+        Step(do="mention", text="x", allow_fail=True)
+    scenario.assertions = [
+        Assertion(
+            kind="any_of",
+            alternatives=[
+                Assertion(kind="judge", turn=1, rubric="answer"),
+                Assertion(kind="judge", turn=2, rubric="answer"),
+            ],
+        )
+    ]
+    assert estimate(scenario, pricing) > scenario.est_turns * pricing.per_turn_usd

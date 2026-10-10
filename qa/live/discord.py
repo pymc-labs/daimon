@@ -473,6 +473,15 @@ class DiscordBackend:
                 if parent:
                     self.thread_parents[turn.thread_id] = parent
             turn.verdicts = [self.classify(m) for m in messages]
+            for message, verdict in zip(messages, turn.verdicts, strict=True):
+                if verdict == "working" and message.get("edited_timestamp"):
+                    edit: Message = {
+                        "message_id": message.get("id"),
+                        "edited_timestamp": message.get("edited_timestamp"),
+                        "phase": "running",
+                    }
+                    if edit not in turn.card_history:
+                        turn.card_history.append(edit)
             if "working" in turn.verdicts and turn.progress_seen_s is None:
                 turn.progress_seen_s = elapsed
             terminal = bool(messages) and all(v in self.driver.TERMINAL for v in turn.verdicts)
@@ -493,6 +502,23 @@ class DiscordBackend:
             time.sleep(min(self.config.poll_interval_s, max(0, deadline - time.monotonic())))
         turn.ended_at = utcnow()
         raise WatchTimeout("watch timed out; collected last messages, no terminal proof")
+
+    def current_messages(self, turn: Turn) -> list[Message]:
+        """Refresh only recorded bot messages inside this run's owned channels."""
+        if not turn.messages:
+            raise Pending("no recorded messages to refresh")
+        rows: list[Message] = []
+        for message in turn.messages:
+            channel = str(message.get("channel_id") or turn.thread_id or turn.channel_id)
+            self._owned(channel)
+            identity = str(message.get("id") or "")
+            if not identity:
+                raise Pending("recorded message has no identity")
+            row = obj(self.driver.call("GET", f"/channels/{channel}/messages/{identity}"))
+            if str(row.get("id")) != identity:
+                raise Pending("message refresh returned no matching evidence")
+            rows.append(row)
+        return rows
 
     def channel_messages(self, turn: Turn) -> list[Message]:
         self._owned(turn.channel_id)
@@ -543,6 +569,7 @@ class DiscordBackend:
             "channel_id": channel,
             "role": step.role,
             "args": step.args,
+            "allow_fail": step.allow_fail,
         }
         result = subprocess.run(
             command,
@@ -556,6 +583,14 @@ class DiscordBackend:
             raise RuntimeError("configured staging admin hook failed")
         if result.stdout.strip():
             data = cast(JsonValue, json.loads(result.stdout))
+            exit_code = obj(data).get("exit_code", 0)
+            if type(exit_code) is not int or exit_code < 0:
+                raise ValueError("admin hook must return a nonnegative CLI exit_code")
+            self.bindings["last_admin_exit_code"] = str(exit_code)
+            if exit_code:
+                if not step.allow_fail:
+                    raise RuntimeError("staging CLI command failed")
+                return
             bindings = obj(data).get("context", {})
             if not isinstance(bindings, dict) or any(
                 not isinstance(v, str) for v in bindings.values()

@@ -329,3 +329,13 @@ PENDING (n/a) and records zero usage plus scoped `skip_evidence`. This requires
 matching guild, channel, and turn-window evidence and no observed thread or bot
 messages. Silence alone never proves a skip: executed or unproven turns retain
 missing-model FAIL semantics. Product silence checks still FAIL independently.
+
+The frozen Discord batch also supports whole-run `answers_total` and
+`threads_created` upper bounds, three-valued nested `any_of`, nested component
+labels, current card refreshes after a wait, distinct running card-edit timestamps,
+and answer chunk gaps from answer-bearing edits or message creation times.
+An incomplete observation cannot prove a count or gap upper bound. Expected CLI
+failures require the hook's JSON `exit_code`; a transport failure is still a
+harness error. `new_channel.guild` must resolve to the configured approved QA
+guild before any setup mutation; a separate depleted-tenant scenario remains
+PENDING until its target is independently approved.

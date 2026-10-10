@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- QA supports frozen Discord answer/thread counts, nested alternatives, component/card observations, running card edits and chunk delivery gaps, with scoped guild and expected CLI-exit parameters.
+
 - Staging QA records deployment images and restart evidence, keeps deploy-interrupted runs silent and PENDING, and retries once after workers settle within the pass budget.
 - GitHub setup sections on Discord, Slack, and Teams show repos and the working repo without grant-editing controls. Ask the agent in chat to change repos; Connect GitHub remains available.
 
