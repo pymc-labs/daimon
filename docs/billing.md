@@ -752,6 +752,15 @@ and transport. Buckets are project totals: reconciliation supports an audited
 isolated project window containing exactly one run, across all keys and sources.
 It never prorates a shared project's bill. Final billing evidence and inventory
 hashes must bind the complete exports; an exhausted page cursor does not prove
-final posting. Missing amounts, empty/delayed bills, duplicate groups, foreign
+final posting. Every page must record the effective organization, origin and
+full-scope query, including its pagination cursor. The collector rejects client
+query, authentication, cookie, custom-header and event-hook defaults before IO.
+Independent final-bill totals and amounts for every classified line item, plus
+inventory token/request totals, must match the exports exactly. Copying these
+expected totals from the candidate export is not evidence of completeness; the
+lead must inspect the separate inventory and final billing artifacts before
+approval. An omitted infrastructure charge or any amount/count mismatch refuses
+the proposal and retains the hold.
+Missing amounts, empty/delayed bills, duplicate groups, foreign
 scope, unknown line items or ambiguous attribution remain estimated, unverified.
 Exact billed token and container line items replace estimates only after approval.

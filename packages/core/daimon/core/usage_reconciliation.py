@@ -71,9 +71,17 @@ class AdminScope(_Evidence):
         return result
 
 
+class AdminRequestEvidence(_Evidence):
+    method: Literal["GET"]
+    url: str
+    organization_id: str
+    parameters: tuple[tuple[str, str], ...]
+
+
 class RecordedPage(_Evidence):
     cursor: str | None
     status_code: Count
+    request: AdminRequestEvidence | None = None
     # Successful response bytes are retained as UTF-8 text, preserving numeric
     # literals for Decimal parsing. Error response bodies/headers are omitted.
     body: str
@@ -127,12 +135,42 @@ class _Page[Row](_APIModel):
     next_page: str | None
 
 
+def _request_url(endpoint: Endpoint) -> str:
+    path = "costs" if endpoint == "costs" else "usage/completions"
+    return f"https://api.openai.com/v1/organization/{path}"
+
+
+def _request_matches(
+    evidence: AdminRequestEvidence | None, scope: AdminScope, endpoint: Endpoint, cursor: str | None
+) -> bool:
+    return evidence is not None and (
+        evidence.method == "GET"
+        and evidence.url == _request_url(endpoint)
+        and evidence.organization_id == scope.organization_id
+        and sorted(evidence.parameters) == sorted(scope.parameters(endpoint, cursor))
+    )
+
+
+def _reject_client_defaults(client: httpx.AsyncClient) -> None:
+    standard_headers = {"accept", "accept-encoding", "connection", "user-agent"}
+    if (
+        client.params
+        or client.auth is not None
+        or client.cookies
+        or set(client.headers).difference(standard_headers)
+        or any(client.event_hooks.values())
+    ):
+        raise ValueError("admin_client_defaults_not_allowed")
+
+
 async def fetch_admin_snapshot(
     *, client: httpx.AsyncClient, admin_key: SecretStr, scope: AdminScope, endpoint: Endpoint
 ) -> AdminSnapshot:
     """Explicit injected transport/key only; no retries or alternate credentials.
 
     Callers own live authorization and client lifetime. Tests use MockTransport.
+    Query/auth/cookie/custom-header/event-hook defaults are rejected before IO;
+    every page binds the effective request to the complete declared scope.
     Redirects and pagination loops cannot forward the credential elsewhere.
     A failed request is recorded without a body or exception text, then refused
     by the assessor; a partial fetch never supplies a final cost.
@@ -140,29 +178,45 @@ async def fetch_admin_snapshot(
     pages: list[RecordedPage] = []
     cursor: str | None = None
     seen: set[str] = set()
-    path = "costs" if endpoint == "costs" else "usage/completions"
     for _ in range(100):
+        _reject_client_defaults(client)
+        # Request/send avoids merging client query/header/cookie defaults. The
+        # preflight rejection also catches defaults changed between pages.
+        request = httpx.Request(
+            "GET",
+            _request_url(endpoint),
+            params=tuple(scope.parameters(endpoint, cursor)),
+            headers={
+                "Authorization": f"Bearer {admin_key.get_secret_value()}",
+                "OpenAI-Organization": scope.organization_id,
+            },
+        )
         try:
-            response = await client.get(
-                f"https://api.openai.com/v1/organization/{path}",
-                params=tuple(scope.parameters(endpoint, cursor)),
-                headers={
-                    "Authorization": f"Bearer {admin_key.get_secret_value()}",
-                    "OpenAI-Organization": scope.organization_id,
-                },
-                follow_redirects=False,
-            )
+            response = await client.send(request, auth=None, follow_redirects=False)
         except httpx.HTTPError:
             pages.append(RecordedPage(cursor=cursor, status_code=0, body=""))
             break
+        effective = response.request
+        evidence = None
+        if effective.method == "GET" and effective.headers.get("authorization") == (
+            f"Bearer {admin_key.get_secret_value()}"
+        ):
+            evidence = AdminRequestEvidence(
+                method="GET",
+                url=str(effective.url.copy_with(query=None)),
+                organization_id=effective.headers.get("openai-organization", ""),
+                parameters=tuple(effective.url.params.multi_items()),
+            )
+        verified = _request_matches(evidence, scope, endpoint, cursor)
         pages.append(
             RecordedPage(
                 cursor=cursor,
                 status_code=response.status_code,
-                body=response.text if response.status_code == 200 else "",
+                request=evidence if verified else None,
+                body=response.text if response.status_code == 200 and verified else "",
             )
         )
-        if response.status_code != 200:
+        if response.status_code != 200 or not verified:
             break
         try:
             page = _Page[_Cost | _Usage].model_validate(
@@ -179,6 +233,12 @@ async def fetch_admin_snapshot(
     )
 
 
+class AdminUsageTotals(_Evidence):
+    input_tokens: Count
+    output_tokens: Count
+    num_model_requests: Count
+
+
 class AttributionAttestation(_Evidence):
     """Audited external facts, NOT facts inferred from Admin bucket responses.
 
@@ -187,6 +247,9 @@ class AttributionAttestation(_Evidence):
     covers every key/source/session in the full project window, including
     billable infrastructure. Multiple runs or shared projects are unsupported.
     Exact provider line item names must be classified without dropping charges.
+    Independent final-bill amounts and inventory usage totals must match the
+    captured exports exactly. Copying totals from those exports is not evidence
+    of completeness and must not be approved.
     """
 
     scope_sha256: Digest
@@ -200,6 +263,11 @@ class AttributionAttestation(_Evidence):
     run_finished_at: Count
     finalized_through: Count
     line_items: dict[str, Literal["token", "container"]]
+    # These are independently evidenced full-project amounts/counters, never
+    # calculated by the assessor from the candidate export being checked.
+    billed_total_usd: Money
+    billed_line_item_totals: dict[str, Money]
+    expected_usage: AdminUsageTotals
 
 
 class ReconciliationAssessment(_Evidence):
@@ -229,6 +297,10 @@ def _buckets[Row](snapshot: AdminSnapshot, schema: type[_Page[Row]]) -> tuple[_B
             raise _Incomplete(f"admin_http_{recorded.status_code}")
         if recorded.cursor != expected_cursor:
             raise _Incomplete("pagination_chain_mismatch")
+        if not _request_matches(
+            recorded.request, snapshot.scope, snapshot.endpoint, recorded.cursor
+        ):
+            raise _Incomplete("effective_request_scope_unverified")
         try:
             page = schema.model_validate(json.loads(recorded.body, parse_float=Decimal))
         except (ValidationError, ValueError):
@@ -290,6 +362,7 @@ def assess_admin_reconciliation(
             for snapshot in (costs, usage)
         ):
             raise _Incomplete("billing_window_still_open")
+        input_tokens = output_tokens = requests = 0
         for bucket in usage_buckets:
             seen_usage: set[tuple[str, str]] = set()
             for result in bucket.results:
@@ -306,9 +379,26 @@ def assess_admin_reconciliation(
                 if key in seen_usage:
                     raise _Incomplete("duplicate_usage_group")
                 seen_usage.add(key)
+                input_tokens += result.input_tokens
+                output_tokens += result.output_tokens
+                requests += result.num_model_requests
+        if (
+            AdminUsageTotals(
+                input_tokens=input_tokens, output_tokens=output_tokens, num_model_requests=requests
+            )
+            != attestation.expected_usage
+        ):
+            raise _Incomplete("complete_usage_totals_mismatch")
         with localcontext() as context:
             context.prec = 64
             token = container = Decimal(0)
+            billed_lines: dict[str, Decimal] = {}
+            if not attestation.billed_line_item_totals or (
+                set(attestation.line_items) != set(attestation.billed_line_item_totals)
+                or sum(attestation.billed_line_item_totals.values(), Decimal(0))
+                != attestation.billed_total_usd
+            ):
+                raise _Incomplete("complete_billing_inventory_unverified")
             for bucket in cost_buckets:
                 # Empty successful responses can be delayed publishing. They
                 # never prove zero; zero requires an explicit finalized row.
@@ -334,6 +424,13 @@ def assess_admin_reconciliation(
                         container += result.amount.value
                     else:
                         raise _Incomplete("unclassified_billed_charge")
+                    billed_lines[result.line_item] = (
+                        billed_lines.get(result.line_item, Decimal(0)) + result.amount.value
+                    )
+            if billed_lines != attestation.billed_line_item_totals:
+                raise _Incomplete("complete_billed_line_items_mismatch")
+            if token + container != attestation.billed_total_usd:
+                raise _Incomplete("complete_billed_total_mismatch")
             return ReconciliationAssessment(
                 accounting_status="ready_for_approval",
                 reason="isolated_run_final_billed_export",

@@ -28,8 +28,10 @@ The full description is [docs/mux.md](../../docs/mux.md). Tests:
 OpenAI probe holds can be proposed for reconciliation by the host's offline
 `daimon.core.usage_reconciliation` command using captured Admin Usage/Costs
 exports. Only an externally audited isolated project/day window with one run and
-finalized billing qualifies. Unknown or mixed attribution keeps the hold; the
-command never discovers an Admin key or approves/applies a ledger correction.
+finalized billing qualifies. Unknown or mixed attribution keeps the hold. The
+captured effective requests must cover the full project, and billed line-item
+amounts and usage counts must match independent complete-project evidence.
+The command never discovers an Admin key or approves/applies a ledger correction.
 The existing `BudgetGuard` remains the sole append-only application path.
 
 Conformance adapters can declare individual fixtures PENDING with typed capability,

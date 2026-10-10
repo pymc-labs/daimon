@@ -12,8 +12,10 @@ from pathlib import Path
 import httpx
 import pytest
 from daimon.core.usage_reconciliation import (
+    AdminRequestEvidence,
     AdminScope,
     AdminSnapshot,
+    AdminUsageTotals,
     AttributionAttestation,
     RecordedPage,
     assess_admin_reconciliation,
@@ -31,6 +33,33 @@ SCOPE = AdminScope(
     organization_id="org-offline", project_id="proj-isolated", start_time=START, end_time=END
 )
 RUN = "1" * 32
+
+
+def recorded_page(*, cursor, status_code, body, scope=SCOPE, endpoint="costs") -> RecordedPage:
+    path = "costs" if endpoint == "costs" else "usage/completions"
+    parameters = [
+        ("start_time", str(scope.start_time)),
+        ("end_time", str(scope.end_time)),
+        ("bucket_width", "1d"),
+        ("limit", "31"),
+        ("project_ids[]", scope.project_id),
+        ("group_by[]", "project_id"),
+        ("group_by[]", "api_source"),
+        ("group_by[]", "line_item" if endpoint == "costs" else "model"),
+    ]
+    if cursor is not None:
+        parameters.append(("page", cursor))
+    return RecordedPage(
+        cursor=cursor,
+        status_code=status_code,
+        body=body,
+        request=AdminRequestEvidence(
+            method="GET",
+            url=f"https://api.openai.com/v1/organization/{path}",
+            organization_id=scope.organization_id,
+            parameters=tuple(parameters),
+        ),
+    )
 
 
 def cost_row(line_item: str = "luna input", value: str = ".002") -> dict:
@@ -79,7 +108,7 @@ def exports() -> tuple[AdminSnapshot, AdminSnapshot]:
         endpoint="costs",
         fetched_at=DAY + timedelta(days=2),
         pages=(
-            RecordedPage(
+            recorded_page(
                 cursor=None,
                 status_code=200,
                 body=page_body([cost_row(), cost_row("hosted small", ".03")]),
@@ -90,7 +119,11 @@ def exports() -> tuple[AdminSnapshot, AdminSnapshot]:
         scope=SCOPE,
         endpoint="completions",
         fetched_at=costs.fetched_at,
-        pages=(RecordedPage(cursor=None, status_code=200, body=page_body([usage_row()])),),
+        pages=(
+            recorded_page(
+                cursor=None, status_code=200, body=page_body([usage_row()]), endpoint="completions"
+            ),
+        ),
     )
     return costs, usage
 
@@ -107,6 +140,9 @@ def attest(costs: AdminSnapshot, usage: AdminSnapshot, run: str = RUN) -> Attrib
         run_finished_at=costs.scope.end_time - 1,
         finalized_through=END,
         line_items={"luna input": "token", "hosted small": "container"},
+        billed_total_usd=Decimal(".032"),
+        billed_line_item_totals={"luna input": Decimal(".002"), "hosted small": Decimal(".03")},
+        expected_usage=AdminUsageTotals(input_tokens=1000, output_tokens=100, num_model_requests=1),
     )
 
 
@@ -155,6 +191,197 @@ async def test_injected_admin_transport_covers_all_keys_models_sources_and_pages
     assert requests[0].headers["openai-organization"] == "org-offline"
     assert "offline-admin-placeholder" not in snapshot.model_dump_json()
     assert tuple(page.cursor for page in snapshot.pages) == (None, "next-offline")
+    assert all(page.request is not None for page in snapshot.pages)
+    assert tuple(page.request.parameters for page in snapshot.pages if page.request) == (
+        tuple(expected),
+        (*expected, ("page", "next-offline")),
+    )
+
+
+async def test_complete_two_day_pagination_matches_independent_whole_project_bill() -> None:
+    scope = SCOPE.model_copy(update={"start_time": START - 86400})
+
+    def handler(request):
+        first = "page" not in request.url.params
+        rows = (
+            [cost_row(), cost_row("hosted small", ".03")]
+            if request.url.path.endswith("/costs")
+            else [usage_row()]
+        )
+        return httpx.Response(
+            200,
+            text=page_body(
+                rows,
+                start=scope.start_time if first else START,
+                next_page="next-offline" if first else None,
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        costs = await fetch_admin_snapshot(
+            client=client, admin_key=SecretStr("offline"), scope=scope, endpoint="costs"
+        )
+        usage = await fetch_admin_snapshot(
+            client=client, admin_key=SecretStr("offline"), scope=scope, endpoint="completions"
+        )
+    evidence = attest(costs, usage).model_copy(
+        update={
+            "billed_total_usd": Decimal(".064"),
+            "billed_line_item_totals": {
+                "luna input": Decimal(".004"),
+                "hosted small": Decimal(".06"),
+            },
+            "expected_usage": AdminUsageTotals(
+                input_tokens=2000, output_tokens=200, num_model_requests=2
+            ),
+        }
+    )
+    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=evidence)
+    assert result.accounting_status == "ready_for_approval"
+    assert result.token_usd == Decimal(".004")
+    assert result.container_usd == Decimal(".06")
+    assert result.proposed_actual_usd == Decimal(".064")
+
+
+@pytest.mark.parametrize("endpoint", ["costs", "completions"])
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        {"params": {"api_key_ids": "key-narrow"}},
+        {"params": {"api_key_ids[]": "key-narrow"}},
+        {"params": {"line_items": "luna input"}},
+        {"params": {"models[]": "gpt-6-luna"}},
+        {"params": {"batch": "false"}},
+        {"params": {"user_ids[]": "user-narrow"}},
+        {"params": {"project_ids[]": "proj-other"}},
+        {"headers": {"OpenAI-Project": "proj-other"}},
+        {"auth": ("unexpected", "credential")},
+        {"cookies": {"scope": "narrow"}},
+    ],
+)
+async def test_client_defaults_refused_before_any_request(endpoint, defaults) -> None:
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, text=page_body([cost_row()]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), **defaults) as client:
+        before = (str(client.params), dict(client.headers), dict(client.cookies), client.auth)
+        with pytest.raises(ValueError, match="^admin_client_defaults_not_allowed$"):
+            await fetch_admin_snapshot(
+                client=client, admin_key=SecretStr("offline"), scope=SCOPE, endpoint=endpoint
+            )
+        assert (
+            str(client.params),
+            dict(client.headers),
+            dict(client.cookies),
+            client.auth,
+        ) == before
+    assert calls == []
+
+
+async def test_client_request_hooks_refused_before_io() -> None:
+    calls = []
+
+    async def hook(request):
+        calls.append(request)
+
+    async with httpx.AsyncClient(event_hooks={"request": [hook]}) as client:
+        with pytest.raises(ValueError, match="^admin_client_defaults_not_allowed$"):
+            await fetch_admin_snapshot(
+                client=client, admin_key=SecretStr("offline"), scope=SCOPE, endpoint="costs"
+            )
+    assert calls == []
+
+
+@pytest.mark.parametrize("endpoint", ["costs", "completions"])
+async def test_client_default_added_between_pages_refuses_second_request(endpoint) -> None:
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        client.params = {"api_key_ids[]": "key-narrow"}
+        return httpx.Response(200, text=page_body([cost_row()], next_page="next-offline"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="^admin_client_defaults_not_allowed$"):
+            await fetch_admin_snapshot(
+                client=client, admin_key=SecretStr("offline"), scope=SCOPE, endpoint=endpoint
+            )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("endpoint", ["costs", "completions"])
+async def test_effective_transport_filter_never_becomes_export_evidence(endpoint) -> None:
+    def handler(request):
+        request.url = request.url.copy_add_param("api_key_ids[]", "key-narrow")
+        row = cost_row() if endpoint == "costs" else usage_row()
+        return httpx.Response(200, text=page_body([row]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        snapshot = await fetch_admin_snapshot(
+            client=client, admin_key=SecretStr("offline"), scope=SCOPE, endpoint=endpoint
+        )
+    costs, usage = exports()
+    if endpoint == "costs":
+        costs = snapshot
+    else:
+        usage = snapshot
+    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=attest(costs, usage))
+    assert snapshot.pages[0].request is None and snapshot.pages[0].body == ""
+    assert result.reason == "effective_request_scope_unverified"
+    assert result.proposed_actual_usd is None
+
+
+@pytest.mark.parametrize("endpoint", ["costs", "completions"])
+@pytest.mark.parametrize("page_index", [0, 1])
+@pytest.mark.parametrize("defect", ["missing", "filter", "origin", "organization"])
+def test_every_offline_page_requires_exact_effective_scope(endpoint, page_index, defect) -> None:
+    costs, usage = exports()
+    scope = SCOPE.model_copy(update={"end_time": END + 86400})
+    snapshots = []
+    for original in (costs, usage):
+        pages = tuple(
+            recorded_page(
+                cursor=None if index == 0 else "next-offline",
+                status_code=200,
+                scope=scope,
+                endpoint=original.endpoint,
+                body=page_body(
+                    [cost_row(), cost_row("hosted small", ".03")]
+                    if original.endpoint == "costs"
+                    else [usage_row()],
+                    start=START + index * 86400,
+                    next_page="next-offline" if index == 0 else None,
+                ),
+            )
+            for index in range(2)
+        )
+        if original.endpoint == endpoint:
+            changed = pages[page_index]
+            assert changed.request is not None
+            request = changed.request
+            if defect == "missing":
+                request = None
+            elif defect == "filter":
+                request = request.model_copy(
+                    update={"parameters": (*request.parameters, ("line_items", "luna input"))}
+                )
+            elif defect == "origin":
+                request = request.model_copy(update={"url": "https://other.invalid"})
+            else:
+                request = request.model_copy(update={"organization_id": "org-other"})
+            changed = changed.model_copy(update={"request": request})
+            pages = tuple(
+                changed if index == page_index else page for index, page in enumerate(pages)
+            )
+        snapshots.append(original.model_copy(update={"scope": scope, "pages": pages}))
+    costs, usage = snapshots
+    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=attest(costs, usage))
+    assert result.reason == "effective_request_scope_unverified"
+    assert result.accounting_status == "estimated_unverified"
+    assert result.proposed_actual_usd is None
 
 
 @pytest.mark.parametrize("status", [302, 400, 401, 403, 429, 500])
@@ -204,13 +431,152 @@ def test_exact_billed_amount_includes_unlabeled_infrastructure_without_token_pri
     # Exercise actual JSON numeric literals (not only string-valued exports).
     body = body.replace('"0.123456789012345678"', "0.123456789012345678")
     costs = costs.model_copy(
-        update={"pages": (RecordedPage(cursor=None, status_code=200, body=body),)}
+        update={"pages": (recorded_page(cursor=None, status_code=200, body=body),)}
     )
-    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=attest(costs, usage))
+    evidence = attest(costs, usage).model_copy(
+        update={
+            "billed_total_usd": Decimal(".153456789012345678"),
+            "billed_line_item_totals": {
+                "luna input": Decimal(".123456789012345678"),
+                "hosted small": Decimal(".03"),
+            },
+        }
+    )
+    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=evidence)
     assert result.accounting_status == "ready_for_approval"
     assert result.token_usd == Decimal(".123456789012345678")
     assert result.container_usd == Decimal(".03")
     assert result.proposed_actual_usd == Decimal(".153456789012345678")
+
+
+@pytest.mark.parametrize(
+    "defect,reason",
+    [
+        ("missing_hosted_charge", "complete_billed_line_items_mismatch"),
+        ("undercounted_token_charge", "complete_billed_line_items_mismatch"),
+        ("overcounted_token_charge", "complete_billed_line_items_mismatch"),
+        ("missing_input_tokens", "complete_usage_totals_mismatch"),
+        ("missing_output_tokens", "complete_usage_totals_mismatch"),
+        ("missing_model_request", "complete_usage_totals_mismatch"),
+        ("empty_usage", "complete_usage_totals_mismatch"),
+        ("missing_line_inventory", "complete_billing_inventory_unverified"),
+        ("inconsistent_billed_total", "complete_billing_inventory_unverified"),
+    ],
+)
+def test_independent_full_project_proof_refuses_missing_or_inconsistent_amounts(
+    defect, reason
+) -> None:
+    costs, usage = exports()
+    rows = [cost_row(), cost_row("hosted small", ".03")]
+    usages = [usage_row()]
+    if defect == "missing_hosted_charge":
+        rows.pop()
+    if defect == "undercounted_token_charge":
+        rows[0]["amount"]["value"] = ".001"
+    if defect == "overcounted_token_charge":
+        rows[0]["amount"]["value"] = ".003"
+    for name, field in [
+        ("missing_input_tokens", "input_tokens"),
+        ("missing_output_tokens", "output_tokens"),
+        ("missing_model_request", "num_model_requests"),
+    ]:
+        if defect == name:
+            usages[0][field] -= 1
+    if defect == "empty_usage":
+        usages = []
+    costs = costs.model_copy(
+        update={"pages": (recorded_page(cursor=None, status_code=200, body=page_body(rows)),)}
+    )
+    usage = usage.model_copy(
+        update={
+            "pages": (
+                recorded_page(
+                    cursor=None, status_code=200, body=page_body(usages), endpoint="completions"
+                ),
+            )
+        }
+    )
+    # These expected amounts/counters come from separate full-project evidence,
+    # never from the narrowed candidate above. Its hashes alone cannot prove completeness.
+    evidence = attest(costs, usage)
+    if defect == "missing_line_inventory":
+        evidence = evidence.model_copy(update={"billed_line_item_totals": {}})
+    if defect == "inconsistent_billed_total":
+        evidence = evidence.model_copy(update={"billed_total_usd": Decimal(".002")})
+    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=evidence)
+    assert result.reason == reason
+    assert result.accounting_status == "estimated_unverified"
+    assert result.proposed_actual_usd is result.token_usd is result.container_usd is None
+
+
+@pytest.mark.parametrize("field", ["billed_total_usd", "billed_line_item_totals", "expected_usage"])
+def test_completeness_proof_is_required_not_assumed_from_finished_pagination(field) -> None:
+    costs, usage = exports()
+    payload = attest(costs, usage).model_dump()
+    del payload[field]
+    with pytest.raises(ValidationError):
+        AttributionAttestation.model_validate(payload)
+
+
+async def test_review_filtered_two_mill_bill_cannot_release_thirty_two_mill_hold(tmp_path) -> None:
+    guard = setup_guard(tmp_path)
+    reservation = guard.reserve(plan())
+    held = guard.settle(reservation, status="failed", limits=plan().limits)
+    paths = [guard.config_path, guard.spend_path, guard.lock_path, guard.checkpoint_path]
+    before = {path: path.read_bytes() for path in paths}
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, text=page_body([cost_row()]))
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        params={"api_key_ids": "key-narrow", "line_items": "luna input"},
+    ) as client:
+        with pytest.raises(ValueError, match="^admin_client_defaults_not_allowed$"):
+            await fetch_admin_snapshot(
+                client=client, admin_key=SecretStr("offline"), scope=SCOPE, endpoint="costs"
+            )
+    assert calls == []
+    # Even a saved narrowed body with a clean effective request cannot override
+    # the independent final bill: $0.002 tokens PLUS $0.03 hosted infrastructure.
+    costs, usage = exports()
+    costs = costs.model_copy(
+        update={
+            "pages": (recorded_page(cursor=None, status_code=200, body=page_body([cost_row()])),)
+        }
+    )
+    evidence = attest(costs, usage, held.run_id)
+    with pytest.raises(ValueError, match="^complete_billed_line_items_mismatch$"):
+        propose_admin_reconciliation(guard=guard, costs=costs, usage=usage, attestation=evidence)
+    for name, value in [("costs", costs), ("usage", usage), ("attestation", evidence)]:
+        (tmp_path / f"{name}.json").write_text(value.model_dump_json())
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "daimon.core.usage_reconciliation",
+            "--costs",
+            str(tmp_path / "costs.json"),
+            "--usage",
+            str(tmp_path / "usage.json"),
+            "--attestation",
+            str(tmp_path / "attestation.json"),
+            "--guard-config",
+            str(guard.config_path),
+            "--spend-ledger",
+            str(guard.spend_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert len(process.stdout.splitlines()) == 1
+    assert json.loads(process.stdout)["proposed_actual_usd"] is None
+    assert {path: path.read_bytes() for path in paths} == before
+    report = guard.report()[0]
+    assert report.actual_usd is None and report.held_usd == held.held_usd
 
 
 @pytest.mark.parametrize(
@@ -268,10 +634,16 @@ def test_ambiguous_or_incomplete_exports_never_become_actual(defect, reason) -> 
     if defect == "negative_charge":
         rows[0]["amount"]["value"] = "-.01"
     costs = costs.model_copy(
-        update={"pages": (RecordedPage(cursor=None, status_code=200, body=page_body(rows)),)}
+        update={"pages": (recorded_page(cursor=None, status_code=200, body=page_body(rows)),)}
     )
     usage = usage.model_copy(
-        update={"pages": (RecordedPage(cursor=None, status_code=200, body=page_body(usages)),)}
+        update={
+            "pages": (
+                recorded_page(
+                    cursor=None, status_code=200, body=page_body(usages), endpoint="completions"
+                ),
+            )
+        }
     )
     if defect == "open_window":
         costs = costs.model_copy(update={"fetched_at": DAY})
@@ -285,7 +657,7 @@ def test_ambiguous_or_incomplete_exports_never_become_actual(defect, reason) -> 
         costs = costs.model_copy(
             update={
                 "pages": (
-                    RecordedPage(
+                    recorded_page(
                         cursor=None, status_code=200, body=page_body(rows, next_page="later")
                     ),
                 )
@@ -294,7 +666,9 @@ def test_ambiguous_or_incomplete_exports_never_become_actual(defect, reason) -> 
     if defect == "bad_cursor":
         costs = costs.model_copy(
             update={
-                "pages": (RecordedPage(cursor="unexpected", status_code=200, body=page_body(rows)),)
+                "pages": (
+                    recorded_page(cursor="unexpected", status_code=200, body=page_body(rows)),
+                )
             }
         )
     if defect == "duplicate_bucket":
@@ -302,17 +676,38 @@ def test_ambiguous_or_incomplete_exports_never_become_actual(defect, reason) -> 
         duplicated["data"].append(duplicated["data"][0])
         costs = costs.model_copy(
             update={
-                "pages": (RecordedPage(cursor=None, status_code=200, body=json.dumps(duplicated)),)
+                "pages": (recorded_page(cursor=None, status_code=200, body=json.dumps(duplicated)),)
             }
         )
     if defect == "missing_day":
+        changed_scope = SCOPE.model_copy(update={"end_time": END + 86400})
         costs = costs.model_copy(
-            update={"scope": SCOPE.model_copy(update={"end_time": END + 86400})}
+            update={
+                "scope": changed_scope,
+                "pages": (
+                    recorded_page(
+                        cursor=None, status_code=200, body=costs.pages[0].body, scope=changed_scope
+                    ),
+                ),
+            }
         )
-        usage = usage.model_copy(update={"scope": costs.scope})
+        usage = usage.model_copy(
+            update={
+                "scope": costs.scope,
+                "pages": (
+                    recorded_page(
+                        cursor=None,
+                        status_code=200,
+                        body=usage.pages[0].body,
+                        scope=changed_scope,
+                        endpoint="completions",
+                    ),
+                ),
+            }
+        )
     if defect == "truncated_json":
         costs = costs.model_copy(
-            update={"pages": (RecordedPage(cursor=None, status_code=200, body="{"),)}
+            update={"pages": (recorded_page(cursor=None, status_code=200, body="{"),)}
         )
     attestation = attest(costs, usage)
     if defect == "mixed_runs":
@@ -349,7 +744,7 @@ def test_evidence_hash_changes_on_raw_export_or_inventory_changes() -> None:
     assert first.evidence_sha256 != second.evidence_sha256
     changed = costs.model_copy(
         update={
-            "pages": (RecordedPage(cursor=None, status_code=200, body=costs.pages[0].body + " "),)
+            "pages": (recorded_page(cursor=None, status_code=200, body=costs.pages[0].body + " "),)
         }
     )
     third = assess_admin_reconciliation(costs=changed, usage=usage, attestation=attestation)
@@ -371,9 +766,10 @@ def test_readonly_cli_and_proposal_then_explicit_approved_append_releases_hold(
             "scope": scope,
             "fetched_at": datetime.fromtimestamp(today_start + 172800, UTC),
             "pages": (
-                RecordedPage(
+                recorded_page(
                     cursor=None,
                     status_code=200,
+                    scope=scope,
                     body=page_body(
                         [cost_row(), cost_row("hosted small", ".03")], start=today_start
                     ),
@@ -386,8 +782,12 @@ def test_readonly_cli_and_proposal_then_explicit_approved_append_releases_hold(
             "scope": scope,
             "fetched_at": costs.fetched_at,
             "pages": (
-                RecordedPage(
-                    cursor=None, status_code=200, body=page_body([usage_row()], start=today_start)
+                recorded_page(
+                    cursor=None,
+                    status_code=200,
+                    body=page_body([usage_row()], start=today_start),
+                    scope=scope,
+                    endpoint="completions",
                 ),
             ),
         }
@@ -475,14 +875,30 @@ def test_final_explicit_zero_is_distinct_from_empty_or_missing_amount() -> None:
     costs = costs.model_copy(
         update={
             "pages": (
-                RecordedPage(cursor=None, status_code=200, body=page_body([cost_row(value="0")])),
+                recorded_page(cursor=None, status_code=200, body=page_body([cost_row(value="0")])),
             )
         }
     )
     usage = usage.model_copy(
-        update={"pages": (RecordedPage(cursor=None, status_code=200, body=page_body([])),)}
+        update={
+            "pages": (
+                recorded_page(
+                    cursor=None, status_code=200, body=page_body([]), endpoint="completions"
+                ),
+            )
+        }
     )
-    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=attest(costs, usage))
+    evidence = attest(costs, usage).model_copy(
+        update={
+            "line_items": {"luna input": "token"},
+            "billed_total_usd": Decimal(0),
+            "billed_line_item_totals": {"luna input": Decimal(0)},
+            "expected_usage": AdminUsageTotals(
+                input_tokens=0, output_tokens=0, num_model_requests=0
+            ),
+        }
+    )
+    result = assess_admin_reconciliation(costs=costs, usage=usage, attestation=evidence)
     assert result.accounting_status == "ready_for_approval"
     assert result.proposed_actual_usd == Decimal(0)
 
