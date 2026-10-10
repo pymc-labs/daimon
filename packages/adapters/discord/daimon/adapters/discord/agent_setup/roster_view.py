@@ -29,7 +29,7 @@ from daimon.adapters.discord.agent_setup.hydrate import (
     load_details_for,
 )
 from daimon.adapters.discord.agent_setup.navigation import STALE_PANEL_MESSAGE, PanelViewBase
-from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.agent_setup.state import PanelState, WebhookBlock
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -52,6 +52,9 @@ _TIER_HINTS: Final[Mapping[ConfigTier, str]] = {
     "tenant": "server default",
     "deployment": "deployment default",
 }
+
+# Channels named in the admin webhook note before the rest collapse to a count.
+_WEBHOOK_BLOCK_LINES: Final = 5
 
 _STATUS_LABELS: Final[Mapping[RosterStatus, str]] = {
     "routed_elsewhere": "answers in other channels",
@@ -145,14 +148,42 @@ def _thread_line(state: PanelState) -> str | None:
     return f"-# In this thread **{responder}** answers while setting up **{context.target_name}**"
 
 
+def _denied_by(block: WebhookBlock) -> str:
+    """Who the channel's overwrite denies, as the subject of the note's sentence."""
+    if block.denied_by == "@everyone":
+        return "@everyone is"
+    if block.denied_by == "member":
+        return "Daimon is"
+    first = f"the '{block.role_names[0]}' role"
+    others = len(block.role_names) - 1
+    if others == 0:
+        return f"{first} is"
+    return f"{first} and {others} other role{'s' if others > 1 else ''} are"
+
+
 def _webhook_fix_line(state: PanelState) -> str | None:
-    """The admin-only note that agents post as Daimon until webhooks are allowed."""
-    if state.webhook_fix_url is None:
+    """The admin-only note that agents post as Daimon until webhooks are allowed.
+
+    A server without Manage Webhooks gets the re-authorize link. A server that
+    grants it gets one line per channel whose overwrites take it back, in one
+    text block so the note costs one component however many channels it names.
+    """
+    if state.webhook_fix_url is not None:
+        return (
+            "Agents answer as Daimon here because Daimon can't manage webhooks. "
+            f"Re-authorize Daimon to show each agent's name and face: {state.webhook_fix_url}"
+        )
+    if not state.webhook_blocks:
         return None
-    return (
-        "Agents answer as Daimon here because Daimon can't manage webhooks. "
-        f"Re-authorize Daimon to show each agent's name and face: {state.webhook_fix_url}"
-    )
+    lines = [
+        f"In #{block.channel_name} agents answer as Daimon because {_denied_by(block)} "
+        "denied Manage Webhooks there. Allow it for Daimon in that channel's permissions."
+        for block in state.webhook_blocks[:_WEBHOOK_BLOCK_LINES]
+    ]
+    hidden = len(state.webhook_blocks) - _WEBHOOK_BLOCK_LINES
+    if hidden > 0:
+        lines.append(f"And {hidden} more channel{'s' if hidden > 1 else ''} like these.")
+    return "\n".join(lines)
 
 
 def _status_line(row: RosterRow) -> str:

@@ -20,9 +20,10 @@ from daimon.adapters.discord.agent_setup.scope_default import (
     list_guild_propagations,
     resolve_account_display,
 )
-from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext
+from daimon.adapters.discord.agent_setup.state import PanelState, ThreadContext, WebhookBlock
 from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import (
     identity_enabled_for,
@@ -37,6 +38,8 @@ from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
+from daimon.core.scope import ChannelConfigRow
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +56,9 @@ _MENTION_PREFIX = "<@"
 # Re-authorizing with this set restores webhooks without dropping anything else.
 BOT_INSTALL_PERMISSIONS = 326954503232
 
+# Channels an admin's panel checks for an overwrite that denies Manage Webhooks.
+WEBHOOK_CHECK_LIMIT = 10
+
 
 def reauthorize_url(*, application_id: int, guild_id: int) -> str:
     """The OAuth link that re-adds the bot to one server with its full permission set."""
@@ -63,24 +69,142 @@ def reauthorize_url(*, application_id: int, guild_id: int) -> str:
     )
 
 
-def webhook_fix_url(
+def _identity_guild(
     runtime: DiscordRuntime, interaction: discord.Interaction, *, is_admin: bool
-) -> str | None:
-    """The re-authorize link for an admin whose server withholds Manage Webhooks.
+) -> discord.Guild | None:
+    """The guild an admin's webhook note is about, or None when there is no note.
 
-    Agent identity posts through a channel webhook; without Manage Webhooks every
-    answer falls back to the bot account. Only an admin can fix that, so nobody
-    else is shown the link, and a server with identity off has nothing to fix.
+    Only an admin can fix a webhook permission, so nobody else is told, and a
+    server with identity off posts through no webhook.
     """
     guild = interaction.guild
     if not is_admin or guild is None:
         return None
     if not identity_enabled_for(runtime.settings, "discord", guild.id):
         return None
+    return guild
+
+
+def webhook_fix_url(
+    runtime: DiscordRuntime, interaction: discord.Interaction, *, is_admin: bool
+) -> str | None:
+    """The re-authorize link for an admin whose server withholds Manage Webhooks.
+
+    Agent identity posts through a channel webhook; without Manage Webhooks every
+    answer falls back to the bot account.
+    """
+    guild = _identity_guild(runtime, interaction, is_admin=is_admin)
+    if guild is None:
+        return None
     permissions = guild.me.guild_permissions
     if permissions.manage_webhooks or permissions.administrator:
         return None
     return reauthorize_url(application_id=interaction.application_id, guild_id=guild.id)
+
+
+def _overwrite_check_guild(
+    runtime: DiscordRuntime, interaction: discord.Interaction, *, is_admin: bool
+) -> discord.Guild | None:
+    """The guild whose channel overwrites are worth checking, or None.
+
+    Only when the server grants Manage Webhooks: without the grant the
+    re-authorize link is the fix, and Administrator ignores every overwrite.
+    """
+    guild = _identity_guild(runtime, interaction, is_admin=is_admin)
+    if guild is None:
+        return None
+    permissions = guild.me.guild_permissions
+    if not permissions.manage_webhooks or permissions.administrator:
+        return None
+    return guild
+
+
+def answering_channel_ids(
+    channel_id: str, channel_rows: Sequence[ChannelConfigRow], policy: TenantAccessPolicy
+) -> list[str]:
+    """Where this server's agents answer, the panel's own channel first.
+
+    The panel's channel, then every channel with a setting of its own, then
+    every channel an agent rule names. Ids may repeat or name a thread.
+    """
+    rule_ids = {raw for rule in policy.agent_rules.values() for raw in rule.runs_in or ()}
+    return [
+        channel_id,
+        *sorted(row.channel_id for row in channel_rows),
+        *sorted(rule_ids),
+    ]
+
+
+def _webhook_channel(
+    guild: discord.Guild, raw_id: str
+) -> discord.TextChannel | discord.ForumChannel | None:
+    """The channel whose webhook a post to `raw_id` would use, if it can have one.
+
+    A thread posts through its parent's webhook. Voice and stage chats never
+    use a webhook, so their permissions say nothing about identity.
+    """
+    try:
+        channel = guild.get_channel_or_thread(int(raw_id))
+    except ValueError:
+        return None
+    if isinstance(channel, discord.Thread):
+        channel = channel.parent
+    if isinstance(channel, discord.TextChannel | discord.ForumChannel):
+        return channel
+    return None
+
+
+def _webhook_denial(
+    channel: discord.TextChannel | discord.ForumChannel, me: discord.Member
+) -> WebhookBlock | None:
+    """The overwrite that takes Manage Webhooks from Daimon in `channel`.
+
+    Discord applies @everyone, then every role's denies, then every role's
+    allows, then the member entry, so a role allow beats a role deny and a
+    member allow beats everything. None when no overwrite explains the loss.
+    """
+    member = channel.overwrites_for(me).manage_webhooks
+    if member is not None:
+        return None if member else WebhookBlock(channel_name=channel.name, denied_by="member")
+    roles = sorted(
+        (role for role in me.roles if not role.is_default()),
+        key=lambda role: role.position,
+        reverse=True,
+    )
+    settings = [(role, channel.overwrites_for(role).manage_webhooks) for role in roles]
+    if any(allowed for _, allowed in settings):
+        return None
+    denying = tuple(role.name for role, allowed in settings if allowed is False)
+    if denying:
+        return WebhookBlock(channel_name=channel.name, denied_by="roles", role_names=denying)
+    if channel.overwrites_for(channel.guild.default_role).manage_webhooks is False:
+        return WebhookBlock(channel_name=channel.name, denied_by="@everyone")
+    return None
+
+
+def webhook_blocks(guild: discord.Guild, channel_ids: Sequence[str]) -> tuple[WebhookBlock, ...]:
+    """The channels, of the first ten in `channel_ids`, whose overwrites deny webhooks.
+
+    `permissions_for` reads the cached overwrites, so this makes no API call.
+    A channel Daimon cannot see is left out: agents don't answer there at all.
+    """
+    me = guild.me
+    channels: dict[int, discord.TextChannel | discord.ForumChannel] = {}
+    for raw_id in channel_ids:
+        channel = _webhook_channel(guild, raw_id)
+        if channel is not None:
+            channels.setdefault(channel.id, channel)
+        if len(channels) == WEBHOOK_CHECK_LIMIT:
+            break
+    blocks: list[WebhookBlock] = []
+    for channel in channels.values():
+        permissions = channel.permissions_for(me)
+        if permissions.manage_webhooks or not permissions.view_channel:
+            continue
+        block = _webhook_denial(channel, me)
+        if block is not None:
+            blocks.append(block)
+    return tuple(blocks)
 
 
 def github_facts(runtime: DiscordRuntime) -> GitHubDeploymentFacts:
@@ -185,6 +309,19 @@ async def load_roster_state(
             ),
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
+        overwrite_guild = _overwrite_check_guild(runtime, interaction, is_admin=is_admin)
+        blocks = (
+            webhook_blocks(
+                overwrite_guild,
+                answering_channel_ids(
+                    channel_id,
+                    cascade[1],
+                    await load_access_policy(session, tenant_id=tenant_id),
+                ),
+            )
+            if overwrite_guild is not None
+            else ()
+        )
         managed_channels = (
             await load_administered_channel_ids(
                 session,
@@ -241,6 +378,7 @@ async def load_roster_state(
         thread_context=thread_context,
         thread_id=thread_id,
         webhook_fix_url=webhook_fix_url(runtime, interaction, is_admin=is_admin),
+        webhook_blocks=blocks,
     )
     state.attributions = await resolve_attributions(runtime, state=state, agents=roster.rows)
     return state

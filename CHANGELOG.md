@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
 - Live QA admits the primary alongside its temporary staging override and accepts exact Haiku 5.5 dated snapshots in deployment evidence and judge replies.
 
+- `/agent-setup` now tells admins when a channel's own permissions keep agents answering as Daimon, even though the server grants Manage Webhooks. Each line names the channel and the role, `@everyone` or member entry that denies it, for up to 5 channels.
 - The live QA runner now targets the replacement staging `qa-live-runs` category after the old category was removed.
 - Live QA preserves measured model and token evidence when a turn has no priced cost, and retains transient trigger reactions observed during progress. Unknown catalog kinds mark their scenario PENDING without blocking supported scenarios.
 

@@ -11,20 +11,24 @@ import discord
 import pytest
 from daimon.adapters.discord.agent_setup.hydrate import (
     BOT_INSTALL_PERMISSIONS,
+    WEBHOOK_CHECK_LIMIT,
+    answering_channel_ids,
     github_facts,
     load_roster_state,
     resolve_attributions,
+    webhook_blocks,
     webhook_fix_url,
 )
-from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.agent_setup.state import PanelState, WebhookBlock
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelConfigRow, DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.turn.deps import build_turn_deps
@@ -161,6 +165,309 @@ def test_an_excluded_guild_gets_no_reauthorize_link() -> None:
     url = webhook_fix_url(runtime, _guild_interaction(manage_webhooks=False), is_admin=True)
 
     assert url is None, "a guild excluded from identity never posts through webhooks"
+
+
+# ---------------------------------------------------------------------------
+# webhook_blocks
+# ---------------------------------------------------------------------------
+#
+# These run on real discord.py guild objects built from gateway payloads, so the
+# effective permission comes from discord.py's own overwrite arithmetic rather
+# than from a mock that answers whatever the test wanted.
+
+BOT_ID = 900
+CLIENT_ROLE_ID = 2001
+BOT_ROLE_ID = 2002
+WEBHOOKS = str(discord.Permissions(manage_webhooks=True).value)
+
+
+def _role(role_id: int, name: str, *, position: int, permissions: int = 0) -> dict[str, Any]:
+    return {
+        "id": role_id,
+        "name": name,
+        "permissions": str(permissions),
+        "position": position,
+        "color": 0,
+        "hoist": False,
+        "managed": False,
+        "mentionable": False,
+    }
+
+
+def _overwrite(target: int, *, allow: bool, member: bool = False) -> dict[str, Any]:
+    return {
+        "id": str(target),
+        "type": 1 if member else 0,
+        "allow": WEBHOOKS if allow else "0",
+        "deny": "0" if allow else WEBHOOKS,
+    }
+
+
+def _channel(channel_id: int, name: str, *overwrites: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": channel_id,
+        "type": 0,
+        "name": name,
+        "position": 0,
+        "guild_id": GUILD_ID,
+        "permission_overwrites": list(overwrites),
+    }
+
+
+def _thread(thread_id: int, parent_id: int) -> dict[str, Any]:
+    return {
+        "id": thread_id,
+        "type": 11,
+        "name": "a thread",
+        "guild_id": GUILD_ID,
+        "parent_id": parent_id,
+        "owner_id": 1,
+        "message_count": 0,
+        "member_count": 0,
+        "rate_limit_per_user": 0,
+        "thread_metadata": {
+            "archived": False,
+            "auto_archive_duration": 1440,
+            "archive_timestamp": "2026-10-10T00:00:00+00:00",
+            "locked": False,
+        },
+    }
+
+
+def _guild(
+    *channels: dict[str, Any],
+    server_grant: bool = True,
+    threads: tuple[dict[str, Any], ...] = (),
+) -> discord.Guild:
+    """A cached guild where Daimon holds the 'insighta client' and 'Daimon' roles."""
+    state = MagicMock()
+    state.self_id = BOT_ID
+    state.user.id = BOT_ID
+    state.member_cache_flags = discord.MemberCacheFlags.all()
+
+    def store_user(data: Any, cache: bool = True) -> discord.User:
+        return discord.User(state=state, data=data)
+
+    state.store_user = store_user
+    everyone = discord.Permissions(view_channel=True, manage_webhooks=server_grant)
+    return discord.Guild(
+        data=cast(
+            Any,
+            {
+                "id": GUILD_ID,
+                "name": "PyMC Labs",
+                "owner_id": 1,
+                "roles": [
+                    _role(GUILD_ID, "@everyone", position=0, permissions=everyone.value),
+                    _role(CLIENT_ROLE_ID, "insighta client", position=2),
+                    _role(BOT_ROLE_ID, "Daimon", position=1),
+                ],
+                "members": [
+                    {
+                        "user": {
+                            "id": BOT_ID,
+                            "username": "Daimon",
+                            "discriminator": "0",
+                            "avatar": None,
+                            "bot": True,
+                        },
+                        "roles": [str(CLIENT_ROLE_ID), str(BOT_ROLE_ID)],
+                        "joined_at": None,
+                        "deaf": False,
+                        "mute": False,
+                        "flags": 0,
+                    }
+                ],
+                "channels": list(channels),
+                "threads": list(threads),
+            },
+        ),
+        state=state,
+    )
+
+
+def _guild_panel(guild: discord.Guild, *, channel_id: int = CHANNEL_ID) -> MagicMock:
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.application_id = APPLICATION_ID
+    interaction.guild = guild
+    interaction.guild_id = GUILD_ID
+    interaction.channel = guild.get_channel_or_thread(channel_id)
+    interaction.user = MagicMock(spec=discord.Member)
+    interaction.user.id = 42
+    return interaction
+
+
+def test_a_role_overwrite_that_denies_webhooks_names_the_channel_and_role() -> None:
+    guild = _guild(_channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
+        WebhookBlock(
+            channel_name="insighta-client", denied_by="roles", role_names=("insighta client",)
+        ),
+    ), "the server grant is undone by the 'insighta client' role's deny in that channel"
+
+
+def test_an_everyone_overwrite_that_denies_webhooks_names_everyone() -> None:
+    guild = _guild(_channel(CHANNEL_ID, "general", _overwrite(GUILD_ID, allow=False)))
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
+        WebhookBlock(channel_name="general", denied_by="@everyone"),
+    )
+
+
+def test_a_member_deny_names_daimon_itself() -> None:
+    guild = _guild(_channel(CHANNEL_ID, "general", _overwrite(BOT_ID, allow=False, member=True)))
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
+        WebhookBlock(channel_name="general", denied_by="member"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("overwrites", "reason"),
+    [
+        (
+            (_overwrite(CLIENT_ROLE_ID, allow=False), _overwrite(BOT_ID, allow=True, member=True)),
+            "a member allow beats every role deny",
+        ),
+        (
+            (_overwrite(CLIENT_ROLE_ID, allow=False), _overwrite(BOT_ROLE_ID, allow=True)),
+            "one role's allow beats another role's deny",
+        ),
+        (
+            (_overwrite(GUILD_ID, allow=False), _overwrite(BOT_ROLE_ID, allow=True)),
+            "a role allow beats the @everyone deny",
+        ),
+        ((), "with no overwrite the server grant stands"),
+    ],
+)
+def test_an_overriding_allow_leaves_the_channel_out(
+    overwrites: tuple[dict[str, Any], ...], reason: str
+) -> None:
+    guild = _guild(_channel(CHANNEL_ID, "general", *overwrites))
+
+    assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (), reason
+
+
+def test_a_thread_is_checked_through_its_parent_channel() -> None:
+    guild = _guild(
+        _channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
+        threads=(_thread(THREAD_ID, CHANNEL_ID),),
+    )
+
+    blocks = webhook_blocks(guild, [str(THREAD_ID), str(CHANNEL_ID)])
+
+    assert [block.channel_name for block in blocks] == ["insighta-client"], (
+        "a thread posts through its parent's webhook, and the parent is named once"
+    )
+
+
+def test_unknown_and_unparseable_channel_ids_are_skipped() -> None:
+    guild = _guild(_channel(CHANNEL_ID, "general", _overwrite(GUILD_ID, allow=False)))
+
+    blocks = webhook_blocks(guild, ["not-a-snowflake", "999999", str(CHANNEL_ID)])
+
+    assert [block.channel_name for block in blocks] == ["general"]
+
+
+def test_only_the_first_ten_distinct_channels_are_checked() -> None:
+    ids = range(5000, 5000 + WEBHOOK_CHECK_LIMIT + 3)
+    guild = _guild(
+        *(_channel(cid, f"room-{cid}", _overwrite(GUILD_ID, allow=False)) for cid in ids)
+    )
+
+    blocks = webhook_blocks(guild, [str(cid) for cid in ids])
+
+    assert len(blocks) == WEBHOOK_CHECK_LIMIT == 10
+
+
+def test_answering_channels_are_the_panel_then_settings_then_agent_rules() -> None:
+    tenant_id = uuid.uuid4()
+    policy = TenantAccessPolicy(
+        agent_rules={"a": AgentRule(runs_in=("40", "30")), "b": AgentRule(runs_in=("30",))}
+    )
+    rows = [
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="20", agent_name="x"),
+        ChannelConfigRow(tenant_id=tenant_id, channel_id="10", agent_name="y"),
+    ]
+
+    assert answering_channel_ids("1", rows, policy) == ["1", "10", "20", "30", "40"]
+
+
+async def _panel_state(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    guild: discord.Guild,
+    *,
+    channel_id: int = CHANNEL_ID,
+    enabled: bool = True,
+    is_admin: bool = True,
+) -> PanelState:
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+    router = MARouter()
+    router.add_agent_list(ma_agent(id="ag_specialist", name="specialist", tenant_id=tenant.id))
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(router.dispatch),
+        default=DeploymentDefault(agent_name="specialist"),
+        settings_overrides={"agent_identity": {"enabled": enabled}},
+    )
+    return await load_roster_state(
+        runtime, _guild_panel(guild, channel_id=channel_id), tenant_id=tenant.id, is_admin=is_admin
+    )
+
+
+async def test_an_admin_panel_in_a_thread_reports_the_parents_blocking_overwrite(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    guild = _guild(
+        _channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
+        threads=(_thread(THREAD_ID, CHANNEL_ID),),
+    )
+
+    state = await _panel_state(db_session_factory, guild, channel_id=THREAD_ID)
+
+    assert state.webhook_fix_url is None, "the server grants Manage Webhooks"
+    assert state.webhook_blocks == (
+        WebhookBlock(
+            channel_name="insighta-client", denied_by="roles", role_names=("insighta client",)
+        ),
+    ), "the panel opened in a thread checks the parent channel"
+
+
+async def test_a_missing_server_grant_gets_the_link_instead_of_channel_lines(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    guild = _guild(
+        _channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
+        server_grant=False,
+    )
+
+    state = await _panel_state(db_session_factory, guild)
+
+    assert state.webhook_fix_url is not None, "without the server grant re-authorizing is the fix"
+    assert state.webhook_blocks == (), "channel overwrites are beside the point without the grant"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "is_admin", "reason"),
+    [
+        (True, False, "only an admin can change channel permissions"),
+        (False, True, "with identity off agents post through no webhook"),
+    ],
+)
+async def test_channel_blocks_are_withheld(
+    enabled: bool,
+    is_admin: bool,
+    reason: str,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    guild = _guild(_channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
+
+    state = await _panel_state(db_session_factory, guild, enabled=enabled, is_admin=is_admin)
+
+    assert state.webhook_blocks == (), reason
+    assert state.webhook_fix_url is None, reason
 
 
 # ---------------------------------------------------------------------------

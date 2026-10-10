@@ -49,6 +49,20 @@ class ThreadContext:
     target_name: str | None
 
 
+@dataclasses.dataclass(frozen=True)
+class WebhookBlock:
+    """One channel whose own permissions keep agents answering as Daimon.
+
+    The server grants Manage Webhooks but an overwrite in this channel takes
+    it away. `denied_by` is the overwrite to change: "@everyone", "member"
+    (Daimon's own entry) or "roles", with `role_names` highest role first.
+    """
+
+    channel_name: str
+    denied_by: Literal["@everyone", "roles", "member"]
+    role_names: tuple[str, ...] = ()
+
+
 @dataclasses.dataclass
 class PanelState:
     """State held for the lifetime of an /agent-setup View.
@@ -131,6 +145,9 @@ class PanelState:
     # Re-authorize link shown to an admin when identity is on but the bot lacks
     # Manage Webhooks, so agents answer as Daimon. None hides the line.
     webhook_fix_url: str | None = None
+    # Channels whose overwrites deny Manage Webhooks while the server grants
+    # it, for the same admin note. Empty hides the lines.
+    webhook_blocks: tuple[WebhookBlock, ...] = ()
 
     def select_agent(self, agent: RosterAgent) -> None:
         """Point Details and setup at `agent`, keeping the legacy selection in step.
