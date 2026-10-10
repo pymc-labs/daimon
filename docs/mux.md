@@ -1042,7 +1042,9 @@ The writer's admitted tenant/account remains the operation owner. Legacy turns
 perform none of these StateStore reads or writes.
 
 An input, action decision, cancel or archive persists its intent and wins
-`claim_send` before provider mutation. A committed sent claim or uncertain
+`claim_send` before provider mutation. Claimed Anthropic mutations use a
+single native attempt even when the shared client has its production retry
+budget; read requests and ordinary legacy I/O retain that budget. A committed sent claim or uncertain
 acknowledgement is replayed without another send; an acknowledged receipt is
 restored. Reusing an operation key for changed input raises `OperationConflict`.
 Only an explicit HTTP client refusal permits a fresh send attempt. A prepared

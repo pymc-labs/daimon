@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
+from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import default_mux_turn_io
@@ -457,7 +458,7 @@ async def test_uncertain_sdk_delivery_restarts_by_replay_without_another_post(
         )
     )
     persistence = context(store)
-    async with transport.client() as client:
+    async with transport.client(max_retries=MA_MAX_RETRIES) as client:
         io = default_mux_turn_io(
             client, SCOPE, SESSION.id, read_timeout_s=120, persistence=persistence
         )
@@ -470,7 +471,7 @@ async def test_uncertain_sdk_delivery_restarts_by_replay_without_another_post(
     native = make_agent_message(event_id="accepted-message", text="answer").model_dump(mode="json")
     replayed.queue(ScriptedReply("GET", "/v1/sessions/session/events", list_response([native])))
     successor = context(stores())
-    async with replayed.client() as client:
+    async with replayed.client(max_retries=MA_MAX_RETRIES) as client:
         io = default_mux_turn_io(
             client, SCOPE, SESSION.id, read_timeout_s=120, persistence=successor
         )
@@ -698,3 +699,106 @@ async def test_cached_action_batch_refuses_changed_wire_order_or_decision(
             await second.run(lambda: io.send(changed))
     transport.assert_consumed()
     assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["send", "actions", "cancel", "archive", "recovery-send", "recovery-stop", "recovery-archive"],
+)
+async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kind: str) -> None:
+    import httpx
+    from anthropic import APIConnectionError
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.io import TrackedLegacyTurnIO, TurnConnectionLost
+    from daimon.testing.ma import session_response
+
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = context(store)
+    archive = kind in {"archive", "recovery-archive"}
+    path = "/v1/sessions/session/archive" if archive else "/v1/sessions/session/events"
+    reply = session_response(session_id=SESSION.id) if archive else send_events_response()
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply("POST", path, httpx.ReadError("provider accepted; acknowledgement lost")),
+        ScriptedReply("POST", path, reply),
+    )
+    inputs: tuple[BetaManagedAgentsEventParams, ...] = (
+        {"type": "user.message", "content": [{"type": "text", "text": "question"}]},
+    )
+    async with transport.client(max_retries=MA_MAX_RETRIES) as client:
+        assert client.max_retries == 8 == MA_MAX_RETRIES
+        if kind.startswith("recovery-"):
+            io = TrackedLegacyTurnIO(client, SESSION.id, scope=SCOPE, persistence=persistence)
+        else:
+            io = default_mux_turn_io(
+                client, SCOPE, SESSION.id, read_timeout_s=120, persistence=persistence
+            )
+        if kind == "actions":
+            inputs = (
+                {"type": "user.tool_confirmation", "tool_use_id": "action", "result": "allow"},
+            )
+
+        async def pump() -> None:
+            if archive:
+                await io.archive()
+            elif kind in {"cancel", "recovery-stop"}:
+                await io.interrupt(timeout_s=0)
+            else:
+                await io.send(inputs)
+
+        with pytest.raises((TurnConnectionLost, APIConnectionError, TurnError)):
+            await persistence.run(pump)
+        assert client.max_retries == MA_MAX_RETRIES
+    assert not transport.violations
+    assert len(transport.requests) == 1 and transport.requests[0].method == "POST"
+    assert len(transport.replies) == 1
+    operation_kind = "send" if kind == "recovery-send" else kind
+    if kind == "recovery-archive":
+        operation_kind = "archive"
+    if kind == "actions":
+        from daimon.core.turn.io import _send_kind, neutral_inputs
+
+        operation_kind = _send_kind(neutral_inputs(inputs))
+    record = await store.get_operation(SCOPE, f"root:{operation_kind}:0")
+    assert record is not None and record.operation.status == "outcome_unknown"
+
+
+async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutations() -> None:
+    import httpx
+    from daimon.core.turn.io import LegacyTurnIO
+    from daimon.testing.ma import session_response
+
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = context(store)
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply("GET", "/v1/sessions/session", httpx.ReadError("retryable read")),
+        ScriptedReply(
+            "GET", "/v1/sessions/session", session_response(session_id=SESSION.id, status="idle")
+        ),
+        ScriptedReply("POST", "/v1/sessions/session/events", httpx.ReadError("legacy retry")),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    )
+    async with transport.client(max_retries=MA_MAX_RETRIES) as client:
+        io = default_mux_turn_io(
+            client, SCOPE, SESSION.id, read_timeout_s=120, persistence=persistence
+        )
+
+        async def read(key: str) -> SendReceipt:
+            assert await io.status() == "idle"
+            return SendReceipt(operation_id=key, status="processed", input_ids=())
+
+        await persistence.run(
+            lambda: persistence.mutate(
+                SESSION, "read-proof", {}, read, SendReceipt, lambda receipt: "processed"
+            )
+        )
+        legacy = LegacyTurnIO(client, SESSION.id, scope=SCOPE)
+        await legacy.send(
+            ({"type": "user.message", "content": [{"type": "text", "text": "legacy"}]},)
+        )
+        assert client.max_retries == MA_MAX_RETRIES
+    transport.assert_consumed()
+    assert [request.method for request in transport.requests] == ["GET", "GET", "POST", "POST"]

@@ -6815,8 +6815,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 58,
-      "end": 63,
+      "line": 79,
+      "end": 84,
       "scope": "latest_idle_is_settled",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6826,8 +6826,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 70,
-      "end": 70,
+      "line": 91,
+      "end": 91,
       "scope": "replay",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6837,19 +6837,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 43,
-      "end": 43,
+      "line": 62,
+      "end": 64,
       "scope": "send",
       "category": "production",
       "resource": "sessions.events.send",
-      "call": "self._client.beta.sessions.events.send(self._session_id, events=events)",
+      "call": "mutation_client(self._client).beta.sessions.events.send(self._session_id, events=events)",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 51,
-      "end": 54,
+      "line": 72,
+      "end": 75,
       "scope": "open_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6859,8 +6859,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 77,
-      "end": 77,
+      "line": 98,
+      "end": 98,
       "scope": "open_interrupt_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6870,19 +6870,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 80,
-      "end": 80,
+      "line": 101,
+      "end": 101,
       "scope": "archive",
       "category": "production",
       "resource": "sessions.archive",
-      "call": "self._client.beta.sessions.archive(self._session_id)",
+      "call": "mutation_client(self._client).beta.sessions.archive(self._session_id)",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 46,
-      "end": 46,
+      "line": 67,
+      "end": 67,
       "scope": "status",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6892,8 +6892,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 63,
-      "end": 63,
+      "line": 64,
+      "end": 64,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6903,8 +6903,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 191,
-      "end": 197,
+      "line": 192,
+      "end": 198,
       "scope": "open_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6914,8 +6914,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 221,
-      "end": 226,
+      "line": 222,
+      "end": 227,
       "scope": "list",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6925,23 +6925,23 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 167,
-      "end": 167,
+      "line": 168,
+      "end": 168,
       "scope": "send",
       "category": "production",
       "resource": "sessions.events.send",
-      "call": "self._client.beta.sessions.events.send(session.id, events=inputs)",
+      "call": "mutation_client(self._client).beta.sessions.events.send(session.id, events=inputs)",
       "request_keys": [],
       "response_access": []
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 258,
-      "end": 260,
+      "line": 259,
+      "end": 261,
       "scope": "cancel",
       "category": "production",
       "resource": "sessions.events.send",
-      "call": "self._client.beta.sessions.events.send(session.id, events=[{'type': 'user.interrupt'}])",
+      "call": "mutation_client(self._client).beta.sessions.events.send(session.id, events=[{'type': 'user.interrupt'}])",
       "request_keys": [
         "type"
       ],
@@ -6949,8 +6949,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 292,
-      "end": 292,
+      "line": 293,
+      "end": 293,
       "scope": "wait_stopped",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -16910,10 +16910,19 @@
     },
     {
       "file": "packages/core/tests/turn/test_persistence.py",
-      "line": 560,
+      "line": 561,
       "module": "anthropic",
       "names": [
         "BadRequestError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 710,
+      "module": "anthropic",
+      "names": [
+        "APIConnectionError"
       ],
       "category": "test"
     },
@@ -17714,7 +17723,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 13,
+      "line": 15,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic",
@@ -17724,7 +17733,7 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 14,
+      "line": 16,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsEventParams",

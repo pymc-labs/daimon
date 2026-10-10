@@ -411,3 +411,8 @@ permits automatic resend. The Anthropic stop observer can forward its normalized
 wait events to this same journal without changing provider requests. Legacy
 turns and unbound direct port callers retain their previous behavior. These host
 proofs do not promote the separate C01–C18 adapter's PENDING entries.
+
+Claimed Anthropic mutations suppress SDK retries only during their delivery
+call, so losing an acknowledgement leaves an unknown outcome for reconciliation
+instead of a second native POST. Read operations and legacy requests retain the
+injected client's retry budget; the shared client is never modified.

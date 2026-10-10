@@ -15,6 +15,7 @@ from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
+from mux.drivers.anthropic.transport import single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.journal import JournalEntry
 from mux.state.lease import Lease, StaleFence
@@ -201,7 +202,8 @@ class TurnPersistence:
                 self._fence(), now=self._now(), ttl=self._ttl
             )
             async with asyncio.timeout(self._send_timeout_s):
-                receipt = await call(key)
+                with single_attempt_mutation():
+                    receipt = await call(key)
         except BaseException as error:
             # Only an explicit client refusal proves this request was rejected.
             cause = error.__cause__ if isinstance(error, ProviderError) else error

@@ -7,7 +7,9 @@ request arguments, timeout policy and stream lifetime exactly.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 from anthropic import AsyncAnthropic, AsyncStream
@@ -19,6 +21,23 @@ from anthropic.types.beta.sessions import (
 
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
+
+_CLAIMED_MUTATION: ContextVar[bool] = ContextVar("anthropic_claimed_mutation", default=False)
+
+
+@contextmanager
+def single_attempt_mutation() -> Iterator[None]:
+    """A durable claim permits one native attempt, independently of read retries."""
+    token = _CLAIMED_MUTATION.set(True)
+    try:
+        yield
+    finally:
+        _CLAIMED_MUTATION.reset(token)
+
+
+def mutation_client(client: AsyncAnthropic) -> AsyncAnthropic:
+    """Do not mutate the shared client or weaken unrelated tasks/read requests."""
+    return client.with_options(max_retries=0) if _CLAIMED_MUTATION.get() else client
 
 
 class LegacyTurnTransport:
@@ -40,7 +59,9 @@ class LegacyTurnTransport:
         self.scope = scope
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        await self._client.beta.sessions.events.send(self._session_id, events=events)
+        await mutation_client(self._client).beta.sessions.events.send(
+            self._session_id, events=events
+        )
 
     async def status(self) -> str:
         return (await self._client.beta.sessions.retrieve(self._session_id)).status
@@ -77,4 +98,4 @@ class LegacyTurnTransport:
         return await self._client.beta.sessions.events.stream(session_id=self._session_id)
 
     async def archive(self) -> None:
-        await self._client.beta.sessions.archive(self._session_id)
+        await mutation_client(self._client).beta.sessions.archive(self._session_id)

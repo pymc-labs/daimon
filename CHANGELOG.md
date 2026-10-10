@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Alias opaque Gemini probe identities before the unchanged recorder and project captured status into a closed vocabulary.
 
 - Audit raw Gemini probe identities for secrets and key shapes before aliasing them for the unchanged recorder, and project captured status into a closed vocabulary.
+- Prevent SDK retries from repeating claimed mux mutations after a lost acknowledgement; retain the default retry policy for reads and legacy turns.
 
 - Add replay-first OpenAI F1 default-capability evidence, paired native command/MCP records, and integrity-checked metadata chunks for eleven skill pins.
 

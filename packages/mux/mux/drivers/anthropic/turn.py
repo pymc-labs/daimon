@@ -32,6 +32,7 @@ from mux.drivers.anthropic.resources._authorization import (
     check_ref,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import ProviderError, UnsupportedCapability
 
 
@@ -164,7 +165,7 @@ class AnthropicEvents:
         inputs = translate_inputs(events)
         try:
             result = await provider_call(
-                self._client.beta.sessions.events.send(session.id, events=inputs)
+                mutation_client(self._client).beta.sessions.events.send(session.id, events=inputs)
             )
         except ProviderError as error:
             if isinstance(error.__cause__, APIConnectionError | APITimeoutError):
@@ -255,7 +256,7 @@ class AnthropicEvents:
         requested_at = datetime.now(UTC)
         try:
             await provider_call(
-                self._client.beta.sessions.events.send(
+                mutation_client(self._client).beta.sessions.events.send(
                     session.id, events=[{"type": "user.interrupt"}]
                 )
             )
