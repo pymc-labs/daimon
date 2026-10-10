@@ -58,7 +58,7 @@ On Discord, run `/privacy` in a server where your account is linked. On Slack,
 run `/privacy` to open the privacy panel. On Teams, send `privacy`; the bot
 replies in your private chat. These controls let you:
 
-- **View** a summary of records linked to your account.
+- **View** who stores what about you: Daimon or Anthropic.
 - **Export** shows a summary on Slack and Teams. Export is not yet available on
   Discord.
 - **Delete** your account and its linked personal records ("delete me").
