@@ -454,6 +454,7 @@ async def test_slack_repo_open_refuses_unauthorized_viewer(
         user_id="U",
     )
     assert handled and refusal.await_count == 1
+    assert refusal.await_args.kwargs["refusal_text"] == ("Ask whoever manages helper to add repos.")
     client.views_push.assert_not_awaited()
 
 

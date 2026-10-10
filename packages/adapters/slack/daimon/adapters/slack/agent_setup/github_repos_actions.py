@@ -17,6 +17,7 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_connect_cards import (
     AgentRepoLine,
+    ask_manager_line,
     load_agent_repo_lines,
     picker_title,
     resolve_connect_card,
@@ -330,6 +331,7 @@ async def handle(
         agent_name=name,
         channel_id=channel_id,
         user_id=user_id,
+        refusal_text=ask_manager_line(name),
     )
     if refused:
         return True

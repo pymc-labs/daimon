@@ -227,8 +227,11 @@ async def refuse_unless_allowed_for_agent_name(
     thread_ts: str | None = None,
     caller_account_id: uuid.UUID | None = None,
     agent: BetaManagedAgentsAgent | None = None,
+    refusal_text: str | None = None,
 ) -> bool:
     """Decide `operation` against the agent the panel calls `agent_name`.
+
+    `refusal_text`, when given, replaces the operation's generic refusal.
 
     A name with no live MA agent behind it is not refused here — see the
     module docstring — it is decided as an unmanaged target, which leaves the
@@ -266,6 +269,7 @@ async def refuse_unless_allowed_for_agent_name(
         channel_id=channel_id,
         user_id=user_id,
         thread_ts=thread_ts,
+        text=refusal_text,
     )
 
 
@@ -367,6 +371,7 @@ async def _render_outcome(
     channel_id: str,
     user_id: str,
     thread_ts: str | None,
+    text: str | None = None,
 ) -> bool:
     if outcome == "allow":
         return False
@@ -375,7 +380,7 @@ async def _render_outcome(
         channel_id=channel_id,
         user_id=user_id,
         thread_ts=thread_ts,
-        text=refusal_message(operation, outcome),
+        text=text or refusal_message(operation, outcome),
     )
     return True
 

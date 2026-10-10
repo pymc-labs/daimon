@@ -4,7 +4,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from cryptography.fernet import Fernet
@@ -80,3 +80,43 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
         "https://mcp.test/oauth/github/connect/private-link-token"
     )
     assert kwargs["view"].children[0].emoji.name == "🔗"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "manages", "expected"),
+    [
+        (("helper", "ag_helper"), True, None),
+        (("helper", "ag_helper"), False, "Ask whoever manages helper to add repos."),
+        (("helper", None), True, "Ask whoever manages helper to add repos."),
+        (None, True, "This connection is no longer available."),
+    ],
+)
+async def test_non_admin_click_needs_to_manage_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    target: tuple[str, str | None] | None,
+    manages: bool,
+    expected: str | None,
+) -> None:
+    @asynccontextmanager
+    async def session():  # type: ignore[no-untyped-def]
+        yield MagicMock()
+
+    bot = MagicMock()
+    bot.runtime.sessionmaker = session
+    check = AsyncMock(return_value=manages)
+    monkeypatch.setattr(button_module, "connect_intent_agent", AsyncMock(return_value=target))
+    monkeypatch.setattr(
+        button_module,
+        "find_agent_by_derived_uuid",
+        AsyncMock(return_value=SimpleNamespace(name="helper", metadata={})),
+    )
+    monkeypatch.setattr(button_module, "can_manage_agent_github", check)
+    monkeypatch.setattr(button_module, "channel_admin_caller", lambda _member: "caller")
+    refusal = await button_module._manager_refusal(  # pyright: ignore[reportPrivateUsage]
+        bot, MagicMock(), uuid.uuid4(), uuid.uuid4()
+    )
+    assert refusal == expected
+    if target is not None and target[1] is not None:
+        assert check.await_args.kwargs["is_daimon_managed"] is False
+        assert check.await_args.kwargs["caller"] == "caller"
