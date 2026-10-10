@@ -4266,6 +4266,58 @@
         'type': 'object',
       }),
     }),
+    'remove_repo': dict({
+      'description': '''
+        Remove owner/repo from this agent only, after the requester confirms in a later turn.
+        <blank line>
+        Ask the returned question in plain words. Call again with confirmed=true
+        only after the same person says yes in this thread. If it was the working
+        repo, the working repo is cleared. Other agents keep their access.
+        Pass the current turn origin and selected agent identity.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'confirmed': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'repo_name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'repo_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'remove_skill': dict({
       'description': '''
         Stop an agent using an attached skill, such as eda. Remove that one

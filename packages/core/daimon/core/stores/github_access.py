@@ -191,6 +191,28 @@ async def list_agent_repos(
     return sorted(result, key=lambda repo: repo.full_name.casefold())
 
 
+async def repo_id_for_agent_removal(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, repo_name: str
+) -> int | None:
+    """Find a repo on this agent's grant or pending draft, including a revoked draft."""
+    for repo in await list_agent_repos(session, tenant_id=tenant_id, agent_id=agent_id):
+        if repo.full_name.casefold() == repo_name.casefold():
+            return repo.repo_id
+    drafts = await session.scalars(
+        select(AgentGitHubGrantDraft).where(
+            AgentGitHubGrantDraft.tenant_id == tenant_id,
+            AgentGitHubGrantDraft.agent_id == agent_id,
+        )
+    )
+    for draft in drafts:
+        repo = await repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=draft.repo_id, agent_id=agent_id
+        )
+        if repo is not None and repo.repo_full_name.casefold() == repo_name.casefold():
+            return draft.repo_id
+    return None
+
+
 async def set_working_repo(
     session: AsyncSession,
     *,
@@ -276,6 +298,10 @@ async def remove_agent_repo(
     only is disconnected too, since no other agent may use it; adding it back
     needs a new Connect. A server-wide repo stays connected for other agents.
     """
+    working = await session.get(
+        AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True
+    )
+    was_working = working is not None and working.is_working_repo
     removed = await remove_grant(
         session,
         tenant_id=tenant_id,
@@ -287,6 +313,12 @@ async def remove_agent_repo(
     if draft is not None:
         await session.delete(draft)
         removed = True
+    if was_working:
+        binding = await agent_repo_binding.get_binding(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+        if binding is not None:
+            await agent_repo_binding.clear_binding(session, tenant_id=tenant_id, agent_id=agent_id)
     own = await session.scalar(
         select(TenantGitHubRepo)
         .where(

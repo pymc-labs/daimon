@@ -16,6 +16,8 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
         assert "/workspace/<owner>/<repo>" in body
         assert "by token" in body
     assert "set_working_repo" in setup
+    assert "remove_repo" in setup
+    assert "remove_repo" in prompt
     assert "none" in setup
     assert "GH_TOKEN_*" in cli_auth
     assert "Other repos granted to this agent" in cli_auth
@@ -24,6 +26,7 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
 def test_tool_catalogue_describes_working_repo_separately() -> None:
     catalogue = (ROOT / "docs/mcp-tools.md").read_text()
     assert "| `set_working_repo` |" in catalogue
+    assert "| `remove_repo` |" in catalogue
     assert "Choose the one repo in this agent's filesystem" in catalogue
     assert "Give this agent token access to more repos" in catalogue
     assert "Ask for token access to a repo" in catalogue

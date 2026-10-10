@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agents can remove a repo from their own GitHub access in a setup conversation after the same requester confirms in a later turn. Removing a working repo clears that selection without changing other agents.
+
 - Account deletion on Discord, Slack, and Teams privacy panels can be paused during an event with `DAIMON_PRIVACY__DELETE_ENABLED=false`; Policy and Export remain available.
 - **QA CLI readback:** Check staging QA agent configuration through a bounded operator hook, with required and forbidden text assertions and no shell execution.
 - **QA sessions:** Serialize timer and manual live runs with a shared lock; accept configured hook context and templated catalog fixture arguments.
