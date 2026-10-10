@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0077_privacy_session_deletes"
-down_revision: str | None = "0076_github_connect_followup"
+revision: str = "0078_privacy_session_deletes"
+down_revision: str | None = "0077_github_connect_cancel"
 branch_labels: str | None = None
 depends_on: str | None = None
 

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.mark.fresh_schema
 async def test_privacy_session_deletes_migration_round_trip(db_session: AsyncSession) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0077_privacy_session_deletes.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0078_privacy_session_deletes.py"
     spec = importlib.util.spec_from_file_location("migration_privacy_session_deletes", path)
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)
