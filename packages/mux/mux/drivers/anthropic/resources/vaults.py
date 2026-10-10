@@ -28,6 +28,7 @@ from mux.drivers.anthropic.resources._authorization import (
     visible_grant,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
+from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.resources._secrets import (
     SecretResolver,
     credential_request,
@@ -46,6 +47,13 @@ class CredentialRecord(CredentialInfo):
 
 
 class Vaults(CoreVaults, Protocol):
+    def walk_named(self, scope: Scope, display_name: str) -> AsyncIterator[NativeSnapshot]: ...
+    def credential_walk_native(
+        self, scope: Scope, vault: ResourceRef
+    ) -> AsyncIterator[NativeSnapshot]: ...
+    async def create_credential_id(
+        self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
+    ) -> str: ...
     def walk(self, scope: Scope) -> AsyncIterator[VaultRecord]: ...
     async def create(self, scope: Scope, display_name: str, *, key: str) -> VaultRecord: ...
     def credential_walk(
@@ -82,6 +90,19 @@ def operation(ref: ResourceRef, key: str, action: str) -> Operation:
         created_at=now,
         updated_at=now,
     )
+
+
+def credential_snapshot(model: BaseModel) -> dict[str, JsonValue]:
+    """Keep known response fields, excluding unknown echoed credential material."""
+    result = cast(
+        dict[str, JsonValue],
+        model.model_dump(mode="json", include=set(type(model).model_fields), exclude_unset=True),
+    )
+    for name in tuple(result):
+        child: object = getattr(model, name)
+        if isinstance(child, BaseModel):
+            result[name] = credential_snapshot(child)
+    return result
 
 
 class AnthropicVaults:
@@ -127,20 +148,7 @@ class AnthropicVaults:
         # Response auth schemas contain metadata only; explicitly exclude any
         # unknown response extras, so a secret echoed by a faulty upstream
         # cannot become a stored record or repr.
-        def snapshot(model: BaseModel) -> dict[str, JsonValue]:
-            result = cast(
-                dict[str, JsonValue],
-                model.model_dump(
-                    mode="json", include=set(type(model).model_fields), exclude_unset=True
-                ),
-            )
-            for name in tuple(result):
-                child: object = getattr(model, name)
-                if isinstance(child, BaseModel):
-                    result[name] = snapshot(child)
-            return result
-
-        native = snapshot(item)
+        native = credential_snapshot(item)
         kind = "environment" if item.auth.type == "environment_variable" else item.auth.type
         return CredentialRecord(
             id=item.id,
@@ -149,6 +157,38 @@ class AnthropicVaults:
             revision=Revision(local=0),
             native=cast(JsonValue, native),
         )
+
+    async def walk_named(self, scope: Scope, display_name: str) -> AsyncIterator[NativeSnapshot]:
+        # The host grants the exact account/agent-derived name, not org enumeration.
+        authorize(self._authorization, scope, "vault_name", display_name)
+        async for item in provider_iter(self._client.beta.vaults.list()):
+            if item.display_name == display_name and visible(scope, item.metadata):
+                yield native_snapshot(item)
+
+    async def credential_walk_native(
+        self, scope: Scope, vault: ResourceRef
+    ) -> AsyncIterator[NativeSnapshot]:
+        authorize(self._authorization, scope, "vault", vault.id)
+        check_ref(scope, vault, self._account_scope_id, "vault")
+        async for item in provider_iter(
+            self._client.beta.vaults.credentials.list(vault_id=vault.id)
+        ):
+            native = credential_snapshot(item)
+            # The MCP summary also consumes this legacy top-level SDK extra.
+            if item.model_extra is not None and "mcp_server_url" in item.model_extra:
+                native["mcp_server_url"] = cast(JsonValue, item.model_extra["mcp_server_url"])
+            # The summary consumes only auth type/URL. Unknown upstream auth
+            # extras must not carry echoed token material through this snapshot.
+            auth = native.get("auth")
+            if isinstance(auth, dict):
+                native["auth"] = {k: v for k, v in auth.items() if k in {"type", "mcp_server_url"}}
+            yield NativeSnapshot(native=native)
+
+    async def create_credential_id(
+        self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
+    ) -> str:
+        # MCP repo binding consumes only the identity, even on a partial reply.
+        return (await self._send_credential(scope, vault, config)).id
 
     async def walk(self, scope: Scope) -> AsyncIterator[VaultRecord]:
         authorize(self._authorization, scope, "vault")

@@ -257,3 +257,11 @@ spend ledger. It records the offline C-matrix separately from its narrow SDK
 smoke and cannot issue a full live certificate. Live mode uses the pinned key
 file and reviewed shared-ledger budget configuration ($30 allocation, $24 stop).
 See `mux/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
+MCP repository binding and vault summaries use the verified tenant/account scope
+and an exact account/agent-derived vault-name grant. Repository writes retain
+create-before-commit, compensation and old-credential revocation ordering.
+Bundle uploads retain the bounded spool, multipart filename/media type and
+cleanup retention. Hosted charts retain the lazy Files API scan cap, Managed
+Agents beta header and binary read. Hub sessions retain account, legacy-access
+and seal filtering; skill details count partial native version rows. The native
+compatibility edge consumes only fields used by these existing callers.

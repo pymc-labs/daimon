@@ -2,7 +2,7 @@
 
 import io
 from collections.abc import AsyncIterator
-from typing import Protocol, cast
+from typing import IO, Protocol, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
@@ -18,7 +18,7 @@ from mux.drivers.anthropic.resources._authorization import (
     authorize,
     check_ref,
 )
-from mux.drivers.anthropic.resources._errors import provider_call
+from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.resources._secrets import (
     CredentialFileUpload,
@@ -30,6 +30,14 @@ from mux.errors import UnsupportedCapability
 
 
 class Artifacts(CoreArtifacts, Protocol):
+    async def upload_native(
+        self, scope: Scope, body: IO[bytes], *, filename: str, media_type: str, key: str
+    ) -> NativeSnapshot: ...
+
+    def walk_session_native(
+        self, scope: Scope, session: ResourceRef, *, limit: int
+    ) -> AsyncIterator[NativeSnapshot]: ...
+
     async def retrieve_native(self, scope: Scope, ref: ResourceRef) -> NativeSnapshot: ...
 
     async def upload_credential_file(
@@ -91,6 +99,29 @@ class AnthropicArtifacts:
         return await provider_call(
             self._client.beta.files.upload(file=(filename, content, media_type))
         )
+
+    async def upload_native(
+        self, scope: Scope, body: IO[bytes], *, filename: str, media_type: str, key: str
+    ) -> NativeSnapshot:
+        authorize(self._authorization, scope, "file")
+        # Keep the caller's bounded spool as the SDK multipart stream.
+        item = await provider_call(
+            self._client.beta.files.upload(file=(filename, body, media_type))
+        )
+        return native_snapshot(item)
+
+    async def walk_session_native(
+        self, scope: Scope, session: ResourceRef, *, limit: int
+    ) -> AsyncIterator[NativeSnapshot]:
+        authorize(self._authorization, scope, "session", session.id)
+        check_ref(scope, session, self._account_scope_id, "session")
+        # Lazy iteration preserves the host's scan cap and SDK stop rules.
+        async for item in provider_iter(
+            self._client.beta.files.list(
+                scope_id=session.id, limit=limit, betas=["managed-agents-2026-04-01"]
+            )
+        ):
+            yield native_snapshot(item)
 
     async def upload_credential_file(
         self, scope: Scope, config: CredentialFileUpload, *, key: str

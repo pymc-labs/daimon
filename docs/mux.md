@@ -909,3 +909,11 @@ a bounded single-POST SDK smoke and the separate offline C-matrix, preserving
 typed PENDING and unknown spend. Neither key presence nor offline passes grant a
 live certificate. See the driver's `LIVE-CERT.md` for commands and provider-budget
 limitations.
+MCP repository binding and vault summaries use the verified tenant/account scope
+and an exact account/agent-derived vault-name grant. Repository writes retain
+create-before-commit, compensation and old-credential revocation ordering.
+Bundle uploads retain the bounded spool, multipart filename/media type and
+cleanup retention. Hosted charts retain the lazy Files API scan cap, Managed
+Agents beta header and binary read. Hub sessions retain account, legacy-access
+and seal filtering; skill details count partial native version rows. The native
+compatibility edge consumes only fields used by these existing callers.

@@ -27,6 +27,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.resource_ports import create_repo_credential, mcp_scope, walk_named_vaults
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
@@ -45,6 +46,7 @@ from daimon.core.env_file import (
 )
 from daimon.core.errors import StoreError
 from daimon.core.github_visibility import pat_can_access_repo
+from daimon.core.mux_compat import delete_credential
 from daimon.core.operation_policy import TargetFacts, decide_operation, needs_reachability_read
 from daimon.core.stores.agent_files import (
     delete_agent_file,
@@ -63,6 +65,7 @@ from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_change
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.ids import Scope
 from pydantic import BaseModel, ConfigDict
 
 logger = structlog.get_logger()
@@ -133,7 +136,7 @@ def _require_agent_id(auth: AuthIdentity) -> uuid.UUID:
 
 
 async def _vault_id_for_agent(
-    client: AsyncAnthropic, *, account_id: uuid.UUID, agent_id: uuid.UUID
+    client: AsyncAnthropic, *, account_id: uuid.UUID, agent_id: uuid.UUID, scope: Scope
 ) -> str:
     """Return the per-agent daimon-mcp vault id.
 
@@ -141,7 +144,11 @@ async def _vault_id_for_agent(
     vault (mirrors tools/vault.py).
     """
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
-    matching = [v async for v in client.beta.vaults.list() if v.display_name == display_name]
+    matching = [
+        v
+        async for v in walk_named_vaults(client, display_name, scope=scope)
+        if v.display_name == display_name
+    ]
     if not matching:
         raise ToolError(
             "no MCP vault found for this account — run a session first to bootstrap the vault"
@@ -436,7 +443,7 @@ async def _set_repo_binding_impl(
 
     # 3. Discover per-agent vault.
     vault_id = await _vault_id_for_agent(
-        runtime.client, account_id=auth.account_id, agent_id=agent_id
+        runtime.client, account_id=auth.account_id, agent_id=agent_id, scope=mcp_scope(auth)
     )
 
     # 4. Capture old ref (separate read session) so we can delete after success.
@@ -450,13 +457,11 @@ async def _set_repo_binding_impl(
 
     # 5. Upload new vault credential. this MUST succeed before any DB write.
     try:
-        new_cred = await runtime.client.beta.vaults.credentials.create(
-            vault_id=vault_id,
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": "https://github.com",  # Plan 01 probe-validated placeholder
-                "token": token,
-            },
+        new_cred = await create_repo_credential(
+            runtime.client,
+            vault_id,
+            token=token,
+            scope=mcp_scope(auth),
             metadata={
                 "service": service,
                 "agent_id": str(agent_id),
@@ -492,10 +497,7 @@ async def _set_repo_binding_impl(
             )
     except Exception:
         try:
-            await runtime.client.beta.vaults.credentials.delete(
-                new_cred.id,
-                vault_id=vault_id,
-            )
+            await delete_credential(runtime.client, vault_id, new_cred.id, scope=mcp_scope(auth))
         except anthropic.APIError:
             logger.warning(
                 "set_repo_binding outcome=orphan_new_vault_cred agent=%s cred=%s",
@@ -511,10 +513,7 @@ async def _set_repo_binding_impl(
     #    itself stands; say so rather than reporting a clean success.
     if old_ref is not None and _is_vault_credential_ref(old_ref) and old_ref != new_cred.id:
         try:
-            await runtime.client.beta.vaults.credentials.delete(
-                old_ref,
-                vault_id=vault_id,
-            )
+            await delete_credential(runtime.client, vault_id, old_ref, scope=mcp_scope(auth))
         except anthropic.APIError as e:
             logger.warning(
                 "set_repo_binding outcome=orphan_old_vault_cred agent=%s cred=%s",
@@ -601,7 +600,7 @@ async def _clear_repo_binding_impl(
     if _is_vault_credential_ref(existing.ma_secret_ref):
         try:
             vault_id = await _vault_id_for_agent(
-                runtime.client, account_id=auth.account_id, agent_id=agent_id
+                runtime.client, account_id=auth.account_id, agent_id=agent_id, scope=mcp_scope(auth)
             )
         except ToolError as e:
             logger.warning(
@@ -613,9 +612,8 @@ async def _clear_repo_binding_impl(
                 "binding was left in place — clear it from the account that bound it"
             ) from e
         try:
-            await runtime.client.beta.vaults.credentials.delete(
-                existing.ma_secret_ref,
-                vault_id=vault_id,
+            await delete_credential(
+                runtime.client, vault_id, existing.ma_secret_ref, scope=mcp_scope(auth)
             )
         except anthropic.APIError as e:
             logger.warning(
