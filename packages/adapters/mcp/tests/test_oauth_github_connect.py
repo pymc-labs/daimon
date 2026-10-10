@@ -461,10 +461,10 @@ async def test_connection_happy_path_and_rechecks(
         assert "Choose repos" in page.text
         assert "0 selected" in page.text
         assert 'id="github-connect-form"' in page.text
-        assert "Connecting…" in page.text
+        assert 'const doing = verb === "Add" ? "Adding" : "Connecting";' in page.text
         assert "submit.disabled = true" in page.text
         assert "if (connecting || !boxes.some(box => box.checked))" in page.text
-        assert 'name="access" value="write" checked' in page.text
+        assert 'name="access" value="read" checked' in page.text
         assert 'class="web-icon web-icon--search"' in page.text
         assert 'class="web-icon web-icon--pencil"' in page.text
         assert 'class="web-icon web-icon--github"' in page.text
@@ -543,7 +543,7 @@ async def test_connection_happy_path_and_rechecks(
         assert 'type="hidden" name="repo"' not in picker.text
         assert 'name="repo" value="101" checked' not in picker.text
         assert 'name="repo" value="102" checked' not in picker.text
-        assert 'name="access" value="write" checked' in picker.text
+        assert 'name="access" value="read" checked' in picker.text
         empty = await browser.post("/oauth/github/confirm", data={"state": state})
         assert "Select at least one repo" in empty.text
         assert 'id="github-connect-form"' in empty.text
@@ -676,7 +676,7 @@ async def test_connection_happy_path_and_rechecks(
             )
         ).status_code == 307
         default_form = await browser.get("/oauth/github/confirm", params={"state": default_state})
-        assert 'name="access" value="write" checked' in default_form.text
+        assert 'name="access" value="read" checked' in default_form.text
         signature_match = re.search(r'name="receipt" value="([a-f0-9]+)"', default_form.text)
         assert signature_match is not None
         signed_form = {
@@ -698,7 +698,7 @@ async def test_connection_happy_path_and_rechecks(
         ) == ["already", "connected"]
         async with sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "write", 102: "write"}
+            assert {repo.repo_id: repo.max_access for repo in repos} == {101: "read", 102: "read"}
             assert len(await list_events(session, tenant_id=tenant_id)) == 2
         async with sessionmaker.begin() as session:
             await github_connect.delete_expired_flows(
@@ -733,3 +733,80 @@ async def test_connection_happy_path_and_rechecks(
     assert any(request.url.path == "/user/installations" for request in requests)
     assert all(request.url.path != "/user/memberships/orgs" for request in requests)
     assert sum(request.url.path == "/applications/client/token" for request in requests) == 4
+
+
+def _agent_picker(*, already_added: frozenset[int] = frozenset()) -> str:
+    repos = tuple(oauth_github._Repo(index, 5, 7, f"lab/repo-{index}", True) for index in (1, 2, 3))
+    installation = oauth_github._Installation(
+        id=7, owner_id=5, owner_login="lab", repository_selection="all", repos=repos
+    )
+    return oauth_github._confirmation_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        cancel_url="https://discord.com",
+        installations=[installation],
+        clients_present=False,
+        platform="discord",
+        workspace="Test Server",
+        agent_name="ResearchBot",
+        already_added=already_added,
+    ).body.decode()
+
+
+def test_agent_picker_names_the_agent_and_who_can_use_it() -> None:
+    body = _agent_picker()
+    assert "<h1>Add repos to ResearchBot</h1>" in body
+    assert "Anyone who talks to ResearchBot can ask it to read them." in body
+    assert "Server: Test Server" in body
+    assert 'name="access" value="read" checked' in body
+    assert body.index('value="read"') < body.index('value="write"')
+    assert 'data-verb="Add"' in body
+    assert '<span class="gh-button-label">Add repos</span>' in body
+    assert " · " not in body
+
+
+def test_agent_picker_ticks_and_greys_repos_already_added() -> None:
+    body = _agent_picker(already_added=frozenset({2}))
+    assert '<input type="checkbox" name="repo" value="2" checked disabled>' in body
+    assert '<input type="checkbox" name="repo" value="1">' in body
+    assert body.count("Already added") == 1
+    # Only new ticks count toward the button and are sent.
+    assert "const boxes = all.filter(box => !box.disabled);" in body
+
+
+def _agent_done(**changes: object) -> str:
+    args: dict[str, object] = {
+        "count": 2,
+        "platform": "slack",
+        "external_id": "U1",
+        "requester_label": "Alex",
+        "same_person": True,
+        "agent_name": "ResearchBot",
+        "update_pending": False,
+    }
+    args.update(changes)
+    return oauth_github._done_page(**args).body.decode()  # type: ignore[arg-type]
+
+
+def test_agent_done_page_says_added_and_close_tab() -> None:
+    body = _agent_done()
+    assert "Added 2 repos to ResearchBot." in body
+    assert "You can close this tab." in body
+    assert "old GitHub token" not in body
+
+
+def test_agent_done_page_mentions_old_token_only_after_the_switch() -> None:
+    assert "ResearchBot no longer uses its old GitHub token." in _agent_done(retired_saved_key=True)
+    pending = _agent_done(
+        update_pending=True,
+        retired_saved_key=False,
+        missing_repos=(("lab/work", True), ("lab/skills", False)),
+    )
+    assert "Added 2 repos to ResearchBot." in pending
+    assert (
+        "ResearchBot still uses its old GitHub token. "
+        "Add lab/work with read and write and lab/skills to finish switching."
+    ) in pending
+    assert "no longer uses" not in pending

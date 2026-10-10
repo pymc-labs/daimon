@@ -20,10 +20,22 @@ from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.config import Settings
 from daimon.core.github_app_auth import build_app_jwt, get_app_installation_details
+from daimon.core.github_connect_cards import (
+    ADD_REPOS_LABEL,
+    ALREADY_ADDED,
+    CLOSE_TAB,
+    added_line,
+    audience_line,
+    old_token_line,
+    picker_title,
+)
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.core.github_panel import requester_manages_agent
 from daimon.core.github_requester_access import list_github_pages
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant, has_external_accounts
+from daimon.core.stores.github_access import list_agent_repos
 from daimon.core.stores.github_request_actions import finish_confirmed_requests
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, Field
@@ -136,15 +148,19 @@ def _already_connected_page(
     update_pending: bool = False,
 ) -> Response:
     label = (
-        f"Already connected: {_repo_count(count)}." if count is not None else "Already connected."
+        added_line(count, agent_name)
+        if agent_name and count
+        else (
+            f"Already connected: {_repo_count(count)}."
+            if count is not None
+            else "Already connected."
+        )
     )
     detail = (
         f"<p>An operator will finish switching {html.escape(agent_name)}.</p>"
         if agent_name and update_pending
         else (
-            f"<p>{html.escape(agent_name)} can use these repos.</p>"
-            if agent_name
-            else "<p>The repos are connected. Choose an agent in GitHub setup.</p>"
+            "" if agent_name else "<p>The repos are connected. Choose an agent in GitHub setup.</p>"
         )
     )
     return github_page(
@@ -157,6 +173,12 @@ def _already_connected_page(
     )
 
 
+def _missing_phrase(missing: tuple[tuple[str, bool], ...]) -> str:
+    """`a/b with read and write and c/d`: each repo the switch still needs."""
+    names = [f"{name} with read and write" if write else name for name, write in missing]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def _done_page(
     *,
     count: int,
@@ -166,36 +188,36 @@ def _done_page(
     same_person: bool,
     agent_name: str | None,
     update_pending: bool,
+    retired_saved_key: bool = False,
+    missing_repos: tuple[tuple[str, bool], ...] = (),
 ) -> Response:
     back = _back_to_chat(platform, external_id)
-    if update_pending and agent_name:
+    if update_pending and agent_name and not missing_repos:
         return github_page(
             title=f"Repos connected. An operator will finish switching {agent_name}.",
             heading_icon=True,
-            body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
-            "<p>You can close this tab.</p>",
+            body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div><p>{CLOSE_TAB}</p>',
         )
     if agent_name:
-        ready = (
-            f"<p>{html.escape(agent_name)} can use them from your next message.</p>"
-            if same_person
-            else ""
+        # The old-token line only once the switch has finished, never while pending.
+        token = (
+            f"<p>{html.escape(agent_name)} still uses its old GitHub token. "
+            f"Add {html.escape(_missing_phrase(missing_repos))} to finish switching.</p>"
+            if update_pending
+            else (f"<p>{html.escape(old_token_line(agent_name))}</p>" if retired_saved_key else "")
         )
-        body = (
+        actions = (
             '<div class="gh-actions">' + back + "</div>"
             if same_person and platform == "discord"
-            else (
-                f"<p>In Slack, run <code>/github</code> to see "
-                f"{html.escape(agent_name)}'s repos.</p>"
-                if same_person
-                else f"<p>{html.escape(requester_label)} can now use these repos with "
-                f"{html.escape(agent_name)}. You can close this tab.</p>"
-            )
+            else ""
         )
         return github_page(
-            title=f"Connected {_repo_count(count)}",
+            title=added_line(count, agent_name),
             heading_icon=True,
-            body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>' + ready + body,
+            body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
+            + token
+            + f"<p>{CLOSE_TAB}</p>"
+            + actions,
         )
     if same_person:
         body = (
@@ -296,7 +318,10 @@ _PICKER_SCRIPT = """
 (() => {
   const form = document.getElementById("github-connect-form");
   const flow = document.querySelector(".gh-flow");
-  const boxes = [...form.querySelectorAll('input[name="repo"]')];
+  const all = [...form.querySelectorAll('input[name="repo"]')];
+  const boxes = all.filter(box => !box.disabled);
+  const verb = form.dataset.verb;
+  const audience = document.getElementById("audience");
   const search = document.getElementById("search-repos");
   search.closest(".gh-search-wrap").hidden = false;
   const changeAccess = document.getElementById("change-access");
@@ -313,8 +338,8 @@ _PICKER_SCRIPT = """
     const query = search.value.trim().toLowerCase();
     let visible = 0;
     let selected = 0;
-    for (const box of boxes) {
-      if (box.checked) selected++;
+    for (const box of all) {
+      if (box.checked && !box.disabled) selected++;
       const row = box.closest(".gh-choice");
       row.hidden = (selectedOnly && !box.checked) ||
         !row.textContent.toLowerCase().includes(query);
@@ -325,20 +350,25 @@ _PICKER_SCRIPT = """
     }
     const results = !!query || selectedOnly;
     count.textContent = query ? `${visible} matching ${plural(visible)}` :
-      selectedOnly ? `${visible} selected ${plural(visible)}` : `${boxes.length} repos available`;
+      selectedOnly ? `${visible} selected ${plural(visible)}` : `${all.length} repos available`;
     showSelected.hidden = selected === 0;
     showSelected.textContent = selectedOnly ? "Show all" : "Show selected";
     changeAccess.hidden = selected === 0;
     const visibleBoxes = boxes.filter(box => !box.closest(".gh-choice").hidden);
     const allVisibleChecked = visibleBoxes.length > 0 && visibleBoxes.every(box => box.checked);
-    bulk.textContent = allVisibleChecked ? "Clear selection" : `Select all ${visible}`;
-    bulk.hidden = visible === 0;
+    bulk.textContent = allVisibleChecked ? "Clear selection" : `Select all ${visibleBoxes.length}`;
+    bulk.hidden = visibleBoxes.length === 0;
     const access = form.querySelector('input[name="access"]:checked').value;
     const accessLabel = access === "write" ? "Read and write" : "Read only";
     status.textContent = selected ? `${selected} selected. ${accessLabel}.` : "0 selected";
     submit.disabled = selected === 0;
     submitLabel.textContent = selected ?
-      `Connect ${selected} ${plural(selected)}` : "Connect repos";
+      `${verb} ${selected} ${plural(selected)}` : `${verb} repos`;
+    if (audience) {
+      const can = access === "write" ? "read and change" : "read";
+      audience.textContent =
+        `Anyone who talks to ${audience.dataset.agent} can ask it to ${can} them.`;
+    }
     form.querySelector(".gh-empty").hidden = visible !== 0;
   }
   search.addEventListener("input", render);
@@ -376,9 +406,10 @@ _PICKER_SCRIPT = """
     showSelected.disabled = true;
     changeAccess.disabled = true;
     flow.classList.add("is-connecting");
-    status.textContent = `Connecting ${selected} ${plural(selected)}…`;
+    const doing = verb === "Add" ? "Adding" : "Connecting";
+    status.textContent = `${doing} ${selected} ${plural(selected)}…`;
     submit.disabled = true;
-    submit.innerHTML = '<span class="gh-spinner" aria-hidden="true"></span>Connecting…';
+    submit.innerHTML = `<span class="gh-spinner" aria-hidden="true"></span>${doing}…`;
     form.setAttribute("aria-busy", "true");
   });
   render();
@@ -387,16 +418,18 @@ _PICKER_SCRIPT = """
 """
 
 
-def _access_choices() -> str:
+def _access_choices(*, agent: bool) -> str:
+    applies = '<p class="gh-access-note">For the repos you add now.</p>' if agent else ""
     return (
         '<section class="gh-side-card gh-access" id="github-access" '
         'aria-label="Access"><h2>Access</h2>'
-        '<label><input type="radio" name="access" value="write" checked>'
+        '<label><input type="radio" name="access" value="read" checked>'
+        f'<span class="gh-access-copy"><strong>{icon("eye")}Read only</strong>'
+        "<small>Read code, issues and pull requests.</small></span></label>"
+        '<label><input type="radio" name="access" value="write">'
         f'<span class="gh-access-copy"><strong>{icon("pencil")}Read and write</strong>'
         "<small>Push branches, open issues and pull requests.</small></span></label>"
-        '<label><input type="radio" name="access" value="read">'
-        f'<span class="gh-access-copy"><strong>{icon("eye")}Read only</strong>'
-        "<small>Read code, issues and pull requests.</small></span></label></section>"
+        f"{applies}</section>"
     )
 
 
@@ -413,15 +446,26 @@ def _confirmation_page(
     workspace: str,
     agent_name: str | None,
     selection_error: str | None = None,
+    already_added: frozenset[int] = frozenset(),
 ) -> Response:
-    """Render the same picker used by the live route and screenshot capture."""
+    """Render the same picker used by the live route and screenshot capture.
+
+    Repos in `already_added` show ticked and greyed; only new ticks are sent.
+    """
     place = "Server" if platform == "discord" else "Workspace"
+    audience = (
+        f'<p class="gh-audience" id="audience" data-agent="{html.escape(agent_name, quote=True)}">'
+        f"{html.escape(audience_line(agent_name, write=False))}</p>"
+        if agent_name
+        else ""
+    )
     context = (
-        f'<div class="gh-context">{platform_mark(platform)}'
+        audience + f'<div class="gh-context">{platform_mark(platform)}'
         f"<span>{place}: {html.escape(workspace)}</span></div>"
     )
     parts = [
         f'<form id="github-connect-form" method="post" '
+        f'data-verb="{"Add" if agent_name else "Connect"}" '
         f'action="{html.escape(root, quote=True)}/oauth/github/confirm">',
         f'<input type="hidden" name="state" value="{html.escape(state, quote=True)}">',
         '<input type="hidden" name="invitation" '
@@ -460,19 +504,23 @@ def _confirmation_page(
         )
         for repo in owned:
             prefix, _, name = repo.full_name.rpartition("/")
-            selected = ""
+            added = repo.id in already_added
             parts.append(
-                '<label class="gh-choice repo-choice">'
-                f'<input type="checkbox" name="repo" value="{repo.id}"{selected}>'
+                f'<label class="gh-choice repo-choice{" is-added" if added else ""}">'
+                f'<input type="checkbox" name="repo" value="{repo.id}"'
+                + (" checked disabled" if added else "")
+                + ">"
                 f'<span><span class="gh-repo-prefix">{html.escape(prefix)}/</span>'
-                f'<span class="gh-repo-name">{html.escape(name)}</span></span></label>'
+                f'<span class="gh-repo-name">{html.escape(name)}</span>'
+                + (f'<span class="gh-added">{ALREADY_ADDED}</span>' if added else "")
+                + "</span></label>"
             )
         parts.append("</div>")
     parts.extend(
         [
             '<p class="gh-empty" hidden>No repos match this search.</p></div></section>',
             '<aside class="gh-side">',
-            _access_choices(),
+            _access_choices(agent=agent_name is not None),
             "</aside></div>",
             '<div class="gh-finish"><div class="gh-finish-status">'
             '<p id="selection-status" aria-live="polite">0 selected</p>'
@@ -496,14 +544,15 @@ def _confirmation_page(
             )
             + '</div><div class="gh-finish-actions">',
             '<button class="gh-primary" id="connect-repos" type="submit">'
-            f'{icon("github")}<span class="gh-button-label">Connect repos</span></button>'
+            f'{icon("github")}<span class="gh-button-label">'
+            f"{ADD_REPOS_LABEL if agent_name else 'Connect repos'}</span></button>"
             f'<a class="gh-link" href="{cancel_url}">Cancel</a></div></div>',
             "</form>",
             _PICKER_SCRIPT,
         ]
     )
     return github_page(
-        title=f"Choose repos for {agent_name}" if agent_name else "Choose repos for your server",
+        title=picker_title(agent_name) if agent_name else "Choose repos for your server",
         body_html="".join(parts),
         kind="picker",
     )
@@ -574,6 +623,7 @@ def build_oauth_github_routes(
     sessionmaker: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,
     client_factory: ClientFactory | None = None,
+    deployment_default: DeploymentDefault | None = None,
 ) -> tuple[RouteHandler, RouteHandler, RouteHandler, RouteHandler]:
     """Build connect, callback, setup and confirmation handlers."""
     config = settings.github_app
@@ -852,6 +902,16 @@ def build_oauth_github_routes(
             if requester is None or requester.is_external:
                 return _error()
             clients_present = await has_external_accounts(session, tenant_id=invitation.tenant_id)
+            already_added = (
+                frozenset(
+                    repo.repo_id
+                    for repo in await list_agent_repos(
+                        session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
+                    )
+                )
+                if invitation.agent_id is not None
+                else frozenset[int]()
+            )
         token = decrypt_token(fernet, flow.encrypted_user_token)
         try:
             async with factory() as client:
@@ -866,6 +926,8 @@ def build_oauth_github_routes(
                 selected_ids = [int(value) for value in fields.get("repo", [])]
             except ValueError:
                 return _error("Selection could not be verified.", retry_url=retry_confirm_url)
+            # Repos already on the agent keep their access; only new ticks count.
+            selected_ids = [repo_id for repo_id in selected_ids if repo_id not in already_added]
             if not selected_ids:
                 return _confirmation_page(
                     root=root,
@@ -881,6 +943,7 @@ def build_oauth_github_routes(
                     workspace=invitation.workspace_label,
                     agent_name=invitation.agent_name,
                     selection_error="Select at least one repo",
+                    already_added=already_added,
                 )
             visible = {
                 repo.id: repo for install in installations for repo in install.repos if repo.admin
@@ -892,7 +955,7 @@ def build_oauth_github_routes(
             repos: list[github_connect.RepoConfirmation] = []
             for repo_id in selected_ids:
                 repo = visible[repo_id]
-                access = fields.get("access", ["write"])[0]
+                access = fields.get("access", ["read"])[0]
                 if access not in ("read", "write"):
                     return _error("Selection could not be verified.", retry_url=retry_confirm_url)
                 repos.append(
@@ -924,6 +987,7 @@ def build_oauth_github_routes(
                 for detail in details
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
+            activation: github_connect.ConfirmedActivation | None = None
             try:
                 async with sessionmaker.begin() as session:
                     saved = await github_connect.confirm(
@@ -932,6 +996,17 @@ def build_oauth_github_routes(
                         cookie=cookie,
                         github_user_id=flow.github_user_id,
                         repos=repos,
+                        requester_manages_agent=deployment_default is not None
+                        and await requester_manages_agent(
+                            session,
+                            tenant_id=invitation.tenant_id,
+                            account_id=invitation.requester_account_id,
+                            platform=requester.platform,
+                            platform_user_id=requester.platform_user_id,
+                            agent_name=invitation.agent_name,
+                            ma_agent_id=invitation.agent_ma_id,
+                            default=deployment_default,
+                        ),
                     )
                     if saved:
                         for detail in details:
@@ -944,7 +1019,7 @@ def build_oauth_github_routes(
                                 repository_selection=detail.repository_selection,
                                 suspended_at=detail.suspended_at,
                             )
-                        await github_connect.activate_confirmed_agent(
+                        activation = await github_connect.activate_confirmed_agent(
                             session, invitation=invitation, repos=repos
                         )
                         resumed_requests = await finish_confirmed_requests(
@@ -1001,6 +1076,11 @@ def build_oauth_github_routes(
                 agent_name=invitation.agent_name,
                 update_pending=confirmed is not None
                 and confirmed.activation_status == "update_pending",
+                retired_saved_key=activation is not None and activation.retired_saved_key,
+                missing_repos=tuple(
+                    (missing.full_name, missing.needs_write)
+                    for missing in (activation.missing_repos if activation else ())
+                ),
             )
             response.set_cookie(
                 _COOKIE,
@@ -1064,6 +1144,7 @@ def build_oauth_github_routes(
             workspace=workspace
             or ("this server" if requester.platform == "discord" else "this workspace"),
             agent_name=invitation.agent_name,
+            already_added=already_added,
         )
 
     return connect, callback, setup, confirm
