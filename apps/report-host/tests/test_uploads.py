@@ -852,6 +852,64 @@ async def test_turn_upload_for_an_ended_turn_returns_404(
     assert resp.json()["detail"] == _UPLOAD_INVALID_MESSAGE
 
 
+async def test_previous_turn_upload_token_stays_invalid_during_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old turn's delayed PDF cannot become the next turn's current revision."""
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    conn = reports_store.connect(settings.data_dir)
+    _seed_report(conn)
+    thread = _seed_running_thread(conn)
+    reports_store.create_upload_token(
+        conn, token="old-turn-token", slug="acme", thread_id=thread.id, now=NOW
+    )
+    threads_store.end_turn(conn, thread_id=thread.id, now=NOW + timedelta(seconds=1))
+    began = threads_store.begin_turn(
+        conn,
+        thread_id=thread.id,
+        reserved_usd=Decimal("0.5"),
+        deadline_at=NOW + timedelta(seconds=61),
+        now=NOW + timedelta(seconds=2),
+    )
+    assert began
+    app = _make_app(settings=settings, conn=conn, seam=_seam(requests=[]))
+    async with await _client(app) as client:
+        resp = await client.put("/upload/old-turn-token", content=b"%PDF old turn")
+    assert resp.status_code == 404
+    assert reports_store.list_revisions(conn, slug="acme") == []
+
+
+async def test_turn_ending_during_upload_does_not_commit_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    conn = reports_store.connect(settings.data_dir)
+    _seed_report(conn)
+    thread = _seed_running_thread(conn)
+    reports_store.create_upload_token(
+        conn, token="in-flight-token", slug="acme", thread_id=thread.id, now=NOW
+    )
+    app = _make_app(settings=settings, conn=conn, seam=_seam(requests=[]))
+
+    async def body():
+        yield b"%PDF first chunk"
+        threads_store.end_turn(conn, thread_id=thread.id, now=NOW + timedelta(seconds=1))
+        assert threads_store.begin_turn(
+            conn,
+            thread_id=thread.id,
+            reserved_usd=Decimal("0.5"),
+            deadline_at=NOW + timedelta(seconds=61),
+            now=NOW + timedelta(seconds=2),
+        )
+        yield b" second chunk"
+
+    async with await _client(app) as client:
+        resp = await client.put("/upload/in-flight-token", content=body())
+    assert resp.status_code == 404
+    assert reports_store.list_revisions(conn, slug="acme") == []
+    assert not (settings.data_dir / "acme" / "v1.pdf").exists()
+
+
 async def test_turn_upload_non_pdf_body_returns_415(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

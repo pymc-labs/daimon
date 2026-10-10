@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS upload_tokens (
     token TEXT PRIMARY KEY,
     slug TEXT NOT NULL REFERENCES reports(slug) ON DELETE CASCADE,
     thread_id INTEGER NOT NULL,
+    turn_id TEXT,
     created_at TEXT NOT NULL
 );
 """
@@ -144,6 +145,7 @@ class UploadTokenRow:
     token: str
     slug: str
     thread_id: int
+    turn_id: str | None
     created_at: datetime
 
 
@@ -224,6 +226,8 @@ def connect(data_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(_SCHEMA)
     threads_store.apply_schema(conn)
+    if "turn_id" not in {row["name"] for row in conn.execute("PRAGMA table_info(upload_tokens)")}:
+        conn.execute("ALTER TABLE upload_tokens ADD COLUMN turn_id TEXT")
     return conn
 
 
@@ -547,8 +551,9 @@ def create_upload_token(
     """
     with conn:
         conn.execute(
-            "INSERT INTO upload_tokens (token, slug, thread_id, created_at) VALUES (?, ?, ?, ?)",
-            (token, slug, thread_id, dt_to_text(now)),
+            "INSERT INTO upload_tokens (token, slug, thread_id, turn_id, created_at) "
+            "VALUES (?, ?, ?, (SELECT turn_id FROM threads WHERE id = ?), ?)",
+            (token, slug, thread_id, thread_id, dt_to_text(now)),
         )
 
 
@@ -563,7 +568,7 @@ def consume_upload_token(conn: sqlite3.Connection, *, token: str) -> UploadToken
     with conn:
         cur = conn.execute(
             "DELETE FROM upload_tokens WHERE token = ? "
-            "RETURNING token, slug, thread_id, created_at",
+            "RETURNING token, slug, thread_id, turn_id, created_at",
             (token,),
         )
         row = cur.fetchone()
@@ -573,5 +578,6 @@ def consume_upload_token(conn: sqlite3.Connection, *, token: str) -> UploadToken
         token=row["token"],
         slug=row["slug"],
         thread_id=row["thread_id"],
+        turn_id=row["turn_id"],
         created_at=text_to_dt(row["created_at"]),
     )

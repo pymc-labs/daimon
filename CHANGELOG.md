@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed attempt to republish a report no longer disconnects the existing report.
 - Slack, Discord and Teams members now see only locally routed responders and agents explicitly allowed in their channel, across setup panels, agent tools, skill reads and routing explanations. Unrouted agents and agents belonging to other channels stay hidden; admin visibility and channel isolation are unchanged.
 - Discord form, credential and app install buttons now check private thread membership before posting for someone.
+- Report PDF upload links now expire with their reader turn, including uploads still streaming when that turn ends.
 - Stop subscribes to the session's events before sending the interrupt, so a fast stop no longer waits two minutes and reports "Stop not confirmed".
 - Worker deploys allow 95 seconds for container shutdown, exceeding the worker compose asset's 90-second grace for turn draining and cleanup.
 
