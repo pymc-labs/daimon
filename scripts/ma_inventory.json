@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2204,
+  "files_scanned": 2187,
   "parse_errors": [],
   "calls": [
     {
@@ -13997,16 +13997,6 @@
       "category": "production"
     },
     {
-      "file": "packages/core/daimon/core/turn/gemini.py",
-      "line": 20,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsEventParams",
-        "BetaManagedAgentsSessionEvent"
-      ],
-      "category": "production"
-    },
-    {
       "file": "packages/core/daimon/core/turn/io.py",
       "line": 19,
       "module": "anthropic._models",
@@ -16912,15 +16902,6 @@
       "category": "test"
     },
     {
-      "file": "packages/core/tests/turn/test_gemini_codec.py",
-      "line": 9,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsEventParams"
-      ],
-      "category": "test"
-    },
-    {
       "file": "packages/core/tests/turn/test_lifecycle.py",
       "line": 10,
       "module": "anthropic.types",
@@ -17041,7 +17022,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_provider_dispatch.py",
-      "line": 87,
+      "line": 85,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"

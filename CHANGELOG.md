@@ -262,6 +262,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Docker Compose `init` service runs migrations again. It called `uv run alembic`, which failed with a permission error writing `/app/uv.lock` as the image's non-root user.
 ### Added
 
+- Offline QA can capture actual Discord adapter posts, edits, draft cards and
+  final message chunks through an in-process Discord gateway. Image text stays
+  incomplete until separately observed.
+
 - Re-record the neutral-core oracle against synced main, attributing every changed transcript to its main PR while retaining exact provider requests and database effects.
 - Run the offline golden matrix on both legacy and mux turn paths against the same recordings, with explicit pending skips until the mux bridge lands and legacy-only regeneration.
 
