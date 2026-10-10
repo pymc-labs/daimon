@@ -37,6 +37,7 @@ from daimon.core.turn.status_lines import (
     format_headline,
     format_summary,
 )
+from daimon.core.turn.termination import TerminationReason
 
 EmbedEvent = _CardEvent
 
@@ -104,7 +105,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         # outcome; the footer carries the numbers on one quiet line.
         elapsed = now - state.started_at if now is not None else 0
         numbers = format_summary(
-            agent_name=None, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
+            agent_name=None, elapsed_seconds=elapsed, cost=state.cost_str, left=None
         )
         # The name gives way so the numbers always fit the footer.
         room = _FOOTER_MAX_CHARS - len(numbers) - len(SUMMARY_GAP)
@@ -112,7 +113,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         if len(name) > room:
             name = name[: room - 1] + "…"
         footer = format_summary(
-            agent_name=name, elapsed_seconds=elapsed, cost=state.cost_str, left=state.balance_str
+            agent_name=name, elapsed_seconds=elapsed, cost=state.cost_str, left=None
         )
         description = ""
         title = ""
@@ -143,33 +144,29 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             notice=notice_text,
         )
 
-    # In progress: one embed, the headline, the tool lines, then the latest draft.
+    # Public progress carries the headline and time; diagnostics stay in state/logs.
     elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
     title = format_headline(
         is_working=state.phase is TurnPhase.TOOL_RUNNING,
         elapsed_seconds=elapsed_seconds,
         bold=lambda word: word,
     )
-    sections: list[str] = []
-    if state.text_preview:
-        sections.append(f"> {_escape_markdown(state.text_preview)}")
     return EmbedData(
         phase=state.phase,
         title=title,
-        description="\n\n".join(sections),
+        description="",
         color=color,
         footer=format_duration(elapsed_seconds) if elapsed_seconds is not None else None,
-        details=(
-            "\n".join(f"`{line.replace('`', "'")}`" for line in state.tool_lines)
-            if state.tool_lines
-            else None
-        ),
+        details=None,
     )
 
 
 def format_termination_notice(notice: TerminationNotice) -> str:
     """Draw the core notice below the ERROR card's title, in Discord markdown."""
-    lines = [_escape_markdown(notice.cause)]
+    cause = notice.cause
+    if notice.reason is TerminationReason.MCP_DEGRADED_EMPTY:
+        cause = "A connected service failed, so Daimon could not finish this reply."
+    lines = [_escape_markdown(cause)]
     if (work := notice.work_line(lambda name: f"`{name.replace('`', '')}`")) is not None:
         lines.append(work)
     lines.append(notice.survived)

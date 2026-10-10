@@ -208,3 +208,7 @@ The seeded Daimon prompt describes opt-in Markdown tables in final replies: Disc
 them as PNG attachments and Slack uses native table blocks; Teams shows Markdown tables
 as they are, with no setting. Existing custom agent
 prompts are unchanged; see [platform table rendering](architecture.md#platform-table-rendering).
+
+The seeded agent keeps internal identifiers, hashes, memory-store paths and
+tool/server names out of public copy. Applying this system-prompt change causes
+one session replacement per existing thread; custom agent prompts are unaffected.

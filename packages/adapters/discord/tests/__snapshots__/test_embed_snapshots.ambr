@@ -15,13 +15,13 @@
   EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='', color=3447003, footer='42s', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[preview_present]
-  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='> Let me check that for you.', color=3447003, footer='42s', details=None, notice=None)
+  EmbedData(phase=<TurnPhase.THINKING: 'thinking'>, title='Working on it…', description='', color=3447003, footer='42s', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[saturated_trail_with_preview_and_cost]
-  EmbedData(phase=<TurnPhase.TOOL_RUNNING: 'tool_running'>, title='Working on it…', description='> Preview text describing the ongoing work.', color=3447003, footer='42s', details='`+3 earlier`\n`✔️ Read a file`\n`🚫 Wrote a file`\n`✔️ Search issues (tracker)`\n`✔️ Listed files`\n`🔍 Searching files`\n`🖋️ Running a command`', notice=None)
+  EmbedData(phase=<TurnPhase.TOOL_RUNNING: 'tool_running'>, title='Working on it…', description='', color=3447003, footer='42s', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[single_tool]
-  EmbedData(phase=<TurnPhase.TOOL_RUNNING: 'tool_running'>, title='Working on it…', description='', color=3447003, footer='42s', details='`🖋️ Running a command`', notice=None)
+  EmbedData(phase=<TurnPhase.TOOL_RUNNING: 'tool_running'>, title='Working on it…', description='', color=3447003, footer='42s', details=None, notice=None)
 # ---
 # name: test_embed_render_snapshot[terminal_done_no_cost]
   EmbedData(phase=<TurnPhase.DONE: 'done'>, title='', description='', color=5763719, footer='Atlas\u2003\u200342s', details=None, notice=None)

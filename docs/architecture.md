@@ -1811,3 +1811,9 @@ The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+
+Discord public turn cards keep status, elapsed time, configured agent identity and
+priced turn cost in the shared footer format. They omit balances, token totals,
+tool trails and in-progress drafts even when an admin requested the turn, since
+the channel audience also sees the card. Internal card state and logs keep the
+diagnostics; private billing/admin views retain their existing balances.

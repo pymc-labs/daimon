@@ -51,12 +51,6 @@
             'color': 3447003,
             'description': None,
             'fields': list([
-              tuple(
-                'Details',
-                list([
-                  '`🖋️ Running a command`',
-                ]),
-              ),
             ]),
             'footer': '11s',
             'title': 'Working on it…',

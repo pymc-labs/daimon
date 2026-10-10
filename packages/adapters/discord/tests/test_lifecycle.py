@@ -491,7 +491,10 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert notice is not None
     assert embed.title == "Something went wrong."
     assert embed.description == notice.next_step
-    assert notice.cause in embed.fields[0].value
+    if reason is TerminationReason.MCP_DEGRADED_EMPTY:
+        assert "A connected service failed" in embed.fields[0].value
+    else:
+        assert notice.cause in embed.fields[0].value
     assert notice.next_step in embed.description, "the next step is not truncated away"
     assert "**Next:**" not in embed.fields[0].value
     assert "`fit_model`" in embed.fields[0].value, "work in flight is named"
@@ -533,7 +536,8 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     embed = edits[-1][1]["embeds"][0]
     assert len(embed.description) <= 4096
     assert len(embed.footer.text) <= 2048
-    assert "and 42 more" in embed.fields[0].value
+    assert "A connected service failed" in embed.fields[0].value
+    assert "ssssss" not in embed.fields[0].value, "server names stay in diagnostics"
     assert "`rid: " in embed.fields[0].value
     assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
 
@@ -902,7 +906,7 @@ class TestStatusEmbedFromTurnState:
         assert len(embeds) == 1, "the whole status is one embed"
         description = embeds[0].description or ""
         assert embeds[0].title == "Working on it…"
-        assert "🔍 Search issues (tracker)" in embeds[0].fields[0].value
+        assert not embeds[0].fields, "tool names and servers stay out of public progress"
         assert "private words" not in description, "a tool line never shows its arguments"
 
     async def test_message_draft_shares_the_status_embed(self) -> None:
@@ -917,9 +921,7 @@ class TestStatusEmbedFromTurnState:
 
         embeds = edits[-1][1]["embeds"]
         assert len(embeds) == 1, "the draft rides the status embed"
-        assert (embeds[0].description or "").endswith("> Let me check the workspace config"), (
-            "agent.message text must be quoted at the bottom of the status embed"
-        )
+        assert not embeds[0].description, "draft diagnostics stay out of public progress"
 
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1022,7 @@ class TestMessageEventMapping:
 
         embeds = sends[0].get("embeds")
         assert embeds is not None and len(embeds) == 1, "one status embed"
-        assert "> I'll look that up" in embeds[0].description, "message text is the draft"
+        assert not embeds[0].description, "draft diagnostics stay out of public progress"
 
     async def test_thinking_event_adds_nothing_to_the_card(self) -> None:
         """agent.thinking carries no text; the headline already says Thinking."""
@@ -1043,9 +1045,9 @@ class TestMessageEventMapping:
 
         embeds = sends[0].get("embeds")
         assert embeds is not None and len(embeds) == 1, "the draft rides the one status embed"
-        description = embeds[0].description
+        description = embeds[0].description or ""
         assert len(description) < 400, "draft must be truncated, not the full text"
-        assert "…" in description, "truncated text should end with ellipsis"
+        assert not description, "draft diagnostics stay out of public progress"
 
 
 # ---------------------------------------------------------------------------
@@ -1093,7 +1095,7 @@ def _terminal_footer(edits: list[tuple[Any, dict[str, Any]]]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_terminal_footer_shows_prepaid_balance_only(
+async def test_terminal_footer_hides_prepaid_balance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1111,7 +1113,8 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     await lc.on_sse_event(_thinking_event())
     await lc.on_render(TurnState())
     await lc.on_terminal_success(_make_success_state())
-    assert _terminal_footer(edits).endswith(f"{GAP}$12.50 left")
+    assert "left" not in _terminal_footer(edits)
+    assert "$12.50" not in _terminal_footer(edits)
 
     async with db_session_factory() as s, s.begin():
         await set_funding_mode(s, tenant_id=tenant.id, funding_mode="operator_funded")
@@ -1658,7 +1661,7 @@ class TestUnpromptedTurn:
 
 
 class TestDegradedTurnNotice:
-    async def test_terminal_success_names_the_failed_mcp_server_under_the_reply(self) -> None:
+    async def test_terminal_success_explains_connection_failure_without_server_name(self) -> None:
         """#79: a reply produced after an MCP failure is delivered, with the
         dropped server named under it instead of a blank failure embed."""
         from daimon.core.turn.state import McpServerFailure
@@ -1680,7 +1683,9 @@ class TestDegradedTurnNotice:
 
         content = edits[-1][1]["content"]
         assert content.startswith("Here is the board."), "the reply itself comes first"
-        assert "`notion`" in content, "the dropped server is named under the reply"
+        assert "A connected service was unavailable" in content
+        assert "notion" not in content
+        assert "access forbidden" not in content
         assert lc.was_answered, "a degraded turn still counts as answered"
 
     async def test_tool_only_turn_posts_the_notice_on_its_own(self) -> None:
@@ -1706,8 +1711,9 @@ class TestDegradedTurnNotice:
         )
         await lc.on_terminal_success(state)
 
-        notices = [s for s in sends if "`notion`" in str(s.get("content", ""))]
-        assert len(notices) == 1, "the dropped server is named once, on its own line"
+        notices = [s for s in sends if "A connected service" in str(s.get("content", ""))]
+        assert len(notices) == 1, "the plain connection notice appears once"
+        assert "notion" not in str(notices)
 
 
 async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
@@ -1853,7 +1859,7 @@ async def test_rejected_table_upload_retries_original_answer_as_text(status, not
 
 
 @pytest.mark.asyncio
-async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
+async def test_terminal_footer_hides_channel_and_tenant_balances(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1881,15 +1887,14 @@ async def test_terminal_footer_shows_an_active_channel_budgets_remainder(
         await lc.on_render(TurnState())
         await lc.on_terminal_success(_make_success_state())
         footers[channel] = _terminal_footer(edits)
-    assert footers["C1"].endswith(f"{GAP}$3.75 left"), "the budget's remainder"
-    for channel in ("C2", "C3", None):
-        assert footers[channel].endswith(f"{GAP}$11.25 left"), (
-            f"{channel}: an inactive or missing budget shows the tenant balance"
-        )
+    for channel, footer in footers.items():
+        assert "left" not in footer, f"{channel}: balances stay out of public cards"
+        assert "$3.75" not in footer
+        assert "$11.25" not in footer
 
 
 @pytest.mark.asyncio
-async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
+async def test_answer_keeps_the_summary_without_public_budget(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1904,7 +1909,8 @@ async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
     await lc.post_initial()
     await lc.on_terminal_success(_make_success_state())
 
-    assert _terminal_footer(edits).endswith(f"{GAP}$25.00 left")
+    assert "$25.00" not in _terminal_footer(edits)
+    assert "left" not in _terminal_footer(edits)
     final_edit = edits[-1][1]
     assert final_edit["content"] == "Hello response"
     assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
