@@ -29,6 +29,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.session_compat import ChangeReason
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     fingerprint_identity,
@@ -38,7 +39,7 @@ from daimon.core.session_snapshot import (
     hash_tools,
 )
 from daimon.core.stores import tenant_ledger, usage_events
-from daimon.core.stores.domain import AccountRow, TenantRow, ThreadSessionRow
+from daimon.core.stores.domain import AccountRow, TenantRow, ThreadSessionRow, TransferKind
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
@@ -49,7 +50,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError
-from daimon.core.turn.prepare import PreparedTurn, bind_session
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_session
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -1287,3 +1288,36 @@ async def test_bind_session_raises_session_busy_when_a_handoff_lands_mid_turn(
     assert untouched is not None and untouched.status == "live", (
         "the source agent's session keeps running its own turn"
     )
+
+
+@pytest.mark.parametrize(
+    ("applied", "transfer_kind", "announced"),
+    [
+        # The prod cases: MA echoing a resolved skill version, and the person
+        # connecting GitHub (rid 01M4J0N1QH5HBFK4V36MZ2XQZ5), both carried in full.
+        (("skills",), "full", False),
+        (("repo_set",), "full", False),
+        (("github_mode", "repo_set", "repo_url", "repo_branch"), "full", False),
+        (("system_prompt", "tools", "mcp_servers", "env_file", "repo_token_age"), "full", False),
+        (("memory_store", "memory_access", "vault", "environment"), "full", False),
+        ((), "full", False),
+        # A different agent or model answering is noticed, so it is said.
+        (("model",), "full", True),
+        (("agent_identity",), "full", True),
+        (("skills", "model"), "full", True),
+        # Anything lost is always said, whatever the reason.
+        (("skills",), "transcript", True),
+        (("repo_set",), "history", True),
+    ],
+)
+def test_replacement_notice_is_only_for_changes_a_person_notices(
+    applied: tuple[ChangeReason, ...], transfer_kind: TransferKind, announced: bool
+) -> None:
+    outcome = ContinuityOutcome(state="replaced", applied=applied, transfer_kind=transfer_kind)
+
+    assert outcome.announces_replacement() is announced
+
+
+def test_no_replacement_notice_without_a_replacement_or_a_transfer() -> None:
+    assert not ContinuityOutcome().announces_replacement()
+    assert not ContinuityOutcome(state="replaced", applied=("model",)).announces_replacement()

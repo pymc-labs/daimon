@@ -104,6 +104,28 @@ class ContinuityOutcome:
         lost = _LOST_BY_TRANSFER.get(self.transfer_kind, ())
         return SessionState(state=self.state, applied=self.applied, lost=lost)
 
+    def announces_replacement(self) -> bool:
+        """Whether the person should be told this bind replaced their session.
+
+        Only what a person would notice is announced: a different agent or
+        model now answering (`NOTICEABLE_REPLACEMENT_REASONS`), or something
+        that did not come across (anything short of a full transfer). Every
+        other reason -- instructions, skills, tools, MCP servers, `.env`, repo
+        token age, GitHub mode or repositories (including ones the person just
+        connected), memory, vault, environment -- carried everything over and
+        changes nothing they can see, so a notice would only puzzle them.
+        """
+        if self.state != "replaced" or self.transfer_kind is None:
+            return False
+        if self.transfer_kind != "full":
+            return True
+        return any(reason in NOTICEABLE_REPLACEMENT_REASONS for reason in self.applied)
+
+
+#: The replacement reasons a person notices on their own: a different agent
+#: or a different model answers. Only these, or a transfer that lost
+#: something, are announced (`ContinuityOutcome.announces_replacement`).
+NOTICEABLE_REPLACEMENT_REASONS: frozenset[ChangeReason] = frozenset({"agent_identity", "model"})
 
 _LOST_BY_TRANSFER: dict[TransferKind | None, tuple[str, ...]] = {
     "transcript": ("working files",),
