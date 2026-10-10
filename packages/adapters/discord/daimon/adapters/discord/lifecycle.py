@@ -154,6 +154,7 @@ class DiscordTurnLifecycle:
         requester_id: int | None = None,
         trigger_message: discord.Message | None = None,
         notify_on_completion: bool = False,
+        acknowledgment_managed: bool = False,
         render_tables: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
@@ -170,6 +171,7 @@ class DiscordTurnLifecycle:
         self._requester_id = requester_id
         self._trigger_message = trigger_message
         self._notify_on_completion = notify_on_completion
+        self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
         self._send = send
         self._request_id = request_id
@@ -237,8 +239,14 @@ class DiscordTurnLifecycle:
             return
         if phase == "done" and not self._was_answered:
             return
+        if phase == "accepted" and self._acknowledgment_managed:
+            return
         await self._trigger_message.add_reaction("👀" if phase == "accepted" else "✅")
-        if phase == "done" and self._trigger_message.guild is not None:
+        if (
+            phase == "done"
+            and not self._acknowledgment_managed
+            and self._trigger_message.guild is not None
+        ):
             me = self._trigger_message.guild.me
             await self._trigger_message.remove_reaction("👀", me)
 

@@ -1008,8 +1008,9 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
             for method, url in fake_slack_web_client.mock.requests
             if "reactions." in str(url)
         ]
-        assert len(reactions) == 1
+        assert len(reactions) == 2
         assert "reactions.add" in reactions[0] and "name=eyes" in reactions[0]
+        assert "reactions.remove" in reactions[1] and "name=eyes" in reactions[1]
 
         return state
 

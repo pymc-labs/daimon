@@ -15,10 +15,12 @@ setting; [self-hosting.md](self-hosting.md) has the deployment.
 Discord, Slack, scheduler and MCP emit `runtime.health` every 30 seconds with
 Anthropic response attempts, database pool use, event loop lag and active turns.
 The Discord process also reports Discord 429 retries by route and longest retry wait.
-An opening Discord mention gets no reply in the parent channel while its thread
-opens. If naming and creation take over three seconds, the mention gets a ⌛
-reaction, removed once the thread exists. A thread that cannot be opened gets
-one plain reply under the mention.
+A Discord mention gets a best-effort 👀 reaction before turn admission resolves
+its agent and environment. The reaction clears when the turn completes, fails
+or is cancelled. A queued follow-up uses ⌛ instead, cleared after its batch
+settles. An opening mention gets no reply in the parent channel while its thread
+opens, and its existing acknowledgment covers naming and creation. A thread
+that cannot be opened gets one plain reply under the mention.
 
 ## The shape
 
@@ -1453,8 +1455,9 @@ creates leave the token stable; unrelated and OAuth credentials are preserved.
 The core driver calls an optional `on_acknowledgment` lifecycle hook with
 `accepted` after the initial event send and `done` after successful answer
 delivery. Missing hooks are no-ops; reaction failures are bounded and do not
-fail the turn. Opted-in Discord and Slack tenants react with eyes, then a check
-mark on success. Unprompted Discord turns stay silent; failures and cancellation
+fail the turn. Discord and Slack acknowledge admitted mentions with eyes; queued Discord
+follow-ups use an hourglass. These markers clear on every terminal path.
+Opted-in tenants also get a check mark on success. Unprompted Discord turns stay silent; failures and cancellation
 do not get a completion marker. Continuations without a trigger message skip
 reactions.
 
@@ -1466,7 +1469,9 @@ An unprompted Discord turn cancelled before it has an answer stays silent.
 Set `DAIMON_COMPLETION_PINGS` to a JSON object keyed by tenant UUID, for example
 `{"00000000-0000-0000-0000-000000000001": true}`, to deliver that tenant's final
 answer as a fresh thread reply mentioning only the requester. Missing or false
-entries keep the existing in-place answer and reactions (none on Discord; Slack keeps its admission eyes). Slack admission adds eyes once; the lifecycle only replaces it on opted-in completion. Recovery lifecycles retain this policy;
+entries keep the existing in-place answer. Discord adds eyes before admission;
+Slack adds eyes at admission. Both clear eyes independently of completion pings.
+Recovery lifecycles retain this policy;
 continuity notices and feedback target the new answer. Teams posts the answer fresh (with
 an @mention in a channel), then sets its card to "Done."; bots cannot
 react there.

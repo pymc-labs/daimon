@@ -221,6 +221,7 @@ async def _open_thread_with_notice(
     opening: Coroutine[Any, Any, discord.Thread],
     *,
     after_s: float,
+    acknowledged: bool = False,
 ) -> discord.Thread:
     """Keep an opening mention visibly acknowledged while naming or Discord creation waits.
 
@@ -236,11 +237,12 @@ async def _open_thread_with_notice(
                 return await asyncio.wait_for(asyncio.shield(task), timeout=after_s)
         except TimeoutError:
             pass
-        try:
-            await message.add_reaction(THREAD_OPENING_REACTION)
-            reacted = True
-        except discord.HTTPException as exc:
-            log.warning("discord.thread_open_notice_failed", error=str(exc))
+        if not acknowledged:
+            try:
+                await message.add_reaction(THREAD_OPENING_REACTION)
+                reacted = True
+            except discord.HTTPException as exc:
+                log.warning("discord.thread_open_notice_failed", error=str(exc))
         return await task
     finally:
         if not task.done():
@@ -525,6 +527,7 @@ class DaimonBot(commands.Bot):
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
         self._pending: dict[int, list[discord.Message]] = {}
+        self._queued_reactions: set[int] = set()
         # Continuation dispatches skipped because the thread was processing,
         # keyed by thread id: re-run when the thread is released (see
         # `_release_thread`). Last writer wins; a dispatch reads every pending
@@ -2017,7 +2020,7 @@ class DaimonBot(commands.Bot):
                         # thread branch below has.
                         for created_id in created_thread_ids:
                             self._release_thread(created_id)
-                            self._pending.pop(created_id, None)
+                            await self._clear_queued_reactions(self._pending.pop(created_id, []))
                     return
 
                 thread_id = message.channel.id
@@ -2027,7 +2030,7 @@ class DaimonBot(commands.Bot):
                     await self._drain_pending_mentions(thread_id, guild_id, tenant_id)
                 finally:
                     self._release_thread(thread_id)
-                    self._pending.pop(thread_id, None)
+                    await self._clear_queued_reactions(self._pending.pop(thread_id, []))
         except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await self._handle_prologue_failure(message, exc, guild_id, post_state=post_state)
         except Exception as exc:  # on_message event-handler boundary
@@ -2047,6 +2050,7 @@ class DaimonBot(commands.Bot):
         retry) is logged and swallowed rather than dropping the queued message
         into the prologue error path.
         """
+        self._queued_reactions.add(id(message))
         self._thread_queue.enqueue(thread_id, message)
         try:
             await message.add_reaction("⌛")
@@ -2057,6 +2061,23 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread_id),
                 err_type=type(exc).__name__,
             )
+        finally:
+            # The drain can finish while add_reaction is still in flight.
+            if id(message) not in self._queued_reactions:
+                await self._remove_mention_reaction(message, "⌛")
+
+    async def _remove_mention_reaction(self, message: discord.Message, emoji: str) -> None:
+        if message.guild is None or self.user is None:
+            return
+        try:
+            await message.remove_reaction(emoji, self.user)
+        except Exception as exc:
+            log.warning("mention.reaction_clear_failed", emoji=emoji, err_type=type(exc).__name__)
+
+    async def _clear_queued_reactions(self, messages: list[discord.Message]) -> None:
+        for message in messages:
+            self._queued_reactions.discard(id(message))
+            await self._remove_mention_reaction(message, "⌛")
 
     async def _handle_prologue_failure(
         self,
@@ -2092,20 +2113,32 @@ class DaimonBot(commands.Bot):
     async def _drain_pending_mentions(
         self, thread_id: int, guild_id: str, tenant_id: uuid.UUID
     ) -> None:
-        async def run(messages: list[discord.Message]) -> None:
-            await self._handle_mention(
-                messages[0],
-                guild_id,
-                tenant_id,
-                content_override=_compose_queued_content(messages),
-                attachments_override=[a for m in messages for a in m.attachments],
-            )
+        draining: dict[int, discord.Message] = {}
 
-        await self._thread_queue.drain(
-            thread_id,
-            compose=lambda queued: group_by_author(queued, lambda m: m.author.id),
-            run=run,
-        )
+        def compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
+            draining.update((id(message), message) for message in queued)
+            return group_by_author(queued, lambda m: m.author.id)
+
+        async def run(messages: list[discord.Message]) -> None:
+            try:
+                await self._handle_mention(
+                    messages[0],
+                    guild_id,
+                    tenant_id,
+                    content_override=_compose_queued_content(messages),
+                    attachments_override=[a for m in messages for a in m.attachments],
+                )
+            finally:
+                await self._clear_queued_reactions(messages)
+                for message in messages:
+                    draining.pop(id(message), None)
+
+        try:
+            await self._thread_queue.drain(thread_id, compose=compose, run=run)
+        finally:
+            # A cancelled/escaping author turn can leave the rest of its popped
+            # batch unrun. Those messages must not retain a queue marker either.
+            await self._clear_queued_reactions(list(draining.values()))
 
     async def _handle_mention(
         self,
@@ -2142,6 +2175,13 @@ class DaimonBot(commands.Bot):
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
         try:
+            # Before admit(): resolving seeded agents/environments can take tens
+            # of seconds. Queued mentions already have their own hourglass.
+            if not unprompted and content_override is None:
+                try:
+                    await message.add_reaction("👀")
+                except Exception as exc:
+                    log.warning("mention.reaction_failed", err_type=type(exc).__name__)
             await self._orchestrate(
                 message,
                 guild_id,
@@ -2178,6 +2218,8 @@ class DaimonBot(commands.Bot):
             # admission instead of keeping the slot (wait_for_slot).
             release_turn_slot()
             structlog.contextvars.unbind_contextvars("rid")
+            if not unprompted and content_override is None:
+                await self._remove_mention_reaction(message, "👀")
 
     async def _render_turn_error(
         self,
@@ -3109,6 +3151,7 @@ class DaimonBot(commands.Bot):
                 message,
                 _open_thread(),
                 after_s=discord_settings.thread_open_notice_after_s,
+                acknowledged=not unprompted,
             )
 
         # --- Wire lifecycle with send/edit callables ---
@@ -3162,6 +3205,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
+                acknowledgment_managed=True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
@@ -3591,6 +3635,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
+                acknowledgment_managed=True,
                 render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
                 send=turn_send,
                 edit=_edit_message,

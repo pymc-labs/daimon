@@ -67,11 +67,13 @@ still apply.
 
 `dict[UUID, bool]` · optional · default `{}`
 
-Per-tenant completion notification policy, keyed by tenant UUID. True enables
-accepted/done reactions and posts the final answer as a fresh reply mentioning only the
-requester on Discord and Slack. On Teams it closes the status card and posts the answer
-fresh, mentioning the requester in channels (Teams bots cannot react). Missing/false
-preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as a JSON object.
+Per-tenant completion notification policy, keyed by tenant UUID. Discord and Slack
+acknowledge mentions independently of this setting and clear the acknowledgment when the
+turn settles. True adds a success check mark and posts the final answer as a fresh reply
+mentioning only the requester on Discord and Slack. On Teams it closes the status card
+and posts the answer fresh, mentioning the requester in channels (Teams bots cannot
+react). Missing/false preserves in-place delivery. Configure DAIMON_COMPLETION_PINGS as
+a JSON object.
 
 ### `DAIMON_BUDGET_NOTICES`
 

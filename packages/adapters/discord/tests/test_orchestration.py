@@ -465,8 +465,10 @@ class TestNewThreadCreation:
         mock_run_turn.side_effect = finish_turn
         await bot.on_message(message)
         assert mock_thread.send.await_count == (2 if completion_enabled else 1)
-        if not completion_enabled:
-            message.add_reaction.assert_not_awaited()
+        assert [call.args[0] for call in message.add_reaction.await_args_list] == (
+            ["👀", "✅"] if completion_enabled else ["👀"]
+        )
+        message.remove_reaction.assert_awaited_once_with("👀", bot.user)
         async with db_session_factory() as session:
             assert not await list_recoverable_turn_card_intents(session, platform="discord")
 

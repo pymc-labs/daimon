@@ -1726,7 +1726,8 @@ async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_reactions_replace_accepted_after_success(enabled):
+@pytest.mark.parametrize("managed", [False, True])
+async def test_reactions_replace_accepted_after_success(enabled, managed):
     calls = []
 
     class Trigger:
@@ -1751,11 +1752,13 @@ async def test_reactions_replace_accepted_after_success(enabled):
         model_id="claude-sonnet-4-6",
         trigger_message=Trigger(),
         notify_on_completion=enabled,
+        acknowledgment_managed=managed,
     )
     await lifecycle.on_acknowledgment("accepted")
     await lifecycle.on_terminal_success(_make_success_state())
     await lifecycle.on_acknowledgment("done")
-    assert calls == ([("add", "👀"), ("add", "✅"), ("remove", "👀")] if enabled else [])
+    expected = [("add", "✅")] if managed else [("add", "👀"), ("add", "✅"), ("remove", "👀")]
+    assert calls == (expected if enabled else [])
 
 
 async def test_completion_preserves_original_card_id():
