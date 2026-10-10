@@ -843,7 +843,7 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     assert any("recorded" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded, got: {posted_texts}"
     )
-    assert any("credit is depleted" in text for text in posted_texts), (
+    assert any("Your team's Daimon credit has run out." in text for text in posted_texts), (
         f"the refusal must reuse the existing credit-depleted copy, got: {posted_texts}"
     )
 
@@ -897,9 +897,10 @@ async def test_a_demoted_admin_outside_the_allowlist_is_refused_on_submit(
         for call in channel.send.call_args_list
         if call.args and isinstance(call.args[0], str)
     ]
-    assert any("recorded" in t and "can start a turn" in t for t in posted_texts), (
-        f"the refusal must say the answers were recorded and why, got: {posted_texts}"
-    )
+    assert any(
+        "Your answers were recorded.\n\nDaimon can't accept your request here." in t
+        for t in posted_texts
+    ), f"the refusal must say the answers were recorded and why, got: {posted_texts}"
     async with db_session_factory() as session:
         account = await get_account(session, principal.account_id)
     assert account is not None and account.role is Role.USER, (

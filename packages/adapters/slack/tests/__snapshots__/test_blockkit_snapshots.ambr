@@ -215,7 +215,7 @@
     }),
     dict({
       'text': dict({
-        'text': 'Mention me to try again.',
+        'text': '@mention Daimon to try again.',
         'type': 'mrkdwn',
       }),
       'type': 'section',

@@ -131,9 +131,7 @@ def _answer() -> MessageActivityInput:
 def _termination() -> MessageActivityInput:
     notice = TerminationNotice(
         reason=TerminationReason.UPSTREAM,
-        headline=EMOJI * 10_000,
-        cause=EMOJI * 10_000,
-        survived=EMOJI * 10_000,
+        title=EMOJI * 10_000,
         next_step=EMOJI * 10_000,
         in_flight=tuple(f"{index}{'t' * 127}" for index in range(20)),
         finished_tools=10**6,

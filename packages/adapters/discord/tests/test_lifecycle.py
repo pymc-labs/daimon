@@ -540,6 +540,7 @@ def _make_lifecycle(
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
+    in_dm: bool | None = None,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -569,6 +570,7 @@ def _make_lifecycle(
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
+        in_dm=in_dm,
     )
     return lc, sends, edits
 
@@ -654,8 +656,8 @@ async def test_spend_limit_posts_notice_and_error_log(
         await lc.on_terminal_failure(TurnState(error=turn_error), turn_error)
     assert alerts == [f"spend_limit:{'org_cap' if status == 429 else 'user_limit'}"]
     embed = edits[-1][1]["embeds"][0]
-    assert embed.fields[0].value.strip() == "Daimon has reached its usage limit."
-    assert embed.description == "Ask the team running it to check the limit."
+    assert embed.title == "Daimon has reached its usage limit."
+    assert embed.description.startswith("Ask the team running it to check the limit.")
     assert str(tenant_id) not in str(embed.to_dict()), "no tenant id in chat"
     assert {
         "event": "anthropic.spend_limit_reached",
@@ -955,7 +957,7 @@ _NOTICE_REASONS = [
 async def test_terminal_failure_card_carries_the_termination_notice(
     reason: TerminationReason,
 ) -> None:
-    """The red card explains the reason: headline in the footer, the rest in the body."""
+    """The red card shows the same two lines as the shared notice."""
     lc, _, edits = _make_lifecycle()
     await lc.on_render(TurnState())
     state = TurnState(
@@ -972,20 +974,10 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     embed = edits[-1][1]["embeds"][0]
     notice = render_termination_notice(reason, state=state)
     assert notice is not None
-    assert embed.title == "Something went wrong."
-    assert embed.description == (
-        "Try again. If it keeps happening, tell an admin."
-        if reason is TerminationReason.UPSTREAM
-        else notice.next_step.replace("share the request id with an admin", "ask an admin for help")
-    )
-    if reason is not TerminationReason.UPSTREAM:
-        assert notice.cause in embed.fields[0].value
-    else:
-        assert "may still arrive" in embed.fields[0].value
-    assert "**Next:**" not in embed.fields[0].value
-    assert "fit_model" not in embed.fields[0].value, "tool details stay in logs"
-    assert "rid:" not in embed.fields[0].value
-    assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
+    assert embed.title == notice.title
+    assert embed.description.startswith(notice.next_step)
+    assert "\n\n-# Ref " in embed.description
+    assert "fit\\_model" in embed.description
     assert "xxx" not in str(embed.to_dict()), "raw error stays in the logs"
 
 
@@ -1022,9 +1014,8 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
     embed = edits[-1][1]["embeds"][0]
     assert len(embed.description) <= 4096
     assert len(embed.footer.text) <= 2048
-    assert "and 42 more" in embed.fields[0].value
-    assert "rid:" not in embed.fields[0].value
-    assert len(embed.fields) == 1, "the numbers ride the footer, not a Details field"
+    assert "and 42 more" in embed.title
+    assert "Ref " in embed.description
 
 
 async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
@@ -1043,9 +1034,8 @@ async def test_a_notice_that_fails_to_build_still_turns_the_card_red(
     assert embed.colour.value == COLOR_RED
     assert embed.title == "Something went wrong."
     # The fallback joins its lines with a blank line; Discord drops the trailing one.
-    assert embed.fields[0].value.rstrip() == "Something went wrong on our side."
-    assert embed.description == "Try again. If it keeps happening, tell an admin."
-    assert not any("upstream timeout" in str(field.value) for field in embed.fields)
+    assert embed.description == "@mention Daimon to try again."
+    assert "upstream timeout" not in str(embed.to_dict())
 
 
 async def test_the_card_reuses_the_rid_bound_for_the_turn() -> None:
@@ -1067,7 +1057,16 @@ async def test_terminal_failure_without_a_reason_on_the_state_maps_the_error() -
 
     await lc.on_terminal_failure(TurnState(), TurnError(kind="connection_lost"))
 
-    assert edits[-1][1]["embeds"][0].title == "Something went wrong."
+    assert edits[-1][1]["embeds"][0].title == "Lost the connection. Daimon may still be working."
+
+
+async def test_dm_terminal_notice_asks_for_a_message() -> None:
+    lc, _, edits = _make_lifecycle(in_dm=True)
+    await lc.on_render(TurnState())
+    await lc.on_terminal_failure(
+        TurnState(termination=TerminationReason.UPSTREAM), RuntimeError("private")
+    )
+    assert edits[-1][1]["embeds"][0].description.startswith("Send your message again.")
 
 
 class TestErrorEmbed:
@@ -2625,11 +2624,10 @@ async def test_terminal_overload_is_plain_and_allows_for_later_file_delivery(
     )
     card = edits[-1][1]["embeds"][0]
     text = str(card.to_dict())
-    assert cause in card.fields[0].value
-    assert card.description == "Try again in a minute."
-    assert "may still arrive" in text
+    assert card.title == "Daimon's AI service failed on this reply."
+    assert card.description.startswith("@mention Daimon to try again.")
     assert "req_private" not in text
-    assert "rid:" not in text
+    assert "Ref " in text
     assert "tool calls" not in text
     assert "error'" not in text
 
@@ -2644,7 +2642,9 @@ async def test_terminal_failure_keeps_authored_setup_guidance(wrapped: bool) -> 
         error = TurnError(kind="connection_lost", cause=error)
     await lc.on_terminal_failure(TurnState(), error)
     card = edits[-1][1]["embeds"][0]
-    assert card.description == copy
+    assert card.description.startswith(
+        "@mention Daimon to ask what it finished." if wrapped else "@mention Daimon to try again."
+    )
     assert "Try again in a minute" not in str(card.to_dict())
     assert "request id" not in str(card.to_dict())
 

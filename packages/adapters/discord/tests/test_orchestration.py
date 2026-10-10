@@ -1485,7 +1485,7 @@ class TestInvokerAccessPolicy:
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "can start a turn" in sent_text, sent_text
+        assert "can't accept your request here" in sent_text, sent_text
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
@@ -1991,9 +1991,9 @@ class TestBillingAdmissionGate:
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert (
-            "cap" in sent_text.lower()  # pyright: ignore[reportUnknownMemberType]
-        ), f"over-cap message should mention 'cap'; got: {sent_text!r}"
+        assert sent_text == (
+            "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
+        )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
@@ -2841,7 +2841,7 @@ class TestUnpromptedAdmission:
         await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "spending budget" in sent, "a mention gets the channel budget notice"
+        assert "budget is used up" in sent, "a mention gets the channel budget notice"
 
 
 class TestOverCapQueue:

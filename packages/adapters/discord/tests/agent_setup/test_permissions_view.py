@@ -126,7 +126,7 @@ def test_screen_offers_both_sides_a_copy_and_a_release(account_id: uuid.UUID) ->
     kept = _view(runtime, account_id, rule=OWN, agents=("alpha",))
     assert _labels(kept) == {"◀ Back", "Done"}, "own agents are released by changing readers"
     assert (
-        "Who can read it: Only its own agents · Who can post: Only its own agents · "
+        "Who can read it: Only its own agents\n\nWho can post: Only its own agents\n\n"
         "Agents kept here: alpha"
     ) in _text(kept)
     inside = _view(runtime, account_id, rule=ChannelRule(readers="inside"), agents=("alpha",))
@@ -182,7 +182,11 @@ async def test_own_readers_refuse_a_shared_agent_then_copy_it_and_release(
     copied = _interaction()
     await _button(screen, COPY_LABEL).callback(copied)
     screen = copied.response.edit_message.call_args.kwargs["view"]
-    assert "team-alpha, a copy of shared, is its own agent" in _text(screen)
+    assert "Made team-alpha, a copy of shared, for this channel." in _text(screen)
+    assert (
+        "Own agents only: only this channel's agents read and post here.\n\n-# Made team-alpha"
+        in _text(screen)
+    )
     async with db_session_factory() as session:
         scope = await get_scope(
             session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=str(CHANNEL_ID))
@@ -206,7 +210,9 @@ async def test_own_readers_refuse_a_shared_agent_then_copy_it_and_release(
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant.id)
     assert policy.agent_rules == {}, "releasing drops the copy's rule"
-    assert "may now run elsewhere" in _text(released.response.edit_message.call_args.kwargs["view"])
+    assert "can now work in other channels" in _text(
+        released.response.edit_message.call_args.kwargs["view"]
+    )
 
 
 async def test_writers_none_closes_the_channel(

@@ -994,7 +994,11 @@ async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy
     await handle_agent_setup_action(runtime, click(ACTION_RULE_READERS, "own"))
     await handle_agent_setup_action(runtime, click(ACTION_RULE_COPY))
     assert "also answers outside this channel" in texts()[0], "the plain pick says why not"
-    assert "team-alpha, a copy of shared, is its own agent" in texts()[1], "the copy click"
+    assert "Made team-alpha, a copy of shared, for this channel." in texts()[1]
+    assert (
+        "Own agents only: only this channel's agents read and post here.\n\nMade team-alpha"
+        in texts()[1]
+    )
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert policy.channel_rules == {room: ChannelRule(readers="own", writers="own")}
@@ -1002,9 +1006,9 @@ async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy
     assert len(_sent(mock, _VIEWS_UPDATE_KEY)) == 2, "each click refreshes Who answers where"
 
     await handle_agent_setup_action(runtime, click(ACTION_RULE_READERS, "any"))
-    assert "team-alpha still run only there" in texts()[2], "opening keeps the copy's rule"
+    assert "team-alpha shows in other channels again, but still works only here" in texts()[2]
     await handle_agent_setup_action(runtime, click(ACTION_RULE_RELEASE))
-    assert "team-alpha may now run elsewhere" in texts()[3], "releasing says so"
+    assert "team-alpha can now work in other channels" in texts()[3], "releasing says so"
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert (policy.channel_rules, policy.agent_rules) == ({}, {}), "all lifted"

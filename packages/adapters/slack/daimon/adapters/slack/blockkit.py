@@ -142,23 +142,32 @@ def to_blocks(
         blocks: list[dict[str, Any]] = []
         if state.phase is TurnPhase.ERROR:
             blocks.append(
-                {"type": "section", "text": {"type": "mrkdwn", "text": "Something went wrong."}}
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": escape_mrkdwn(state.notice_title or "Something went wrong."),
+                    },
+                }
             )
-            next_step = "Mention me to try again."
-            notice_text = state.notice
-            if state.notice and "*Next:* " in state.notice:
-                extracted = state.notice.split("*Next:* ", 1)[1].split("\n", 1)[0].strip()
-                if extracted:
-                    next_step = extracted
-                notice_text = "\n".join(
-                    line for line in state.notice.splitlines() if not line.startswith("*Next:* ")
-                )
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": next_step}})
             if state.notice:
+                parts = state.notice.split("\n\n")
                 blocks.append(
                     {
                         "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"*Details*\n{notice_text}"},
+                        "text": {"type": "mrkdwn", "text": parts[0]},
+                    }
+                )
+                blocks.extend(
+                    {"type": "context", "elements": [{"type": "mrkdwn", "text": part}]}
+                    for part in parts[1:]
+                    if part
+                )
+            else:
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "@mention Daimon to try again."},
                     }
                 )
         elif not answer_visible and state.text_preview is None:
@@ -243,11 +252,9 @@ def to_interrupted_blocks() -> list[dict[str, Any]]:
 
 def format_termination_notice(notice: TerminationNotice) -> str:
     """Draw the core notice below the ERROR card's title as mrkdwn."""
-    lines = [escape_mrkdwn(notice.cause)]
+    lines = [escape_mrkdwn(notice.next_step)]
     work = notice.work_line(lambda name: f"`{escape_mrkdwn(name.replace('`', ''))}`")
     if work is not None:
         lines.append(work)
-    lines.append(notice.survived)
-    lines.append(f"*Next:* {notice.next_step}")
-    tail = f"`rid: {notice.request_id}`" if notice.request_id is not None else None
+    tail = notice.ref_line
     return fit_notice(lines, tail=tail, limit=NOTICE_MAX_CHARS)

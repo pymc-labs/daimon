@@ -68,7 +68,9 @@ def _embed_snapshot(embed: Any) -> dict[str, Any]:
     """Reduce a discord.Embed to a plain, snapshot-friendly dict."""
     return {
         "title": embed.title,
-        "description": embed.description,
+        "description": (
+            embed.description.replace("\n\n", r"\n\n") if embed.description is not None else None
+        ),
         "color": embed.colour.value if embed.colour is not None else None,
         "footer": embed.footer.text if embed.footer else None,
         "fields": [(field.name, field.value.splitlines()) for field in embed.fields],

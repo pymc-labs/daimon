@@ -465,16 +465,21 @@ class TeamsTurnLifecycle:
                 key=f"spend_limit:{limit}",
                 message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
-        label = state.error.message if state.error is not None else str(err)
-        text = f"❌ {label or 'error'}"
+        retry = "Send your message again." if self._direct_chat else "@mention Daimon to try again."
+        text = f"Something went wrong.\n\n{retry}"
         reason = request_id = summary = None
-        # The notice is words on the ❌ card, never a reason not to close it:
-        # if building it fails, the card falls back to the raw error.
+        # If building the notice fails, still close the card with safe words.
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
             notice = render_termination_notice(
-                reason, state=state, request_id=request_id, error=err
+                reason,
+                state=state,
+                request_id=request_id,
+                error=err,
+                in_dm=self._direct_chat,
+                setup_command="`setup`",
+                agent_name=self._agent_name,
             )
             if notice is not None:
                 text = card.termination_text(notice)

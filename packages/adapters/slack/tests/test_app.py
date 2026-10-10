@@ -3600,8 +3600,8 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     depleted = [
         b
         for b in post_bodies
-        if str(b.get("text", "")) == f"This workspace's {display_name} credit is depleted. "
-        "A workspace admin can top up with `/billing`."
+        if str(b.get("text", ""))
+        == "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
     ]
     assert depleted, (
         f"expected the exact D-10 over-balance copy via chat.postMessage, got: {post_bodies}"
@@ -3685,7 +3685,7 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "You've reached your monthly usage cap. An operator can raise it."
+        == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
     assert cap_msgs, (
         f"expected the exact D-10 over-cap copy via chat.postMessage, got: {post_bodies}"
@@ -3752,7 +3752,7 @@ async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_cr
         if url == post_url
         for req in reqs
     ]
-    assert any("spending budget" in text for text in texts), texts
+    assert any("budget is used up" in text for text in texts), texts
 
 
 async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debit(
@@ -3952,7 +3952,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "This workspace's daimon credit is depleted. A workspace admin can top up with `/billing`."
+        == "Your team's Daimon credit has run out.\n\nAsk an admin to top up."
     ]
     assert depleted, (
         f"expected the exact over-balance copy via chat.postMessage, got: {post_bodies}"
@@ -4053,7 +4053,7 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
         b
         for b in post_bodies
         if str(b.get("text", ""))
-        == "You've reached your monthly usage cap. An operator can raise it."
+        == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
     assert cap_msgs, f"expected the exact over-cap copy via chat.postMessage, got: {post_bodies}"
 
@@ -4502,10 +4502,10 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
         for element in block.get("elements", [block])
         if isinstance(element, dict)
     )
-    assert "Something went wrong." in rendered_text
+    assert "This took too long, so Daimon stopped waiting." in rendered_text
     ceiling_notice = render_termination_notice(TerminationReason.CEILING)
     assert ceiling_notice is not None
-    assert ceiling_notice.cause in rendered_text, (
+    assert ceiling_notice.title in rendered_text, (
         "the rendered card must carry the core ceiling notice -- no new "
         "Slack-specific ceiling copy may be introduced"
     )
@@ -6500,7 +6500,9 @@ async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notic
         if url == post_url
         for req in reqs
     ]
-    refusals = [b for b in post_bodies if "can start a turn" in str(b.get("text", ""))]
+    refusals = [
+        b for b in post_bodies if "can't accept your request here" in str(b.get("text", ""))
+    ]
     assert refusals, f"expected the invoker refusal notice in-thread, got: {post_bodies}"
     assert refusals[0].get("thread_ts") == thread_ts
 

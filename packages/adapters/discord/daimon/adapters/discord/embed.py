@@ -118,21 +118,10 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         title = ""
         notice_text: str | None = None
         if state.phase is TurnPhase.ERROR:
-            title = "Something went wrong."
-            description = "Mention me to try again."
+            title = _escape_markdown(state.notice_title or "Something went wrong.")
+            description = state.notice or "@mention Daimon to try again."
             if state.notice:
-                next_marker = "**Next:** "
-                if next_marker in state.notice:
-                    extracted = state.notice.split(next_marker, 1)[1].split("\n", 1)[0].strip()
-                    if extracted:
-                        description = extracted
-                    notice_text = "\n".join(
-                        line
-                        for line in state.notice.splitlines()
-                        if not line.startswith(next_marker)
-                    )
-                else:
-                    notice_text = state.notice
+                description = state.notice
         return EmbedData(
             phase=state.phase,
             title=title,
@@ -169,6 +158,8 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
 
 def format_termination_notice(notice: TerminationNotice) -> str:
     """Draw the core notice below the ERROR card's title, in Discord markdown."""
-    lines = [_escape_markdown(notice.cause), notice.survived]
-    lines.append(f"**Next:** {notice.next_step}")
-    return fit_notice(lines, tail=None, limit=_NOTICE_MAX_CHARS)
+    lines = [_escape_markdown(notice.next_step)]
+    if (work := notice.work_line()) is not None:
+        lines.append(f"-# {_escape_markdown(work)}")
+    tail = f"-# {notice.ref_line}" if notice.ref_line else None
+    return fit_notice(lines, tail=tail, limit=_NOTICE_MAX_CHARS)

@@ -96,4 +96,4 @@ async def change_rule(
         await audit(outcome="error", reason="failed")
         return f"{exc} Nothing changed."
     await audit(outcome="allowed", reason="completed")
-    return f"<#{channel}>: " + " ".join(escape_mrkdwn(note) for note in change.notes)
+    return f"<#{channel}>: " + "\n\n".join(escape_mrkdwn(note) for note in change.notes)

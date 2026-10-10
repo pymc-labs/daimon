@@ -26,14 +26,14 @@ def test_every_admission_refusal_has_person_facing_copy(reason: AdmissionDenialR
 
 def test_an_agent_with_a_rule_says_why_it_cannot_move_to_a_dm() -> None:
     message = _denial_text("runs_elsewhere")
-    assert "rule" in message and "DM" in message, message
+    assert message == "This agent only works in other channels.\n\nAsk it there."
 
 
 def test_a_channel_kept_to_its_own_agents_says_why_it_cannot_move_to_a_dm() -> None:
     message = _denial_text("own_agents_only")
-    assert "own agents" in message and "DM" in message, message
+    assert message == "This channel only uses its own agents.\n\nAsk in that channel."
 
 
 def test_a_dm_refusal_uses_the_workspace_nouns() -> None:
     message = _denial_text("invoker_not_allowed")
-    assert "this workspace's list" in message and "A workspace admin" in message, message
+    assert message == "Daimon can't accept your request here.\n\nAsk an admin to add you."

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _GUILD = 700000101
 _PARENT = 2
 _THREAD = 3
-_OVER_BUDGET = "This channel has used its spending budget. A server admin can raise or clear it."
+_OVER_BUDGET = "This channel's budget is used up.\n\nAn admin can raise it."
 
 
 async def _no_history(*, limit: int) -> AsyncIterator[discord.Message]:

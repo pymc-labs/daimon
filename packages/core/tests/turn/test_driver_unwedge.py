@@ -129,7 +129,7 @@ async def test_a_session_still_stuck_after_the_interrupt_says_start_a_new_thread
     assert final.termination is not None
     notice = render_termination_notice(final.termination, state=final)
     assert notice is not None
-    assert notice.next_step == "Start a new thread to carry on."
+    assert notice.next_step == "Start a new conversation to carry on."
     assert "stuck" in notice.headline.lower()
 
 
@@ -167,7 +167,7 @@ async def test_a_failed_interrupt_still_ends_the_turn_through_the_normal_failure
     assert len(lc.terminal_failures) == 1, "the normal failure callbacks ran"
     assert final.termination is not None
     notice = render_termination_notice(final.termination, state=final)
-    assert notice is not None and notice.next_step == "Start a new thread to carry on."
+    assert notice is not None and notice.next_step == "Start a new conversation to carry on."
 
 
 async def test_stop_during_recovery_ends_the_turn_as_stopped() -> None:

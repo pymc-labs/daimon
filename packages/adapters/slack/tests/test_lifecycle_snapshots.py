@@ -72,7 +72,15 @@ def _calls_snapshot(fake: Any, url: yarl.URL) -> list[dict[str, Any]]:
             for element in block.get("elements", []):
                 if element.get("action_id") == "cancel_turn" and "value" in element:
                     element["value"] = "<turn-key>"
-        snapshots.append({"blocks": blocks, "text": body.get("text")})
+        fallback = body.get("text")
+        snapshots.append(
+            {
+                "blocks": blocks,
+                "text": fallback.replace("\n\n", r"\n\n")
+                if isinstance(fallback, str)
+                else fallback,
+            }
+        )
     return snapshots
 
 

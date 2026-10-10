@@ -204,6 +204,7 @@ class SlackTurnLifecycle:
         self._budget_channel_id = budget_channel_id
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
+        self._agent_name = agent_name
         self._thread_ts = thread_ts
         self._cancel = cancel
         self._author_id = author_id
@@ -805,8 +806,12 @@ class SlackTurnLifecycle:
                 message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
         try:
-            label = str(err)[:100]
-            body = ""
+            label = "Something went wrong."
+            body = (
+                "Send your message again."
+                if self._channel.startswith("D")
+                else "@mention Daimon to try again."
+            )
             fallback_text: str | None = None
             reason = request_id = None
             # The notice is words on top of the ❌ card, never a reason not to
@@ -815,7 +820,12 @@ class SlackTurnLifecycle:
                 reason = state.termination or termination_reason(err)
                 request_id = self._request_id()
                 notice = render_termination_notice(
-                    reason, state=state, request_id=request_id, error=err
+                    reason,
+                    state=state,
+                    request_id=request_id,
+                    error=err,
+                    in_dm=self._channel.startswith("D"),
+                    agent_name=self._agent_name,
                 )
                 if notice is not None:
                     label, body = notice.headline, format_termination_notice(notice)
@@ -834,14 +844,19 @@ class SlackTurnLifecycle:
             # footer (reason + usage) under the notice and removes the cancel
             # button — Discord parity.
             self._state = update(self._state, EmbedEvent(kind="error", label=label))
-            self._state = dataclasses.replace(self._state, notice=body)
+            self._state = dataclasses.replace(self._state, notice=body, notice_title=label)
             self._apply_usage(state)
             await self._apply_balance()
             await self._flush_terminal(fallback_text)
             self.final_ts = self._status_ts
         except Exception:
             log.warning("turn.terminal_failure.flush_failed", exc_info=True)
-            await self._repair_terminal_flush("Something went wrong.\nMention me to try again.")
+            action = (
+                "Send your message again."
+                if self._channel.startswith("D")
+                else "@mention Daimon to try again."
+            )
+            await self._repair_terminal_flush(f"Something went wrong.\n\n{action}")
         finally:
             await self._clear_acknowledgment()
             if self._status_ts is not None:

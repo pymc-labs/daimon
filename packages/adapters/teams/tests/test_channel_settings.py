@@ -163,7 +163,7 @@ async def test_a_server_admin_picks_a_channel_and_changes_all_three(
     form = json.dumps(opened)
     assert "Who can read it" in form and "Entra object ids" in form, "and sees every control"
     assert "science environment" in json.dumps(saved)
-    assert "legal, a copy of analyst, is its own agent" in json.dumps(kept)
+    assert "Made legal, a copy of analyst, for this channel." in json.dumps(kept)
     assert "Channel admins saved." in json.dumps(granted), "a thread id names its channel"
     async with db_session_factory() as session:
         scope = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT, channel_id=LEGAL))
