@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Literal, cast
 
@@ -18,12 +18,17 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.turn import driver
 from daimon.core.turn.io import LegacyTurnIO, TurnEvent, TurnStream
+from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.ma_models import ma_model_usage
 from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle, YieldEvent
-from mux.contracts.ids import ModelRef, ResourceRef
+from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import StopObservation
+from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
+from mux.state.lease import LeaseBusy
+from mux.state.memory import MemoryStateStore
+from mux.state.store import binding_slot
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 
@@ -179,6 +184,94 @@ async def test_pending_same_revision_is_retried_after_run(monkeypatch: pytest.Mo
     )
     assert len(recorded) == 2 and recorded[0] == recorded[1]
     assert final.usage_totals.output_tokens == 101
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_persisted_provider_pump_keeps_lease_through_usage_reconciliation(
+    monkeypatch: pytest.MonkeyPatch, provider: Literal["openai", "gemini"], failed: bool
+) -> None:
+    store = MemoryStateStore()
+    binding = ProviderBinding(
+        id="provider-binding",
+        thread=ThreadRef(
+            channel=ChannelRef(tenant_id="tenant", platform="slack", channel_id="channel"),
+            thread_id="thread",
+        ),
+        provider=provider,
+        profile=f"{provider}.test",
+        native_refs={"session": "sess_1"},
+        generation=1,
+        config_revision=1,
+        legacy_account_id="caller",
+    )
+    await store.put_binding(binding, expected_generation=0)
+    persistence = TurnPersistence(
+        store,
+        binding,
+        Scope(
+            tenant_id="tenant",
+            account_id="caller",
+            principal_id="daimon",
+            authorization_id="admitted",
+        ),
+        operation_key="provider-turn",
+    )
+
+    class LeasedCodec(Codec):
+        async def replay_usage(self) -> Sequence[UsageObservation]:
+            # A competing worker cannot take over during the post-run fetch,
+            # including the reconciliation after a failed pump.
+            with pytest.raises(LeaseBusy):
+                await store.acquire_lease(
+                    binding_slot(binding),
+                    holder="competitor",
+                    turn_id="another-turn",
+                    now=datetime.now(UTC),
+                    ttl=timedelta(minutes=1),
+                )
+            return await super().replay_usage()
+
+    fake = FakeAnthropic()
+    fake.beta.sessions.events.stream_scripts = [
+        [YieldEvent(make_status_idle(event_id="terminal", stop_reason=make_end_turn()))]
+    ]
+    codec = LeasedCodec(fake, [usage(provider)])
+    codec.fail_open = failed
+    install(monkeypatch, codec)
+    recorded: list[UsageObservation] = []
+
+    async def record(*, observation: UsageObservation) -> bool:
+        recorded.append(observation)
+        return True
+
+    with persistence.activate():
+        run = driver.run_turn(
+            anthropic=cast(AsyncAnthropic, fake),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=ObservationBilled(record),
+            path="mux",
+        )
+        if failed:
+            with pytest.raises(RuntimeError, match="codec failure"):
+                await run
+        else:
+            final = await run
+            assert final.usage_totals.output_tokens == 101
+    assert codec.fetches == 1 and recorded
+    assert all(value == usage(provider) for value in recorded)
+    successor = await store.acquire_lease(
+        binding_slot(binding),
+        holder="successor",
+        turn_id="next-turn",
+        now=datetime.now(UTC),
+        ttl=timedelta(minutes=1),
+    )
+    assert successor.fence == 2 and not successor.took_over
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
