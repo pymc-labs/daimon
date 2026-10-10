@@ -350,7 +350,10 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
     kwargs = thread.send.await_args.kwargs
     assert thread.send.await_args.args == ()
     assert kwargs["embed"].to_dict()["author"]["name"] == "ResearchBot"
-    assert kwargs["embed"].description == "Pick repos ResearchBot can use."
+    assert (
+        kwargs["embed"].description
+        == "Nothing is connected yet.\n\nTap the button and tick the repos ResearchBot can use."
+    )
     assert kwargs["embed"].to_dict()["color"] == 0x0C1F40
     item = kwargs["view"].children[0]
     assert item.custom_id == f"gh_connect:456:{uuid.UUID(int=1).hex}"

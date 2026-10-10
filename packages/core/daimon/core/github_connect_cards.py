@@ -67,9 +67,12 @@ def build_connect_card(
         author_name=author,
         author_icon_url=(avatar_url if identity_enabled and avatar_url else None)
         or f"{root}/web/daimon-face.png",
-        description=f"Pick repos {shown or 'this agent'} can use."
-        if agent_name
-        else "Pick repos your agents can use.",
+        description="Nothing is connected yet.\n\n"
+        + (
+            f"Tap the button and tick the repos {shown or 'this agent'} can use."
+            if agent_name
+            else "Tap the button and tick the repos your agents can use."
+        ),
         github_mark_url=f"{root}/web/github-mark.png",
         variant=chosen,
     )

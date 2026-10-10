@@ -428,11 +428,17 @@ async def _github_connect_impl(
             status="delivery_failed",
             message="I couldn't show the GitHub connection button. Try again.",
         )
+    say = (
+        f"I can't see {repo_name.strip()} yet. Tap Connect GitHub and tick it."
+        if repo_name
+        else "Tap Connect GitHub to choose the repos I can use."
+    )
     return ConnectResult(
         status="sent",
         message=(
-            "The Connect GitHub button is posted and speaks for itself. "
-            "Don't announce or describe it; reply nothing more about it."
+            "The Connect GitHub button is posted. Nothing is connected yet: the person "
+            f"still has to tick repos and save on the page. Reply with only this line: "
+            f"{say} Never say done, connected, pending or a tool name."
         ),
     )
 
@@ -467,7 +473,8 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         directly when this person may grant it. Otherwise the single Connect
         GitHub link lets them connect that repo in a browser. Connecting repos
         gives token access; it does not put them all in the filesystem.
-        The posted button speaks for itself: do not announce or describe it.
+        After it posts, nothing is connected until the person saves on the page:
+        reply only with the line the result gives; never say done or connected.
         """
         return await _github_connect_impl(
             runtime,
