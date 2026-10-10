@@ -11,14 +11,22 @@ import pytest
 
 from qa.live.config import Alerts, Pricing
 from qa.live.judge import HaikuJudge
+from qa.live.models import ModelPolicy
 from qa.live.report import Alerter, Result, report
-from qa.live.schema import MODEL
 from qa.live.types import Check, Pending, utcnow
+
+MODEL = ModelPolicy().backends["anthropic"].primary
 
 
 def test_judge_needs_go_and_exact_model(pricing: Pricing) -> None:
     with pytest.raises(ValueError):
-        HaikuJudge(pricing, go=True, model="claude-opus-4-6")
+        HaikuJudge(
+            pricing,
+            go=True,
+            models=ModelPolicy.model_validate(
+                {"backends": {"anthropic": {"primary": "claude-opus-4-6"}}}
+            ),
+        )
     with pytest.raises(Pending, match="GO"):
         HaikuJudge(pricing, go=False).evaluate("rubric", "answer")
 

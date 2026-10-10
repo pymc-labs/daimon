@@ -15,7 +15,7 @@ from typing import TextIO, cast
 from pydantic import JsonValue
 
 from qa.live.config import Pricing
-from qa.live.schema import MODEL, Scenario
+from qa.live.schema import Scenario
 from qa.live.types import Usage, utcnow
 
 DAILY_CAP = 10.0
@@ -123,10 +123,12 @@ class Ledger:
         )
         no_spend = not spend_possible and not usages
         charged = 0.0 if no_spend else (measured if complete else max(estimated, measured))
+        models = sorted({model for usage in usages for model in usage.models})
         row = {
             "ts": utcnow().isoformat(),
             "who": "qa-runner",
-            "model": MODEL,
+            "model": models[0] if len(models) == 1 else ("multiple" if models else "unavailable"),
+            "models": models,
             "run_id": run_id,
             "usd": charged,
             "actual_usd": measured if complete or no_spend else None,

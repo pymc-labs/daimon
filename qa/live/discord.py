@@ -18,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qa.live.config import Config, Target
-from qa.live.schema import MODEL, Assertion, Step
+from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
 
 CHANNEL_MARKER = "daimon-live-qa"
@@ -246,10 +246,12 @@ class DiscordBackend:
             or evidence.channel_id != parent
             or evidence.agent_name != self.target.qa_agent_name
             or not evidence.agent_id
-            or evidence.model != MODEL
+            or not self.config.models.accepts(self.target.backend, evidence.model, self.env)
             or (self.env == "prod" and not evidence.channel_pinned)
         ):
-            raise ValueError("QA channel agent is not a verified Haiku pin")
+            raise ValueError(
+                "QA channel agent is not a verified cheap-model pin (Haiku for Claude)"
+            )
 
     def send(
         self,

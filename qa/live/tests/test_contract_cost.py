@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from qa.live.config import Config, Pricing, Target
 from qa.live.cost import Ledger, estimate
-from qa.live.schema import MODEL, Assertion, Scenario, Step, load_catalog
+from qa.live.schema import Assertion, Scenario, Step, load_catalog
 from qa.live.types import Usage, utcnow
 
 
@@ -86,7 +86,7 @@ def test_only_exact_model_and_qa_guild(pricing: Pricing) -> None:
     with pytest.raises(ValidationError, match="customer"):
         Config(pricing=pricing, prod=Target(guild_allowlist=["customer"]))
     config = Config(pricing=pricing)
-    assert config.model == MODEL
+    assert config.models.backends["anthropic"].primary == "claude-haiku-5-5"
     with pytest.raises(ValueError, match="disabled"):
         config.target("prod")
     with pytest.raises(ValidationError, match="explicitly allowed"):

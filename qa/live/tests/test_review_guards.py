@@ -122,8 +122,9 @@ def test_model_refusal_is_before_trigger_and_free(
 @pytest.mark.parametrize(
     "model,pinned,passes",
     [
-        (MODEL, True, True),
-        (MODEL, False, False),
+        ("claude-haiku-5-5", True, True),
+        ("claude-haiku-5-5", False, False),
+        (MODEL, True, False),
         ("claude-opus-4-6", True, False),
         ("", True, False),
     ],
