@@ -131,6 +131,7 @@ async def test_connected_repo_is_granted_immediately_in_chat(
         origin_context_id=str(uuid.uuid4()),
         repo_name="owner/repo",
         required_ability="write",
+        confirmed=True,
     )
     assert write.status == "granted"
     assert (
