@@ -52,20 +52,24 @@ async def test_catalog_migration_upgrade_downgrade_upgrade_preserves_legacy(
     module = migration()
 
     def cycle(sync: Connection) -> None:
+        here = sync.scalar(text("SELECT current_schema()"))
         # The test fixture creates mapped tables; first return to pre-migration.
         with Operations.context(MigrationContext.configure(sync)):
             module.downgrade()
-            assert not TABLES.intersection(inspect(sync).get_table_names())
+            assert not TABLES.intersection(inspect(sync).get_table_names(schema=here))
             module.upgrade()
             assert sync.scalar(text("SHOW lock_timeout")) == "5s"
-            assert TABLES.issubset(inspect(sync).get_table_names())
+            assert TABLES.issubset(inspect(sync).get_table_names(schema=here))
             # Compare real migration DDL with all mapped columns, keys, checks and FKs.
             for name in TABLES:
-                actual = inspect(sync).get_columns(name)
+                actual = inspect(sync).get_columns(name, schema=here)
                 assert [column["name"] for column in actual] == list(
                     Base.metadata.tables[name].columns.keys()
                 )
-                assert {check["name"] for check in inspect(sync).get_check_constraints(name)} == {
+                assert {
+                    check["name"]
+                    for check in inspect(sync).get_check_constraints(name, schema=here)
+                } == {
                     constraint.name
                     for constraint in Base.metadata.tables[name].constraints
                     if constraint.__class__.__name__ == "CheckConstraint"
@@ -90,10 +94,10 @@ async def test_catalog_migration_upgrade_downgrade_upgrade_preserves_legacy(
                 values,
             )
             module.downgrade()
-            assert not TABLES.intersection(inspect(sync).get_table_names())
+            assert not TABLES.intersection(inspect(sync).get_table_names(schema=here))
             module.upgrade()
             assert sync.scalar(text("SHOW lock_timeout")) == "5s"
-            assert TABLES.issubset(inspect(sync).get_table_names())
+            assert TABLES.issubset(inspect(sync).get_table_names(schema=here))
 
     await connection.run_sync(cycle)
     after = (
