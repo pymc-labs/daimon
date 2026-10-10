@@ -21,6 +21,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import discord
 import discord.http
@@ -56,6 +57,7 @@ patch_discord_http = _tools_conftest.patch_discord_http
 # Permission flag constants (Discord docs).
 _VIEW_CHANNEL = 1 << 10  # 1024
 _SEND_MESSAGES = 1 << 11  # 2048
+_SEND_MESSAGES_IN_THREADS = 1 << 38
 
 
 def _payload_from_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -601,6 +603,67 @@ async def test_post_wizard_refuses_a_channel_the_requester_cannot_see(
             spec=spec,
             short_id="abcd1234",
         )
+
+
+async def test_post_wizard_checks_private_membership_but_allows_public_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    thread_type = 12
+    posts: list[str] = []
+    spec = WizardSpec(
+        prompt="p",
+        steps=[
+            Step(
+                key="k", question="q", kind=StepKind.CHOICE, options=[Option(label="a", value="a")]
+            )
+        ],
+    )
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return _guild_payload()
+        if route.path == "/guilds/{guild_id}/roles":
+            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            if str(route.channel_id) == "222":
+                return _text_channel_payload()
+            return {
+                "id": "999",
+                "parent_id": "222",
+                "owner_id": "1",
+                "name": "form-thread",
+                "type": thread_type,
+                "message_count": 1,
+                "member_count": 1,
+                "thread_metadata": {
+                    "archived": False,
+                    "auto_archive_duration": 1440,
+                    "archive_timestamp": "2026-05-09T00:00:00+00:00",
+                },
+                "guild_id": "111",
+            }
+        if route.path == "/channels/{channel_id}/thread-members/{user_id}":
+            raise discord.NotFound(MagicMock(status=404), {"message": "Unknown Member"})
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            posts.append(str(route.channel_id))
+            return _message_payload(message_id="9202", channel_id="999")
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    runtime = _runtime_with_discord_token(session_factory=db_session_factory)
+    with pytest.raises(ToolError, match="missing view_channel permission"):
+        await _post_wizard_impl(runtime, _auth(), channel_id="999", spec=spec, short_id="abcd1234")
+    assert posts == []
+
+    thread_type = 11
+    posted = await _post_wizard_impl(
+        runtime, _auth(), channel_id="999", spec=spec, short_id="abcd1234"
+    )
+    assert posted.message_id == "9202"
+    assert posts == ["999"]
 
 
 async def test_post_wizard_posts_a_form_with_no_images(

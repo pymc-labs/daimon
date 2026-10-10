@@ -58,6 +58,7 @@ from daimon.adapters.mcp.tools.discord._send import (
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
@@ -186,7 +187,7 @@ async def _post_wizard_impl(  # pyright: ignore[reportUnusedFunction]
     address is captured now, before any tap, since a later render cannot
     reach this process's file store.
     """
-    _require_discord_identity(auth)
+    user_id = _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
     bot_token = _require_bot_token(runtime)
 
@@ -204,13 +205,14 @@ async def _post_wizard_impl(  # pyright: ignore[reportUnusedFunction]
     view = build_wizard_view(rendered_screen, files=files_by_handle)
 
     async with rest_client(bot_token) as c:
-        _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
+        _, member = await _resolve_member(c, guild_id, user_id)
         raw_channel = await _resolve_channel(c, channel_id)
         channel = _require_guild_channel(raw_channel, guild_id)
         if isinstance(channel, discord.Thread):
             # Thread.permissions_for needs the parent in the guild cache;
             # the per-call REST client starts with an empty one.
             await _ensure_thread_parent_cached(channel)
+            await _check_thread_view(c, channel, member, user_id)
         _check_send_permission(channel, member)
         await _require_discord_channel_writable(runtime, auth, channel)
         if not isinstance(channel, discord.abc.Messageable):

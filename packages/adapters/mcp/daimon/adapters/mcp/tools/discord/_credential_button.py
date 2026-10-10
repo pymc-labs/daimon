@@ -41,6 +41,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 from daimon.adapters.mcp.tools.discord._posted_card import build_card_view
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
@@ -129,6 +130,7 @@ async def _post_credential_button_impl(  # pyright: ignore[reportUnusedFunction]
             # Thread.permissions_for needs the parent in the guild cache;
             # the per-call REST client starts with an empty one.
             await _ensure_thread_parent_cached(channel)
+            await _check_thread_view(c, channel, member, requester_id)
         _check_send_permission(channel, member)
         await _require_discord_channel_writable(runtime, auth, channel, origin=origin)
         if not isinstance(channel, discord.abc.Messageable):
