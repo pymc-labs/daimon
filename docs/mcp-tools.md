@@ -210,7 +210,7 @@ Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos through GitHub. |
+| `github_connect` | Discord callers, Slack callers | Let an agent read a private GitHub repo: give it token access through GitHub. |
 
 ## `github_remove_repo`
 

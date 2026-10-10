@@ -74,8 +74,10 @@ CASES = [
     SearchCase("remove the old Toggl key from research-bot", "remove_agent_key", frozenset([])),
     SearchCase(
         "let research-bot read our private repo github.com/acme/data",
-        "request_repo_binding",
-        frozenset(["post_github_app_install_link"]),
+        # bind_public_repo checks visibility first and points a private repo
+        # at github_connect; the token form is never offered.
+        frozenset(["github_connect", "bind_public_repo"]),
+        frozenset(["github_connect"]),
     ),
     SearchCase(
         "install the GitHub app",
