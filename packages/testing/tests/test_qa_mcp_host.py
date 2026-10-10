@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from daimon.testing.qa_mcp_host import (
     schema_exists,
     scrubbed_environment,
     serve,
+    spawn_tunnel,
     tunnel_command,
 )
 from starlette.types import Message, Receive, Scope, Send
@@ -42,12 +44,31 @@ NOW = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.UTC)
     [
         "postgresql+asyncpg://u:p@localhost:5432/daimon",
         "postgresql+asyncpg://u:p@db.example.com:5432/daimon_test",
+        "postgresql+asyncpg://u:p@localhost:5432/production_latest",
+        # Query parameters override the URL's own host, database and port.
+        "postgresql+asyncpg://u:p@localhost:5432/daimon_test?host=db.example.com",
+        "postgresql+asyncpg://u:p@localhost:5432/daimon_test?database=daimon",
+        "postgresql+asyncpg://u:p@localhost:5432/daimon_test?port=6543",
+        "postgresql+asyncpg://u:p@localhost:5432/daimon_test?host=/var/run/postgresql",
+        "postgresql+asyncpg://u:p@/daimon_test",
+        "not a url",
     ],
 )
 def test_only_a_local_disposable_database_is_accepted(url: str) -> None:
     with pytest.raises(QaHostError):
         check_database(url)
-    check_database("postgresql+asyncpg://u:p@127.0.0.1:5432/daimon_qa_run")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://u:p@127.0.0.1:5432/daimon_qa_run",
+        "postgresql+asyncpg://u:p@localhost:5432/daimon_test",
+        "postgresql+asyncpg://u:p@localhost/daimon_test_nc_n2",
+    ],
+)
+def test_a_local_disposable_database_passes(url: str) -> None:
+    check_database(url)
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.5", "example.com"])
@@ -142,7 +163,7 @@ async def test_the_gate_refuses_other_tools_batches_and_large_bodies_before_disp
     tmp_path: Path,
 ) -> None:
     gate, recorder, _ = _gate(tmp_path)
-    for name in ("start_turn", "ask", "archive_my_session", None):
+    for name in ("start_turn", "ask", "archive_my_session", "list_events", None):
         refused = await _post(gate, body=_call(name) if name else {"method": "tools/call"})
         assert refused.status_code == 403
     assert (
@@ -207,7 +228,7 @@ async def test_a_run_serves_two_read_tools_on_loopback_then_cleans_up(
             assert "error" not in described, described
             assert "qa-agent" in json.dumps(described)
 
-            events = await _rpc(
+            sessions = await _rpc(
                 client,
                 url,
                 token,
@@ -215,13 +236,11 @@ async def test_a_run_serves_two_read_tools_on_loopback_then_cleans_up(
                     "jsonrpc": "2.0",
                     "id": 4,
                     "method": "tools/call",
-                    "params": {"name": "list_events", "arguments": {"handle": QA_SESSION_ID}},
+                    "params": {"name": "list_my_sessions", "arguments": {}},
                 },
             )
-            assert "error" not in events, events
-            dumped = json.dumps(events)
-            for event_id in ("sevt_qa_user", "sevt_qa_agent", "sevt_qa_idle"):
-                assert event_id in dumped
+            assert "error" not in sessions, sessions
+            assert QA_SESSION_ID in json.dumps(sessions)
 
             refused = await client.post(
                 url,
@@ -271,9 +290,13 @@ async def test_a_tunnel_needs_the_lead_go_and_points_only_at_the_gate(tmp_path: 
     manifest_path = qa.manifest.path(tmp_path)
     spawned: list[list[str]] = []
 
-    async def fake_spawn(command: list[str]) -> tuple[int, str]:
+    async def fake_spawn(
+        command: list[str], *, started: Callable[[int], None], log: Path, timeout: float
+    ) -> str:
         spawned.append(command)
-        return 999_999_999, "https://qa-run.trycloudflare.com"
+        started(999_999_999)
+        assert log.parent == tmp_path / qa.manifest.run_id
+        return "https://qa-run.trycloudflare.com"
 
     try:
         with pytest.raises(QaHostError):
@@ -311,5 +334,91 @@ async def test_a_build_that_fails_after_creating_its_schema_leaves_nothing(
     probe = build_test_engine(database_url, "public")
     try:
         assert not await schema_exists(probe, "qa_mcp_failedbuild")
+    finally:
+        await probe.dispose()
+
+
+async def test_a_tunnel_that_never_reports_a_url_is_stopped(tmp_path: Path) -> None:
+    started: list[int] = []
+    with pytest.raises(TimeoutError):
+        await spawn_tunnel(
+            ["sleep", "30"],
+            started=started.append,
+            log=tmp_path / "tunnel.log",
+            timeout=0.5,
+        )
+    (pid,) = started
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+async def test_a_tunnel_that_fails_after_starting_is_left_in_the_manifest(
+    tmp_path: Path,
+) -> None:
+    database_url = _database_url()
+    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
+    manifest_path = qa.manifest.path(tmp_path)
+
+    async def failing_spawn(
+        command: list[str], *, started: Callable[[int], None], log: Path, timeout: float
+    ) -> str:
+        started(999_999_998)
+        raise TimeoutError
+
+    try:
+        async with serve(qa):
+            with pytest.raises(TimeoutError):
+                await open_tunnel(qa, lead_go="inbox/LEAD-GO.md", spawn=failing_spawn)
+        assert Manifest.load(manifest_path).tunnel_pid == 999_999_998
+    finally:
+        await qa.engine.dispose()
+        cleaned = await cleanup(manifest_path, database_url=database_url)
+    assert cleaned.tunnel_pid is None
+
+
+async def test_a_schema_create_that_fails_halfway_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_url = _database_url()
+    from daimon.testing import qa_mcp_host
+
+    real = getattr(qa_mcp_host, "_create_schema_with_tables")  # noqa: B009 - a private name
+
+    async def create_then_fail(engine: Any, schema: str) -> None:
+        await real(engine, schema)
+        raise RuntimeError("create_all failed halfway")
+
+    monkeypatch.setattr(qa_mcp_host, "_create_schema_with_tables", create_then_fail)
+    with pytest.raises(RuntimeError, match="halfway"):
+        await build_host(database_url=database_url, port=0, root=tmp_path, run_id="halfway")
+    assert Manifest.load(tmp_path / "halfway" / "manifest.json").status == "cleaned"
+    probe = build_test_engine(database_url, "public")
+    try:
+        assert not await schema_exists(probe, "qa_mcp_halfway")
+    finally:
+        await probe.dispose()
+
+
+@pytest.mark.parametrize("schema", ["public", "qa_mcp_another_run", "test_w1_abc"])
+async def test_cleanup_refuses_a_manifest_naming_any_other_schema(
+    tmp_path: Path, schema: str
+) -> None:
+    database_url = _database_url()
+    manifest = Manifest(
+        run_id="edited",
+        created_at=NOW.isoformat(),
+        expires_at=NOW.isoformat(),
+        host="127.0.0.1",
+        port=1,
+        database="postgresql+asyncpg://localhost/whatever",
+        schema=schema,
+        tenant_id=str(NOW.timestamp()),
+    )
+    path = manifest.save(tmp_path)
+    with pytest.raises(QaHostError, match="not this run's own"):
+        await cleanup(path, database_url=database_url)
+    probe = build_test_engine(database_url, "public")
+    try:
+        assert await schema_exists(probe, "public")
     finally:
         await probe.dispose()

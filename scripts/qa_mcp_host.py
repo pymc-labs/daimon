@@ -41,9 +41,9 @@ async def _up(args: argparse.Namespace) -> int:
     )
     manifest_path = qa.manifest.path(args.root)
     bearer_path = args.root / qa.manifest.run_id / "bearer"
-    bearer_path.touch(mode=0o600)
-    bearer_path.write_text(qa.bearer.token + "\n")
     try:
+        bearer_path.touch(mode=0o600)
+        bearer_path.write_text(qa.bearer.token + "\n")
         async with serve(qa) as url:
             print(f"manifest: {manifest_path}")
             print(f"bearer file: {bearer_path}")

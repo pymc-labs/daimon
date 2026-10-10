@@ -9,7 +9,8 @@ configuration, a production database or a real provider:
   says `qa` or `test`, seeded with one synthetic tenant, account and agent.
 - The Anthropic client is a `MockTransport` that answers only the seeded
   agent, environment and session reads and refuses anything else: no egress.
-- Only `describe_agent` and `list_events` exist on the server.
+- Only the F1 contract's MCP tools (`describe_agent`, `list_my_sessions`) exist
+  on the server.
 
 In front of the Daimon app sits `McpGate`, the only thing a tunnel may expose.
 It serves `POST /mcp` alone, requires the run's bearer (constant-time
@@ -55,11 +56,15 @@ from daimon.testing.db import (
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from mux.conformance.default_capability import MCP_TOOLS
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-ALLOWED_TOOLS: tuple[str, ...] = ("describe_agent", "list_events")
+# The F1 default-capability contract's MCP pair, so the host cannot drift from it.
+ALLOWED_TOOLS: tuple[str, ...] = tuple(sorted(MCP_TOOLS))
 QA_AGENT_ID = "agent_qa_synthetic"
 QA_ENVIRONMENT_ID = "env_qa_synthetic"
 QA_SESSION_ID = "sesn_qa_synthetic"
@@ -88,6 +93,9 @@ QA_EVENTS: tuple[dict[str, Any], ...] = (
         "processed_at": "2026-10-10T00:00:02Z",
     },
 )
+
+
+_RUN_ID = re.compile(r"[a-z0-9_]{1,32}")
 
 
 class QaHostError(RuntimeError):
@@ -154,14 +162,27 @@ def _sanitized(database_url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
+_DISPOSABLE_NAME = re.compile(r"(^|_)(qa|test)(_|$)")
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
 def check_database(database_url: str) -> None:
-    """Refuse anything but a local database whose name marks it disposable."""
-    parts = urlsplit(database_url)
-    name = parts.path.lstrip("/")
-    if "qa" not in name and "test" not in name:
-        raise QaHostError(f"database {name!r} is not marked qa/test")
-    if parts.hostname not in ("localhost", "127.0.0.1", "::1"):
-        raise QaHostError(f"database host {parts.hostname!r} is not local")
+    """Refuse anything but a local database whose name marks it disposable.
+
+    Judged on the URL SQLAlchemy and the driver will actually use: any query
+    parameter is refused, because `host`, `port`, `database` and driver
+    options in the query override the URL's own parts.
+    """
+    try:
+        url = make_url(database_url)
+    except ArgumentError as err:
+        raise QaHostError(f"unparseable database URL: {err}") from None
+    if url.query:
+        raise QaHostError(f"database URL query parameters are refused: {sorted(url.query)}")
+    if url.host not in _LOCAL_HOSTS:
+        raise QaHostError(f"database host {url.host!r} is not local")
+    if not url.database or not _DISPOSABLE_NAME.search(url.database):
+        raise QaHostError(f"database {url.database!r} is not marked qa/test")
 
 
 def check_loopback(host: str) -> None:
@@ -205,6 +226,7 @@ def synthetic_anthropic(
     ).model_dump(mode="json")
     router.add("GET", r"/v1/agents$", lambda _r, _m: list_response([agent]))
     router.add("GET", r"/v1/environments$", lambda _r, _m: list_response([environment]))
+    router.add("GET", r"/v1/sessions$", lambda _r, _m: list_response([session]))
     router.add(
         "GET", rf"/v1/sessions/{QA_SESSION_ID}$", lambda _r, _m: httpx.Response(200, json=session)
     )
@@ -367,6 +389,8 @@ async def build_host(
         raise QaHostError("a QA bearer lives at most two hours")
     now = now or dt.datetime.now(dt.UTC)
     run_id = run_id or uuid.uuid4().hex[:12]
+    if not _RUN_ID.fullmatch(run_id):
+        raise QaHostError(f"run id {run_id!r} must be 1-32 of [a-z0-9_]")
     schema = f"qa_mcp_{run_id}"
     tenant_id = uuid.uuid5(uuid.NAMESPACE_URL, f"daimon-qa-mcp:{run_id}")
     manifest = Manifest(
@@ -382,10 +406,11 @@ async def build_host(
     manifest.save(root)
 
     engine = build_test_engine(database_url, schema)
-    await _create_schema_with_tables(engine, schema)
-    manifest.status = "schema"
-    manifest.save(root)
     try:
+        # Inside the cleanup scope: a create that fails halfway leaves nothing.
+        await _create_schema_with_tables(engine, schema)
+        manifest.status = "schema"
+        manifest.save(root)
         return await _seed_and_build(engine, manifest, database_url, host, port, ttl, root, now)
     except BaseException:
         # A half-built run leaves nothing behind.
@@ -476,6 +501,8 @@ async def cleanup(manifest_path: Path, *, database_url: str) -> Manifest:
     """Revoke, stop and delete what the manifest owns, in that order. Idempotent."""
     manifest = Manifest.load(manifest_path)
     root = manifest_path.parent.parent
+    if not _RUN_ID.fullmatch(manifest.run_id) or manifest.schema != f"qa_mcp_{manifest.run_id}":
+        raise QaHostError(f"manifest schema {manifest.schema!r} is not this run's own")
     check_database(database_url)
     if _sanitized(database_url) != manifest.database:
         raise QaHostError("cleanup must target the manifest's own database")
@@ -565,38 +592,89 @@ async def open_tunnel(
     qa: QaHost,
     *,
     lead_go: str,
-    spawn: Callable[[list[str]], Awaitable[tuple[int, str]]] | None = None,
+    spawn: Callable[..., Awaitable[str]] | None = None,
+    timeout: float = 30,
 ) -> str:
     """Expose the gate through a temporary HTTPS tunnel. Only with a lead GO.
 
     `lead_go` names the lead's GO (an inbox note or timestamp) and is kept in
     the manifest. The tunnel forwards to the gate alone, which serves only
-    `POST /mcp` with the run bearer. Returns the public `/mcp` URL.
+    `POST /mcp` with the run bearer. The process id is in the manifest from the
+    moment it starts, so `cleanup` stops it whatever happens next; a tunnel that
+    does not report its URL in time is stopped here. Returns the public URL.
     """
     if not lead_go.strip():
         raise QaHostError("a tunnel needs the lead's GO, recorded with --lead-go")
     if qa.manifest.status != "serving":
         raise QaHostError("serve the gate before opening a tunnel to it")
-    pid, base = await (spawn or _spawn_cloudflared)(tunnel_command(qa.manifest.port))
-    qa.manifest.tunnel_pid = pid
-    qa.manifest.tunnel_url = f"{base}/mcp"
     qa.manifest.tunnel_lead_go = lead_go
+
+    def started(pid: int) -> None:
+        qa.manifest.tunnel_pid = pid
+        qa.manifest.save(qa.root)
+
+    base = await (spawn or spawn_tunnel)(
+        tunnel_command(qa.manifest.port),
+        started=started,
+        log=qa.root / qa.manifest.run_id / "tunnel.log",
+        timeout=timeout,
+    )
+    qa.manifest.tunnel_url = f"{base}/mcp"
     qa.manifest.save(qa.root)
     return qa.manifest.tunnel_url
 
 
-async def _spawn_cloudflared(command: list[str]) -> tuple[int, str]:
+async def spawn_tunnel(
+    command: list[str],
+    *,
+    started: Callable[[int], None],
+    log: Path,
+    timeout: float,
+    url_pattern: re.Pattern[str] = TUNNEL_URL,
+) -> str:
+    """Start `command`, return the first URL it prints, and keep draining its output.
+
+    On a timeout or any failure the process is terminated and reaped before
+    the error propagates.
+    """
     process = await asyncio.create_subprocess_exec(
         *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
     )
+    started(process.pid)
     assert process.stderr is not None
-    deadline = asyncio.get_running_loop().time() + 30
-    while asyncio.get_running_loop().time() < deadline:
-        line = await asyncio.wait_for(process.stderr.readline(), timeout=30)
-        found = TUNNEL_URL.search(line.decode(errors="replace"))
-        if found:
-            return process.pid, found.group(0)
-        if not line:
-            break
-    process.terminate()
-    raise QaHostError("cloudflared did not report a tunnel URL")
+    stderr = process.stderr
+    found: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def drain() -> None:
+        with log.open("ab") as out:
+            while line := await stderr.readline():
+                out.write(line)
+                out.flush()
+                match = url_pattern.search(line.decode(errors="replace"))
+                if match and not found.done():
+                    found.set_result(match.group(0))
+        if not found.done():
+            found.set_exception(QaHostError("the tunnel exited before reporting a URL"))
+
+    drainer = asyncio.create_task(drain())
+    _TUNNEL_DRAINERS.add(drainer)
+    drainer.add_done_callback(_TUNNEL_DRAINERS.discard)
+    try:
+        return await asyncio.wait_for(asyncio.shield(found), timeout=timeout)
+    except BaseException:
+        await _terminate(process)
+        drainer.cancel()
+        raise
+
+
+_TUNNEL_DRAINERS: set[asyncio.Task[None]] = set()
+
+
+async def _terminate(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
