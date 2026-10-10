@@ -1421,3 +1421,14 @@ Configured OpenAI runtimes refuse `OPENAI_CUSTOM_HEADERS` before constructing
 a client, including changes introduced after runtime preparation. This prevents
 ambient header injection from replacing the selected channel key or project;
 the refusal never includes header contents.
+
+
+### Platform backend-selection callbacks
+
+The Discord, Slack and Teams adapters provide explicitly imported offline
+`backend_conformance` callbacks over their normal admission and binding paths.
+They return the actual prepared turn or the normally rendered admission refusal
+for host conformance collectors; they do not select revisions, inject bindings
+or change application startup. Use dedicated idle applications and scripted
+transports. Each adapter's `BACKEND-CONFORMANCE.md` describes its input boundary
+and the independent database and SDK mutation controls.
