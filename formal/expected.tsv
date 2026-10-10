@@ -12,8 +12,8 @@ github_connect_cancel	ConnectCancel	ConnectCancelSiblingClear	violates:PendingTo
 github_request_cards	RequestCards	RequestCardsSafe	clean	568	-	shared GitHub request card thread lock keeps one card and three mentions per hour
 github_request_cards	RequestCards	RequestCardsNoLock	violates:NoDuplicate	334	-	unlocked concurrent retry posts two cards for one request
 # ---- turn ----
-discord_card_handover	CardHandover	CardHandoverSafe	clean	8	-	transferred old progress edit retains successor repair ownership
-discord_card_handover	CardHandover	CardHandoverUnsafe	violates:RepairOwned	7	-	pre-fix handover loses repair after old edit overwrites recovered answer
+discord_card_handover	CardHandover	CardHandoverSafe	clean	201	-	late replacement is retired after terminal delivery or handover; edit repair stays owned
+discord_card_handover	CardHandover	CardHandoverUnsafe	violates:NoStaleReplacement	65	-	late progress replacement leaves Working alongside recovered answer
 turn	TurnLifecycle	TurnLifecycle	violates:TerminalExclusive	39	-	adversarial terminal ordering (idle then terminated), unreachable via the live consume loop
 turn	TurnLifecycle	TurnLifecycleReplay	clean	6926	-	stale replay with the merge fix: RenderAnchorBound holds
 turn	TurnLifecycle	TurnLifecycleBounded	clean	2646	-	adversarial conditions off: all safety invariants

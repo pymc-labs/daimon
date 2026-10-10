@@ -226,12 +226,14 @@ class DiscordTurnLifecycle:
         self._progress_edits: set[asyncio.Task[None]] = set()
         self._progress_settled = asyncio.Event()
         self._progress_settled.set()
+        self._replacement_lock = asyncio.Lock()
         self._progress_repair_owner: DiscordTurnLifecycle | None = None
         if adopt_pending_progress is not None:
             # Shielded edits may outlive the failed turn. Share their settle
             # state and route their completion to this lifecycle's final card.
             self._progress_edits = adopt_pending_progress._progress_edits
             self._progress_settled = adopt_pending_progress._progress_settled
+            self._replacement_lock = adopt_pending_progress._replacement_lock
             adopt_pending_progress._progress_repair_owner = self
             old_repair = adopt_pending_progress._terminal_reassert_task
             if old_repair is not None and not old_repair.done():
@@ -370,6 +372,7 @@ class DiscordTurnLifecycle:
         **kwargs: Any,  # noqa: ANN401
     ) -> bool:
         assert message is not None
+        may_outlive_terminal = progress or not self._terminal
         if self._terminal and not progress and message is self._card_message_ref:
             if "embeds" in kwargs:
                 self._terminal_card_embeds = kwargs["embeds"]
@@ -397,22 +400,76 @@ class DiscordTurnLifecycle:
                     send_kwargs.pop(key, None)
             if self._terminal_embed is not None and not {"embed", "embeds"} & kwargs.keys():
                 send_kwargs["embeds"] = [self._terminal_embed]
-            replacement = await self._send_message(**send_kwargs)
-            self._message_ref = replacement
-            if message is self._card_message_ref:
-                self._card_message_ref = replacement
-            if self._on_replacement is not None:
-                await self._on_replacement(replacement)
-            return True
+
+            async def send_replacement() -> bool:
+                # Another missing-card edit may already have replaced this ref.
+                if may_outlive_terminal and (self._terminal or self._message_ref is not message):
+                    return False
+                replacement = await self._send_message(**send_kwargs)
+                if may_outlive_terminal and await self._reconcile_late_replacement(
+                    replacement, message
+                ):
+                    return False
+                self._message_ref = replacement
+                if message is self._card_message_ref:
+                    self._card_message_ref = replacement
+                if self._on_replacement is not None:
+                    await self._on_replacement(replacement)
+                return True
+
+            if may_outlive_terminal:
+                async with self._replacement_lock:
+                    return await send_replacement()
+            return await send_replacement()
         edited_at = getattr(replacement, "edited_at", None)
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
         if isinstance(replacement, discord.Message) and replacement.id != message.id:
+            if may_outlive_terminal and await self._reconcile_late_replacement(
+                replacement, message
+            ):
+                return False
             self._message_ref = replacement
             if message is self._card_message_ref:
                 self._card_message_ref = replacement
             if self._on_replacement is not None:
                 await self._on_replacement(replacement)
+        return True
+
+    async def _reconcile_late_replacement(
+        self, replacement: discord.Message, previous: discord.Message
+    ) -> bool:
+        """Retire a progress card created after terminal delivery or handover.
+
+        A replacement send can outlive the progress edit that requested it. It
+        must not take ownership back from a terminal render or its successor.
+        """
+        owner = self
+        while owner._progress_repair_owner is not None:
+            owner = owner._progress_repair_owner
+        if owner is self and not self._terminal and self._message_ref is previous:
+            return False
+        if owner._delete is not None:
+            try:
+                await owner._delete(replacement)
+                return True
+            except discord.NotFound as err:
+                if err.code == 10008:
+                    return True
+                log.warning("turn.stale_replacement_delete_failed", exc_info=True)
+            except Exception:
+                log.warning("turn.stale_replacement_delete_failed", exc_info=True)
+        # The adapter may lack delete permission. At least remove the pending
+        # control; a terminal render is preferable when one is available.
+        try:
+            await owner._edit(
+                replacement,
+                _allow_replacement=False,
+                embeds=owner._terminal_card_embeds or [],
+                view=None,
+            )
+        except Exception:
+            log.warning("turn.stale_replacement_reconcile_failed", exc_info=True)
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:

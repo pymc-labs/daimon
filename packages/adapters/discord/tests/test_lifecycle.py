@@ -15,6 +15,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
+from unittest.mock import MagicMock
 
 import daimon.adapters.discord.lifecycle as lifecycle_module
 import discord
@@ -48,6 +49,145 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 # ---------------------------------------------------------------------------
 
 _SENTINEL_REF = object()  # opaque message reference
+
+
+@pytest.mark.parametrize("replacement_source", ["missing", "transport"])
+async def test_overlapping_progress_edits_create_one_replacement(
+    replacement_source: str,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    second_started = asyncio.Event()
+    refs: list[Any] = []
+    cards: dict[int, dict[str, Any]] = {}
+
+    async def send(**kwargs: Any) -> Any:
+        ref = MagicMock(spec=discord.Message)
+        ref.id = 1000 + len(refs)
+        refs.append(ref)
+        if len(refs) == 2:
+            started.set()
+            await release.wait()
+        elif len(refs) == 3:
+            second_started.set()
+        cards[ref.id] = dict(kwargs)
+        return ref
+
+    async def edit(ref: Any, **kwargs: Any) -> Any:
+        if replacement_source == "transport" and ref.id == 1000 and not cards:
+            return await send(**kwargs)
+        if ref.id not in cards:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="gone"),
+                {"code": 10008, "message": "gone"},
+            )
+        cards[ref.id].update(kwargs)
+        return ref
+
+    async def delete(ref: Any) -> None:
+        cards.pop(ref.id, None)
+
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, delete=delete, agent_name="test", model_id="m"
+    )
+    await lifecycle.post_initial()
+    del cards[1000]
+    lifecycle._last_flush = -100
+    ticks = [asyncio.create_task(lifecycle.on_render(_running_tool_turn()))]
+    await asyncio.wait_for(started.wait(), 1)
+    ticks.append(asyncio.create_task(lifecycle.on_render(_running_tool_turn())))
+    if replacement_source == "transport":
+        await asyncio.wait_for(second_started.wait(), 1)
+    else:
+        await asyncio.sleep(0)
+    for tick in ticks:
+        tick.cancel()
+    outcomes = await asyncio.gather(*ticks, return_exceptions=True)
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    pending = set(lifecycle._progress_edits)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    assert len(refs) == (2 if replacement_source == "missing" else 3)
+    assert set(cards) == {lifecycle.message_ref.id}
+
+
+@pytest.mark.parametrize("replacement_source", ["missing", "transport"])
+@pytest.mark.parametrize("can_delete", [True, False])
+async def test_late_progress_replacement_does_not_leave_a_working_card(
+    monkeypatch: pytest.MonkeyPatch, replacement_source: str, can_delete: bool
+) -> None:
+    """A replacement send can finish after failure and recovery have answered."""
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
+    started, release = asyncio.Event(), asyncio.Event()
+    cards: dict[int, dict[str, Any]] = {}
+    refs: list[Any] = []
+
+    async def send(**kwargs: Any) -> Any:
+        ref = (
+            MagicMock(spec=discord.Message)
+            if replacement_source == "transport"
+            else types.SimpleNamespace()
+        )
+        ref.id = 1000 + len(refs)
+        refs.append(ref)
+        if len(refs) == 2:
+            started.set()
+            await release.wait()
+        cards[ref.id] = dict(kwargs)
+        return ref
+
+    async def edit(ref: Any, **kwargs: Any) -> Any:
+        if replacement_source == "transport" and ref.id == 1000 and not cards:
+            # The transport has sent a replacement while handling its edit.
+            replacement = await send(**kwargs)
+            return replacement
+        if ref.id not in cards:
+            raise discord.NotFound(
+                types.SimpleNamespace(status=404, reason="gone"),
+                {"code": 10008, "message": "gone"},
+            )
+        cards[ref.id].update(kwargs)
+        return ref
+
+    async def delete(ref: Any) -> None:
+        cards.pop(ref.id, None)
+
+    old = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        delete=delete if can_delete else None,
+        agent_name="test",
+        model_id="m",
+        cancel_view="STOP",
+    )
+    await old.post_initial()
+    del cards[1000]
+    old._last_flush = -100
+    tick = asyncio.create_task(old.on_render(_running_tool_turn()))
+    await asyncio.wait_for(started.wait(), 1)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    pending = set(old._progress_edits)
+    await old.on_terminal_failure(TurnState(), RuntimeError("retry"))
+    successor = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        delete=delete if can_delete else None,
+        agent_name="test",
+        model_id="m",
+        adopt_message_ref=old.release_message_ref(),
+        adopt_pending_progress=old,
+    )
+    await successor.on_terminal_success(_make_success_state("Recovered answer"))
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    if can_delete:
+        assert len(cards) == 1
+    else:
+        assert cards[1001]["view"] is None
+        assert not any("Working" in (embed.title or "") for embed in cards[1001]["embeds"])
+    assert cards[1002]["content"] == "Recovered answer"
+    assert cards[1002]["view"] is None
 
 
 @pytest.mark.parametrize("extra_render", [False, True])
