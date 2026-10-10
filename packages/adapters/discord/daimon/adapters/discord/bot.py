@@ -3371,13 +3371,7 @@ class DaimonBot(commands.Bot):
             if current.message_ref is not None:
                 # No replacement post: retiring the intent below is only right
                 # when the card itself now shows the error.
-                await _edit_message(
-                    current.message_ref,
-                    content=text,
-                    embed=None,
-                    view=None,
-                    _allow_replacement=False,
-                )
+                await current.end_card(text)
             else:
                 await turn_send(text)
             shown_on = current.message_ref

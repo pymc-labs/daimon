@@ -81,7 +81,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
-from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
+from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import (
     AutoApprove,
@@ -827,6 +827,7 @@ async def _pump(
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
 
     async def _cancel_render() -> None:
+        stop_rendering(lifecycle)
         render_task.cancel()
         with _suppress_task_exc():
             await render_task
@@ -1109,6 +1110,7 @@ async def _pump(
             # leave: `_render_loop` can only exit via CancelledError (its
             # per-tick `_render_once` catches Exception), so nothing goes
             # unretrieved, and the task reaps within a loop turn.
+            stop_rendering(lifecycle)
             render_task.cancel()
 
 

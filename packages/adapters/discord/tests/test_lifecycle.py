@@ -7,6 +7,7 @@ message reference as its first positional argument.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import time
 import types
@@ -47,6 +48,118 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 # ---------------------------------------------------------------------------
 
 _SENTINEL_REF = object()  # opaque message reference
+
+
+@pytest.mark.parametrize("extra_render", [False, True])
+@pytest.mark.parametrize("ending", ["answer", "long_answer", "stopped", "failure", "external"])
+async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
+    monkeypatch: pytest.MonkeyPatch, extra_render: bool, ending: str
+) -> None:
+    """Both #628 review races: timeout, and a second edit after cancellation.
+
+    Hold edits past answer delivery and release in reverse order. The answer
+    stays bounded, the final embeds/view survive, and repair never posts.
+    """
+    monkeypatch.setattr(lifecycle_module, "_PROGRESS_SETTLE_S", 0.01)
+    releases = [asyncio.Event(), asyncio.Event()]
+    started = [asyncio.Event(), asyncio.Event()]
+    current: dict[str, Any] = {}
+    sends: list[dict[str, Any]] = []
+    progress_count = 0
+    clock = [0.0]
+
+    async def send(**kwargs: Any) -> object:
+        sends.append(kwargs)
+        if len(sends) == 1:
+            current.update(kwargs)
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        nonlocal progress_count
+        embeds = kwargs.get("embeds", [])
+        if embeds and embeds[0].title and "Working" in embeds[0].title:
+            index = progress_count
+            progress_count += 1
+            started[index].set()
+            await releases[index].wait()
+        current.update(kwargs)
+
+    lc = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="test", model_id="m", clock=lambda: clock[0]
+    )
+    await lc.post_initial()
+    clock[0] = 30.0
+    tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
+    await asyncio.wait_for(started[0].wait(), 1)
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    if extra_render:
+        # An adapter must still account for an older edit if another caller
+        # starts an edit before the stop hook (the reviewed final-render race).
+        tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
+        await asyncio.wait_for(started[1].wait(), 1)
+        tick.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tick
+    pending = set(lc._progress_edits)
+    lc.on_render_stopped()  # the driver does this before cancelling its loop
+    text = "x" * 4000 if ending == "long_answer" else "Final answer"
+    state = _make_success_state(text)
+    if ending == "stopped":
+        state = TurnState(termination=TerminationReason.INTERRUPTED)
+    await lc.on_render(state)  # guarded final render must not start another edit
+    assert progress_count == (2 if extra_render else 1)
+    if ending == "failure":
+        await asyncio.wait_for(lc.on_terminal_failure(state, RuntimeError("failed")), 1)
+    elif ending == "external":
+        await asyncio.wait_for(lc.end_card("Outer turn failure"), 1)
+    else:
+        await asyncio.wait_for(lc.on_terminal_success(state), 1)
+    final_embeds = current.get("embeds", [])
+    if "embed" in current:
+        final_embeds = [current["embed"]] if current["embed"] else []
+    final_content = current.get("content")
+    post_count = len(sends)
+    if extra_render:
+        releases[1].set()
+        # The first request is still outstanding: repair must wait for it too.
+        await asyncio.sleep(0)
+    releases[0].set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    if lc._terminal_reassert_task is not None:
+        await asyncio.wait_for(lc._terminal_reassert_task, 1)
+    assert current["embeds"] == final_embeds
+    assert current["view"] is None
+    assert current.get("content") == final_content
+    assert len(sends) == post_count
+    assert not lc._progress_edits
+
+
+async def test_abandoned_render_does_not_leave_a_progress_task_waiting_for_terminal() -> None:
+    release, started = asyncio.Event(), asyncio.Event()
+
+    async def send(**kwargs: Any) -> object:
+        return _SENTINEL_REF
+
+    async def edit(ref: Any, **kwargs: Any) -> None:
+        started.set()
+        await release.wait()
+
+    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test", model_id="m")
+    await lc.post_initial()
+    lc._last_flush = time.monotonic() - 11
+    tick = asyncio.create_task(lc.on_render(_running_tool_turn()))
+    await asyncio.wait_for(started.wait(), 1)
+    pending = set(lc._progress_edits)
+    lc.on_render_stopped()
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    assert not lc._progress_edits
+    assert lc._terminal_reassert_task is None
 
 
 def _make_lifecycle(
@@ -379,7 +492,9 @@ class TestCleanReplace:
 
         await lc.on_terminal_success(_make_success_state())
 
-        assert "embeds" not in edits[-1][1], "a one-message answer keeps the card's summary"
+        assert edits[-1][1]["embeds"] == [lc._terminal_embed], (
+            "the answer reasserts the summary if a progress edit landed in between"
+        )
 
     async def test_completion_ping_answer_carries_the_summary_and_the_card_goes(self) -> None:
         deleted: list[object] = []

@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Live QA's Haiku 5.5 judge omits its deprecated temperature parameter. Judge execution errors preserve product checks as PENDING without root alerts; failed verdicts still fail and alert.
+- Discord answers, stopped turns and errors retain their final status when older progress edits complete late, including errors caught outside the turn driver. Repairs preserve text and files without another answer post.
+
 - Older live QA configs that omit `dated_snapshots` now inherit the approved backend default when loaded. Explicit conflicting settings still refuse.
 
 - A turn on a dated model snapshot id (e.g. `claude-haiku-4-5-20251001`) is priced at its alias row instead of going unbilled.
