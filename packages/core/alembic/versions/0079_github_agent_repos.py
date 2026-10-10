@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0077_github_agent_repos"
-down_revision: str | None = "0076_github_connect_followup"
+revision: str = "0079_github_agent_repos"
+down_revision: str | None = "0078_privacy_session_deletes"
 branch_labels: str | None = None
 depends_on: str | None = None
 

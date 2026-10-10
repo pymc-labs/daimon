@@ -51,25 +51,11 @@ __all__ = [
     "connect_link",
     "sync_connect_admin",
     "pending_connect_link",
-    "AGENT_CONNECT_ONLY_AGENT",
-    "AGENT_CONNECT_TITLE",
-    "agent_connect_title",
     "can_manage_agent_github",
     "requester_manages_agent",
 ]
 
 CONNECT_COPY = "Choose repos on GitHub. If someone else manages them, send them this link."
-
-# Words for a Connect bound to one agent. The UI slice owns where they show.
-AGENT_CONNECT_TITLE = "Connect to {agent} in #{channel}"
-AGENT_CONNECT_ONLY_AGENT = "Only {agent} can use these repos."
-
-
-def agent_connect_title(agent_name: str, channel_name: str | None) -> str:
-    """The confirm page title for a Connect bound to one agent."""
-    if not channel_name:
-        return f"Connect to {agent_name}"
-    return AGENT_CONNECT_TITLE.format(agent=agent_name, channel=channel_name.lstrip("#"))
 
 
 async def can_manage_agent_github(
