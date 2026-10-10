@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qa.live.config import Config, Target
+from qa.live.deploy_quiet import QuietGate
 from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
@@ -602,6 +603,11 @@ class DiscordBackend:
         if len(response.stdout.encode("utf-8")) > 131072:
             raise Pending("CLI readback exceeds bounded observation")
         return redact(response.stdout)
+
+    def deployment_quiet(self) -> Message:
+        if self.env != "staging":
+            raise Pending("deployment quiet gate is staging-only")
+        return QuietGate().wait()
 
     def deployment_image(self) -> str:
         if self.env != "staging":

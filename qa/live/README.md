@@ -329,3 +329,22 @@ PENDING (n/a) and records zero usage plus scoped `skip_evidence`. This requires
 matching guild, channel, and turn-window evidence and no observed thread or bot
 messages. Silence alone never proves a skip: executed or unproven turns retain
 missing-model FAIL semantics. Product silence checks still FAIL independently.
+
+Before every staging observation, the runner reads main CI runs and their jobs
+through `gh`. It requires no active/queued `Deploy to GCP (staging)` job, including
+older active runs outside the recent run list, and at least three minutes since
+the most recent completed staging deploy job. It polls every 30 seconds for up to
+15 minutes; missing GitHub evidence never permits a trigger. This gate does not
+pin or deploy staging. A busy timeout is a silent PENDING without a paid retry or
+pending-streak increment. GitHub access failures remain harness PENDING. The
+existing deploy-interrupted retry policy still applies to turns already posted.
+The service timeout is one hour to cover quiet waits, observation, and one retry.
+
+The deploy gate matches bare caller and expanded reusable-workflow job names.
+Completed job metadata is cached across scenarios and retries in the process;
+active, queued, waiting, requested, and pending runs are refreshed each time.
+Missing tools, authentication, or deployment history fail fast as harness PENDING.
+HTTP-only staging results retain the gate evidence under `deployment.quiet`.
+
+A known busy deploy that outlasts the quiet wait remains a silent not-quiet
+outcome; the expired wait never starts a subprocess with no evidence budget.

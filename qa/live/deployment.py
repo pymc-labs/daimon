@@ -129,7 +129,12 @@ def run_with_deploy_retry(
             result.retry_of = attempts[0].run_id
         attempts.append(result)
         on_result(result)
-        if not result.deployment or not result.deployment.interrupted or attempt:
+        if (
+            not result.deployment
+            or not result.deployment.interrupted
+            or not result.turns
+            or attempt
+        ):
             break
         try:
             settled_image = wait_for_stable_deployment(executor.backend)
