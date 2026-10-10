@@ -413,6 +413,24 @@ thread is still opening. Includes thread naming and Discord rate-limit waits. Se
 to react immediately. The reaction is removed when creation finishes; a failed creation
 is answered with a visible error reply.
 
+### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`
+
+`bool` · optional · default `False`
+
+React with 🔔 to a person's reply that does not @mention the bot in a thread the bot
+opened, as a hint that only mentions start a turn. The message itself is never answered.
+At most once per thread per unmentioned_reply_hint_cooldown_h, never on a message that
+mentions someone else, never to any bot, never where the agent may not post, and never
+while the thread is followed (thread participation on). Off by default: the cooldown is
+kept in memory, so each restart allows one more hint per thread.
+
+### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H`
+
+`float` · optional · default `24.0`
+
+Hours before the unmentioned-reply hint may be shown again in the same thread. Kept in
+memory, so a restart allows one more.
+
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS_PER_TENANT`
 
 `int` · optional · default `3`

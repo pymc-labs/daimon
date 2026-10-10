@@ -30,7 +30,12 @@ from daimon.adapters.discord.context import (
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
-from daimon.adapters.discord.gating import is_participation_candidate, should_process_message
+from daimon.adapters.discord.gating import (
+    HintCooldown,
+    is_participation_candidate,
+    is_unmentioned_reply_hint_candidate,
+    should_process_message,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
@@ -493,6 +498,10 @@ class _ParticipationBatch:
 _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 
+#: The reaction on an unmentioned reply in a thread daimon opened: only a
+#: mention starts a turn. A reaction, not a message, so the hint stays quiet.
+UNMENTIONED_REPLY_HINT_EMOJI: Final[str] = "🔔"
+
 
 async def _requester_role(guild: discord.Guild, external_user_id: str) -> tuple[Role, list[str]]:
     """The requester's live guild role and role ids, for a turn with no message to read.
@@ -553,6 +562,12 @@ class DaimonBot(commands.Bot):
         # Built on first use, not here: it needs `self.user`, which the gateway
         # only supplies once the bot is ready.
         self._participant: ThreadParticipant | None = None
+        # Unmentioned-reply hint: thread id -> when it was last shown there.
+        self._unmentioned_hint_cooldown = HintCooldown(
+            runtime.settings.discord.unmentioned_reply_hint_cooldown_h * 3600
+            if runtime.settings.discord is not None
+            else 1.0
+        )
         # In-flight seed guard: tenant_ids with a reconcile in progress.
         self._seeding: set[uuid.UUID] = set()
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
@@ -1747,6 +1762,73 @@ class DaimonBot(commands.Bot):
                 self._release_thread(thread_id)
                 self._pending.pop(thread_id, None)
 
+    async def _maybe_hint_unmentioned_reply(
+        self, message: discord.Message, *, bot_mentioned: bool
+    ) -> None:
+        """React once to a person's unmentioned reply in a thread daimon opened.
+
+        Such a reply starts no turn, by design. Without a sign, people read the
+        silence as daimon ignoring them and re-mention it in the channel, which
+        opens a sibling thread with none of this one's context. The reaction
+        says "mention me to continue" without a message: once per thread per
+        cooldown, not while the thread is followed, where the reply may still
+        be answered unprompted, and not where the agent may not post. Best
+        effort: a failure is logged only, and never shows the hint.
+        """
+        discord_settings = self.runtime.settings.discord
+        if discord_settings is None or self.user is None or message.guild is None:
+            return
+        thread = message.channel
+        if not isinstance(thread, discord.Thread):
+            return
+        if not is_unmentioned_reply_hint_candidate(
+            enabled=discord_settings.unmentioned_reply_hint,
+            author_is_bot=message.author.bot,
+            author_is_webhook=isinstance(message.webhook_id, int),
+            bot_mentioned=bot_mentioned,
+            in_bot_owned_thread=thread.owner_id == self.user.id,
+            mentions_someone_else=(
+                message.mention_everyone
+                or bool(message.role_mentions)
+                or any(user.id != self.user.id for user in message.mentions)
+            ),
+            is_plain_message=message.type
+            in (discord.MessageType.default, discord.MessageType.reply),
+        ):
+            return
+        thread_id = thread.id
+        if thread_id in self._processing or thread_id in self._participation_pending:
+            return  # a turn is running or deciding here; this message may yet be read
+        now = asyncio.get_running_loop().time()
+        if not self._unmentioned_hint_cooldown.claim(thread_id, now=now):
+            return
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+        try:
+            responder = self._thread_participant(
+                bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
+            )
+            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
+            if resolved.mode is ParticipationMode.ON:
+                self._unmentioned_hint_cooldown.release(thread_id)
+                return
+            # A reaction is a post: where the agent may not write (or that
+            # can't be established), it stays silent like every other notice.
+            post_state = await _channel_protection_state(
+                self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+            )
+            if not post_state.may_post:
+                self._unmentioned_hint_cooldown.release(thread_id)
+                return
+            await message.add_reaction(UNMENTIONED_REPLY_HINT_EMOJI)
+        except Exception as exc:  # cosmetic hint: never surfaces, never retries
+            log.warning(
+                "unmentioned_reply_hint.failed",
+                thread_id=str(thread_id),
+                err_type=type(exc).__name__,
+            )
+            return
+        log.info("unmentioned_reply_hint.shown", thread_id=str(thread_id))
+
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Remember the clicker's name for /billing; the command tree handles the rest."""
         remember_guild_user(
@@ -1852,6 +1934,7 @@ class DaimonBot(commands.Bot):
                 guild_id=str(message.guild.id) if message.guild else None,
             ):
                 await self._maybe_participate(message)
+            await self._maybe_hint_unmentioned_reply(message, bot_mentioned=bot_mentioned)
             return
         assert message.guild is not None
         guild = message.guild
