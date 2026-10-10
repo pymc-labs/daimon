@@ -16,6 +16,7 @@ from daimon.core._models import (
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import Exists, delete, distinct, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 
 @dataclass(frozen=True)
@@ -40,13 +41,14 @@ async def _require_admin(
 
 def _has_own_row(model: type[AgentGitHubGrant] | type[AgentGitHubGrantDraft]) -> Exists:
     """The grant's agent has this repo connected for itself."""
+    own = aliased(TenantGitHubRepo)
     return (
-        select(TenantGitHubRepo.id)
+        select(own.id)
         .where(
-            TenantGitHubRepo.tenant_id == model.tenant_id,
-            TenantGitHubRepo.repo_id == model.repo_id,
-            TenantGitHubRepo.scope_agent_id == model.agent_id,
-            TenantGitHubRepo.status == "active",
+            own.tenant_id == model.tenant_id,
+            own.repo_id == model.repo_id,
+            own.scope_agent_id == model.agent_id,
+            own.status == "active",
         )
         .exists()
     )

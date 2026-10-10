@@ -26,6 +26,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -148,7 +149,7 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         parent_channel_id="channel",
         thread_id="thread",
     )
-    agent = SimpleNamespace(id="agent_connected", name="ConnectedBot")
+    agent = SimpleNamespace(id="agent_connected", name="ConnectedBot", metadata={})
     delivery = AsyncMock()
     monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
     monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
@@ -244,11 +245,60 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
             ),
         )
     delivery.reset_mock()
+    delivery.side_effect = None
+    # A pinned agent with no server-wide repos may get repos of its own.
     pinned = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, admin, origin_context_id=str(uuid.uuid4())
     )
-    assert pinned.status == "client_agent"
-    assert pinned.message == (
-        "This agent uses a saved GitHub key. Ask your Daimon operator to switch it."
+    assert pinned.status == "sent"
+    delivery.assert_awaited_once()
+
+    # So may a channel admin of the only channel it runs in, who is not a server admin.
+    async with committing_sessionmaker.begin() as session:
+        channel_admin = await make_account(session, tenant=tenant)
+        await set_channel_admins(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="client-channel",
+            role_ids=[],
+            user_ids=["777"],
+            actor_account_id=None,
+        )
+    delivery.reset_mock()
+    channel_admin_auth = AuthIdentity(
+        account_id=channel_admin.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        external_id="workspace",
+        platform_user_id="777",
+        is_admin=False,
     )
+    own = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, channel_admin_auth, origin_context_id=str(uuid.uuid4())
+    )
+    assert own.status == "sent"
+    assert delivery.await_args is not None
+    async with committing_sessionmaker() as session:
+        bound = (
+            await session.execute(
+                text(
+                    "SELECT requester_account_id, agent_ma_id "
+                    "FROM github_connect_click_intents WHERE id = :id"
+                ),
+                {"id": delivery.await_args.kwargs["intent_id"]},
+            )
+        ).one()
+        assert (bound.requester_account_id, bound.agent_ma_id) == (
+            channel_admin.id,
+            "agent_connected",
+        )
+    # A managed agent stays a server admin's.
+    agent.metadata = {"daimon_managed": "true"}
+    delivery.reset_mock()
+    managed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, channel_admin_auth, origin_context_id=str(uuid.uuid4())
+    )
+    assert managed.status == "ask_admin"
     delivery.assert_not_awaited()
