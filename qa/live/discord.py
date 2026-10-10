@@ -604,8 +604,6 @@ class DiscordBackend:
         return redact(response.stdout)
 
     def deployment_image(self) -> str:
-        import re
-
         if self.env != "staging":
             raise Pending("deployment observation is staging-only")
         hook = self.target.deployment_probe

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from qa.live.errors import redact
 from qa.live.report import Result
-from qa.live.runner import Executor
 from qa.live.schema import CatalogScenario
 from qa.live.types import Backend, Check, Pending, objects, utcnow
+
+if TYPE_CHECKING:
+    from qa.live.runner import Executor
 
 
 def finish_observation(result: Result, backend: Backend) -> None:
@@ -36,8 +39,15 @@ def finish_observation(result: Result, backend: Backend) -> None:
                         "affects_turn": True,
                     }
                 )
+    end_probe_pending = False
     try:
         observation.end_image = backend.deployment_image()
+    except Pending:
+        # A verified start followed by mixed/missing workers is an active rollout.
+        # The bounded settle gate determines whether a fresh attempt is possible.
+        end_probe_pending = bool(observation.start_image)
+        observation.error = "deployment image unavailable: Pending"
+        result.notes.append(observation.error)
     except Exception as exc:
         observation.error = "deployment image unavailable: " + type(exc).__name__
         result.notes.append(redact(observation.error))
@@ -49,7 +59,8 @@ def finish_observation(result: Result, backend: Backend) -> None:
         observation.error = "deployment observation unavailable: " + type(exc).__name__
         result.notes.append(redact(observation.error))
     observation.interrupted = bool(
-        (
+        end_probe_pending
+        or (
             observation.start_image
             and observation.end_image
             and observation.start_image != observation.end_image

@@ -16,6 +16,7 @@ from pathlib import Path
 from qa.live.config import Pricing
 from qa.live.context import Context
 from qa.live.cost import Ledger, estimate
+from qa.live.deployment import finish_observation
 from qa.live.errors import exception_evidence
 from qa.live.evaluate import evaluate
 from qa.live.models import BackendName, ModelPolicy
@@ -294,8 +295,6 @@ class Executor:
             fixture_dir.cleanup()
             self.ledger.receipt(run_id, usages, estimated, spend_possible=self.trigger_attempted)
             if result.deployment:
-                from qa.live.deployment import finish_observation
-
                 finish_observation(result, self.backend)
         result.finalize()
         return result

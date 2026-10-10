@@ -32,7 +32,16 @@ class Result:
     retry_of: str | None = None
 
     def finalize(self) -> None:
-        if self.deployment and (self.deployment.interrupted or self.deployment.error):
+        if self.deployment and (
+            self.deployment.interrupted
+            or (
+                self.deployment.error
+                and not (
+                    self.deployment.start_image
+                    and self.deployment.start_image == self.deployment.end_image
+                )
+            )
+        ):
             self.status = "PENDING"
             return
         statuses = [c.status for c in self.checks]

@@ -300,12 +300,15 @@ contains `env: staging`, the QA `guild_id`, and `read_only: true`. Return JSON
 images. Missing, mixed, or unavailable workers remain PENDING before any trigger.
 
 Results record start/end images, scoped draining and orphan-retirement events,
-and restart cards under `deployment`. Changed images or restart evidence affecting
+and restart cards under `deployment`. A verified start followed by a missing or
+mixed end probe also counts as an active rollout. Changed images or restart evidence affecting
 the observed turn force `deploy-interrupted` PENDING, preserving original checks
 for triage. These attempts never alert or change the pending-alert streak.
 The CLI retries once with a fresh backend and judge after all worker images stay
 equal for 30 seconds (bounded to five minutes), within the remaining pass and daily
 budgets. Both attempts retain receipts and JSON evidence; the retry records
 `retry_of`. Custom operator entrypoints should use `run_with_deploy_retry` or apply
-the same bounded policy. Missing observation evidence remains PENDING and never
-proves a product PASS. Production execution is unchanged.
+the same bounded policy. This checks image stability, not boot or orphan-sweep
+readiness. Missing observation evidence remains PENDING and never proves a product
+PASS; an event-log outage with matching verified images preserves a product FAIL.
+Production execution is unchanged.

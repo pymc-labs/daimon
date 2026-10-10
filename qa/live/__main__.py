@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+from functools import partial
 from pathlib import Path
 from types import FrameType
 
@@ -20,6 +21,10 @@ from qa.live.schema import ProposedScenario, Scenario, load_catalog
 
 def interrupted(signum: int, frame: FrameType | None) -> None:
     raise KeyboardInterrupt
+
+
+def retry_fits_budget(ledger: Ledger, attempted_ids: set[str], cost: float, budget: float) -> bool:
+    return ledger.charged(attempted_ids) + cost <= budget
 
 
 def main() -> int:
@@ -79,7 +84,11 @@ def main() -> int:
         ledger.claim_schedule(args.command, args.env)
         failed = False
         attempted_ids: set[str] = set()
+        notified_ids: set[str] = set()
         for scenario in scenarios:
+            scenario_estimate = (
+                estimate(scenario, config.pricing) if isinstance(scenario, Scenario) else 0
+            )
 
             def factory() -> Executor:
                 backend = DiscordBackend(config, args.env)
@@ -96,6 +105,9 @@ def main() -> int:
             def persist(result: Result) -> None:
                 attempted_ids.add(result.run_id)
                 path = report(result, args.results)
+                if result.run_id in notified_ids:
+                    return
+                notified_ids.add(result.run_id)
                 try:
                     Alerter(config.alerts, args.results / "alert-state.json").notify(result, path)
                 except Exception as exc:
@@ -105,18 +117,17 @@ def main() -> int:
                     report(result, args.results)
                     print("alert inbox unavailable; pass continues with retained result evidence")
 
-            def retry_allowed(
-                scenario_estimate: float = estimate(scenario, config.pricing)
-                if isinstance(scenario, Scenario)
-                else 0,
-            ) -> bool:
-                return (
-                    ledger.charged(attempted_ids) + scenario_estimate
-                    <= config.schedule.catalog_budget_usd
-                )
-
             attempts = run_with_deploy_retry(
-                scenario, factory, persist, retry_allowed=retry_allowed
+                scenario,
+                factory,
+                persist,
+                retry_allowed=partial(
+                    retry_fits_budget,
+                    ledger,
+                    attempted_ids,
+                    scenario_estimate,
+                    config.schedule.catalog_budget_usd,
+                ),
             )
             result = attempts[-1]
             failed |= result.status != "PASS"
