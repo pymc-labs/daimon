@@ -16,6 +16,7 @@ from pathlib import Path
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
+from daimon.core.defaults.backfill_guidance import backfill_credential_guidance
 from daimon.core.defaults.loader import (
     load_agent_specs,
     load_environment_specs,
@@ -199,8 +200,9 @@ async def _reconcile_core(
             )
 
         # Agent pass — account_id threads the guild ownership axis.
+        seeded_agent_ids: set[str] = set()
         for spec in agent_specs:
-            await _run_per_resource(
+            outcome = await _run_per_resource(
                 report,
                 lambda spec=spec: reconcile_agent(
                     client,
@@ -212,6 +214,19 @@ async def _reconcile_core(
                 ),
                 kind="agent",
                 name=spec.name,
+            )
+            if outcome.anthropic_id is not None:
+                seeded_agent_ids.add(outcome.anthropic_id)
+
+        # The seeded pass owns its own fingerprints. User-created agents have no
+        # spec to reconcile, so refresh their system guidance separately.
+        if not dry_run:
+            await backfill_credential_guidance(
+                client,
+                tenant_id=tenant_id,
+                seeded_agent_ids=seeded_agent_ids,
+                seeded_agent_names={spec.name for spec in agent_specs},
+                seeded_account_id=account_id,
             )
 
         # Sweep in reverse order. Skills sweep compares canonical tenant-scoped
