@@ -143,7 +143,7 @@ def test_spawn_marimo_requires_a_token_passed_on_stdin_not_argv(
     fake.stdin.close.assert_called_once()
 
 
-def test_notebook_url_carries_its_access_token() -> None:
+def test_notebook_url_keeps_its_access_token_on_the_host() -> None:
     from notebook_host.lifecycle import NotebookProcess
 
     np = NotebookProcess(
@@ -155,9 +155,9 @@ def test_notebook_url_carries_its_access_token() -> None:
         public_url_base="https://nbs.example.com",
         access_token="tok",
     )
-    assert np.url == "https://nbs.example.com/n/nb/?access_token=tok", (
-        "the shared link is the only thing that carries the notebook's token"
-    )
+    assert np.url.startswith("https://nbs.example.com/s/nb/")
+    assert "tok" not in np.url
+    assert "access_token" not in np.url
     assert "tok" not in repr(np), "the token stays out of reprs and logs"
 
 
@@ -175,7 +175,7 @@ def test_scratch_upload_defaults_to_a_read_only_app(
     assert np.registered is True, "a read-only scratch notebook starts on a visit once stopped"
     assert r.json()["expires_at"] is not None, "and still reports its expiry"
     assert r.json()["permanent"] is False
-    assert "access_token=" in r.json()["url"], "the returned link carries the token"
+    assert "access_token=" not in r.json()["url"], "the returned link keeps the token on the host"
     assert calls[-1]["access_token"] == np.access_token, "marimo gets the same token"
 
 
@@ -234,7 +234,8 @@ def test_blog_token_is_persisted_and_reused_on_restart(
     r = client.put(f"/upload/{_mint('blog', 'post')}", content=b"# blog\n")
     assert r.status_code == 200, r.text
     tok = state.processes["post"].access_token
-    assert f"access_token={tok}" in r.json()["url"]
+    assert tok not in r.json()["url"]
+    assert "/s/" in r.json()["url"]
     record = load_blogs(state.settings.resolved_blogs_file)["post"]
     assert record.access_token == tok, "a blog's token outlives the host process"
     assert (os.stat(state.settings.resolved_blogs_file).st_mode & 0o077) == 0, (
@@ -775,7 +776,7 @@ def test_each_notebook_gets_its_own_unguessable_origin(
 ) -> None:
     _, state, _, hosts = _origin_client(tmp_path, monkeypatch)
     url = state.processes["b"].url
-    assert url.startswith(f"https://{hosts['b']}/n/b/?access_token="), url
+    assert url.startswith(f"https://{hosts['b']}/s/b/"), url
     label = hosts["b"].split(".", 1)[0]
     assert len(label) == 32 and label != "b", "the label is random-looking, never the slug"
     assert hosts["a"] != hosts["b"], "two notebooks never share an origin"
@@ -1434,11 +1435,68 @@ def test_real_marimo_through_the_proxy_needs_the_link_token(
             ws.receive_text()
 
         viewer = TestClient(app)
-        link = np.url.split(f"/n/{slug}/", 1)[1]
-        first = viewer.get(f"/n/{slug}/{link}", follow_redirects=False)
+        from urllib.parse import urlsplit
+
+        first = viewer.get(urlsplit(np.url).path, follow_redirects=False)
         assert first.status_code in (200, 303), first.status_code
         assert viewer.get(f"/n/{slug}/").status_code == 200, "the link's cookie opens the page"
         with viewer.websocket_connect(f"/n/{slug}/ws?session_id=s-viewer") as ws:
             assert ws.receive_text(), "the kernel socket authenticates with the same cookie"
     finally:
         kill(np)
+
+
+def test_shared_link_bootstraps_a_host_only_cookie_and_clean_redirect(tmp_path, monkeypatch):
+    from urllib.parse import urlsplit
+
+    client, state, seen, hosts = _origin_client(tmp_path, monkeypatch)
+    url = state.processes["b"].url
+    response = client.get(urlsplit(url).path, headers={"host": hosts["b"]}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/n/b/"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    cookies = response.headers.get_list("set-cookie")
+    assert len(cookies) == 2
+    assert all(
+        cookie.startswith("__Host-") and "Secure" in cookie and "Domain=" not in cookie
+        for cookie in cookies
+    )
+    assert seen[-1].headers["authorization"] == "Bearer tok-b"
+    assert not seen[-1].url.query
+    assert "access_token=" not in response.headers["location"]
+
+
+def test_shared_link_is_scoped_to_notebook_token_and_origin(tmp_path, monkeypatch):
+    from urllib.parse import urlsplit
+
+    client, state, seen, hosts = _origin_client(tmp_path, monkeypatch)
+    path = urlsplit(state.processes["b"].url).path
+    assert client.get(path, headers={"host": hosts["a"]}).status_code == 404
+    assert (
+        client.get(path.replace("/s/b/", "/s/a/"), headers={"host": hosts["a"]}).status_code == 404
+    )
+    assert (
+        client.get(
+            path, headers={"host": hosts["b"], "origin": "https://other.example.com"}
+        ).status_code
+        == 403
+    )
+    assert not seen
+    state.processes["b"].access_token = "new-token"
+    assert client.get(path, headers={"host": hosts["b"]}).status_code == 404
+    assert not seen
+
+
+def test_share_link_keys_are_redacted_from_plain_and_encoded_logs():
+    from urllib.parse import quote
+
+    from notebook_host.logs import redact_access_token
+    from notebook_host.share import share_key
+
+    key = share_key("nb", "marimo-private-token")
+    path = f"https://nb.example.com/s/nb/{key}"
+    for value in (path, quote(path, safe=""), quote(quote(path, safe=""), safe="")):
+        output = redact_access_token(f"GET {value}")
+        assert key not in output
+        assert "[redacted]" in output

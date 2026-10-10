@@ -11,10 +11,12 @@ from uvicorn.logging import AccessFormatter, DefaultFormatter
 # original path, query included, into ``next=``). Tokens are url-safe
 # base64, so a value ends at the first ``&``, ``%``, quote or space.
 _ACCESS_TOKEN = re.compile(r"(access_token(?:=|%3D|%253D))[^&%\s\"']*", re.IGNORECASE)
+_SEP = r"(?:/|%2F|%252F)"
+_SHARE_KEY = re.compile(rf"({_SEP}s{_SEP}[a-z0-9_-]+{_SEP})[0-9a-f]{{64}}", re.IGNORECASE)
 
 
 def redact_access_token(text: str) -> str:
-    return _ACCESS_TOKEN.sub(r"\1[redacted]", text)
+    return _SHARE_KEY.sub(r"\1[redacted]", _ACCESS_TOKEN.sub(r"\1[redacted]", text))
 
 
 class RedactingDefaultFormatter(DefaultFormatter):

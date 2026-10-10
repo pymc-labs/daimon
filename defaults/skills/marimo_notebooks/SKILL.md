@@ -9,8 +9,10 @@ Publish an interactive marimo notebook for the user. You mint a one-time upload
 URL, get the notebook's `.py` into a sandbox file, and
 `curl -X PUT --data-binary` it to the URL — the source never goes through a tool
 argument, which truncates large notebooks. The curl response returns a URL
-whose `access_token` is the notebook's only key. Share the whole URL, and only
-with the user who asked.
+for this notebook. Share the whole URL, and only with the user who asked.
+The share link opens a browser session without exposing the notebook's raw
+access token. Never post an old URL containing an `access_token` query string;
+re-publish the same slug to get a share link instead.
 
 A notebook is data work, not decoration. The person on the other end is usually
 trying to answer a real question. A polished notebook that answers the *wrong*
@@ -38,7 +40,7 @@ response). Re-uploading the same slug restarts its `ttl_days` from now.
 Both kinds survive host restarts. The host stops a notebook nobody has opened
 for a couple of hours and starts it again on the next visit, so a link that has
 been quiet can take a few seconds to load. That is expected, not an error. Only
-the full link, with its `access_token`, starts a stopped notebook, so always
+the full share link starts a stopped notebook, so always
 share the whole URL from the curl response, never a shortened one.
 
 **Default to `permanent=False`.** Publish the scratch version, let the user look

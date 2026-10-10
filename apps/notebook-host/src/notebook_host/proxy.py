@@ -27,6 +27,7 @@ from notebook_host.admin import AdminState
 from notebook_host.blogs_store import load_blogs
 from notebook_host.lazy_spawn import ensure_running
 from notebook_host.lifecycle import NotebookProcess, origin_label_for
+from notebook_host.share import valid_share_key
 
 _log = logging.getLogger(__name__)
 
@@ -209,6 +210,57 @@ def _cross_origin(headers: Mapping[str, str], own_origin: str) -> bool:
 
 def create_proxy_router(state: AdminState) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/s/{slug}/{key}")
+    async def open_shared_notebook(  # pyright: ignore[reportUnusedFunction]
+        slug: str, key: str, request: Request
+    ) -> Response:
+        np = state.processes.get(slug)
+        if np is not None and np.is_alive():
+            access_token = np.access_token
+        else:
+            record = load_blogs(state.settings.resolved_blogs_file).get(slug)
+            access_token = (record.access_token if record is not None else None) or ""
+        if not valid_share_key(slug, access_token, key):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Notebook link is unavailable.")
+        # Refuse another notebook's fetch before starting a stopped kernel.
+        base = state.settings.origin_base
+        if base is not None:
+            origin = f"{state.settings.origin_scheme}://{origin_label_for(access_token)}.{base}"
+            if _cross_origin(request.headers, origin):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-origin request refused")
+        resolved = await _resolve(state, slug, request.headers, access_token)
+        if resolved is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Notebook link is unavailable.")
+        np, own_origin = resolved
+        np.touch()
+        secure = own_origin is not None and own_origin.startswith("https://")
+        headers = _backend_request_headers(request.headers, secure=secure)
+        headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+        headers["Authorization"] = f"Bearer {np.access_token}"
+        # marimo authenticates this host-only request and sets its session
+        # cookie. Neither the browser URL nor the chat link carries its token.
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            result = await client.get(f"http://localhost:{np.port}/n/{slug}/", headers=headers)
+        if not result.is_success or not result.headers.get_list("set-cookie"):
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Notebook could not open.")
+        response = Response(
+            status_code=303,
+            headers={
+                "Location": f"/n/{slug}/",
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+        response.raw_headers.extend(
+            (name, value)
+            for name, value in _response_headers(
+                result.headers, own_origin=own_origin, secure=secure
+            )
+            if name.lower()
+            in {b"set-cookie", b"strict-transport-security", b"content-security-policy"}
+        )
+        return response
 
     @router.api_route(
         "/n/{slug}/{path:path}",

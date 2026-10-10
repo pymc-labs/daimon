@@ -204,6 +204,10 @@ toolset into each seeded agent, so an apply run without it produces agents
 that differ from a deployed one. Both are in
 [configuration.md](configuration.md).
 
+The marimo notebook skill shares the complete notebook-specific link returned
+by publication, and never posts legacy `access_token` query strings. Re-publish
+the same slug to get a share link for an older notebook URL.
+
 The seeded Daimon prompt describes opt-in Markdown tables in final replies: Discord renders
 them as PNG attachments and Slack uses native table blocks; Teams shows Markdown tables
 as they are, with no setting. Existing custom agent
