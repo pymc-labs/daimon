@@ -123,22 +123,23 @@ def build_limited_network_refusal(*, environment_name: str | None) -> str:
     )
 
 
-def build_limited_network_confirm(*, environment_name: str | None, panel: bool = False) -> str:
+def build_limited_network_confirm(
+    *, environment_name: str | None, panel: bool = False, channel: str | None = None
+) -> str:
     """Why a server admin's pick in a channel with limited readers waits for a confirmation.
 
     A panel has no confirm step, so it points at chat, whose tool asks for one.
     """
-    what = (
-        f"the {environment_name} environment has"
-        if environment_name is not None
-        else "the default it would fall back to has"
-    )
+    what = f"the {environment_name} environment" if environment_name else "the default environment"
     note = (
-        f"Only turns inside this channel read it, and {what} unrestricted network access, "
-        "so its content could leave through it. Nothing changed."
+        f"Nothing changed. This channel or one of its threads limits who can read it, and {what} "
+        "could let its content out."
     )
     if panel:
-        note += " To use it anyway, ask daimon to make the change in chat and confirm there."
+        if channel is None:
+            raise ValueError("Panel confirmation requires a channel")
+        action = "make this change" if environment_name else "use the default environment"
+        note += f"\n\nAsk me in chat to {action} for {channel}, then confirm when I ask."
     return note
 
 
@@ -146,14 +147,10 @@ def build_limited_channels_confirm(*, environment_name: str | None) -> str:
     """Why a change beyond one channel waits for a confirmation: it leaves channels
     with limited readers on an open network (a workspace default, an environment
     edit or archive)."""
-    what = (
-        f"the {environment_name} environment"
-        if environment_name is not None
-        else "the environment they would fall back to"
-    )
+    what = f"the {environment_name} environment" if environment_name else "the default environment"
     return (
-        f"Channels only turns inside them read would run in {what}, which has unrestricted "
-        "network access, so their content could leave through it. Nothing changed."
+        f"Nothing changed. Some channels or their threads limit who can read them, and {what} "
+        "could let their content out."
     )
 
 

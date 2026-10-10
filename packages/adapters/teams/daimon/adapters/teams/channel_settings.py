@@ -89,13 +89,11 @@ log = structlog.get_logger(__name__)
 ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
 """One team's standard channels by id, with their names; empty when unreadable."""
 
-CHANNELS_NEED_ADMIN: Final = (
-    "Changing a channel's settings needs a server admin or an admin of that channel."
-)
+CHANNELS_NEED_ADMIN: Final = "Only a server admin or this channel's admin can change this."
 SERVER_ADMIN_ONLY: Final = (
     "Only a server admin can change a channel's permissions, admins or skills. Nothing changed."
 )
-SKILLS_UNREADABLE: Final = "This organisation's skills could not all be read. Nothing was added."
+SKILLS_UNREADABLE: Final = "Couldn't read all the skills.\n\nNo skill was added."
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
 _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
     "environment": "environment",
@@ -327,7 +325,9 @@ class ChannelSettingsDialog:
             return build_missing_environment_note(name)
         if pick.needs_confirm:
             await self._audit(actor, "environment", outcome="denied", reason="needs_confirm")
-            return build_limited_network_confirm(environment_name=name, panel=True)
+            channel_name = (await self._listed(actor.tenant_id)).get(channel_id)
+            channel = f"#{channel_name}" if channel_name else f"Channel {channel_id}"
+            return build_limited_network_confirm(environment_name=name, panel=True, channel=channel)
         name = pick.environment_name or name
         account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:

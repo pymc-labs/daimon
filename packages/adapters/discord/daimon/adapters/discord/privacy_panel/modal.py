@@ -17,6 +17,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.privacy_panel.embeds import build_post_delete_container
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from daimon.core.privacy import DELETE_PAUSED
 from daimon.core.purge import purge_account
 
 import discord
@@ -49,9 +50,7 @@ class DeleteConfirmModal(discord.ui.Modal, title="Confirm delete"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(
-                "Deleting your account is paused during the event.", ephemeral=True
-            )
+            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
             return
         rid = generate_request_id()
         typed = str(self.name_in.value).strip() if self.name_in.value else ""

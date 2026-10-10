@@ -81,29 +81,58 @@ def export_card(preview: PurgePreview, *, bot: str) -> AdaptiveCard:
 
 
 def _will_happen(preview: PurgePreview) -> list[str]:
-    rows = (
-        ("🔑 Remove", preview.linked_principals, "linked principal(s)"),
-        ("⏰ Cancel", preview.routines, "scheduled routine(s)"),
-        ("🔗 Remove", preview.principal_links, "principal link(s)"),
-        ("⚙ Remove", preview.user_configs, "user config row(s)"),
-        ("🧰 Remove", preview.user_skills, "synced skill ledger row(s)"),
-        ("🔑 Delete", preview.github_credentials, "stored GitHub token(s)"),
-        ("🔗 Remove", preview.github_user_links, "GitHub user link(s)"),
-        ("🤝 Remove", preview.github_oauth_states, "GitHub OAuth handshake record(s)"),
-        ("🎫 Revoke", preview.mcp_tokens, "per-agent MCP token(s)"),
-        ("🤖 Remove", preview.agent_github_binding, "per-agent GitHub token link(s)"),
-        ("🔐 Remove", preview.slack_user_tokens, "Slack user token(s)"),
-        ("💬 Remove", preview.slack_turn_contexts, "Slack turn context(s)"),
-        ("💬 Remove", preview.direct_message_conversations, "private conversation(s)"),
-    )
-    lines = [
-        f"{verb} **{row.count}** {label}" + (f" (e.g. {row.example})" if row.example else "")
-        for verb, row, label in rows
-        if row.count > 0
-    ]
+    def amount(count: int, singular: str) -> str:
+        return f"**{count}** {singular if count == 1 else singular + 's'}"
+
+    lines: list[str] = []
+    if preview.linked_principals.count:
+        n = amount(preview.linked_principals.count, "linked account")
+        ex = preview.linked_principals.example or "—"
+        lines.append(f"🔑 Remove {n}, for example {ex}")
+    if preview.routines.count:
+        lines.append(f"⏰ Cancel {amount(preview.routines.count, 'routine')}")
+    if preview.principal_links.count:
+        lines.append(
+            f"🔗 Remove {amount(preview.principal_links.count, 'link')} between your accounts"
+        )
+    if preview.user_configs.count:
+        lines.append("⚙ Remove your saved settings")
+    if preview.user_skills.count:
+        n = amount(preview.user_skills.count, "skill")
+        ex = preview.user_skills.example or "—"
+        lines.append(f"🧰 Forget {n} you synced, for example {ex}")
+    if preview.github_credentials.count:
+        n = amount(preview.github_credentials.count, "saved GitHub key")
+        ex = preview.github_credentials.example or "—"
+        lines.append(f"🔑 Delete {n}, for example the one for {ex}")
+    if preview.github_user_links.count:
+        lines.append(f"🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}")
+    if preview.github_oauth_states.count:
+        lines.append(
+            f"🤝 Delete {amount(preview.github_oauth_states.count, 'GitHub sign-in record')}"
+        )
+    if preview.mcp_tokens.count:
+        lines.append(f"🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}")
+    if preview.agent_github_binding.count:
+        n = amount(preview.agent_github_binding.count, "link")
+        lines.append(f"🤖 Remove {n} from agents to your GitHub keys")
+    if preview.slack_user_tokens.count:
+        lines.append(
+            f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
+        )
+    if preview.slack_turn_contexts.count:
+        n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
+        lines.append(f"💬 Delete {n}")
+    if preview.direct_message_conversations.count:
+        n = amount(preview.direct_message_conversations.count, "private conversation")
+        lines.append(f"💬 Delete Daimon's saved data for {n}")
+    if preview.channel_admins.count:
+        lines.append(
+            f"Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
+        )
     if preview.account.count > 0:
-        lines.append("🪪 Remove the account row itself")
-    return lines or ["(nothing to delete)"]
+        lines.append("🪪 Remove your account")
+    return lines or ["Nothing to delete."]
 
 
 def confirm_card(
@@ -119,7 +148,9 @@ def confirm_card(
     if error:
         body.append(error_text(error))
     body += _spaced(*delete_scope_lines(bot))
-    body += text_lines("⚡ **What will happen**", *_will_happen(preview), *_KEPT)
+    body += _spaced("⚡ **What will happen**")
+    body += text_lines(*_will_happen(preview))
+    body += _spaced(*_KEPT)
     body.append(TextInput(id=CONFIRM_INPUT, label=f"Type '{name}' to confirm", placeholder=name))
     delete = button(VERB, "Delete", "confirm_delete", style="destructive", account=str(account_id))
     body.append(ActionSet(actions=[delete, button(VERB, "Cancel", "refresh")]))

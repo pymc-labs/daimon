@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - QA expected CLI refusals reject transport/crash signatures before matching refusal text, reject empty-match patterns, and refuse wrapped or structured tenant-credit commands before mutation.
 
 - QA supports frozen Discord answer/thread counts, nested alternatives, component/card observations, running card edits and chunk delivery gaps, with scoped guild and expected CLI-exit parameters.
+- Privacy delete previews, channel setup panels, network confirmations, and DM controls use the approved plain words across Discord, Slack, and Teams.
 - Staging QA records deployment images and restart evidence, keeps deploy-interrupted runs silent and PENDING, and retries once after workers settle within the pass budget.
 - GitHub setup sections on Discord, Slack, and Teams show repos and the working repo without grant-editing controls. Ask the agent in chat to change repos; Connect GitHub remains available.
 

@@ -37,7 +37,8 @@ def test_paused_delete_submission_does_not_proceed() -> None:
     assert not decision.proceed
     assert decision.account_id is None
     assert decision.response_payload["view"]["blocks"][0]["text"]["text"] == (
-        "Deleting your account is paused during the event."
+        "Deleting your account is paused during the event.\n\n"
+        "Ask the team running Daimon if you need it deleted now."
     )
 
 
@@ -60,7 +61,8 @@ async def test_paused_background_handler_does_not_purge(
     )
     purge.assert_not_awaited()
     assert web_client.views_update.await_args.kwargs["view"]["blocks"][0]["text"]["text"] == (
-        "Deleting your account is paused during the event."
+        "Deleting your account is paused during the event.\n\n"
+        "Ask the team running Daimon if you need it deleted now."
     )
 
 

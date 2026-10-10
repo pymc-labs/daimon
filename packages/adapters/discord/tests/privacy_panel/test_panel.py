@@ -65,7 +65,9 @@ async def test_old_delete_button_answers_pause_without_loading_preview() -> None
     interaction.response.send_message = AsyncMock()
     await view._on_delete(interaction)
     interaction.response.send_message.assert_awaited_once_with(
-        "Deleting your account is paused during the event.", ephemeral=True
+        "Deleting your account is paused during the event.\n\n"
+        "Ask the team running Daimon if you need it deleted now.",
+        ephemeral=True,
     )
 
 

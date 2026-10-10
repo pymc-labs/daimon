@@ -459,12 +459,12 @@ async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirmi
     for config in (unrestricted, a_host):
         with pytest.raises(
             ToolError,
-            match="Channels only turns inside them read would run in the closed.*confirm_open",
+            match=r"Nothing changed\. Some channels or their threads limit who can read them, and the closed environment could let their content out.*confirm_open",
         ):
             await _update_environment_impl(
                 runtime, auth, name="closed", config=config, description=None
             )
-    with pytest.raises(ToolError, match="the environment they would fall back to.*confirm_open"):
+    with pytest.raises(ToolError, match="the default environment.*confirm_open"):
         await _archive_environment_impl(runtime, auth, "closed")
     assert writes == [], "nothing reaches the provider unconfirmed"
 
@@ -534,7 +534,7 @@ async def test_a_sealed_thread_counts_under_the_channel_a_session_ran_it_in(
         await make_thread_session(session, tenant=tenant, thread_id="200", channel_id="100")
     with pytest.raises(
         ToolError,
-        match="Channels only turns inside them read would run in the closed.*confirm_open",
+        match=r"Nothing changed\. Some channels or their threads limit who can read them, and the closed environment could let their content out.*confirm_open",
     ):
         await _update_environment_impl(
             runtime, auth, name="closed", config=unrestricted, description=None

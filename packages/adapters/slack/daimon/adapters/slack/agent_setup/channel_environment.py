@@ -47,7 +47,7 @@ MAX_ENVIRONMENT_OPTIONS: Final = 99
 _MAX_OPTION_VALUE: Final = 150
 """Slack's limit on an option's value."""
 ENVIRONMENT_NEED_ADMIN_MESSAGE: Final = (
-    "Picking this channel's environment needs a workspace admin or an admin of this channel."
+    "Only a workspace admin or this channel's admin can change this."
 )
 
 
@@ -176,7 +176,9 @@ async def save_environment_choice(
         return build_missing_environment_note(name)
     if pick.needs_confirm:
         await audit(outcome="denied", reason="needs_confirm")
-        return build_limited_network_confirm(environment_name=name, panel=True)
+        return build_limited_network_confirm(
+            environment_name=name, panel=True, channel=f"<#{channel_id}>"
+        )
     # The environment the network rule judged, not a second lookup by name.
     name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:

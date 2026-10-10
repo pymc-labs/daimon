@@ -104,7 +104,7 @@ def _button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any] |
 def test_container_lists_each_channels_roles_and_members() -> None:
     text = _text(build_channel_admins_container([_row("500", roles=("77",), users=("88",))]))
     assert "<#500> → <@&77>, <@88>" in text, "roles then members, by mention"
-    assert "no channel has its own admins yet" in _text(build_channel_admins_container([])), (
+    assert "No channel admins yet." in _text(build_channel_admins_container([])), (
         "an empty tenant says so"
     )
 
@@ -112,8 +112,8 @@ def test_container_lists_each_channels_roles_and_members() -> None:
 def test_container_explains_channel_admins_in_two_lines() -> None:
     text = _text(build_channel_admins_container([]))
     assert (
-        "-# Channel admins pick this channel's agent and edit agents that only work in their "
-        "channels.\n\n-# Starting agents and the default agent stay with server admins."
+        "-# Channel admins choose their channels' environment and agent, and edit agents limited to those "
+        "channels.\n\n-# Starting agents and the server default stay with server admins."
     ) in text, "two lines, a blank line apart"
 
 

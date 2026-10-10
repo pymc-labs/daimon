@@ -49,9 +49,7 @@ MAX_ENVIRONMENT_OPTIONS: Final = 24
 """A select holds 25 options; the first is always Use the default."""
 _MAX_OPTION_VALUE: Final = 100
 """Discord's limit on a select option's value."""
-REFUSED_MESSAGE: Final = (
-    "Picking this channel's environment needs Manage Server or an admin of this channel."
-)
+REFUSED_MESSAGE: Final = "Only a server admin or this channel's admin can change this."
 
 
 def build_environment_select(
@@ -204,7 +202,8 @@ async def save_environment_choice(
         await audit_environment_pick(
             runtime=runtime, state=state, user_id=user_id, outcome="denied", reason="needs_confirm"
         )
-        return build_limited_network_confirm(environment_name=name, panel=True)
+        channel = f"#{state.channel_name}" if state.channel_name else f"<#{channel_id}>"
+        return build_limited_network_confirm(environment_name=name, panel=True, channel=channel)
     # The environment the network rule judged, not a second lookup by name.
     name = pick.environment_name or name
     async with runtime.sessionmaker.begin() as session:

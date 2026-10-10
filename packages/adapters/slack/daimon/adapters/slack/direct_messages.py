@@ -163,12 +163,15 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         if action in {"enable", "disable"}:
             if role is not Role.ADMIN:
-                raise UserFacingError("Only a workspace admin can change the DM policy.")
-            async with runtime.sessionmaker.begin() as session:
-                await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
-            reply = (
-                "DM conversations enabled." if action == "enable" else "DM conversations disabled."
-            )
+                reply = "Only a workspace admin can turn Daimon DMs on or off here."
+            else:
+                async with runtime.sessionmaker.begin() as session:
+                    await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
+                reply = (
+                    "Daimon DMs are on for this workspace."
+                    if action == "enable"
+                    else "Daimon DMs are off for this workspace."
+                )
         elif action in {"", "move"}:
             await require_dm_enabled(runtime.turn_deps, tenant_id=tenant_id)
             if channel_id.startswith("D"):

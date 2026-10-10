@@ -50,12 +50,14 @@ PERMISSIONS_NOTE: Final = (
     "agents lets them run elsewhere, bringing what they remembered here."
 )
 CHANNEL_ADMINS_NOTE: Final = (
-    "Channel admins pick their channels' environment and default agent. Server admins run "
-    "every channel. Enter Entra object ids, separated by commas; leave it empty to remove them."
+    "Channel admins choose their channels' environment and agent, and edit agents limited to those "
+    "channels.\n\nStarting agents and the server default stay with server admins."
+)
+CHANNEL_ADMIN_IDS_HINT: Final = (
+    "Enter Entra object IDs, separated by commas.\n\nLeave it empty to remove them."
 )
 CHANNEL_SKILLS_NOTE: Final = (
-    "Added to whatever agent answers in this channel, here only, from the next message: a "
-    "library skill, or one uploaded to this channel's agent. Server admins only."
+    "These skills apply only here, from the next message.\n\nOnly server admins can change them."
 )
 MAX_LISTED_SKILLS: Final = 20
 
@@ -76,13 +78,16 @@ class ChannelSettings:
     """None for a caller who is not a server admin."""
 
 
-def _text(text: str, *, bold: bool = False, subtle: bool = False) -> TextBlock:
+def _text(
+    text: str, *, bold: bool = False, subtle: bool = False, spaced: bool = False
+) -> TextBlock:
     return TextBlock(
         text=re.sub(r"\n+", "\n\n", text),
         wrap=True,
         weight="Bolder" if bold else None,
         is_subtle=subtle or None,
         size="Small" if subtle else None,
+        spacing="Medium" if spaced else None,
     )
 
 
@@ -160,7 +165,7 @@ def _rule_section(status: ChannelRuleStatus) -> list[CardElement]:
 def _skills_section(rows: Sequence[ChannelSkillRow]) -> list[CardElement]:
     """Discord's and Slack's channel skills: the list, a name to add, ticks to remove."""
     shown = rows[:MAX_LISTED_SKILLS]
-    lines = [f"`{row.name}` · {row.version}" for row in shown]
+    lines = [f"`{row.name}` ({row.version})" for row in shown]
     if len(rows) > len(shown):
         lines.append(f"…and {len(rows) - len(shown)} more")
     body: list[CardElement] = [
@@ -209,7 +214,8 @@ def channel_settings_form(settings: ChannelSettings, *, notice: str | None = Non
                 value=", ".join(settings.admin_user_ids),
                 placeholder="none",
             ),
-            _text(CHANNEL_ADMINS_NOTE, subtle=True),
+            _text(CHANNEL_ADMINS_NOTE, subtle=True, spaced=True),
+            _text(CHANNEL_ADMIN_IDS_HINT, subtle=True, spaced=True),
         ]
         actions.append(_submit("Save channel admins", "admins", channel))
     if settings.skills is not None:

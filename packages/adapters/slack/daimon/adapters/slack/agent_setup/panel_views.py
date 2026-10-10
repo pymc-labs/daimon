@@ -298,9 +298,9 @@ _MAX_OPTION_TEXT: Final = 75
 CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
 """Room for the listing, its heading and "and N more" in one section's 3000 characters."""
 CHANNEL_ADMINS_NOTE: Final = (
-    "Channel admins pick this channel's agent and edit agents that only work in their "
+    "Channel admins choose their channels' environment and agent, and edit agents limited to those "
     "channels.\n\n"
-    "Starting agents and the default agent stay with workspace admins."
+    "Starting agents and the workspace default stay with workspace admins."
 )
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
 CHANNEL_SKILLS_HEADER: Final = "Extra skills"
@@ -813,7 +813,7 @@ def build_routing_view(
     if answering_map.deployment_default is not None:
         line = f"Deployment default: *{escape_mrkdwn(answering_map.deployment_default)}*"
         if answering_map.tenant_consumes_fallthrough:
-            line = f"{line}\n_not in effect while a workspace default is set_"
+            line = f"{line}\n\n_Not used while a workspace default is set._"
         blocks.append(_section(line))
     else:
         blocks.append(_section("_no deployment default_"))
@@ -868,7 +868,7 @@ def _environment_blocks(
     if deployment is not None:
         defaults.append(f"Deployment default: *{_shown_name(deployment)}*")
         if tenant is not None:
-            defaults.append("_not in effect while a workspace default is set_")
+            defaults.append("_Not used while a workspace default is set._")
     rows = answering_map.channel_environments
     lines = fit_lines(
         (
@@ -943,11 +943,11 @@ def _channel_admins_blocks(
     )
     if len(lines) < len(grants):
         lines.append(f"_and {len(grants) - len(lines)} more_")
-    listing = "\n".join(lines) or "_no channel has its own admins yet_"
+    listing = "\n".join(lines) or "_No channel admins yet._"
     editable = _is_channel(channel_id)
     edit = _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if editable else None
     return [
-        _section(f"*{CHANNEL_ADMINS_LABEL}*\n{listing}", accessory=edit),
+        _section(f"*{CHANNEL_ADMINS_LABEL}*\n\n{listing}", accessory=edit),
         _context(CHANNEL_ADMINS_NOTE),
         {"type": "divider"},
     ]

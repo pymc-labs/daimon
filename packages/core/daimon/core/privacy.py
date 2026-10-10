@@ -101,29 +101,49 @@ class PurgePreview(BaseModel):
 def summary_line(preview: PurgePreview) -> str:
     """The non-zero held-data categories, comma-joined, for the privacy panels."""
     categories = (
-        (preview.linked_principals, "linked principal(s)"),
-        (preview.routines, "routine(s)"),
-        (preview.user_configs, "user config row(s)"),
-        (preview.user_skills, "synced skill(s)"),
-        (preview.github_credentials, "GitHub token(s)"),
-        (preview.github_connect_requests, "GitHub setup request(s)"),
-        (preview.github_connect_click_intents, "GitHub connect button(s)"),
-        (preview.github_user_links, "GitHub user link(s)"),
-        (preview.github_oauth_states, "OAuth handshake record(s)"),
-        (preview.mcp_tokens, "MCP token(s)"),
-        (preview.agent_github_binding, "per-agent GitHub link(s)"),
-        (preview.slack_user_tokens, "Slack user token(s)"),
-        (preview.slack_turn_contexts, "Slack turn context(s)"),
-        (preview.direct_message_conversations, "private conversation(s)"),
-        (preview.channel_admins, "channel admin grant(s)"),
-        (preview.agent_post_requesters, "record(s) of you asking an agent in a thread"),
-        (preview.platform_user_names, "remembered name(s)"),
+        (preview.linked_principals, "linked account"),
+        (preview.routines, "routine"),
+        (preview.user_configs, "saved settings"),
+        (preview.user_skills, "skill you synced"),
+        (preview.github_credentials, "saved GitHub key"),
+        (preview.github_connect_requests, "GitHub setup request"),
+        (preview.github_connect_click_intents, "GitHub connect button"),
+        (preview.github_user_links, "linked GitHub account"),
+        (preview.github_oauth_states, "GitHub sign-in record"),
+        (preview.mcp_tokens, "Daimon access token"),
+        (preview.agent_github_binding, "link from an agent to your GitHub keys"),
+        (preview.slack_user_tokens, "saved Slack access token"),
+        (preview.slack_turn_contexts, "temporary Slack request record"),
+        (preview.direct_message_conversations, "private conversation"),
+        (preview.channel_admins, "channel admin list"),
+        (preview.agent_post_requesters, "post an agent made for you"),
+        (preview.platform_user_names, "remembered name"),
     )
-    parts = [f"{row.count} {label}" for row, label in categories if row.count > 0]
-    return ", ".join(parts) if parts else "nothing visible to you yet"
+    parts = [
+        "saved settings"
+        if row is preview.user_configs
+        else f"{row.count} {label if row.count == 1 else _plural(label)}"
+        for row, label in categories
+        if row.count > 0
+    ]
+    return ", ".join(parts) if parts else "nothing listed here"
+
+
+def _plural(label: str) -> str:
+    if label == "skill you synced":
+        return "skills you synced"
+    if label == "link from an agent to your GitHub keys":
+        return "links from agents to your GitHub keys"
+    if label == "post an agent made for you":
+        return "posts agents made for you"
+    return f"{label}s"
 
 
 PRIVACY_TITLE: Final[str] = "🔒 Your data"
+DELETE_PAUSED: Final[str] = (
+    "Deleting your account is paused during the event.\n\n"
+    "Ask the team running Daimon if you need it deleted now."
+)
 
 
 def privacy_lines(display_name: str) -> tuple[str, str]:

@@ -10,7 +10,7 @@ import uuid
 
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.privacy import PRIVACY_TITLE, privacy_lines
+from daimon.core.privacy import DELETE_PAUSED, PRIVACY_TITLE, privacy_lines
 
 import discord
 
@@ -100,9 +100,7 @@ class PrivacyPanelView(discord.ui.LayoutView):
 
     async def _on_delete(self, interaction: discord.Interaction) -> None:
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(
-                "Deleting your account is paused during the event.", ephemeral=True
-            )
+            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
             return
         # Lazy import to avoid circular: panel.py <-> cascade.py
         from daimon.adapters.discord.privacy_panel.cascade import CascadePreviewView

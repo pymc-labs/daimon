@@ -22,6 +22,32 @@ _TEAM = "T_DM_BUDGET"
 _CHANNEL = "C_SOURCE"
 
 
+@pytest.mark.parametrize(
+    ("role", "action", "expected"),
+    [
+        (Role.USER, "enable", "Only a workspace admin can turn Daimon DMs on or off here."),
+        (Role.ADMIN, "enable", "Daimon DMs are on for this workspace."),
+        (Role.ADMIN, "disable", "Daimon DMs are off for this workspace."),
+    ],
+)
+async def test_dm_policy_replies_use_workspace_words(
+    monkeypatch: pytest.MonkeyPatch, role: Role, action: str, expected: str
+) -> None:
+    client = MagicMock()
+    client.chat_postEphemeral = AsyncMock()
+    monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=role))
+    save = AsyncMock()
+    monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    runtime = MagicMock()
+    await dm_module.handle_dm_command(
+        runtime,
+        {"team_id": _TEAM, "user_id": "U1", "channel_id": _CHANNEL, "text": action},
+    )
+    assert client.chat_postEphemeral.await_args.kwargs["text"] == expected
+    assert save.await_count == (1 if role is Role.ADMIN else 0)
+
+
 async def test_reply_in_dm_thread_stays_in_that_thread(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

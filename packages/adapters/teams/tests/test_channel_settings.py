@@ -263,7 +263,9 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
             service, _submit(ADMIN, "environment", channel=GROWTH, environment="env:science")
         )
 
-    assert "confirm there" in json.dumps(held), json.dumps(held)
+    assert "Ask me in chat to make this change for #Growth, then confirm when I ask." in json.dumps(
+        held
+    ), json.dumps(held)
     assert await _events(db_session_factory) == [("panel:environment", "denied", "needs_confirm")]
 
 
@@ -310,7 +312,7 @@ async def test_a_server_admin_adds_and_removes_channel_skills_and_a_channel_admi
     assert forged["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY, "nor save them"
     assert_card_renders(added["task"]["value"]["card"]["content"])
     form = json.dumps(added, ensure_ascii=False)
-    assert "Added pdf-tools." in form and "`pdf-tools` · v3" in form, "listed with its version"
+    assert "Added pdf-tools." in form and "`pdf-tools` (v3)" in form, "listed with its version"
     assert REFUSALS["not_found"] in json.dumps(unknown)
     assert "Removed 1." in json.dumps(removed) and "No extra skills." in json.dumps(removed), (
         "a forged id is not counted"

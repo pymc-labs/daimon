@@ -82,15 +82,15 @@ class DirectMessageCog(commands.Cog):
             if action in {"enable", "disable"}:
                 if not is_admin:
                     await interaction.followup.send(
-                        "That needs someone with Manage Server.", ephemeral=True
+                        "Only a server admin can turn Daimon DMs on or off here.", ephemeral=True
                     )
                     return
                 async with runtime.sessionmaker.begin() as session:
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
                 await interaction.followup.send(
-                    "DM conversations enabled."
+                    "Daimon DMs are on for this server."
                     if action == "enable"
-                    else "DM conversations disabled.",
+                    else "Daimon DMs are off for this server.",
                     ephemeral=True,
                 )
                 return

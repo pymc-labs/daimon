@@ -37,7 +37,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
 
-UNREADABLE: Final = "This workspace's skills could not all be read. Nothing changed."
+UNREADABLE: Final = "Couldn't read all the skills.\n\nNo skill was added."
 
 
 @dataclasses.dataclass(frozen=True)

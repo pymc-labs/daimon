@@ -119,7 +119,7 @@ def test_cascade_container_renders_nonzero_categories() -> None:
         "linked_principals.example must appear in the rendered row"
     )
     assert "3" in joined, "must mention 3 routines"
-    assert "@daily standup" in joined, "routines.example must appear in the rendered row"
+    assert "@daily standup" not in joined, "routine IDs stay out of the preview"
     # Zero-count principal_links category MUST NOT appear:
     assert "principal link" not in joined.lower(), (
         "zero-count categories must NOT render a row (D-PREVIEW-FMT-01)"
@@ -160,7 +160,22 @@ def test_cascade_container_user_skills_row_renders_when_nonzero() -> None:
     joined = _joined_text(container)
     assert "2" in joined, "user_skills count must appear in the row"
     assert "brainstorming" in joined, "user_skills.example must appear in the row"
-    assert "synced skill ledger" in joined, "user_skills row must mention synced skill ledger"
+    assert "skills you synced" in joined, "user_skills row must mention synced skill ledger"
+
+
+def test_cascade_plain_rows_keep_routine_id_out_and_space_the_list() -> None:
+    preview = _make_preview(
+        routines=PurgePreviewRow(count=2, example="routine-uuid"),
+        user_configs=PurgePreviewRow(count=1, example=None),
+        github_credentials=PurgePreviewRow(count=1, example="octocat"),
+    )
+    body = _text_displays(build_cascade_preview_container(preview))[-1]
+    assert "⚡ **What will happen**\n\n-#" in body
+    assert "📋 **What is intentionally kept elsewhere**\n\n-#" in body
+    assert "-# ⏰ Cancel **2** routines" in body
+    assert "routine-uuid" not in body
+    assert "-# ⚙ Remove your saved settings" in body
+    assert "-# 🔑 Delete **1** saved GitHub key, for example the one for `octocat`" in body
 
 
 def test_cascade_container_user_skills_row_absent_when_zero() -> None:
@@ -168,7 +183,7 @@ def test_cascade_container_user_skills_row_absent_when_zero() -> None:
     preview = _make_preview(user_skills=PurgePreviewRow(count=0, example=None))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
-    assert "synced skill ledger" not in joined, (
+    assert "skills you synced" not in joined, (
         "zero-count user_skills must NOT render a row (D-PREVIEW-FMT-01)"
     )
 
@@ -180,7 +195,7 @@ def test_cascade_container_github_credentials_row_renders_when_nonzero() -> None
     joined = _joined_text(container)
     assert "1" in joined, "github_credentials count must appear in the row"
     assert "octocat" in joined, "github_credentials.example (login) must appear in the row"
-    assert "GitHub token" in joined, "github_credentials row must mention GitHub token"
+    assert "saved GitHub key" in joined, "github_credentials row must mention GitHub token"
 
 
 def test_cascade_container_github_credentials_row_absent_when_zero() -> None:
@@ -188,7 +203,7 @@ def test_cascade_container_github_credentials_row_absent_when_zero() -> None:
     preview = _make_preview(github_credentials=PurgePreviewRow(count=0, example=None))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
-    assert "GitHub token" not in joined, (
+    assert "saved GitHub key" not in joined, (
         "zero-count github_credentials must NOT render a row (D-PREVIEW-FMT-01)"
     )
 
@@ -199,7 +214,7 @@ def test_cascade_container_github_oauth_states_row_renders_when_nonzero() -> Non
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
     assert "3" in joined, "github_oauth_states count must appear in the row"
-    assert "OAuth handshake" in joined, "github_oauth_states row must mention OAuth handshake"
+    assert "GitHub sign-in record" in joined, "github_oauth_states row must mention OAuth handshake"
 
 
 def test_cascade_container_github_oauth_states_row_absent_when_zero() -> None:
@@ -207,7 +222,7 @@ def test_cascade_container_github_oauth_states_row_absent_when_zero() -> None:
     preview = _make_preview(github_oauth_states=PurgePreviewRow(count=0, example=None))
     container = build_cascade_preview_container(preview)
     joined = _joined_text(container)
-    assert "OAuth handshake" not in joined, (
+    assert "GitHub sign-in record" not in joined, (
         "zero-count github_oauth_states must NOT render a row (D-PREVIEW-FMT-01)"
     )
 
@@ -256,31 +271,31 @@ def test_cascade_container_mcp_tokens_row_renders_when_nonzero() -> None:
     preview = _make_preview(mcp_tokens=PurgePreviewRow(count=2, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "2" in joined, "mcp_tokens count must appear in the row"
-    assert "MCP token" in joined, "mcp_tokens row must mention MCP token(s)"
+    assert "Daimon access token" in joined, "mcp_tokens row must mention Daimon access token"
 
 
 def test_cascade_container_mcp_tokens_row_absent_when_zero() -> None:
     """per-agent MCP token row is suppressed when count == 0."""
     preview = _make_preview(mcp_tokens=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "per-agent MCP token(s)" not in joined, "zero-count mcp_tokens must NOT render a row"
+    assert "Daimon access token" not in joined, "zero-count mcp_tokens must NOT render a row"
 
 
 def test_cascade_container_agent_github_binding_row_renders_when_nonzero() -> None:
-    """per-agent GitHub token link row appears when count > 0."""
+    """links from agents to your GitHub keys row appears when count > 0."""
     preview = _make_preview(agent_github_binding=PurgePreviewRow(count=3, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "3" in joined, "agent_github_binding count must appear in the row"
-    assert "per-agent GitHub token link" in joined, (
+    assert "links from agents to your GitHub keys" in joined, (
         "agent_github_binding row must mention the per-agent GitHub token link"
     )
 
 
 def test_cascade_container_agent_github_binding_row_absent_when_zero() -> None:
-    """per-agent GitHub token link row is suppressed when count == 0."""
+    """links from agents to your GitHub keys row is suppressed when count == 0."""
     preview = _make_preview(agent_github_binding=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "per-agent GitHub token link" not in joined, (
+    assert "links from agents to your GitHub keys" not in joined, (
         "zero-count agent_github_binding must NOT render a row"
     )
 
@@ -290,14 +305,18 @@ def test_cascade_container_slack_user_tokens_row_renders_when_nonzero() -> None:
     preview = _make_preview(slack_user_tokens=PurgePreviewRow(count=1, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "1" in joined, "slack_user_tokens count must appear in the row"
-    assert "Slack user token" in joined, "slack_user_tokens row must mention Slack user token(s)"
+    assert "saved Slack access token" in joined, (
+        "slack_user_tokens row must mention saved Slack access token"
+    )
 
 
 def test_cascade_container_slack_user_tokens_row_absent_when_zero() -> None:
     """slack_user_tokens row is suppressed when count == 0."""
     preview = _make_preview(slack_user_tokens=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "Slack user token" not in joined, "zero-count slack_user_tokens must NOT render a row"
+    assert "saved Slack access token" not in joined, (
+        "zero-count slack_user_tokens must NOT render a row"
+    )
 
 
 def test_cascade_container_slack_turn_contexts_row_renders_when_nonzero() -> None:
@@ -305,8 +324,8 @@ def test_cascade_container_slack_turn_contexts_row_renders_when_nonzero() -> Non
     preview = _make_preview(slack_turn_contexts=PurgePreviewRow(count=4, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "4" in joined, "slack_turn_contexts count must appear in the row"
-    assert "Slack turn context" in joined, (
-        "slack_turn_contexts row must mention Slack turn context(s)"
+    assert "temporary Slack request record" in joined, (
+        "slack_turn_contexts row must mention temporary Slack request record"
     )
 
 
@@ -314,6 +333,6 @@ def test_cascade_container_slack_turn_contexts_row_absent_when_zero() -> None:
     """slack_turn_contexts row is suppressed when count == 0."""
     preview = _make_preview(slack_turn_contexts=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "Slack turn context" not in joined, (
+    assert "temporary Slack request record" not in joined, (
         "zero-count slack_turn_contexts must NOT render a row"
     )

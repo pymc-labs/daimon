@@ -1001,7 +1001,7 @@ def test_routing_view_renders_channel_mentions_not_raw_ids_and_names_deployment_
     assert "set by <@U1>" in rendered, "a recorded actor is named"
     assert "*Workspace default:* daimon" in rendered, "the workspace default is named"
     assert "Deployment default: *daimon*" in rendered, "the deployment default is named too"
-    assert "_not in effect while a workspace default is set_" in rendered, (
+    assert "_Not used while a workspace default is set._" in rendered, (
         "a workspace default consumes the deployment fall-through, and the view says so"
     )
     assert PRECEDENCE_LINE in rendered, "the precedence rule is stated once, from the core"
@@ -1446,8 +1446,8 @@ def test_channel_admins_form_explains_admins_in_two_lines() -> None:
     form = build_channel_admins_form(meta=_meta(view="channel_admins"), user_ids=[])
     assert _texts(form)[-2:] == [
         "Empty the lists to clear it.",
-        "Channel admins pick this channel's agent and edit agents that only work in their "
-        "channels.\n\nStarting agents and the default agent stay with workspace admins.",
+        "Channel admins choose their channels' environment and agent, and edit agents limited to those "
+        "channels.\n\nStarting agents and the workspace default stay with workspace admins.",
     ], "each line its own block or a blank line apart"
 
 

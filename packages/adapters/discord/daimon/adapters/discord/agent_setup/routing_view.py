@@ -75,7 +75,7 @@ log = structlog.get_logger()
 
 BACK_LABEL = "◀ Back"
 SERVER_DEFAULT_LABEL = "Server default"
-DEPLOYMENT_NOT_IN_EFFECT = "not in effect while a server default is set"
+DEPLOYMENT_NOT_IN_EFFECT = "Not used while a server default is set."
 MAX_SETUP_CONVERSATION_LINKS = 5
 MAX_ENVIRONMENT_LINES = 10
 _MORE_LINE_RESERVE = len("\n-# and 9999 more")
@@ -261,7 +261,7 @@ def _defaults_block(
     if deployment_default is not None:
         lines.append(f"Deployment default → **{deployment_default}**")
         if not deployment_in_effect:
-            lines.append(f"-# {DEPLOYMENT_NOT_IN_EFFECT}")
+            lines.append(f"\n-# {DEPLOYMENT_NOT_IN_EFFECT}")
     return "\n".join(lines)
 
 
@@ -278,7 +278,7 @@ def build_environments_block(
     if deployment is not None:
         defaults.append(f"Deployment default → **{deployment}**")
         if tenant is not None:
-            defaults.append(f"-# {DEPLOYMENT_NOT_IN_EFFECT}")
+            defaults.append(f"\n-# {DEPLOYMENT_NOT_IN_EFFECT}")
     fixed = len("\n".join([heading, *defaults]))
     rows = answering_map.channel_environments
     shown = fit_lines(

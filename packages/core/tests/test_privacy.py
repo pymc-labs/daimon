@@ -26,11 +26,17 @@ from daimon.core._models import (
     Routine,
     UserConfig,
 )
+from daimon.core.channel_environments import (
+    build_limited_channels_confirm,
+    build_limited_network_confirm,
+)
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.privacy import (
+    DELETE_PAUSED,
     PurgePreview,
     PurgePreviewRow,
     collect_purge_preview,
+    summary_line,
 )
 from daimon.core.purge import PurgeReport, purge_account
 from daimon.core.stores import agent_github_binding as agent_github_binding_store
@@ -57,6 +63,44 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .factories.github import make_oauth_state
+
+
+def test_plain_privacy_summary_plural_and_pause_spacing() -> None:
+    empty = PurgePreviewRow(count=0, example=None)
+    values = {name: empty for name in PurgePreview.model_fields}
+    values.update(
+        linked_principals=PurgePreviewRow(count=1, example="user:maria"),
+        routines=PurgePreviewRow(count=2, example="123"),
+        user_configs=PurgePreviewRow(count=1, example=None),
+    )
+    preview = PurgePreview(**values)
+    assert summary_line(preview) == "1 linked account, 2 routines, saved settings"
+    assert summary_line(PurgePreview(**{name: empty for name in values})) == "nothing listed here"
+    assert DELETE_PAUSED == (
+        "Deleting your account is paused during the event.\n\n"
+        "Ask the team running Daimon if you need it deleted now."
+    )
+
+
+def test_restricted_network_confirm_names_selected_channel_and_spaced_action() -> None:
+    assert build_limited_network_confirm(
+        environment_name="Acme", panel=True, channel="#analytics"
+    ) == (
+        "Nothing changed. This channel or one of its threads limits who can read it, and "
+        "the Acme environment "
+        "could let its content out.\n\n"
+        "Ask me in chat to make this change for #analytics, then confirm when I ask."
+    )
+    assert build_limited_network_confirm(
+        environment_name=None, panel=True, channel="#analytics"
+    ).endswith(
+        "Ask me in chat to use the default environment for #analytics, then confirm when I ask."
+    )
+    assert build_limited_channels_confirm(environment_name=None) == (
+        "Nothing changed. Some channels or their threads limit who can read them, and "
+        "the default environment "
+        "could let their content out."
+    )
 
 
 async def test_account_purge_deletes_github_user_after_last_link(

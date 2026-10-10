@@ -11,7 +11,7 @@ from daimon.adapters.discord import layout, theme
 from daimon.adapters.discord.privacy_panel.modal import DeleteConfirmModal
 from daimon.adapters.discord.privacy_panel.state import PurgePreview
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.privacy import delete_scope_lines
+from daimon.core.privacy import DELETE_PAUSED, delete_scope_lines
 
 import discord
 
@@ -26,70 +26,71 @@ def build_cascade_preview_container(
     Pure: no I/O, no ActionRows. The view shell appends hairline + ActionRow.
     """
     will_happen_rows: list[str] = []
+
+    def amount(count: int, singular: str, plural: str | None = None) -> str:
+        return f"**{count}** {singular if count == 1 else plural or singular + 's'}"
+
     if preview.linked_principals.count > 0:
         ex = preview.linked_principals.example or "—"
-        will_happen_rows.append(
-            f"-# 🔑 Remove **{preview.linked_principals.count}** linked principal(s) (e.g. `{ex}`)"
-        )
+        n = amount(preview.linked_principals.count, "linked account")
+        will_happen_rows.append(f"-# 🔑 Remove {n}, for example `{ex}`")
     if preview.routines.count > 0:
-        ex = preview.routines.example or "—"
-        will_happen_rows.append(
-            f"-# ⏰ Cancel **{preview.routines.count}** scheduled routine(s) (e.g. `{ex}`)"
-        )
+        will_happen_rows.append(f"-# ⏰ Cancel {amount(preview.routines.count, 'routine')}")
     if preview.principal_links.count > 0:
         will_happen_rows.append(
-            f"-# 🔗 Remove **{preview.principal_links.count}** principal link(s)"
+            f"-# 🔗 Remove {amount(preview.principal_links.count, 'link')} between your accounts"
         )
     if preview.user_configs.count > 0:
-        will_happen_rows.append(f"-# ⚙ Remove **{preview.user_configs.count}** user config row(s)")
+        will_happen_rows.append("-# ⚙ Remove your saved settings")
     if preview.user_skills.count > 0:
         ex = preview.user_skills.example or "—"
-        will_happen_rows.append(
-            f"-# 🧰 Remove **{preview.user_skills.count}** synced skill ledger row(s) (e.g. `{ex}`)"
-        )
+        n = amount(preview.user_skills.count, "skill")
+        will_happen_rows.append(f"-# 🧰 Forget {n} you synced, for example `{ex}`")
     if preview.github_credentials.count > 0:
         ex = preview.github_credentials.example or "—"
         n = preview.github_credentials.count
-        will_happen_rows.append(f"-# 🔑 Delete **{n}** stored GitHub token(s) (`{ex}`)")
+        will_happen_rows.append(
+            f"-# 🔑 Delete {amount(n, 'saved GitHub key')}, for example the one for `{ex}`"
+        )
     if preview.github_user_links.count > 0:
         will_happen_rows.append(
-            f"-# 🔗 Remove **{preview.github_user_links.count}** GitHub user link(s)"
+            f"-# 🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}"
         )
     if preview.github_oauth_states.count > 0:
         will_happen_rows.append(
-            f"-# 🤝 Remove **{preview.github_oauth_states.count}** GitHub OAuth handshake record(s)"
+            f"-# 🤝 Delete {amount(preview.github_oauth_states.count, 'GitHub sign-in record')}"
         )
     if preview.mcp_tokens.count > 0:
         will_happen_rows.append(
-            f"-# 🎫 Revoke **{preview.mcp_tokens.count}** per-agent MCP token(s)"
+            f"-# 🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}"
         )
     if preview.agent_github_binding.count > 0:
         n = preview.agent_github_binding.count
-        will_happen_rows.append(f"-# 🤖 Remove **{n}** per-agent GitHub token link(s)")
+        will_happen_rows.append(f"-# 🤖 Remove {amount(n, 'link')} from agents to your GitHub keys")
     if preview.slack_user_tokens.count > 0:
         will_happen_rows.append(
-            f"-# 🔐 Remove **{preview.slack_user_tokens.count}** Slack user token(s)"
+            f"-# 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
         )
     if preview.slack_turn_contexts.count > 0:
-        will_happen_rows.append(
-            f"-# 💬 Remove **{preview.slack_turn_contexts.count}** Slack turn context(s)"
-        )
+        n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
+        will_happen_rows.append(f"-# 💬 Delete {n}")
     if preview.direct_message_conversations.count > 0:
-        will_happen_rows.append(
-            f"-# Remove **{preview.direct_message_conversations.count}** private conversation(s)"
-        )
+        n = amount(preview.direct_message_conversations.count, "private conversation")
+        will_happen_rows.append(f"-# 💬 Delete Daimon's saved data for {n}")
     if preview.channel_admins.count > 0:
         will_happen_rows.append(
-            f"-# Remove you from the admins of **{preview.channel_admins.count}** channel(s)"
+            f"-# Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
     if preview.account.count > 0:
-        will_happen_rows.append("-# 🪪 Remove the account row itself")
+        will_happen_rows.append("-# 🪪 Remove your account")
 
     body_rows: list[str] = [
         "⚡ **What will happen**",
-        *(will_happen_rows if will_happen_rows else ["-# _(nothing to delete)_"]),
+        "",
+        *(will_happen_rows if will_happen_rows else ["-# _Nothing to delete._"]),
         "",
         "📋 **What is intentionally kept elsewhere**",
+        "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
         "-# Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
@@ -155,9 +156,7 @@ class CascadePreviewView(discord.ui.LayoutView):
 
     async def _on_confirm(self, interaction: discord.Interaction) -> None:
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(
-                "Deleting your account is paused during the event.", ephemeral=True
-            )
+            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
             return
         await interaction.response.send_modal(
             DeleteConfirmModal(

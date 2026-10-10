@@ -12,7 +12,11 @@ from contextlib import AbstractAsyncContextManager
 import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
-from daimon.adapters.teams.privacy_card import no_data_card, panel_card, post_delete_card
+from daimon.adapters.teams.privacy_card import (
+    no_data_card,
+    panel_card,
+    post_delete_card,
+)
 from daimon.adapters.teams.privacy_panel import DELETE_PAUSED, DELETING, NAME_MISMATCH, STALE
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -62,7 +66,7 @@ async def test_paused_delete_action_preserves_account(
         response = await post_activity(
             service, _click("confirm_delete", account=account_id, confirm_name=NAME)
         )
-    assert DELETE_PAUSED in json.dumps(response)
+    assert response["value"] == DELETE_PAUSED
     assert await _has_principal(db_session_factory, AAD_OBJECT_ID)
 
 
@@ -170,7 +174,7 @@ async def test_command_shows_holdings_and_export_summarises_them(
         "the panel says who stores what; the categories are the policy's"
     )
     assert POLICY_URL in panel and "Action.OpenUrl" in panel, "the policy opens as a link"
-    assert "holds: 1 linked principal(s)" in json.dumps(export), "export shows the summary"
+    assert "holds: 1 linked account" in json.dumps(export), "export shows the summary"
 
 
 async def test_delete_asks_for_the_typed_name_and_refuses_a_mismatch(

@@ -33,7 +33,9 @@ async def test_paused_modal_does_not_purge(monkeypatch: pytest.MonkeyPatch) -> N
     interaction = _make_interaction_with_response()
     await modal.on_submit(interaction)
     interaction.response.send_message.assert_awaited_once_with(
-        "Deleting your account is paused during the event.", ephemeral=True
+        "Deleting your account is paused during the event.\n\n"
+        "Ask the team running Daimon if you need it deleted now.",
+        ephemeral=True,
     )
     purge.assert_not_awaited()
 
