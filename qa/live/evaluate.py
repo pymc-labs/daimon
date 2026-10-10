@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import re
 
+from qa.live.errors import exception_evidence
 from qa.live.schema import Assertion
-from qa.live.types import Backend, Check, Judge, Pending, Turn, obj, objects, text_of
+from qa.live.types import (
+    Backend,
+    Check,
+    Judge,
+    Pending,
+    Turn,
+    obj,
+    objects,
+    text_components,
+    text_of,
+)
 
 
 def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: Judge) -> Check:
@@ -37,7 +48,16 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
             elif kind in {"text_present", "text_absent"}:
                 if not turn.messages:
                     raise Pending("no messages: text absence is unproven")
-                match = bool(re.search(assertion.pattern or "", turn.text))
+                # Match each content/embed component independently. Anchored
+                # answers must not be joined to another message or its footer.
+                pattern = assertion.pattern or ""
+                components = [component for m in turn.messages for component in text_components(m)]
+                # Plain ^...$ is an exact component assertion. Inline (?m)
+                # remains available for explicitly requested per-line searches.
+                matcher = (
+                    re.fullmatch if pattern.startswith("^") and pattern.endswith("$") else re.search
+                )
+                match = any(matcher(pattern, component, re.MULTILINE) for component in components)
                 passed = match if kind == "text_present" else not match
                 reason = f"regex {assertion.pattern!r}; matched={match}"
             elif kind == "in_thread":
@@ -141,6 +161,7 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                 except Pending:
                     raise
                 except Exception as exc:
+                    judge.errors.append(exception_evidence(exc, "judge"))
                     # A broken evaluator is unavailable evidence, not a
                     # product failure. Never expose provider exception bodies.
                     raise Pending(f"judge execution unavailable: {type(exc).__name__}") from None

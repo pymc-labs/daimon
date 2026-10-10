@@ -25,14 +25,18 @@ def objects(value: JsonValue) -> list[Message]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
-def text_of(message: Message, *, include_fields: bool = True) -> str:
+def text_components(message: Message, *, include_fields: bool = True) -> list[str]:
     parts = [str(message.get("content") or "")]
     for embed in objects(message.get("embeds")):
         parts.extend(str(embed.get(k) or "") for k in ("title", "description"))
         parts.append(str(obj(embed.get("footer")).get("text") or ""))
         for field_ in objects(embed.get("fields")) if include_fields else []:
             parts.extend(str(field_.get(k) or "") for k in ("name", "value"))
-    return "\n".join(parts)
+    return parts
+
+
+def text_of(message: Message, *, include_fields: bool = True) -> str:
+    return "\n".join(text_components(message, include_fields=include_fields))
 
 
 @dataclass
@@ -54,6 +58,7 @@ class Turn:
     started_at: datetime
     ended_at: datetime | None = None
     first_visible_s: float | None = None
+    first_visible_evidence: Message = field(default_factory=dict[str, JsonValue])
     done_s: float | None = None
     thread_id: str | None = None
     progress_seen_s: float | None = None
@@ -114,5 +119,6 @@ class Backend(Protocol):
 
 class Judge(Protocol):
     usage: list[Usage]
+    errors: list[Message]
 
     def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]: ...

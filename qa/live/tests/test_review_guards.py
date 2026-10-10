@@ -115,7 +115,7 @@ def test_model_refusal_is_before_trigger_and_free(
         raise ValueError("non-Haiku agent")
 
     monkeypatch.setattr(backend, "verify_model", refuse)
-    assert Executor(backend, judge, ledger, pricing, "prod").run(scenario).status == "FAIL"
+    assert Executor(backend, judge, ledger, pricing, "prod").run(scenario).status == "PENDING"
     assert backend.sent == 0 and backend.events[-1] == "delete"
     assert json.loads(ledger.path.read_text())["usd"] == 0
 

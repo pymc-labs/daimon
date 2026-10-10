@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import cast
 
 from qa.live.config import Alerts
+from qa.live.errors import redact
 from qa.live.schema import Status
-from qa.live.types import Check, Turn, utcnow
+from qa.live.types import Check, Message, Turn, utcnow
 
 
 @dataclass
@@ -25,6 +26,7 @@ class Result:
     turns: list[Turn] = field(default_factory=list[Turn])
     notes: list[str] = field(default_factory=list[str])
     channel_id: str | None = None
+    errors: list[Message] = field(default_factory=list[Message])
 
     def finalize(self) -> None:
         statuses = [c.status for c in self.checks]
@@ -72,19 +74,6 @@ class Alerter:
         )
         key = f"{result.env}:{result.scenario}"
         prior = state.get(key, {})
-        unavailable = [c for c in result.checks if c.status != "PASS"]
-        if (
-            result.status == "PENDING"
-            and unavailable
-            and all(c.kind == "judge" for c in unavailable)
-        ):
-            # Driver policy: judge infrastructure errors do not page root,
-            # even repeatedly. Other missing evidence still alerts after three.
-            if prior:
-                prior["pending_count"] = "0"
-                state[key] = prior
-                self._save_state(state)
-            return
         now = utcnow()
         pending_count = (
             int(prior.get("pending_count", "0")) + 1 if result.status == "PENDING" else 0
@@ -118,20 +107,38 @@ class Alerter:
             for c in result.checks
             if c.status == result.status
         )
-        (inbox / f"qa-canary-{label}-{now.strftime('%Y%m%dT%H%M%S%fZ')}.md").write_text(
+        alert_path = inbox / f"qa-canary-{label}-{now.strftime('%Y%m%dT%H%M%S%fZ')}.md"
+        alert_path.write_text(
             f"{line}\n\n{failures}\n\nRun evidence: {evidence_path.resolve()}\n",
         )
-        delivery = subprocess.run(
-            [*self.config.command, line], capture_output=True, text=True, timeout=30, check=False
-        )
-        if delivery.returncode:
-            raise RuntimeError("handoff alert delivery failed; dedupe state was not advanced")
+        # The inbox is the durable delivery channel. A busy tmux composer can
+        # leave tsend queued with exit 1; never duplicate that durable notice.
         state[key] = {
             "status": result.status,
             "ts": now.isoformat(),
             "pending_count": str(pending_count),
+            "delivery": "durable inbox written; tsend pending",
         }
         self._save_state(state)
+        try:
+            delivery = subprocess.run(
+                [*self.config.command, line],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            status = f"tsend exit {delivery.returncode}"
+            if delivery.returncode:
+                status += "; delivered-pending via durable inbox"
+            detail = redact(str(delivery.stdout or "") + str(delivery.stderr or ""))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            status = f"tsend {type(exc).__name__}; delivered-pending via durable inbox"
+            detail = ""
+        state[key]["delivery"] = status
+        self._save_state(state)
+        with alert_path.open("a") as stream:
+            stream.write(f"\nDelivery: {status}\n{detail}\n")
 
     def _save_state(self, state: dict[str, dict[str, str]]) -> None:
         temporary = self.state_path.with_suffix(".tmp")

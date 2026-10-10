@@ -9,12 +9,14 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
 from qa.live.config import Pricing
 from qa.live.context import Context
 from qa.live.cost import Ledger, estimate
+from qa.live.errors import exception_evidence
 from qa.live.evaluate import evaluate
 from qa.live.models import BackendName, ModelPolicy
 from qa.live.report import Result
@@ -65,6 +67,10 @@ class Executor:
         self.created: list[str] = []
         self.context: Context | None = None
         self.trigger_attempted = False
+        self.watchers: dict[int, Future[None]] = {}
+        self.watch_pool: ThreadPoolExecutor | None = None
+        self.burst_timeout = backend.fallback_watch_s
+        self.burst_workers = 0
 
     def run(self, scenario: CatalogScenario) -> Result:
         run_id = f"{utcnow().strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
@@ -103,6 +109,7 @@ class Executor:
         self.channels = {}
         self.created = []
         self.trigger_attempted = False
+        harness_failed = False
         try:
             self.backend.preflight(
                 {s.role for s in [*scenario.setup, *scenario.steps, *scenario.teardown]}
@@ -114,8 +121,16 @@ class Executor:
                 self.channels["default"] = channel
                 self.context.values["channel_id"] = channel
             try:
-                for step in [*scenario.setup, *scenario.steps]:
+                steps = [*scenario.setup, *scenario.steps]
+                self.burst_workers = sum(len(s.texts) for s in steps if s.do == "burst")
+                for index, step in enumerate(steps):
+                    if step.do == "burst":
+                        self.burst_timeout = next(
+                            (s.timeout_s for s in steps[index + 1 :] if s.do == "wait_done"),
+                            self.backend.fallback_watch_s,
+                        )
                     self.step(step, result, channel)
+                self.join_watchers(result)
                 for turn in result.turns:
                     if turn.ended_at is None:
                         self.backend.collect(turn, self.backend.fallback_watch_s)
@@ -135,39 +150,79 @@ class Executor:
                         assertion.model_dump(mode="json", by_alias=True),
                     )
                 )
-                result.checks.append(evaluate(resolved, result.turns, self.backend, self.judge))
+                check = evaluate(resolved, result.turns, self.backend, self.judge)
+                result.checks.append(check)
+                if check.kind == "judge" and check.reason.startswith("judge execution unavailable"):
+                    result.notes.append(f"turn {check.turn}: {check.reason}")
         except Pending as exc:
             result.checks.append(Check("execution", "PENDING", str(exc)))
         except (KeyboardInterrupt, SystemExit) as exc:
-            result.checks.append(Check("execution", "PENDING", type(exc).__name__))
-        except Exception as exc:
-            # External tool/DB/API exceptions can contain credentials. Persist the type only.
+            harness_failed = True
+            result.errors.append(exception_evidence(exc, "execution"))
             result.checks.append(
-                Check("execution", "FAIL", f"execution raised {type(exc).__name__}")
+                Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
+            )
+        except Exception as exc:
+            harness_failed = True
+            result.errors.append(exception_evidence(exc, "execution"))
+            result.checks.append(
+                Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
             )
         finally:
+            # Finish read-only watchers before deleting their owned channels.
+            for future in self.watchers.values():
+                try:
+                    future.result()
+                except WatchTimeout:
+                    result.checks.append(
+                        Check("watch", "FAIL", "watch ended without terminal proof")
+                    )
+                except BaseException as exc:
+                    harness_failed = True
+                    result.errors.append(exception_evidence(exc, "watcher"))
+                    result.checks.append(
+                        Check("execution", "PENDING", f"harness error: {type(exc).__name__}")
+                    )
+            self.watchers.clear()
+            if self.watch_pool:
+                self.watch_pool.shutdown(wait=True)
+                self.watch_pool = None
+            result.errors.extend(self.judge.errors)
             if channel:
                 for step in scenario.teardown:
                     try:
                         self.step(step, result, channel)
                     except BaseException as exc:
-                        result.checks.append(Check("teardown", "FAIL", type(exc).__name__))
+                        result.errors.append(exception_evidence(exc, "teardown"))
+                        result.checks.append(
+                            Check("teardown", "PENDING", f"harness error: {type(exc).__name__}")
+                        )
                 for created in reversed(self.created):
                     try:
                         with deferred_interrupts():
                             self.backend.delete_channel(created)
                     except BaseException as exc:
+                        result.errors.append(exception_evidence(exc, "cleanup"))
                         result.checks.append(
                             Check(
                                 "cleanup",
-                                "FAIL",
-                                f"delete channel {created}: {type(exc).__name__}",
+                                "PENDING",
+                                f"harness error: delete channel {created}: {type(exc).__name__}",
                             )
                         )
             for turn in result.turns:
                 try:
                     turn.usage = self.backend.usage(turn)
-                    if not turn.usage.models or any(
+                    if not turn.usage.models and harness_failed:
+                        result.checks.append(
+                            Check(
+                                "model",
+                                "PENDING",
+                                "harness error: turn model could not be collected",
+                                turn.number,
+                            )
+                        )
+                    elif not turn.usage.models or any(
                         not self.models.accepts(self.model_backend, model, self.env)
                         for model in turn.usage.models
                     ):
@@ -179,10 +234,16 @@ class Executor:
                                 turn.number,
                             )
                         )
-                except Exception:
+                except Exception as exc:
+                    result.errors.append(exception_evidence(exc, "usage"))
                     result.notes.append(f"turn {turn.number}: usage unavailable")
                     result.checks.append(
-                        Check("model", "FAIL", "Daimon model evidence unavailable", turn.number)
+                        Check(
+                            "model",
+                            "PENDING",
+                            f"harness error: usage evidence unavailable: {type(exc).__name__}",
+                            turn.number,
+                        )
                     )
             usages = [t.usage for t in result.turns] + self.judge.usage
             fixture_dir.cleanup()
@@ -190,7 +251,42 @@ class Executor:
         result.finalize()
         return result
 
+    def watch(self, turn: Turn, started: threading.Event) -> None:
+        started.set()
+        try:
+            self.backend.collect(turn, self.burst_timeout)
+        except WatchTimeout:
+            turn.ended_at = turn.ended_at or utcnow()
+            raise
+
+    def join_watchers(self, result: Result) -> None:
+        errors: list[tuple[int, BaseException]] = []
+        for number, future in self.watchers.items():
+            try:
+                future.result()
+            except WatchTimeout:
+                result.checks.append(
+                    Check("watch", "FAIL", "watch ended without terminal proof", number)
+                )
+            except BaseException as exc:
+                errors.append((number, exc))
+        self.watchers.clear()
+        if errors:
+            for number, exc in errors[1:]:
+                if not isinstance(exc, Pending):
+                    result.errors.append(exception_evidence(exc, "watcher"))
+                    result.checks.append(
+                        Check(
+                            "execution", "PENDING", f"harness error: {type(exc).__name__}", number
+                        )
+                    )
+            raise errors[0][1]
+
     def step(self, step: Step, result: Result, channel: str) -> None:
+        if self.watchers and step.role != "user":
+            raise Pending(
+                "harness error: non-user steps are forbidden while burst watchers are active"
+            )
         if self.context:
             step = self.context.step(step)
         kind = step.do
@@ -251,32 +347,43 @@ class Executor:
             destination = next(
                 (t.thread_id for t in reversed(result.turns) if t.thread_id), channel
             )
+            # One pin preflight before the burst; remote probes must not
+            # serialize its posts. Every completed turn still verifies its model.
+            self.backend.verify_model(destination)
+            if self.watch_pool is None:
+                self.watch_pool = ThreadPoolExecutor(
+                    max_workers=max(self.burst_workers, len(step.texts))
+                )
+            schedule = time.monotonic()
             for i, text in enumerate(step.texts):
-                if i:
-                    time.sleep(step.interval_s)
-                self.backend.verify_model(destination)
+                time.sleep(max(0, schedule + i * step.interval_s - time.monotonic()))
                 started_at = utcnow()
                 self.trigger_attempted = True
                 trigger = self.backend.send(
                     destination, Step(do="mention", text=text), mention=True
                 )
-                result.turns.append(
-                    Turn(
-                        len(result.turns) + 1,
-                        trigger,
-                        destination,
-                        started_at,
-                        thread_id=destination if destination != channel else None,
-                    )
+                turn = Turn(
+                    len(result.turns) + 1,
+                    trigger,
+                    destination,
+                    started_at,
+                    thread_id=destination if destination != channel else None,
                 )
+                result.turns.append(turn)
+                started = threading.Event()
+                self.watchers[turn.number] = self.watch_pool.submit(self.watch, turn, started)
+                started.wait()
         elif kind == "wait":
             time.sleep(step.s or 0)
         elif kind == "wait_done":
-            pending = [t for t in result.turns if t.ended_at is None]
+            pending = [t for t in result.turns if t.ended_at is None or t.number in self.watchers]
             if not pending:
                 raise Pending("wait_done requires an unfinished turn")
+            watched = set(self.watchers)
+            self.join_watchers(result)
             for turn in pending:
-                self.backend.collect(turn, step.timeout_s)
+                if turn.number not in watched:
+                    self.backend.collect(turn, step.timeout_s)
                 if any(v in {"over_cap", "provisioning"} for v in turn.verdicts):
                     raise Pending("load-shed or provisioning notice: retry after preflight")
                 if any(v in {"error", "cancelled"} for v in turn.verdicts):

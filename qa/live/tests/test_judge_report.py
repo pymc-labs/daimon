@@ -90,7 +90,7 @@ def test_judge_http_errors_are_pending_without_retry(
         assert judge.usage[0].models == [JUDGE_MODEL]
 
 
-def test_judge_only_pending_never_alerts_but_failed_verdict_does(
+def test_judge_execution_pending_counts_toward_threshold(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[list[str]] = []
@@ -114,12 +114,78 @@ def test_judge_only_pending_never_alerts_but_failed_verdict_does(
             Check("judge", "PENDING", "judge execution unavailable: HTTP 400"),
         ],
     )
-    for _ in range(6):
+    for _ in range(2):
         alerts.notify(result, tmp_path / "run.json")
     assert not calls
     assert not (tmp_path / "inbox").exists()
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 1
+    assert "PENDING" in calls[0][-1]
+    result.scenario = "QA-D1-PRODUCT-VERDICT"
     result.checks[-1] = Check("judge", "FAIL", "incorrect answer")
     result.finalize()
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "judge returned another model or incomplete output",
+        "ANTHROPIC_API_KEY is unavailable",
+        "judge requires the driver's GO",
+        "judge input exceeds reserved token budget",
+        "turn was not executed",
+    ],
+)
+def test_judge_policy_refusals_alert_after_three_pending_runs(
+    reason: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
+    )
+    result = Result("run", "QA-D1-TEST", "staging", "PENDING", [Check("judge", "PENDING", reason)])
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    assert not calls
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(calls) == 1
+
+
+def test_judge_execution_pending_preserves_other_evidence_streak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
+    )
+    result = Result(
+        "run",
+        "QA-D1-TEST",
+        "staging",
+        "PENDING",
+        [Check("log_absent", "PENDING", "logs unavailable")],
+    )
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    result.checks = [Check("judge", "PENDING", "judge execution unavailable: TypeError")]
+    alerts.notify(result, tmp_path / "run.json")
+    assert json.loads(alerts.state_path.read_text())["staging:QA-D1-TEST"]["pending_count"] == "3"
+    assert len(calls) == 1
+    result.checks = [Check("log_absent", "PENDING", "logs unavailable")]
     alerts.notify(result, tmp_path / "run.json")
     assert len(calls) == 1
 
@@ -170,16 +236,22 @@ def test_alert_fail_dedupe_recovery_and_retry(
     assert "RECOVERY" in calls[-1][-1]
 
 
-def test_alert_delivery_failure_does_not_advance_state(
+def test_queued_alert_advances_durable_inbox_dedupe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1))
     alerts = Alerter(
         Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
     )
-    with pytest.raises(RuntimeError, match="delivery failed"):
-        alerts.notify(Result("run", "QA-D1-TEST", "staging", "FAIL"), tmp_path / "run.json")
-    assert not alerts.state_path.exists()
+    result = Result("run", "QA-D1-TEST", "staging", "FAIL")
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    state = json.loads(alerts.state_path.read_text())["staging:QA-D1-TEST"]
+    assert state["status"] == "FAIL"
+    assert "tsend exit 1" in state["delivery"]
+    files = list((tmp_path / "inbox").glob("qa-canary-FAIL-*.md"))
+    assert len(files) == 1
+    assert "delivered-pending" in files[0].read_text()
 
 
 def test_report_has_json_evidence_and_five_line_summary(
@@ -190,3 +262,85 @@ def test_report_has_json_evidence_and_five_line_summary(
     path = report(result, tmp_path)
     assert json.loads(path.read_text())["status"] == "PASS"
     assert len(capsys.readouterr().out.splitlines()) == 5
+
+
+@pytest.mark.parametrize("error", [OSError("offline"), subprocess.TimeoutExpired("fake", 30)])
+def test_alert_command_exception_does_not_halt_or_duplicate(
+    error: Exception, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", failed)
+    alerts = Alerter(
+        Alerts(inbox=str(tmp_path / "inbox"), command=["fake"]), tmp_path / "state.json"
+    )
+    result = Result("run", "QA-D1-TEST", "staging", "FAIL")
+    alerts.notify(result, tmp_path / "run.json")
+    alerts.notify(result, tmp_path / "run.json")
+    assert len(list((tmp_path / "inbox").glob("*.md"))) == 1
+    assert type(error).__name__ in alerts.state_path.read_text()
+
+
+def test_catalog_continues_after_alert_inbox_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    from qa.live import __main__ as cli
+    from qa.live.config import Config, Pricing, Target
+    from qa.live.schema import Scenario
+    from qa.live.tests.conftest import FakeBackend, FakeJudge
+
+    config = Config(
+        pricing=Pricing(per_turn_usd=0.01, judge_input_per_million=1, judge_output_per_million=5),
+        staging=Target(enabled=True),
+    )
+    scenarios = [
+        Scenario.model_validate(
+            {
+                "id": f"QA-D1-TEST{i}",
+                "title": "offline",
+                "friction": [],
+                "sources": [],
+                "set": "A",
+                "surface": "discord",
+                "tier": "full",
+                "priority": "P1",
+                "est_turns": 1,
+                "steps": [{"do": "mention", "text": "APPLE"}, {"do": "wait_done"}],
+                "assert": [{"kind": "text_present", "turn": 1, "pattern": "APPLE"}],
+            }
+        )
+        for i in (1, 2)
+    ]
+
+    class CLIBackend(FakeBackend):
+        target = config.staging
+
+    calls: list[str] = []
+
+    def inbox_unavailable(self: Alerter, result: Result, path: Path) -> None:
+        calls.append(result.scenario)
+        raise OSError("offline inbox unavailable")
+
+    monkeypatch.setattr(cli, "load_catalog", lambda path: scenarios)
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "DiscordBackend", lambda *a, **kw: CLIBackend())
+    monkeypatch.setattr(cli, "HaikuJudge", lambda *a, **kw: FakeJudge())
+    monkeypatch.setattr(Alerter, "notify", inbox_unavailable)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qa",
+            "run",
+            "--go",
+            "--ledger",
+            str(tmp_path / "ledger"),
+            "--results",
+            str(tmp_path / "results"),
+        ],
+    )
+    assert cli.main() == 0
+    assert calls == ["QA-D1-TEST1", "QA-D1-TEST2"]

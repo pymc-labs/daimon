@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 import urllib.parse
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -18,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qa.live.config import Config, Target
+from qa.live.errors import redact
 from qa.live.schema import Assertion, Step
 from qa.live.types import Message, Pending, Turn, Usage, WatchTimeout, obj, objects, text_of, utcnow
 
@@ -91,6 +93,38 @@ def fingerprint(message: Message) -> str:
     )
 
 
+def message_created_at(message: Message) -> datetime | None:
+    timestamp = message.get("timestamp")
+    if isinstance(timestamp, str):
+        created = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            raise ValueError("Discord timestamp lacks a timezone")
+        return created
+    identity = str(message.get("id", ""))
+    if identity.isdigit() and int(identity) >= 1 << 22:
+        return datetime.fromtimestamp(((int(identity) >> 22) + 1420070400000) / 1000, UTC)
+    return None
+
+
+def message_visible_at(
+    message: Message, trigger_at: datetime, *, reused: bool = False
+) -> tuple[datetime, str] | None:
+    created = message_created_at(message)
+    # Allow the legacy driver's documented 5s cross-worker snowflake skew.
+    # A reused card predating this trigger needs an edit from this turn.
+    if created and not reused and (created - trigger_at).total_seconds() >= -5:
+        source = "message_created" if created >= trigger_at else "message_created_clock_skew"
+        return created, source
+    edited = message.get("edited_timestamp")
+    if isinstance(edited, str):
+        timestamp = datetime.fromisoformat(edited.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("Discord edit timestamp lacks a timezone")
+        if (timestamp - trigger_at).total_seconds() >= -5:
+            return timestamp, "card_edited"
+    return None
+
+
 class DiscordBackend:
     def __init__(self, config: Config, env: str, *, driver: Driver | None = None) -> None:
         self.config = config
@@ -100,6 +134,7 @@ class DiscordBackend:
         self.owned: set[str] = set()
         self.threads: set[str] = set()
         self.baselines: dict[str, set[str]] = {}
+        self.baseline_ids: dict[str, set[str]] = {}
         self.parent = ""
         self.thread_parents: dict[str, str] = {}
         self.fallback_watch_s = config.fallback_watch_s
@@ -230,16 +265,31 @@ class DiscordBackend:
             "channel_id": parent,
             "category_id": self.target.category_id,
         }
-        response = subprocess.run(
-            self.target.model_probe,
-            input=json.dumps(request),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if response.returncode:
-            raise ValueError("deployment model readback did not prove the Haiku pin")
+        for attempt in range(2):
+            try:
+                response = subprocess.run(
+                    self.target.model_probe,
+                    input=json.dumps(request),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                if attempt:
+                    raise
+                time.sleep(2)
+                continue
+            if not response.returncode:
+                break
+            if attempt:
+                raise RuntimeError(
+                    f"read-only deployment model probe exited {response.returncode}; "
+                    f"stdout={redact(response.stdout)}; stderr={redact(response.stderr)}"
+                )
+            time.sleep(2)
+        else:
+            raise RuntimeError("read-only deployment model probe did not finish")
         evidence = ModelEvidence.model_validate_json(response.stdout)
         if (
             evidence.guild_id != self.target.guild_id
@@ -293,6 +343,7 @@ class DiscordBackend:
         if not message_id.isdigit():
             raise ValueError("driver did not return a Discord message id")
         self.baselines[message_id] = {fingerprint(m) for m in baseline}
+        self.baseline_ids[message_id] = {str(m.get("id")) for m in baseline}
         self.driver.set_role("user")
         return message_id
 
@@ -300,6 +351,7 @@ class DiscordBackend:
         self._owned(turn.channel_id)
         self.driver.set_role("user")
         turn.guild_id = self.target.guild_id
+        trigger_at = message_created_at({"id": turn.trigger_id}) or turn.started_at
         deadline = time.monotonic() + timeout
         stable_since: float | None = None
         previous = ""
@@ -324,7 +376,7 @@ class DiscordBackend:
                 )
                 if any(u.get("id") == self.target.daimon_id for u in users):
                     turn.trigger_reactions.append(reaction)
-            reaction_elapsed = (utcnow() - turn.started_at).total_seconds()
+            reaction_elapsed = max(0, (utcnow() - trigger_at).total_seconds())
             turn.trigger_reaction_history.append(
                 {
                     "elapsed_s": reaction_elapsed,
@@ -333,6 +385,10 @@ class DiscordBackend:
             )
             if turn.trigger_reactions and turn.first_visible_s is None:
                 turn.first_visible_s = reaction_elapsed
+                turn.first_visible_evidence = {
+                    "source": "reaction_observed",
+                    "elapsed_s": reaction_elapsed,
+                }
             candidates = self.driver.turn_messages(
                 turn.channel_id,
                 after=turn.trigger_id,
@@ -363,8 +419,24 @@ class DiscordBackend:
                 if fingerprint(m) not in self.baselines.get(turn.trigger_id, set())
             ]
             elapsed = (utcnow() - turn.started_at).total_seconds()
-            if messages and turn.first_visible_s is None:
-                turn.first_visible_s = elapsed
+            for message in messages:
+                event = message_visible_at(
+                    message,
+                    trigger_at,
+                    reused=str(message.get("id")) in self.baseline_ids.get(turn.trigger_id, set()),
+                )
+                if event:
+                    timestamp, source = event
+                    visible_s = max(0, (timestamp - trigger_at).total_seconds())
+                    if turn.first_visible_s is None or visible_s < turn.first_visible_s:
+                        turn.first_visible_s = visible_s
+                        turn.first_visible_evidence = {
+                            "source": source,
+                            "message_id": str(message.get("id", "")),
+                            "timestamp": timestamp.isoformat(),
+                            "trigger_timestamp": trigger_at.isoformat(),
+                            "elapsed_s": visible_s,
+                        }
             turn.messages = messages
             turn.parent_messages = [m for m in messages if str(m.get("channel_id")) in self.owned]
             thread_ids = {

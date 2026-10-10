@@ -17,6 +17,7 @@ from qa.live.types import Message, Pending, Turn, Usage, utcnow
 class FakeJudge:
     def __init__(self) -> None:
         self.usage: list[Usage] = []
+        self.errors: list[Message] = []
 
     def evaluate(self, rubric: str, answer: str) -> tuple[bool, str]:
         return "APPLE" in answer, rubric
