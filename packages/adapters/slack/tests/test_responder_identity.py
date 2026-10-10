@@ -183,7 +183,7 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
     first = _event(_THREAD_TS, f"<@{_BOT_USER_ID}> first question", in_thread=False)
     queued = _event("1900000002.000001", f"<@{_BOT_USER_ID}> queued question")
     # Queued behind the first mention, as `_orchestrate` would have while it ran.
-    app._pending[_THREAD_TS] = [queued]  # pyright: ignore[reportPrivateUsage]
+    app._pending[(_TEAM_ID, _CHANNEL, _THREAD_TS)] = [queued]  # pyright: ignore[reportPrivateUsage]
 
     with (
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
