@@ -54,13 +54,6 @@ async def test_confirmed_connected_repo_is_granted_in_chat(
         )
         await session.execute(
             text(
-                "INSERT INTO agent_github_mode (tenant_id, agent_id, mode) "
-                "VALUES (:tenant, :agent, 'app')"
-            ),
-            {"tenant": tenant.id, "agent": agent_id},
-        )
-        await session.execute(
-            text(
                 "INSERT INTO tenant_github_repos "
                 "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
                 "repo_full_name, max_access, authorized_by_github_user_id, "
@@ -125,6 +118,10 @@ async def test_confirmed_connected_repo_is_granted_in_chat(
     assert result.message == "Agent has read access to owner/repo."
     delivery.assert_not_awaited()
     async with committing_sessionmaker() as session:
+        assert (
+            await github_access.get_agent_mode(session, tenant_id=tenant.id, agent_id=agent_id)
+            == "app"
+        )
         [grant] = await github_access.list_agent_grants(
             session, tenant_id=tenant.id, agent_id=agent_id
         )

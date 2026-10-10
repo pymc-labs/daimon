@@ -32,6 +32,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
+    activate_agent,
     get_agent_mode,
     list_agent_grants,
     list_authorized_repos,
@@ -42,6 +43,7 @@ from daimon.core.stores.github_connect import (
     CLIENT_AGENT_MESSAGE,
     ClientAgentConnectionError,
     create_discord_connect_intent,
+    has_saved_github_state,
     mint_invitation,
     record_connect_request,
     require_app_eligible_agent,
@@ -235,7 +237,11 @@ async def _github_connect_impl(
             requested_repo = repo_name.strip()
             if requested_repo.count("/") != 1 or any(c.isspace() for c in requested_repo):
                 raise ToolError("Name one repo as owner/repo.")
-            if await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=agent_id) == "app":
+            mode = await get_agent_mode(session, tenant_id=auth.tenant_id, agent_id=agent_id)
+            can_activate = mode == "app" or not await has_saved_github_state(
+                session, tenant_id=auth.tenant_id, agent_id=agent_id
+            )
+            if can_activate:
                 repos = await list_authorized_repos(
                     session, tenant_id=auth.tenant_id, agent_id=agent_id
                 )
@@ -291,6 +297,13 @@ async def _github_connect_impl(
                             mount_path=existing.mount_path if existing else None,
                             is_working_repo=existing.is_working_repo if existing else False,
                         )
+                        if mode == "legacy":
+                            await activate_agent(
+                                session,
+                                tenant_id=auth.tenant_id,
+                                agent_id=agent_id,
+                                changed_by_account_id=auth.account_id,
+                            )
                         return ConnectResult(
                             status="granted",
                             message=f"{agent.name} has {ability} access to {repo.repo_full_name}.",
