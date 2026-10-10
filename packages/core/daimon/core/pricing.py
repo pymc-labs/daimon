@@ -172,14 +172,24 @@ def cost_of_totals(
     long_usage: UsageCounts,
     rates: ModelRates | None,
 ) -> float | None:
-    """Price turn totals using the long-prompt subset's request tier."""
-    if rates is None:
+    """Price a turn's totals: `long_usage` is the subset from long-prompt requests.
+
+    The rest is priced at the base rates and the subset at the long-context
+    rates, so the sum equals pricing each request on its own.
+    """
+    short = BetaManagedAgentsSpanModelUsage(
+        input_tokens=all_usage.input_tokens - long_usage.input_tokens,
+        output_tokens=all_usage.output_tokens - long_usage.output_tokens,
+        cache_creation_input_tokens=all_usage.cache_creation_input_tokens
+        - long_usage.cache_creation_input_tokens,
+        cache_read_input_tokens=all_usage.cache_read_input_tokens
+        - long_usage.cache_read_input_tokens,
+    )
+    short_cost = cost_of_bucket(short, rates, long_prompt=False)
+    long_cost = cost_of_bucket(long_usage, rates, long_prompt=True)
+    if short_cost is None or long_cost is None:
         return None
-    all_at_base = cost_of_bucket(all_usage, rates, long_prompt=False)
-    long_at_base = cost_of_bucket(long_usage, rates, long_prompt=False)
-    long_at_tier = cost_of_bucket(long_usage, rates, long_prompt=True)
-    assert all_at_base is not None and long_at_base is not None and long_at_tier is not None
-    return all_at_base - long_at_base + long_at_tier
+    return short_cost + long_cost
 
 
 def format_cost(amount: float | None) -> str | None:
