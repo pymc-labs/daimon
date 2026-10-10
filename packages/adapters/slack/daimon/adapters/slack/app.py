@@ -139,7 +139,7 @@ from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.names import remember_payload_names
-from daimon.adapters.slack.output_delivery import deliver_session_outputs
+from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -415,8 +415,8 @@ class SlackApp:
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
-        # Output-delivery abort-notice dedup, keyed "{team_id}:{error_code}".
-        self._delivery_notice_keys: set[str] = set()
+        # Output-delivery notice dedup per thread and warning log dedup per workspace.
+        self._delivery_notice_keys = NoticeKeys()
         # Chains output sweeps per MA session so two never overlap.
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
         # Drain flag — set on SIGTERM; blocks new mention handling.

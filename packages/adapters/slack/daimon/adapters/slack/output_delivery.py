@@ -11,7 +11,9 @@ in the core engine.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -28,8 +30,64 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger(__name__)
 
+MAX_NOTICE_KEYS = 4096
+
+
+class NoticeKeys:
+    """Bounded app-lifetime dedup state with temporary per-key post locks."""
+
+    def __init__(self, *, max_keys: int = MAX_NOTICE_KEYS) -> None:
+        if max_keys < 1:
+            raise ValueError("max_keys must be positive")
+        self.max_keys = max_keys
+        self._keys: OrderedDict[str, None] = OrderedDict()
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
+
+    def __contains__(self, key: str) -> bool:
+        if key not in self._keys:
+            return False
+        self._keys.move_to_end(key)
+        return True
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def add(self, key: str) -> None:
+        self._keys[key] = None
+        self._keys.move_to_end(key)
+        self._trim()
+
+    def _trim(self) -> None:
+        # A posting key with waiters must remain visible until they check it.
+        # The cache can exceed the cap only while those posts are active.
+        if len(self._keys) <= self.max_keys:
+            return
+        for key in list(self._keys):
+            if len(self._keys) <= self.max_keys:
+                break
+            if key not in self._locks:
+                del self._keys[key]
+
+    @asynccontextmanager
+    async def lock(self, key: str) -> AsyncIterator[None]:
+        # No await between lookup and reservation: concurrent callers share
+        # one lock. References include waiters, so cleanup cannot split them.
+        lock, users = self._locks.get(key, (asyncio.Lock(), 0))
+        self._locks[key] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            _, users = self._locks[key]
+            if users == 1:
+                del self._locks[key]
+                self._trim()
+            else:
+                self._locks[key] = (lock, users - 1)
+
+
 # Workspace-wide, persistent failures: retrying per file (or per turn) is pure
-# noise, so these abort the sweep and produce one deduped notice per team.
+# noise, so these abort the sweep and produce one notice per affected thread.
 _ABORT_NOTICES: dict[str, str] = {
     "missing_scope": (
         "I couldn't attach the generated file because this app is missing the "
@@ -105,15 +163,14 @@ async def deliver_session_outputs(
     session_id: str,
     channel_id: str,
     thread_ts: str,
-    notice_keys: set[str],
+    notice_keys: NoticeKeys,
     team_id: str,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sweep the session's outputs into the thread, degrading on abort codes.
 
-    ``notice_keys`` is the instance-level dedup set owned by ``SlackApp``,
-    keyed ``"{team_id}:{error_code}"`` — one abort notice per team per code
-    per process.
+    ``notice_keys`` is the instance-level bounded registry owned by ``SlackApp``,
+    keyed per thread for notices and per workspace for the warning log.
     """
     post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
     on_skip = _build_skip_notice(web_client, channel_id=channel_id, thread_ts=thread_ts)
@@ -123,19 +180,25 @@ async def deliver_session_outputs(
         )
     except OutputPostingUnavailable as exc:
         code = _abort_code(exc)
-        log.warning(
-            "slack.output_delivery.unavailable",
-            session_id=session_id,
-            team_id=team_id,
-            code=code,
-        )
         notice = _ABORT_NOTICES.get(code)
-        key = f"{team_id}:{code}"
-        if notice is None or key in notice_keys:
+        if notice is None:
             return
-        await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=notice,
-        )
-        notice_keys.add(key)
+        log_key = f"log:{team_id}:{code}"
+        if log_key not in notice_keys:
+            log.warning(
+                "slack.output_delivery.unavailable",
+                session_id=session_id,
+                team_id=team_id,
+                code=code,
+            )
+            notice_keys.add(log_key)
+        notice_key = f"notice:{team_id}:{channel_id}:{thread_ts}:{code}"
+        async with notice_keys.lock(notice_key):
+            if notice_key in notice_keys:
+                return
+            await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=notice,
+            )
+            notice_keys.add(notice_key)
