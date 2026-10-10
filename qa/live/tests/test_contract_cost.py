@@ -235,3 +235,37 @@ def test_manual_checklist_with_no_automated_steps(scenario: Scenario) -> None:
         }
     )
     assert entry.set == "B"
+
+
+@pytest.mark.parametrize("section", ["steps", "assert"])
+def test_unknown_kind_only_makes_its_scenario_pending(
+    section: str, tmp_path: Path, scenario: Scenario
+) -> None:
+    import yaml
+
+    from qa.live.schema import ProposedScenario
+
+    values = scenario.model_dump(by_alias=True)
+    (tmp_path / "supported.yaml").write_text(yaml.safe_dump(values))
+    values["id"] = "QA-FUTURE"
+    values[section].append({"do" if section == "steps" else "kind": "future_kind", "future_arg": 2})
+    (tmp_path / "future.yaml").write_text(yaml.safe_dump(values))
+    entries = load_catalog(tmp_path)
+    assert len(entries) == 2
+    future = next(entry for entry in entries if entry.id == "QA-FUTURE")
+    assert isinstance(future, ProposedScenario)
+    assert any("future_kind" in feature for feature in future.unsupported)
+    assert isinstance(next(entry for entry in entries if entry.id == scenario.id), Scenario)
+
+
+def test_approved_ledger_kind_is_typed_pending(tmp_path: Path, scenario: Scenario) -> None:
+    import yaml
+
+    from qa.live.schema import ProposedScenario
+
+    values = scenario.model_dump(by_alias=True)
+    values["assert"] = [{"kind": "ledger_matches_usage", "turn": 1, "tol_pct": 2}]
+    (tmp_path / "ledger.yaml").write_text(yaml.safe_dump(values))
+    entry = load_catalog(tmp_path)[0]
+    assert isinstance(entry, ProposedScenario)
+    assert "assertion ledger_matches_usage" in entry.unsupported
