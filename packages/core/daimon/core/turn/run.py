@@ -129,6 +129,9 @@ def _turn_port_kwargs(
         result["session_ref"] = deps.backend_session_ref(session_id, scope)
     if provider_session is not None:
         result["session_ref"] = provider_session
+    injected = result.get("backend")
+    if injected is not None and injected.capabilities().profile_id != profile:
+        raise ScopeViolation(session_id, "injected backend differs from the admitted profile")
     if profile != "anthropic.managed_agents":
         native = result.get("session_ref")
         if native is None:

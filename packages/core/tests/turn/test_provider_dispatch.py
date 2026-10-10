@@ -470,3 +470,23 @@ async def test_injected_backend_preserves_the_admitted_runtime(
                 ),
             )
     assert not transport.requests
+
+
+async def test_injected_backend_cannot_bypass_default_channel_admission(
+    openai_backend: OpenAIDriver, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    transport = ScriptedTransport()
+
+    def native_session(id_: str, scope: Scope) -> ResourceRef:
+        return SESSION
+
+    async with transport.client() as client:
+        deps = replace(
+            deps_for(client, db_session_factory),
+            backend=openai_backend,
+            backend_session_ref=native_session,
+        )
+        default = replace(admission(), backend_revision=None)
+        with pytest.raises(ScopeViolation, match="admitted profile"):
+            _turn_port_kwargs(deps, default, SESSION.id, tenant_id=TENANT)
+    assert not transport.requests
