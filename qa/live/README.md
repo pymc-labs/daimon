@@ -19,14 +19,16 @@ uv run python -m qa.live validate --catalog /path/to/catalog
 
 The catalog can contain `scenarios/*.yaml` or YAML files directly. Attachment
 paths such as `fixtures/canary.pdf` resolve against the catalog root, not the
-current directory. Duplicate IDs, invalid regexes, unknown kinds, missing required
-arguments, missing files and invalid turn indices
-fail validation before any live action. `notes` is optional descriptive metadata.
-Approved catalog extensions that are not implemented are inventoried as typed PENDING entries, without
-executing their supported-looking steps. This lets a supported scenario coexist
-with pending extensions in one catalog. Unknown step/assertion kinds mark only their scenario PENDING, preserving the
-rest of the catalog. Invalid arguments for implemented kinds still fail validation. Template placeholders also remain PENDING
-for unavailable values; numeric regex quantifiers stay literal.
+current directory. Duplicate IDs, invalid regexes, missing required arguments,
+missing files and invalid turn indices fail validation before any live action.
+`notes` is optional descriptive metadata. Approved catalog extensions that are
+not implemented are inventoried as typed PENDING entries, without executing
+their steps. Unknown step/assertion kinds in other tiers mark only that scenario
+PENDING, preserving the rest of the catalog. Canary-tier unknown kinds fail
+validation to catch hourly canary typos before a live run. Approved,
+unimplemented kinds stay PENDING. Invalid arguments for implemented kinds still
+fail validation. Template placeholders remain PENDING for unavailable values;
+numeric regex quantifiers stay literal.
 `est_turns` is the driver's billed-turn estimate, which may differ from trigger
 count when triggers coalesce. The driver must set a conservative estimate.
 
@@ -41,12 +43,15 @@ Anthropic Messages API's JSON schema output format. See the
 [Anthropic structured output reference](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 The one backend map contains Claude `claude-haiku-5-5`, OpenAI `gpt-6-luna`,
 and Gemini `gemini-3.8-flash`. Unknown or expensive replacements refuse.
-Gemini fallback selection advances to `gemini-flash-latest`, then
+The Gemini fallback helper advances to `gemini-flash-latest`, then
 `gemini-3.5-flash-lite`, only for HTTP 503. The shipped judge transport is
 Anthropic only; the other backends do not enable new paid judge transports.
 A temporary staging-only override admits `claude-haiku-4-5` and its dated
 `claude-haiku-4-5-20251001` snapshot until the driver confirms Haiku 5.5
-deployment. Judges and production canaries never use that override. Every trigger first runs the target's read-only
+deployment. Staging also accepts the primary throughout that transition.
+Exact Haiku 5.5 snapshots with a valid `YYYYMMDD` suffix are admitted in model
+evidence and judge responses; requests still use the primary alias. Judges
+and production canaries never use the staging override. Every trigger first runs the target's read-only
 `model_probe` argv command, passing the owned channel/guild/category as JSON on
 stdin. Set `qa_agent_name` to the dedicated QA agent. The shipped
 `python -m qa.live.model_probe` helper must execute with the chosen deployment's

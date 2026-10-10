@@ -88,7 +88,10 @@ class HaikuJudge:
                 models=[str(result.get("model", "unknown"))],
             )
         )
-        if result.get("model") != self.model or result.get("stop_reason") != "end_turn":
+        if (
+            not self.models.policy("anthropic").matches_primary(str(result.get("model", "")))
+            or result.get("stop_reason") != "end_turn"
+        ):
             raise Pending("judge returned another model or incomplete output")
         blocks = objects(result.get("content"))
         text = "".join(str(b.get("text", "")) for b in blocks if b.get("type") == "text")

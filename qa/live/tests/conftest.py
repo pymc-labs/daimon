@@ -9,7 +9,8 @@ from pydantic import JsonValue
 
 from qa.live.config import Pricing
 from qa.live.cost import Ledger
-from qa.live.schema import MODEL, Assertion, Scenario, Step
+from qa.live.models import STAGING_LEGACY_MODEL
+from qa.live.schema import Assertion, Scenario, Step
 from qa.live.types import Message, Pending, Turn, Usage, utcnow
 
 
@@ -99,7 +100,7 @@ class FakeBackend:
             cache_creation_input_tokens=0,
             usd=0.02,
             source="turn_outcomes",
-            models=[MODEL],
+            models=[STAGING_LEGACY_MODEL],
         )
 
     def classify(self, message: Message) -> str:

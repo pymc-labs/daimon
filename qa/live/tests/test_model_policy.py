@@ -28,7 +28,7 @@ def test_temporary_staging_override_never_admits_old_haiku_to_prod() -> None:
     for model in ("claude-haiku-4-5", "claude-haiku-4-5-20251001"):
         assert policy.accepts("anthropic", model, "staging")
         assert not policy.accepts("anthropic", model, "prod")
-    assert not policy.accepts("anthropic", "claude-haiku-5-5", "staging")
+    assert policy.accepts("anthropic", "claude-haiku-5-5", "staging")
     assert policy.backends["anthropic"].primary == "claude-haiku-5-5"
 
 
@@ -61,6 +61,7 @@ def test_config_rejects_changed_missing_and_extra_backend_maps(pricing: Pricing)
     with pytest.raises(ValidationError):
         Config.model_validate_json(json.dumps(payload))
     assert Config.model_validate_json(config.model_dump_json()).models == config.models
+    assert Config.model_validate(config.model_dump(mode="json")).models == config.models
 
 
 def test_mutated_policy_refuses_before_judge_or_model_admission(pricing: Pricing) -> None:
@@ -87,3 +88,34 @@ def test_scenario_b_prod_canary_remains_haiku_only(pricing: Pricing) -> None:
                 guild_allowlist=["745261709622771773"],
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "model", ["claude-haiku-5-5", "claude-haiku-5-5-20261001", "claude-haiku-5-5-20261010"]
+)
+def test_primary_and_exact_dated_snapshots_pass_both_environments(model: str) -> None:
+    policy = ModelPolicy()
+    for env in ("staging", "prod"):
+        assert policy.accepts("anthropic", model, env)
+    assert policy.policy("anthropic").matches_primary(model)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-haiku-5-5-2026101",
+        "claude-haiku-5-5-202610010",
+        "claude-haiku-5-5-20261301",
+        "claude-haiku-5-5-20260230",
+        "claude-haiku-5-5-20261001-extra",
+        "claude-haiku-5-5-latest",
+        "claude-sonnet-5-5-20261001",
+        "claude-haiku-5-5-２０２６１００１",
+        "claude-haiku-5-5-20261001\n",
+    ],
+)
+def test_non_exact_and_invalid_date_snapshots_refuse(model: str) -> None:
+    policy = ModelPolicy()
+    assert not policy.accepts("anthropic", model, "staging")
+    assert not policy.accepts("anthropic", model, "prod")
+    assert not policy.policy("anthropic").matches_primary(model)

@@ -9,10 +9,6 @@ from typing import Literal, Self, cast, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
-from qa.live.models import APPROVED_MODELS
-
-# Compatibility for existing offline fixtures; all runtime guards use Config.models.
-MODEL = APPROVED_MODELS["anthropic"].staging_aliases[0]
 Status = Literal["PASS", "FAIL", "PENDING"]
 
 
@@ -267,6 +263,8 @@ class ProposedScenario(ScenarioMetadata):
                 features.add(f"step {kind}")
                 continue
             if isinstance(kind, str) and kind not in get_args(Step.model_fields["do"].annotation):
+                if self.tier == "canary":
+                    raise ValueError(f"unknown step kind in canary: {kind}")
                 features.add(f"unknown step {kind}")
                 continue
             normalized = dict(step)
@@ -285,6 +283,8 @@ class ProposedScenario(ScenarioMetadata):
             if isinstance(kind, str) and kind not in get_args(
                 Assertion.model_fields["kind"].annotation
             ):
+                if self.tier == "canary":
+                    raise ValueError(f"unknown assertion kind in canary: {kind}")
                 features.add(f"unknown assertion {kind}")
                 continue
             normalized = dict(assertion)

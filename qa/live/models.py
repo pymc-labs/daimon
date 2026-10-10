@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+import re
+from datetime import datetime
+from typing import Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 BackendName = Literal["anthropic", "openai", "gemini"]
 
@@ -12,15 +14,36 @@ BackendName = Literal["anthropic", "openai", "gemini"]
 class BackendModels(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     primary: str
+    dated_snapshots: bool = False
     fallback: tuple[str, ...] = ()
     fallback_status: int | None = None
     staging_override: str | None = None
     staging_aliases: tuple[str, ...] = ()
 
-    def daimon_models(self, env: str) -> frozenset[str]:
-        if env == "staging" and self.staging_override:
-            return frozenset((self.staging_override, *self.staging_aliases))
-        return frozenset((self.primary,))
+    @field_validator("fallback", "staging_aliases", mode="before")
+    @classmethod
+    def sequences(cls, value: object) -> object:
+        return tuple(cast(list[object], value)) if isinstance(value, list) else value
+
+    def matches_primary(self, model: str) -> bool:
+        if model == self.primary:
+            return True
+        if not self.dated_snapshots or not re.fullmatch(
+            re.escape(self.primary) + r"-[0-9]{8}", model
+        ):
+            return False
+        try:
+            datetime.strptime(model[-8:], "%Y%m%d")
+        except ValueError:
+            return False
+        return True
+
+    def accepts_daimon(self, model: str, env: str) -> bool:
+        return self.matches_primary(model) or (
+            env == "staging"
+            and self.staging_override is not None
+            and model in (self.staging_override, *self.staging_aliases)
+        )
 
     def next_model(self, current: str, http_status: int) -> str | None:
         if self.fallback_status != http_status:
@@ -36,6 +59,7 @@ class BackendModels(BaseModel):
 APPROVED_MODELS: dict[BackendName, BackendModels] = {
     "anthropic": BackendModels(
         primary="claude-haiku-5-5",
+        dated_snapshots=True,
         staging_override="claude-haiku-4-5",
         staging_aliases=("claude-haiku-4-5-20251001",),
     ),
@@ -46,6 +70,9 @@ APPROVED_MODELS: dict[BackendName, BackendModels] = {
         fallback_status=503,
     ),
 }
+
+
+STAGING_LEGACY_MODEL = APPROVED_MODELS["anthropic"].staging_aliases[0]
 
 
 class ModelPolicy(BaseModel):
@@ -68,4 +95,4 @@ class ModelPolicy(BaseModel):
         return self.backends[backend]
 
     def accepts(self, backend: BackendName, model: str, env: str) -> bool:
-        return model in self.policy(backend).daimon_models(env)
+        return self.policy(backend).accepts_daimon(model, env)

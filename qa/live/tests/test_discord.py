@@ -376,7 +376,7 @@ def test_readonly_queries_bind_context_and_extract_scalar(
 def test_measured_usage_records_real_token_and_model_evidence(
     backend: DiscordBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from qa.live.schema import MODEL
+    from qa.live.models import STAGING_LEGACY_MODEL
 
     async def query(sql: str, params: dict[str, object] | None = None) -> JsonValue:
         assert params and params["thread"] == "thread"
@@ -387,7 +387,7 @@ def test_measured_usage_records_real_token_and_model_evidence(
                 "cache_read_input_tokens": 300,
                 "cache_creation_input_tokens": 0,
                 "cost_usd": "0.00023",
-                "model_ids": [MODEL],
+                "model_ids": [STAGING_LEGACY_MODEL],
             }
         ]
 
@@ -395,7 +395,7 @@ def test_measured_usage_records_real_token_and_model_evidence(
     turn = Turn(1, "123", "parent", utcnow(), ended_at=utcnow(), thread_id="thread")
     usage = backend.usage(turn)
     assert usage.input_tokens == 100 and usage.cache_read_input_tokens == 300
-    assert usage.usd == 0.00023 and usage.models == [MODEL]
+    assert usage.usd == 0.00023 and usage.models == [STAGING_LEGACY_MODEL]
 
 
 def test_null_cost_preserves_measured_model_and_tokens(
