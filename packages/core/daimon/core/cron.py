@@ -21,12 +21,15 @@ def next_slot_at_or_after(cron_expr: str, tz: str, after: datetime) -> datetime:
     +1s on the input avoids landing on `after` itself; croniter `get_next`
     precision around second boundaries is fuzzy.
     """
-    after_local = after.astimezone(ZoneInfo(tz))
-    base = after_local + timedelta(seconds=1)
+    after_utc = after.astimezone(UTC)
+    base = (after_utc + timedelta(seconds=1)).astimezone(ZoneInfo(tz))
     nxt_local: datetime = croniter(cron_expr, base).get_next(datetime)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # croniter untyped
     if nxt_local.tzinfo is None:
         nxt_local = nxt_local.replace(tzinfo=ZoneInfo(tz))
-    return nxt_local.astimezone(UTC)
+    nxt_utc = nxt_local.astimezone(UTC)
+    if nxt_utc <= after_utc:
+        raise ValueError("cron returned a slot no later than the input")
+    return nxt_utc
 
 
 class InvalidScheduleError(ValueError):

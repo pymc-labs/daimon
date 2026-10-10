@@ -34,6 +34,7 @@ def test_next_slot_at_or_after_evaluates_cron_in_iana_tz() -> None:
         f"cron `0 9 * * *` Asia/Tokyo should yield 09:00 local, got {local.isoformat()}"
     )
     assert result > after, "returned slot must be strictly after input"
+    assert result == datetime(2026, 5, 8, 0, 0, tzinfo=UTC)
 
 
 def test_next_slot_at_or_after_handles_dst_spring_forward() -> None:
@@ -55,6 +56,37 @@ def test_next_slot_at_or_after_handles_dst_spring_forward() -> None:
     assert local.hour in (2, 3), (
         f"DST resolution should land at 02:30/03:30 (skip) or 03:00, got {local.isoformat()}"
     )
+    assert next_slot_at_or_after(
+        "* * * * *", "America/New_York", datetime(2026, 3, 8, 6, 59, tzinfo=UTC)
+    ) == datetime(2026, 3, 8, 7, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("cron_expr", "first_expected", "second_expected"),
+    [
+        (
+            "* * * * *",
+            datetime(2026, 11, 1, 5, 2, tzinfo=UTC),
+            datetime(2026, 11, 1, 6, 2, tzinfo=UTC),
+        ),
+        (
+            "30 1 * * *",
+            datetime(2026, 11, 1, 5, 30, tzinfo=UTC),
+            datetime(2026, 11, 1, 6, 30, tzinfo=UTC),
+        ),
+    ],
+)
+def test_next_slot_after_fall_back_never_moves_backward(
+    cron_expr: str, first_expected: datetime, second_expected: datetime
+) -> None:
+    # The second 01:00 hour starts at 06:00 UTC on 2026-11-01 in New York.
+    # A next-fire value in the past makes a due row fire again on every tick.
+    first = datetime(2026, 11, 1, 5, 1, tzinfo=UTC)
+    second = datetime(2026, 11, 1, 6, 1, tzinfo=UTC)
+    assert next_slot_at_or_after(cron_expr, "America/New_York", first) == first_expected
+    result = next_slot_at_or_after(cron_expr, "America/New_York", second)
+    assert result == second_expected
+    assert result > second, f"next fire {result.isoformat()} must follow {second.isoformat()}"
 
 
 @pytest.mark.parametrize(
