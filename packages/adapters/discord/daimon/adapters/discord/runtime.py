@@ -10,7 +10,7 @@ from secrets import randbits
 
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from asyncpg import InternalClientError
+from asyncpg import InternalClientError  # pyright: ignore[reportMissingTypeStubs]
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices

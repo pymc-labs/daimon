@@ -208,6 +208,7 @@ assigned by its ID; built-in Daimon posts use the bot. If a webhook is
 unavailable, the first answer chunk carries a bold agent name. The bot and MCP
 Discord tools resolve the webhook matching a message's webhook ID to edit or
 delete that agent's recorded post.
+
 On gateway readiness, Discord scans recently active channels and threads for
 missed addressed messages. The window and per-guild/channel limits are
 configurable (`discord.startup_replay_*`). Replayed messages use the same
@@ -216,10 +217,12 @@ The `discord_message_admissions` ledger deduplicates each tenant/message ID;
 queued follow-ups remain pending until a card intent is committed or the
 request reaches a visible terminal outcome. A PostgreSQL session advisory
 lock identifies each process for its lifetime, using one dedicated database
-connection outside the turn connection pool. A guard stops the adapter if this connection is lost. Another worker can reclaim a pending message only after that
-owner's lock disappears. Inputs whose card intent was committed before a crash
+connection outside the turn connection pool. A guard stops the adapter if this
+connection is lost. Another worker can reclaim a pending message only after
+that owner's lock disappears. Inputs whose card intent was committed before a crash
 but never posted are requeued only after two complete no-card history reads
-separated by a minute; the ledger reset and intent retirement commit together. Turn markers and card intents also carry the owner,
+separated by a minute; the ledger reset and intent retirement commit together.
+Turn markers and card intents also carry the owner,
 so startup never retires another live worker's cards.
 
 Orphan recovery runs at most four rows concurrently. Successful completed
