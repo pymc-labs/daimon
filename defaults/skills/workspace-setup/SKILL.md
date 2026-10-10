@@ -277,8 +277,11 @@ cap) is carried and put back into the same repository at the saved commit. If
 the new workspace mounts another repository, restore into a separate clone of
 the old remote. Inherited files are merged into one archive at their original paths; it never
 contains the previous handoff archive. Inspect `prior-repo-state/` too when
-present: it holds older unsaved repository captures with their own remote and
-HEAD. A file that exceeds the size limit is skipped and named in HANDOFF.md and the
+present: it holds at most one unresolved prior capture within the remaining size
+budget. New captures supersede restored work; older captures dropped for size are
+named as omissions. Extract outside the archived roots and keep capture artifacts
+there. Restore repository work at the saved commit on the saved branch, creating
+a branch for a saved detached HEAD; skip an empty patch. A file that exceeds the size limit is skipped and named in HANDOFF.md and the
 handoff framing; smaller files still travel, and the transfer is partial. A
 failed capture or oversized combined archive carries only the conversation.
 Say which files are missing. Say this plainly when someone asks where their file went

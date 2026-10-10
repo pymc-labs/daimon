@@ -597,7 +597,15 @@ def as_prepared_replacement(
     not_carried: tuple[str, ...]
 
     if isinstance(outcome, FullHandoff):
-        transfer_kind = "partial" if outcome.unpreserved else "full"
+        # A deliberate leave choice and the checkpoint history guard retain
+        # their existing full-with-not-carried notice. Partial means files
+        # were omitted by the size budget, rather than a chosen disposition.
+        omitted = tuple(
+            item
+            for item in outcome.unpreserved
+            if item not in {_UNSAVED_WORK_LEFT_BEHIND, _COMMITTED_DURING_CHECKPOINT}
+        )
+        transfer_kind = "partial" if omitted else "full"
         transfer_file_id = outcome.transfer_file_id
         # The successor must be told where MA actually mounts the bundle. The
         # resource is requested at `HANDOFF_MOUNT_PATH`, but every mount path is

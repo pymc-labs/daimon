@@ -157,8 +157,8 @@ from daimon.core.turn.thread_queue import (
 )
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
-    HandoffNotice,
     SessionState,
+    build_handoff_notice,
     holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
@@ -2769,25 +2769,17 @@ class DaimonBot(commands.Bot):
                 )
                 await session.commit()
 
-        transfer_kind = prepared.continuity.transfer_kind
-        workspace: Literal["transferred", "transcript_only", "history_only"] = (
-            "transferred"
-            if transfer_kind == "full"
-            else "transcript_only"
-            if transfer_kind == "transcript"
-            else "history_only"
-        )
         # Only a handoff hands the task to a different agent, so only a handoff
         # gets the one-time notice. `private_input_applied` re-runs the SAME
         # agent that just asked for the value, so framing it as "X handed you
         # this" would describe a transfer that never happened.
         handoff_notice = (
-            HandoffNotice(
-                from_name=from_name or "the previous agent",
-                from_ma_agent_id=from_ma_agent_id or "",
+            build_handoff_notice(
+                from_name=from_name,
+                from_ma_agent_id=from_ma_agent_id,
                 requested_by=f"<@{row.requester_external_user_id}>",
-                requested_work=decision.seed_user_message,
-                workspace=workspace,
+                requested_work=decision.seed_user_message or "",
+                transfer_kind=prepared.continuity.transfer_kind,
             )
             if row.reason == "task_handoff"
             else None

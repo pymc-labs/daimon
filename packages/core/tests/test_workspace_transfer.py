@@ -955,6 +955,7 @@ def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behin
         requested_work=None,
     )
 
+    assert prepared.transfer_kind == "full", "a requested leave choice keeps its existing notice"
     system_text = prepared.system_blocks[0]["text"]
     assert "Not carried over: uncommitted repository changes were left in the old checkout" in (
         system_text

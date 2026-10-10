@@ -31,6 +31,7 @@ from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
 from daimon.core.turn.notices import admission_refusal_text
+from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.slots import release_turn_slot
 from daimon.testing.factories import make_account
 from daimon.testing.ma import MARouter, build_fake_anthropic
@@ -163,6 +164,9 @@ async def test_a_handoff_runs_after_the_turn_as_the_requester(
     )
     assert follow.thread_id == (setup or CONVERSATION_ID), "a setup handoff stays in setup"
     assert kw["reraise"] is True and kw["handoff"] is not None
+    notice = kw["handoff"](ContinuityOutcome(state="replaced", transfer_kind="partial"))
+    assert notice.workspace == "transferred"
+    assert notice.not_carried == ("some working files",)
     assert await _status(db_session_factory, keys[0]) == ("delivered", None)
 
 

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import random
 import re
 import shutil
 import subprocess
 import tarfile
+import time
 import uuid
 from pathlib import Path
 
@@ -514,7 +516,12 @@ def test_other_checkouts_under_the_archived_roots_still_travel() -> None:
 
 
 def _execute_checkpoint(
-    sandbox: Path, monkeypatch: pytest.MonkeyPatch, *, repo: Path | None = None, cap: int = 20
+    sandbox: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    repo: Path | None = None,
+    cap: int = 20,
+    write_note: bool = True,
 ) -> tuple[Path, str]:
     home = sandbox / "root"
     outputs = sandbox / "mnt/session/outputs"
@@ -534,7 +541,8 @@ def _execute_checkpoint(
         home_dir=str(home),
         max_bundle_mib=cap,
     )
-    (home / "HANDOFF.md").write_text("Task: preserve the files\n")
+    if write_note:
+        (home / "HANDOFF.md").write_text("Task: preserve the files\n")
     commands = "\n".join(line[2:] for line in prompt.splitlines() if line.startswith("  "))
     result = subprocess.run(["bash", "-c", commands], capture_output=True, text=True)
     assert result.returncode == 0 or "HANDOFF_INCOMPLETE" in result.stdout, result.stderr
@@ -739,29 +747,45 @@ def test_repo_without_a_remote_carries_a_self_contained_bundle(
     assert (successor / "task.md").read_text() == "local task"
 
 
-@pytest.mark.parametrize("restore", [False, True])
-def test_mounted_repo_five_hops_keep_one_payload_even_if_never_unpacked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore: bool
+@pytest.mark.parametrize(
+    ("restore", "size_mib", "ignored", "edit", "detach"),
+    [
+        (False, 5, False, False, False),
+        (True, 5, True, False, False),
+        (True, 5, False, True, False),
+        (True, 12, False, False, True),
+    ],
+)
+def test_mounted_repo_five_hops_keep_latest_payload_after_real_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore: bool,
+    size_mib: int,
+    ignored: bool,
+    edit: bool,
+    detach: bool,
 ) -> None:
     origin, seed = tmp_path / "origin.git", tmp_path / "seed"
     _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     _git(tmp_path, "clone", "-q", str(origin), str(seed))
-    (seed / ".gitignore").write_text("data.bin\n")
+    (seed / "asset.bin").write_bytes(b"old\0binary")
+    if ignored:
+        (seed / ".gitignore").write_text("data.bin\n")
     _git(seed, "add", ".")
     _git(seed, "commit", "-qm", "initial")
     _git(seed, "push", "-q", "origin", "HEAD:main")
     repo = tmp_path / "repo"
     _git(tmp_path, "clone", "-q", str(origin), str(repo))
-    expected = random.Random(628).randbytes(5 * 1024 * 1024)
+    (repo / "local.txt").write_text("unpublished commit must survive")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "local")
+    saved_head = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "asset.bin").write_bytes(b"modified\0binary")
+    expected = random.Random(628).randbytes(size_mib * 1024 * 1024)
     (repo / "data.bin").write_bytes(expected)
     sandbox = tmp_path / ("long-session-" + "x" * 100)
     sizes = []
     for hop in range(5):
-        if hop and restore:
-            # Only timestamps change; this must not create historical payload copies.
-            import os
-
-            os.utime(repo / "data.bin", (hop, hop))
         archive, reply = _execute_checkpoint(sandbox, monkeypatch, repo=repo)
         assert "HANDOFF_TOO_LARGE" not in reply and "HANDOFF_INCOMPLETE" not in reply
         sizes.append(archive.stat().st_size)
@@ -774,18 +798,114 @@ def test_mounted_repo_five_hops_keep_one_payload_even_if_never_unpacked(
             with tarfile.open(artifact) as files:
                 if "data.bin" in files.getnames():
                     payloads.append(files.extractfile("data.bin").read())
-        assert payloads == [expected], "one current/restorable payload, including skip path"
+        assert payloads == [expected], "only the latest/restorable payload, never historical copies"
+        if restore:
+            assert not (home / "prior-repo-state").exists()
+            assert (home / REPO_STATE_DIR / "branch.txt").read_text().strip() == "main"
         saved = tmp_path / f"repo-bundle-{hop}.tar.gz"
         shutil.copyfile(archive, saved)
         shutil.rmtree(sandbox)
         uploads = sandbox / "mnt/session/uploads"
         uploads.mkdir(parents=True)
         shutil.copyfile(saved, uploads / "daimon-handoff.tar.gz")
-        if not restore:
-            (repo / "data.bin").unlink(missing_ok=True)
-    assert all(5 * 1024 * 1024 <= size < 5.1 * 1024 * 1024 for size in sizes), sizes
+        shutil.rmtree(repo)
+        _git(tmp_path, "clone", "-q", str(origin), str(repo))
+        if restore:
+            # Actual fresh restore. G also exercises the legacy detached-HEAD
+            # recipe; branch-label differences must never duplicate payloads.
+            shutil.copytree(
+                home,
+                sandbox / "root",
+                ignore=shutil.ignore_patterns(
+                    "repo-state", "prior-repo-state", "uncommitted.patch", "untracked.txt"
+                ),
+            )
+            state = home / REPO_STATE_DIR
+            _git(repo, "fetch", "-q", str(state / "local-commits.bundle"), "HEAD")
+            head = (state / "head.txt").read_text().strip()
+            if detach:
+                _git(repo, "checkout", "-q", head)
+            else:
+                branch = (state / "branch.txt").read_text().strip()
+                _git(repo, "checkout", "-qB", branch, head)
+            _git(repo, "apply", "--binary", str(home / "uncommitted.patch"))
+            subprocess.run(["tar", "xf", str(state / "files.tar"), "-C", str(repo)], check=True)
+            assert _git(repo, "rev-parse", "HEAD").strip() == saved_head
+            assert (repo / "asset.bin").read_bytes() == b"modified\0binary"
+            assert (repo / "data.bin").read_bytes() == expected
+            if not detach:
+                assert _git(repo, "branch", "--show-current").strip() == "main"
+            if edit:
+                expected += f"hop-{hop}\n".encode()
+                with (repo / "data.bin").open("ab") as data:
+                    data.write(f"hop-{hop}\n".encode())
+    assert all(size_mib * 1024 * 1024 <= size < (size_mib + 0.1) * 1024 * 1024 for size in sizes), (
+        sizes
+    )
     assert max(sizes) - min(sizes) < 8192, sizes
-    print(f"mounted five-hop sizes ({restore=}): {sizes}")
+    print(f"mounted actual-restore five-hop sizes ({restore=}, {size_mib=}): {sizes}")
+
+
+def test_prior_captures_are_bounded_and_never_recaptured_as_current_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "root"
+    uploads = tmp_path / "mnt/session/uploads"
+    uploads.mkdir(parents=True)
+    prefix = str(home).lstrip("/") + "/"
+    payload = random.Random(628).randbytes(5 * 1024 * 1024)
+    with tarfile.open(uploads / "daimon-handoff.tar.gz", "w:gz") as bundle:
+        for capture in ("older", "recent"):
+            member = tarfile.TarInfo(prefix + f"prior-repo-state/{capture}/repo-state/files.tar")
+            member.size = len(payload)
+            bundle.addfile(member, io.BytesIO(payload))
+    stale = home / "prior-repo-state/restored-copy/repo-state"
+    stale.mkdir(parents=True)
+    (stale / "files.tar").write_bytes(payload)
+    work = home / "work"
+    work.mkdir()
+    (work / "data.bin").write_bytes(random.Random(629).randbytes(14 * 1024 * 1024))
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch, write_note=False)
+    assert "HANDOFF_TOO_LARGE" not in reply
+    assert "HANDOFF_OMITTED" in reply and "/older" in reply
+    with tarfile.open(archive) as bundle:
+        captures = [n for n in bundle.getnames() if "/prior-repo-state/" in n]
+        assert captures == [prefix + "prior-repo-state/recent/repo-state/files.tar"]
+        note = bundle.extractfile(prefix + "HANDOFF.md")
+        assert note is not None and b"/older" in note.read()
+    # A newer ordinary payload gets priority over even the single saved prior.
+    shutil.copyfile(archive, uploads / "daimon-handoff.tar.gz")
+    (work / "data.bin").write_bytes(random.Random(630).randbytes(18 * 1024 * 1024))
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch)
+    assert "HANDOFF_TOO_LARGE" not in reply
+    assert "HANDOFF_OMITTED" in reply and "/recent" in reply
+    with tarfile.open(archive) as bundle:
+        assert not any("/prior-repo-state/" in n for n in bundle.getnames())
+        assert bundle.getmember(prefix + "work/data.bin").size == 18 * 1024 * 1024
+
+
+def test_many_unsorted_inherited_files_survive_without_repeated_gzip_seeks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uploads = tmp_path / "mnt/session/uploads"
+    uploads.mkdir(parents=True)
+    prefix = str(tmp_path / "root/work").lstrip("/") + "/"
+    expected = random.Random(631).randbytes(200)
+    with tarfile.open(uploads / "daimon-handoff.tar.gz", "w:gz") as bundle:
+        for index in reversed(range(10_000)):
+            member = tarfile.TarInfo(prefix + f"{index:05d}.bin")
+            member.size = len(expected)
+            bundle.addfile(member, io.BytesIO(expected))
+    started = time.monotonic()
+    archive, reply = _execute_checkpoint(tmp_path, monkeypatch)
+    print(f"10,000 unsorted inherited files: {time.monotonic() - started:.2f}s")
+    assert "HANDOFF_INCOMPLETE" not in reply and "HANDOFF_TOO_LARGE" not in reply
+    with tarfile.open(archive) as bundle:
+        carried = [m for m in bundle if m.name.startswith(prefix)]
+        assert len(carried) == 10_000
+        for member in carried:
+            content = bundle.extractfile(member)
+            assert content is not None and content.read() == expected
 
 
 def test_corrupt_inherited_archive_removes_any_stale_output_and_reports_incomplete(
