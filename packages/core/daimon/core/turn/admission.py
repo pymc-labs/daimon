@@ -50,6 +50,12 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
+from daimon.core.channel_backend import (
+    BackendUnsupported,
+    channel_ref,
+    check_backend,
+    current_backend,
+)
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills
@@ -92,6 +98,8 @@ from daimon.core.turn.errors import (
     SessionBusyError,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from mux.contracts.admission import Admission as BackendAdmission
+from mux.contracts.config import ConfigRevision
 
 __all__ = [
     "Admission",
@@ -197,6 +205,10 @@ class Admission:
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
+    # The channel's backend configuration and its admission, when the channel
+    # has one and `DAIMON_TURN__CHANNEL_BACKENDS` is on; None otherwise.
+    backend_revision: ConfigRevision | None = field(default=None, compare=False, repr=False)
+    backend: BackendAdmission | None = field(default=None, compare=False, repr=False)
 
 
 async def admit(
@@ -359,6 +371,12 @@ async def admit_impl(
             thread_id=thread_id,
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+        # Off by default: with the flag unset this reads nothing.
+        backend_revision = (
+            await current_backend(session, channel_ref(tenant_id, platform, channel_id))
+            if deps.channel_backends
+            else None
+        )
     mark("config")
 
     # --- An external caller is never answered in a setup conversation, even
@@ -381,6 +399,14 @@ async def admit_impl(
             agent_name_tier=config.agent_name_tier,
             environment_name_tier=config.environment_name_tier,
         )
+
+    # --- Channel backend: its profile must meet the channel's configuration
+    # and be runnable here. Before any MA call; a channel never configured has
+    # no revision and skips it. ---
+    try:
+        backend = check_backend(backend_revision) if backend_revision is not None else None
+    except BackendUnsupported as err:
+        raise AdmissionDenied(reason="backend_unsupported") from err
 
     async def _apply() -> object:
         return await reconcile_tenant_defaults(
@@ -581,6 +607,8 @@ async def admit_impl(
     mark("channel_skills")
 
     result = Admission(
+        backend_revision=backend_revision,
+        backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
         source_sealed=source_sealed,

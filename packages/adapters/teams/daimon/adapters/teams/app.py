@@ -205,6 +205,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "writers_none": "turn.skipped.writers_none",
     "own_agents_only": "turn.skipped.own_agents_only",
     "external_participant": "turn.skipped.external_participant",
+    "backend_unsupported": "turn.skipped.backend_unsupported",
 }
 
 _NO_CONTEXT = (

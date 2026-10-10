@@ -1079,6 +1079,15 @@ Experimental neutral turn ports; legacy remains the default.
 Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
 opts into neutral Events/Sessions ports. Off by default.
 
+### `DAIMON_TURN__CHANNEL_BACKENDS`
+
+`bool` · optional · default `False`
+
+Read each channel's backend configuration at admission. Off by default: no channel's
+configuration is read and every turn runs as before. On: a channel with no backend
+configuration is unchanged; a configured one is checked against its profile and refused
+(backend_unsupported) if the profile cannot meet it or this release cannot run it yet.
+
 ## Thread Naming
 
 Read from `daimon.core.config.ThreadNamingSettings`. Prefix `DAIMON_THREAD_NAMING__`.

@@ -24,6 +24,9 @@ AdmissionDenialReason = Literal[
     "runs_elsewhere",
     "own_agents_only",
     "external_participant",
+    # The channel's backend configuration (`daimon.core.channel_backend`) names
+    # a profile that cannot meet it, or one this release cannot run yet.
+    "backend_unsupported",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

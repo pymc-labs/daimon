@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Route MCP repository credentials, vault summaries, bundle uploads, hosted charts, hub sessions and skill-version counts through scoped mux resource ports while preserving native request bytes and existing host policy.
 
+- A channel can carry its own agent backend configuration (backend, profile,
+  model, required capabilities, thread mode), read at admission only when
+  `DAIMON_TURN__CHANNEL_BACKENDS` is on. It is off by default, and a channel
+  nobody configured admits exactly as before. A configured channel whose
+  backend can't run on this deployment yet is refused with a message naming
+  the channel's backend, never quietly run on another one.
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
 
 - Prepare an explicit Gemini SDK smoke and recorded offline conformance harness, with a private MockTransport dry-run, the $30/$24 live admission guard and an exact Flash-Lite model pin before credential access.
