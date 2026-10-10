@@ -114,7 +114,7 @@ def native_events(manifest: DefaultManifest) -> tuple[Object, ...]:
             "status": "completed",
         }
         events.append(event("turn.item.done", identity, item=item))
-    for name in ("client_context", "list_events"):
+    for name in ("describe_agent", "list_my_sessions"):
         item = {
             "id": name,
             "type": "mcp_call",
@@ -207,23 +207,33 @@ async def test_checked_in_scripted_tape_reprovisions_fresh_upstream(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault",
-    ["missing_mcp", "mcp_server", "command_failed", "skill_bytes", "foreign_root", "extra_native"],
+    [
+        "missing_mcp",
+        "nonexistent_mcp",
+        "mcp_server",
+        "command_failed",
+        "skill_bytes",
+        "foreign_root",
+        "extra_native",
+    ],
 )
 async def test_native_sdk_mutants_fail_f1(manifest: DefaultManifest, fault: str) -> None:
     events = list(native_events(manifest))
     if fault == "missing_mcp":
-        events = [event for event in events if event["event_id"] != "list_events"]
+        events = [event for event in events if event["event_id"] != "list_my_sessions"]
     elif fault == "extra_native":
         events.insert(
             -1, {"type": "agent.session.idle", "event_id": "extra", "session_id": "session"}
         )
     else:
-        identity = "client_context" if fault == "mcp_server" else "skill-read"
+        identity = "describe_agent" if fault in ("mcp_server", "nonexistent_mcp") else "skill-read"
         index = next(i for i, event in enumerate(events) if event["event_id"] == identity)
         raw = events[index]
         item = object_json(raw["item"])
         if fault == "mcp_server":
             item["server_label"] = "wrong-server"
+        elif fault == "nonexistent_mcp":
+            item["name"] = "client_context"
         elif fault == "command_failed":
             item["exit_code"] = 1
         elif fault == "skill_bytes":
@@ -288,7 +298,7 @@ async def test_normalized_replay_mutants_refuse_without_event_network(
             for event in events
             if not (
                 event["type"] == "agent.tool_result"
-                and event["payload"]["call_id"] == "list_events"
+                and event["payload"]["call_id"] == "list_my_sessions"
             )
         ]
     elif fault in ("wrong_executor", "wrong_server", "arguments"):
@@ -296,7 +306,7 @@ async def test_normalized_replay_mutants_refuse_without_event_network(
             event
             for event in events
             if event["type"] == "agent.tool_use"
-            and event["payload"]["tool_name"] == "client_context"
+            and event["payload"]["tool_name"] == "describe_agent"
         )
         if fault == "wrong_executor":
             call["payload"]["executor"] = "host"

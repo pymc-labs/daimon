@@ -304,7 +304,7 @@ async def test_native_builtin_turn_replays_all_six_routes_and_rejects_missing_ca
                 {"type": "code_execution_result", "call_id": name, "result": output},
             )
         )
-    for name in ("client_context", "list_events"):
+    for name in ("describe_agent", "list_my_sessions"):
         steps.extend(
             (
                 {

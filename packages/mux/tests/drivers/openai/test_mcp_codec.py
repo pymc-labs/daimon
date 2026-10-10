@@ -24,9 +24,9 @@ def mcp(*, status: str = "completed") -> Object:
         "id": "mcp-context",
         "type": "mcp_call",
         "turn_id": "root",
-        "name": "client_context",
+        "name": "list_events",
         "server_label": "daimon-mcp",
-        "arguments": {"channel_id": "fixture"},
+        "arguments": {"handle": "fixture"},
         "output": {"context": "fixture"},
         "error": None,
         "status": status,
@@ -52,7 +52,7 @@ def assert_pair(events: list[Event], *, authority: str) -> None:
     assert isinstance(use, ToolUsePayload) and isinstance(result, ToolResultPayload)
     assert use.call_id == result.call_id == "mcp-context"
     assert use.executor == "mcp" and use.mcp_server == "daimon-mcp"
-    assert use.tool_name == "client_context" and use.input == {"channel_id": "fixture"}
+    assert use.tool_name == "list_events" and use.input == {"handle": "fixture"}
     assert result.content == (TextPart(text='{"context": "fixture"}'),)
     assert not result.is_error
     assert all(e.native.event_type == "agent.session.turn.item.done" for e in events)
@@ -173,7 +173,7 @@ async def test_sdk_malformed_mcp_item_is_owned_error_without_body(fault: str) ->
 @pytest.mark.asyncio
 async def test_sdk_mcp_failed_tool_output_cannot_be_success_with_completed_item() -> None:
     item = mcp()
-    item["arguments"] = '{"channel_id":"fixture"}'
+    item["arguments"] = '{"handle":"fixture"}'
     item["output"] = {"isError": True, "content": [{"type": "text", "text": "failed"}]}
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -191,7 +191,7 @@ async def test_sdk_mcp_failed_tool_output_cannot_be_success_with_completed_item(
     ) as sdk:
         events = [e async for e in driver_for(sdk).events.stream(SCOPE, REF)]
     use, result = (e.typed_payload() for e in events)
-    assert isinstance(use, ToolUsePayload) and use.input == {"channel_id": "fixture"}
+    assert isinstance(use, ToolUsePayload) and use.input == {"handle": "fixture"}
     assert isinstance(result, ToolResultPayload) and result.is_error
 
 

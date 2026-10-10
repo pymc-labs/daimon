@@ -54,12 +54,13 @@ DEFAULT_SKILLS = (
 )
 BuiltinCapability = Literal["bash", "read", "edit", "grep", "glob", "write"]
 DEFAULT_TOOLS: tuple[BuiltinCapability, ...] = ("bash", "read", "edit", "grep", "glob", "write")
-MCP_TOOLS = frozenset({"client_context", "list_events"})
+# Real read-only agent-token tools, both scoped by the token with no arguments.
+MCP_TOOLS = frozenset({"describe_agent", "list_my_sessions"})
 BASH_RESULT = "f1-bash-ok"
 FINAL_MESSAGE = "f1-default-capability-ok"
 PROMPT = (
     "Load the attached file-handling skill by reading its entire SKILL.md. "
-    "Call daimon-mcp client_context and list_events (read-only). "
+    "Call daimon-mcp describe_agent and list_my_sessions (read-only, no arguments). "
     "In this fresh disposable workspace, write f1.txt containing f1-initial, "
     "edit it to f1-edited, read it back (f1-edited), grep with line numbers "
     "(1:f1-edited), and glob its basename (f1.txt). Use the mapped tool for "

@@ -310,13 +310,15 @@ and reports the missing atomic pin as a capability gap, without claiming CAS.
 Skill pins are required in both modes.
 
 One scripted turn reads the exact pinned SKILL.md, successfully invokes distinct
-`client_context` and `list_events` on `daimon-mcp`, writes/edits/reads `f1.txt`,
+`describe_agent` and `list_my_sessions` on `daimon-mcp`, writes/edits/reads `f1.txt`,
 greps its edited content, globs its basename and runs bash. Checks reject
 failed/unpaired/duplicate calls, wrong routes or servers, missing capabilities,
 altered readback, previews, cross-session/root records, gaps, errors and multiple
 turns. The first running record must name a nonempty root that matches its own
 turn ID before it establishes the stream's root. Loading the pinned instructions
 is the skill invocation; scripted output does not establish model quality.
+Both MCP tools are real read-only agent-token tools in `docs/mcp-tools.md` and
+take no arguments: their identity and ownership scope come from the token.
 Non-null turn IDs seen before running must match the accepted root too; null
 pre-running IDs remain legal. Every subsequent record retains the root check,
 including usage observations.

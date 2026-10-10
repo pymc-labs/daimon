@@ -304,7 +304,8 @@ configuration snapshot backfill, including null channel and thread metadata.
 The supplementary F1 scenario in `mux.conformance.default_capability` provisions
 the authored Daimon default's eleven skill bundles and immutable pins, mapped
 builtin tools and reserved `daimon-mcp` attachment. One scripted turn loads the
-pinned file-handling skill, invokes two read-only MCP tools, exercises the six
+pinned file-handling skill, invokes the real read-only `describe_agent` and
+`list_my_sessions` MCP tools, exercises the six
 logical builtin capabilities in a disposable workspace and completes one root.
 `run_default_capability` and `replay_default_capability` are explicit runner
 entry points; the C01–C18 matrix stays unchanged. The initial Anthropic evidence
