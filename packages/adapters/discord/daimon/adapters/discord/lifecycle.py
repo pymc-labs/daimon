@@ -14,7 +14,6 @@ Design decisions:
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import time
 import uuid
@@ -68,7 +67,6 @@ EditFn = Callable[..., Awaitable[discord.Message | None]]
 DeleteFn = Callable[[discord.Message], Awaitable[None]]
 
 _DEBOUNCE_S = 10.0
-_PROGRESS_SETTLE_S = 5.0
 
 # A text block sealed by a later tool use posts permanently once it reaches
 # this size; shorter sealed blocks are pre-tool narration and stay in the
@@ -217,13 +215,6 @@ class DiscordTurnLifecycle:
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
-        self._progress_edits: set[asyncio.Task[None]] = set()
-        self._progress_settled = asyncio.Event()
-        self._progress_settled.set()
-        self._terminal_delivered = asyncio.Event()
-        self._terminal_card_embeds: list[discord.Embed] | None = None
-        self._progress_reassert_needed = False
-        self._terminal_reassert_task: asyncio.Task[None] | None = None
         # A terminal render reached Discord (or there was by design nothing to
         # show), so the card is no longer a pending card with a Stop button.
         self._terminal_shown: bool = False
@@ -267,11 +258,6 @@ class DiscordTurnLifecycle:
         Public so dead-session recovery can hand it to the replacement
         lifecycle via ``adopt_message_ref``; nothing else should need it.
         """
-        return self._message_ref
-
-    def release_message_ref(self) -> discord.Message | None:
-        """Give recovery the card, retiring this lifecycle's deferred repairs."""
-        self._card_message_ref = None
         return self._message_ref
 
     async def post_initial(self) -> None:
@@ -322,53 +308,21 @@ class DiscordTurnLifecycle:
         """
         await self._edit_message(self._message_ref, **kwargs)
 
-    async def end_card(self, text: str) -> None:
-        """Finish a card from the adapter's outer exception/ceiling boundary."""
-        try:
-            await self._settle_progress()
-            await self._edit_message(
-                self._message_ref,
-                content=text,
-                embed=None,
-                view=None,
-                _allow_replacement=False,
-                recover_missing=False,
-                missing_is_error=True,
-            )
-            self._terminal_shown = True
-        finally:
-            self._mark_ended()
-            self._terminal_delivered.set()
-            self._queue_terminal_reassert()
-
     async def _edit_message(
         self,
         message: discord.Message | None,
-        *,
-        progress: bool = False,
-        recover_missing: bool = True,
-        missing_is_error: bool = False,
         **kwargs: Any,  # noqa: ANN401
-    ) -> bool:
+    ) -> None:
         assert message is not None
-        if self._terminal and not progress and message is self._card_message_ref:
-            if "embeds" in kwargs:
-                self._terminal_card_embeds = kwargs["embeds"]
-            elif "embed" in kwargs:
-                self._terminal_card_embeds = [kwargs["embed"]] if kwargs["embed"] else []
         try:
             replacement = await self._edit(message, **kwargs)
         except discord.HTTPException as err:
             if err.code != 10008:
                 raise
-            if not recover_missing or (progress and self._terminal):
-                if missing_is_error:
-                    raise
-                return False
             delivered = self._revealed_first_chunk is not None or self._summary_ref is not None
             log.info("turn.message_missing", message_id=str(message.id), delivered=delivered)
             if delivered:
-                return False  # a stale edit must not turn a delivered answer into an error
+                return  # a stale edit must not turn a delivered answer into an error
             send_kwargs = dict(kwargs)
             attachments = send_kwargs.pop("attachments", None)
             if attachments:
@@ -382,7 +336,7 @@ class DiscordTurnLifecycle:
             self._message_ref = replacement
             if self._on_replacement is not None:
                 await self._on_replacement(replacement)
-            return True
+            return
         edited_at = getattr(replacement, "edited_at", None)
         if isinstance(edited_at, datetime):
             self._note_discord_time(discord.utils.time_snowflake(edited_at, high=True))
@@ -390,7 +344,6 @@ class DiscordTurnLifecycle:
             self._message_ref = replacement
             if self._on_replacement is not None:
                 await self._on_replacement(replacement)
-        return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, tool lines and the latest draft."""
@@ -421,89 +374,12 @@ class DiscordTurnLifecycle:
             await self._on_first_post(self._message_ref)
             self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
-            # Keep every on-wire edit alive when the render loop is cancelled.
-            # Its completion reconciles the card if terminal delivery overtook it.
-            task = asyncio.create_task(
-                self._edit_progress(self._message_ref, self._build_embeds(now)),
-                name="discord.progress_edit",
+            # Debounce elapsed — edit
+            await self._edit_message(
+                self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
             )
-            self._progress_edits.add(task)
-            self._progress_settled.clear()
-            task.add_done_callback(self._progress_edit_done)
-            await asyncio.shield(task)
             self._last_flush = now
         # else: within debounce window — skip
-
-    def on_render_stopped(self) -> None:
-        self._terminal = True
-
-    @staticmethod
-    def _progress_edit_done(task: asyncio.Task[None]) -> None:
-        # A shielded edit may outlive its cancelled waiter. Retrieve failures
-        # there too; an active waiter still receives the exception for retry.
-        if not task.cancelled():
-            task.exception()
-
-    async def _edit_progress(self, message: discord.Message, embeds: list[discord.Embed]) -> None:
-        landed = False
-        try:
-            if not self._terminal:
-                landed = await self._edit_message(
-                    message, progress=True, embeds=embeds, view=self._cancel_view
-                )
-        except Exception:
-            log.warning("turn.progress_edit_failed", exc_info=True)
-            raise
-        finally:
-            task = asyncio.current_task()
-            assert task is not None
-            self._progress_edits.discard(task)
-            last_edit = not self._progress_edits
-            if last_edit:
-                self._progress_settled.set()
-            if landed and self._terminal and self._terminal_card_embeds is not None:
-                self._progress_reassert_needed = True
-                self._queue_terminal_reassert()
-                if last_edit and self._terminal_reassert_task is not None:
-                    await asyncio.shield(self._terminal_reassert_task)
-
-    def _queue_terminal_reassert(self) -> None:
-        # Network completion never waits indefinitely for a terminal hook:
-        # an outer exception may bypass it. Either completion can enqueue the
-        # repair once BOTH terminal delivery and every progress edit settle.
-        if (
-            self._card_message_ref is not None
-            and self._terminal_delivered.is_set()
-            and not self._progress_edits
-            and self._progress_reassert_needed
-            and self._terminal_card_embeds is not None
-            and self._terminal_reassert_task is None
-        ):
-            self._terminal_reassert_task = asyncio.create_task(
-                self._reassert_terminal_card(), name="discord.terminal_reassert"
-            )
-
-    async def _reassert_terminal_card(self) -> None:
-        if self._card_message_ref is None:
-            return
-        try:
-            await self._edit_message(
-                self._card_message_ref,
-                recover_missing=False,
-                embeds=self._terminal_card_embeds,
-                view=None,
-            )
-        except Exception:
-            log.warning("turn.terminal_card_reassert_failed", exc_info=True)
-
-    async def _settle_progress(self) -> None:
-        self.on_render_stopped()
-        if self._progress_edits:
-            try:
-                async with asyncio.timeout(_PROGRESS_SETTLE_S):
-                    await self._progress_settled.wait()
-            except TimeoutError:
-                pass
 
     def _apply_usage(self, state: TurnState) -> None:
         """Price the turn's accumulated token totals onto the embed state before a
@@ -600,15 +476,11 @@ class DiscordTurnLifecycle:
     async def on_terminal_success(self, state: TurnState) -> None:
         self._discord_mark = None  # only the terminal sends and edits close the window
         try:
-            await self._settle_progress()
             await self._deliver_success(state)
         finally:
             self._mark_ended()
-            self._terminal_delivered.set()
-            self._queue_terminal_reassert()
 
     async def _deliver_success(self, state: TurnState) -> None:
-        self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         if self._unprompted and not extract_final_response(state.content):
             # No final answer on a turn nobody asked for: leave the thread as
@@ -722,15 +594,14 @@ class DiscordTurnLifecycle:
                     **({"embeds": [summary]} if summary and len(chunks) == 1 else {}),
                 )
             else:
-                file_kwargs: dict[str, Any] = {"attachments": files} if files else {}
                 await self._edit_message(
                     self._message_ref,
                     content=content,
                     view=None,
                     allowed_mentions=mentions,
-                    **file_kwargs,
+                    **({"attachments": files} if files else {}),
                     # A long answer ends on its last chunk, so the summary moves there.
-                    embeds=[summary] if summary and len(chunks) == 1 else [],
+                    **({"embeds": []} if len(chunks) > 1 else {}),
                 )
 
         try:
@@ -830,16 +701,11 @@ class DiscordTurnLifecycle:
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._discord_mark = None  # only the terminal sends and edits close the window
         try:
-            await self._settle_progress()
             await self._deliver_failure(state, err)
         finally:
             self._mark_ended()
-            self._terminal_delivered.set()
-            self._queue_terminal_reassert()
 
     async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
-        await self._persist_sealed_responses(state)
-        self._state = update_activity(self._state, state)
         if (limit := spend_limit_error(err)) is not None:
             log.error(
                 "anthropic.spend_limit_reached",

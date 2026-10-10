@@ -106,17 +106,6 @@ class TurnLifecycle(Protocol):
 Acknowledgment = Literal["accepted", "done"]
 
 
-def stop_rendering(lifecycle: TurnLifecycle) -> None:
-    """Close an adapter's progress generation before cancelling the render loop.
-
-    Optional synchronous bookkeeping hook, with no network I/O. Final render
-    and terminal delivery still run; outstanding progress edits may finish.
-    """
-    hook = getattr(lifecycle, "on_render_stopped", None)
-    if hook is not None:
-        cast(Callable[[], None], hook)()
-
-
 async def acknowledge(lifecycle: TurnLifecycle, phase: Acknowledgment) -> None:
     """Optional, best-effort platform signal. Missing hooks safely do nothing.
 
