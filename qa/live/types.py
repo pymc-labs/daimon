@@ -69,6 +69,7 @@ class Turn:
     parent_messages: list[Message] = field(default_factory=list[Message])
     verdicts: list[str] = field(default_factory=list[str])
     usage: Usage = field(default_factory=Usage)
+    settled: bool = False
 
     @property
     def text(self) -> str:

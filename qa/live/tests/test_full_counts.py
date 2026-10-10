@@ -12,7 +12,7 @@ from qa.live.types import Check, Message, Turn, utcnow
 
 
 def check(kind: str, messages: list[Message], **params: JsonValue) -> Check:
-    turn = Turn(1, "0", "parent", utcnow(), ended_at=utcnow(), messages=messages)
+    turn = Turn(1, "0", "parent", utcnow(), ended_at=utcnow(), messages=messages, settled=True)
     return evaluate(
         Assertion.model_validate({"kind": kind, "turn": 1, **params}),
         [turn],
@@ -114,6 +114,7 @@ def test_uniqueness_is_only_among_filtered_files() -> None:
         "parent",
         utcnow(),
         ended_at=utcnow(),
+        settled=True,
         messages=[
             {
                 "id": "4",

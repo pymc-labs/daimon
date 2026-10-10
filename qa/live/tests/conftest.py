@@ -64,6 +64,7 @@ class FakeBackend:
             raise self.error
         turn.thread_id = "thread"
         turn.ended_at = utcnow()
+        turn.settled = True
         turn.progress_seen_s = 0.5
         turn.first_visible_s = 1
         turn.done_s = 2

@@ -68,11 +68,22 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                     raise Pending("message identity is unavailable")
                 messages = list({str(m["id"]): m for m in messages}.values())
                 if kind == "message_count":
+                    upper_bound_exceeded = (
+                        assertion.maximum is not None and len(messages) > assertion.maximum
+                    )
+                    if (
+                        not turn.settled
+                        and not upper_bound_exceeded
+                        and (len(messages) < assertion.minimum or assertion.maximum is not None)
+                    ):
+                        raise Pending("turn did not settle; message count bound is unproven")
                     passed = len(messages) >= assertion.minimum and (
                         assertion.maximum is None or len(messages) <= assertion.maximum
                     )
                     reason = f"observed {len(messages)} unique messages"
                 elif kind == "fences_balanced":
+                    if not turn.settled:
+                        raise Pending("turn did not settle; final code fences are unproven")
                     passed = bool(messages) and all(
                         component.count("```") % 2 == 0
                         for m in messages
@@ -80,6 +91,8 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                     )
                     reason = "code fences balanced in each message component"
                 else:
+                    if not turn.settled:
+                        raise Pending("turn did not settle; final footer placement is unproven")
                     if len(messages) > 1:
                         if any(not str(m["id"]).isdigit() for m in messages):
                             raise Pending("Discord message order is unavailable")
@@ -189,6 +202,19 @@ def evaluate(assertion: Assertion, turns: list[Turn], backend: Backend, judge: J
                         for a in attachments
                         if re.search(assertion.name_pattern, str(a.get("filename", "")))
                     ]
+                upper_bound_exceeded = (
+                    assertion.maximum is not None and len(attachments) > assertion.maximum
+                )
+                if (
+                    not turn.settled
+                    and not upper_bound_exceeded
+                    and (
+                        len(attachments) < assertion.minimum
+                        or assertion.maximum is not None
+                        or assertion.unique
+                    )
+                ):
+                    raise Pending("turn did not settle; attachment count/uniqueness is unproven")
                 passed = len(attachments) >= assertion.minimum and (
                     assertion.maximum is None or len(attachments) <= assertion.maximum
                 )

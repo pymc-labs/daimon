@@ -183,15 +183,22 @@ FULL-tier `message_count` counts unique turn messages, excluding thread starters
 `fences_balanced` checks each independently rendered content/embed component.
 `footer_on_last_message` requires the sole cost footer on the final message,
 ordered by Discord snowflake; a file-only post cannot carry the answer's footer.
-These checks require a completed observation. Missing identities or ordering
-stay PENDING. `thread_name` re-fetches the owned thread and applies every supplied
+`Turn.settled` records terminal stability separately from the bounded end time,
+which is also recorded on a timeout. An unsettled observation cannot prove a
+message/attachment upper bound, balanced final fences, or final footer placement:
+those checks stay PENDING. An already exceeded upper bound remains FAIL, and an
+observed lower bound can pass. The scenario's watch timeout remains FAIL and
+alerts. Missing identities or ordering stay PENDING.
+`thread_name` re-fetches the owned thread and applies every supplied
 `pattern`, `pattern_absent`, and `max_len` constraint; unavailable or mismatched
-thread metadata stays PENDING.
+thread metadata stays PENDING. A missing thread also stays PENDING; pair it with
+`in_thread` when thread creation itself must be a product requirement.
 
 For `attachments`, `name_pattern` filters files before applying min/max and
 uniqueness. A maximum of zero passes when no matching file was delivered, even
-if other file types exist. Attachment uniqueness conservatively compares filename and byte size across
-turns, so two independent files with identical names and sizes fail uniqueness.
+if other file types exist and the turn settled. Attachment uniqueness
+conservatively compares filename and byte size across turns, so two independent
+files with identical names and sizes fail uniqueness.
 The tool does not download attachments to compare hashes.
 
 Each run writes `results/<run-id>.json` with assertions, observations, raw Discord
