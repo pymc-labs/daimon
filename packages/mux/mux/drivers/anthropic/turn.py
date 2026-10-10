@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -32,6 +32,7 @@ from mux.drivers.anthropic.resources._authorization import (
     check_ref,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import ProviderError, UnsupportedCapability
 
 
@@ -137,11 +138,13 @@ class AnthropicEvents:
         authorization: ResourceAuthorization | None = None,
         *,
         stream_read_timeout_s: float | None = None,
+        on_stop_event: Callable[[Event], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._account_scope_id = account_scope_id
         self._authorization = authorization
         self._stream_read_timeout_s = stream_read_timeout_s
+        self._on_stop_event = on_stop_event
 
     def _check(self, scope: Scope, session: ResourceRef) -> None:
         check_ref(scope, session, self._account_scope_id, "session")
@@ -162,7 +165,7 @@ class AnthropicEvents:
         inputs = translate_inputs(events)
         try:
             result = await provider_call(
-                self._client.beta.sessions.events.send(session.id, events=inputs)
+                mutation_client(self._client).beta.sessions.events.send(session.id, events=inputs)
             )
         except ProviderError as error:
             if isinstance(error.__cause__, APIConnectionError | APITimeoutError):
@@ -253,7 +256,7 @@ class AnthropicEvents:
         requested_at = datetime.now(UTC)
         try:
             await provider_call(
-                self._client.beta.sessions.events.send(
+                mutation_client(self._client).beta.sessions.events.send(
                     session.id, events=[{"type": "user.interrupt"}]
                 )
             )
@@ -291,6 +294,8 @@ class AnthropicEvents:
                     )
                     stream = _NormalizedStream(native_stream, receipt.session, False)
                     async for event in stream:
+                        if self._on_stop_event is not None:
+                            await self._on_stop_event(event)
                         if (stop := observed_stop(event, receipt)) is not None:
                             return stop
         except TimeoutError:

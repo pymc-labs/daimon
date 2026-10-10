@@ -23,17 +23,20 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO, TurnCodecRequest, TurnIO, turn_io
+from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import _turn_port_kwargs
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.ids import ChannelRef, ResourceRef, Scope
+from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
+from mux.contracts.resources import ProviderBinding
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.state.memory import MemoryStateStore
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -127,12 +130,28 @@ def prepared(request: ProviderPreparationRequest, **changes: object) -> Prepared
     return replace(result, **changes)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
 async def test_factory_and_codec_receive_model_native_identity_and_runtime(
-    monkeypatch: pytest.MonkeyPatch, openai_backend: OpenAIDriver
+    monkeypatch: pytest.MonkeyPatch, openai_backend: OpenAIDriver, persistent: bool
 ) -> None:
     transport = ScriptedTransport()
     runtime = TurnRuntime(
         lambda config, scope: (config, scope), MemoryRecoveryJournal(), MemoryUsageRevisions()
+    )
+    binding = ProviderBinding(
+        id="provider-owner",
+        thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+        provider="openai",
+        profile=PROFILE,
+        native_refs={"session": SESSION.id},
+        generation=1,
+        config_revision=REVISION.local,
+        legacy_account_id=SCOPE.account_id,
+    )
+    persistence = (
+        TurnPersistence(MemoryStateStore(), binding, SCOPE, operation_key="invocation")
+        if persistent
+        else None
     )
     factories: list[TurnBackendRequest] = []
     codecs: list[TurnCodecRequest] = []
@@ -153,10 +172,22 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
             PROFILE, client, SCOPE, SESSION.id, config=REVISION, session=SESSION, runtime=runtime
         )
         selected = turn_io(
-            client, SESSION.id, path="mux", scope=SCOPE, profile=PROFILE, backend_request=request
+            client,
+            SESSION.id,
+            path="mux",
+            scope=SCOPE,
+            profile=PROFILE,
+            backend_request=request,
+            persistence=persistence,
         )
-        assert selected is marker and factories == [request]
+        expected = (
+            replace(request, on_stop_event=persistence.record)
+            if persistence is not None
+            else request
+        )
+        assert selected is marker and factories == [expected]
         assert len(codecs) == 1
+        assert codecs[0].persistence is persistence
         assert codecs[0].model == "gpt-6-luna" and codecs[0].config == REVISION
         assert codecs[0].scope == SCOPE and codecs[0].session == SESSION
         assert codecs[0].runtime is not None

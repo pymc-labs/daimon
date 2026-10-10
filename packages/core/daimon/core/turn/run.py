@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict
@@ -50,6 +50,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.tool_safety import trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import chat_tool_confirmation
+from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn
@@ -674,6 +675,7 @@ async def run_prepared_turn(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirm_write: ConfirmationHook | None = None,
     attended: bool | None = None,
+    operation_key: str | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -706,6 +708,7 @@ async def run_prepared_turn(
                 now=now,
                 confirm_write=confirm_write,
                 attended=attended,
+                operation_key=operation_key,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -735,6 +738,7 @@ async def run_prepared_turn_impl(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirm_write: ConfirmationHook | None = None,
     attended: bool | None = None,
+    operation_key: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -811,33 +815,58 @@ async def run_prepared_turn_impl(
     context = context_prompt(origin, system=prepared.admission.agent.system)
     prefix = context + prepared.continuity.user_prefix
 
+    @contextlib.asynccontextmanager
+    async def persisted(
+        admission: Admission,
+        session_id: str,
+        mapping_id: uuid.UUID | None,
+        session_ref: ResourceRef | None = None,
+    ) -> AsyncIterator[None]:
+        if (deps.turn_path or load_turn_settings().path) == "legacy":
+            yield
+            return
+        persistence = await prepared_persistence(
+            deps,
+            admission,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            session_id=session_id,
+            mapping_id=mapping_id,
+            operation_key=operation_key,
+            session_ref=session_ref,
+        )
+        with persistence.activate():
+            yield
+
     async def _run() -> RunOutcome:
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
 
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
-        state = await run_turn(
-            **_turn_port_kwargs(
-                deps,
-                prepared.admission,
-                ma_session_id,
-                tenant_id=tenant_id,
-                provider_backend=prepared.backend,
-                provider_session=prepared.session_ref,
-            ),
-            anthropic=deps.anthropic,
-            session_id=ma_session_id,
-            user_message=_with_prefix(prefix, user_message),
-            lifecycle=first_attempt,
-            cancel=cancel,
-            render_interval_s=render_interval_s,
-            billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
-            tool_confirmation=tool_confirmation,
-            image_blocks=image_blocks,
-            system_blocks=prepared.continuity.system_blocks,
-            before_send=decide_before_send(deps, prepared.admission),
-            send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
-        )
+        async with persisted(prepared.admission, ma_session_id, mapping_id, prepared.session_ref):
+            state = await run_turn(
+                **_turn_port_kwargs(
+                    deps,
+                    prepared.admission,
+                    ma_session_id,
+                    tenant_id=tenant_id,
+                    provider_backend=prepared.backend,
+                    provider_session=prepared.session_ref,
+                ),
+                anthropic=deps.anthropic,
+                session_id=ma_session_id,
+                user_message=_with_prefix(prefix, user_message),
+                lifecycle=first_attempt,
+                cancel=cancel,
+                render_interval_s=render_interval_s,
+                billing=Billed(record=prepared._record),  # pyright: ignore[reportPrivateUsage]
+                tool_confirmation=tool_confirmation,
+                image_blocks=image_blocks,
+                system_blocks=prepared.continuity.system_blocks,
+                before_send=decide_before_send(deps, prepared.admission),
+                send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
+            )
 
         if not (
             _is_dead_session(state)
@@ -963,30 +992,35 @@ async def run_prepared_turn_impl(
                 _mirror_cancel(cancel, fresh_cancel), name="turn.cancel_mirror"
             )
             try:
-                recovered_state = await run_turn(
-                    **_turn_port_kwargs(
-                        deps,
-                        recovery.admission or prepared.admission,
-                        new_session_id,
-                        tenant_id=tenant_id,
-                    ),
-                    anthropic=deps.anthropic,
-                    session_id=new_session_id,
-                    user_message=context + reseeded_message,
-                    lifecycle=new_lifecycle,
-                    cancel=fresh_cancel,
-                    render_interval_s=render_interval_s,
-                    billing=Billed(record=new_record),
-                    tool_confirmation=tool_confirmation,
-                    image_blocks=image_blocks,
-                    system_blocks=loss_system_blocks,
-                    # Reseeding and opening the stream await platform and MA
-                    # calls after recovery's last decision.
-                    before_send=decide_before_send(deps, recovery.admission or prepared.admission),
-                    send_guard=lambda: session_mutation_fence(
-                        deps.sessionmaker, recovery.ma_session_id
-                    ),
-                )
+                async with persisted(
+                    recovery.admission or prepared.admission, new_session_id, new_mapping_id
+                ):
+                    recovered_state = await run_turn(
+                        **_turn_port_kwargs(
+                            deps,
+                            recovery.admission or prepared.admission,
+                            new_session_id,
+                            tenant_id=tenant_id,
+                        ),
+                        anthropic=deps.anthropic,
+                        session_id=new_session_id,
+                        user_message=context + reseeded_message,
+                        lifecycle=new_lifecycle,
+                        cancel=fresh_cancel,
+                        render_interval_s=render_interval_s,
+                        billing=Billed(record=new_record),
+                        tool_confirmation=tool_confirmation,
+                        image_blocks=image_blocks,
+                        system_blocks=loss_system_blocks,
+                        # Reseeding and opening the stream await platform and MA
+                        # calls after recovery's last decision.
+                        before_send=decide_before_send(
+                            deps, recovery.admission or prepared.admission
+                        ),
+                        send_guard=lambda: session_mutation_fence(
+                            deps.sessionmaker, recovery.ma_session_id
+                        ),
+                    )
             finally:
                 if not mirror_task.done():
                     mirror_task.cancel()

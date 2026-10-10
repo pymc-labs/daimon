@@ -82,9 +82,17 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import ceiling_error, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
-from daimon.core.turn.io import LegacyTurnIO, TurnConnectionLost, TurnIO, TurnStream, turn_io
+from daimon.core.turn.io import (
+    LegacyTurnIO,
+    TrackedLegacyTurnIO,
+    TurnConnectionLost,
+    TurnIO,
+    TurnStream,
+    turn_io,
+)
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge
 from daimon.core.turn.outcomes import current_outcome
+from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -575,6 +583,7 @@ async def run_turn(
     Returns the final `TurnState`.
     """
     selected_path = path if path is not None else load_turn_settings().path
+    persistence = current_persistence.get() if selected_path == "mux" else None
     io = turn_io(
         anthropic,
         session_id,
@@ -585,6 +594,7 @@ async def run_turn(
         read_timeout_s=stream_read_timeout_s,
         profile=profile,
         backend_request=backend_request,
+        persistence=persistence,
     )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
@@ -677,7 +687,12 @@ async def run_turn(
                 # Keep main's proof/retry semantics on the existing SDK client;
                 # the rejected batch was never accepted. Only this turn falls
                 # back, and the closed first stream cannot end the retry.
-                io = LegacyTurnIO(anthropic, session_id, scope=scope)
+                if persistence is not None:
+                    io = TrackedLegacyTurnIO(
+                        anthropic, session_id, scope=persistence.scope, persistence=persistence
+                    )
+                else:
+                    io = LegacyTurnIO(anthropic, session_id, scope=scope)
                 log.info("turn.confirmation_recovery_legacy", session_id=session_id)
             settled = await _interrupt_and_settle(
                 anthropic, session_id=session_id, cancel=cancel, io=io, scope=scope
@@ -688,7 +703,7 @@ async def run_turn(
             # "idle": the retried pump runs the turn normally.
             return await _new_pump()
 
-    pump_coro = _pump_unwedging()
+    pump_coro = _pump_unwedging() if persistence is None else persistence.run(_pump_unwedging)
     if deadline is None:
         return await pump_coro
 
