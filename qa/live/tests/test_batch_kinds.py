@@ -5,11 +5,12 @@ from pydantic import ValidationError
 
 from qa.live.config import Pricing
 from qa.live.cost import Ledger, estimate
+from qa.live.discord import fingerprint
 from qa.live.evaluate import evaluate
 from qa.live.runner import Executor
 from qa.live.schema import Assertion, Scenario, Step
 from qa.live.tests.conftest import FakeBackend, FakeJudge
-from qa.live.types import Message, Turn, utcnow
+from qa.live.types import Message, Turn, card_text_of, text_of, utcnow
 
 
 def observed(number: int, identity: str, *, settled: bool = True) -> Turn:
@@ -90,6 +91,83 @@ def test_running_edits_are_distinct_and_exclude_terminal_edits() -> None:
     turn.settled = False
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
     turn.card_history.append({**edit, "edited_timestamp": "next"})
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+
+
+def test_current_card_reads_nested_v2_copy_without_button_labels() -> None:
+    turn = observed(1, "card")
+    turn.messages = [
+        {
+            "id": "card",
+            "components": [
+                {
+                    "type": 17,
+                    "components": [
+                        {
+                            "type": 9,
+                            "components": [{"type": 10, "content": "Request expired."}],
+                            "accessory": {"type": 2, "label": "Received"},
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    check = Assertion(
+        kind="card_text_now", turn=1, pattern="(?i)expired", pattern_absent="Received"
+    )
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "PASS"
+    assert card_text_of(turn.messages[0]).strip() == "Request expired."
+    assert not text_of(turn.messages[0]).strip()
+
+
+@pytest.mark.parametrize("absence", [False, True])
+@pytest.mark.parametrize("with_readable_row", [False, True])
+def test_current_card_unreadable_copy_never_proves_presence_or_absence(
+    absence: bool, with_readable_row: bool
+) -> None:
+    turn = observed(1, "card")
+    turn.messages = [{"id": "card", "components": [{"type": 2, "label": "Expired"}]}]
+    if with_readable_row:
+        turn.messages.append({"id": "answer", "content": "Expired"})
+    check = Assertion(
+        kind="card_text_now",
+        turn=1,
+        pattern=None if absence else "Expired",
+        pattern_absent="Received" if absence else None,
+    )
+    assert evaluate(check, [turn], FakeBackend(), FakeJudge()).status == "PENDING"
+
+
+def test_component_only_edits_change_fingerprint_without_edit_timestamp() -> None:
+    before: Message = {
+        "id": "card",
+        "components": [{"type": 17, "components": [{"type": 10, "content": "Received"}]}],
+    }
+    after: Message = {
+        **before,
+        "components": [{"type": 17, "components": [{"type": 10, "content": "Expired"}]}],
+    }
+    assert fingerprint(before) != fingerprint(after)
+
+
+def test_v2_card_extraction_does_not_relax_anchored_answer_matching() -> None:
+    turn = observed(1, "answer")
+    turn.messages = [
+        {
+            "id": "answer",
+            "content": "-# qa-agent\nNot B1: needs context\nB1",
+            "components": [
+                {"type": 10, "content": "B1"},
+                {"type": 10, "content": "Not B1: context"},
+            ],
+        }
+    ]
+    turn.agent_subtext_headers = [{"message_id": "answer", "line": "-# qa-agent"}]
+    assertion = Assertion(kind="text_present", turn=1, pattern="^B1$")
+    assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "FAIL"
+    turn.messages[0]["content"] = "-# qa-agent\nB1"
+    turn.messages[0]["components"] = [{"type": 10, "content": "Footer: $0.01"}]
     assert evaluate(assertion, [turn], FakeBackend(), FakeJudge()).status == "PASS"
 
 

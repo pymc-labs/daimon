@@ -370,4 +370,12 @@ an explicitly configured isolated QA operator hook.
 Progress text includes nested Discord V2 type-10 text displays. A component-only
 card whose running/terminal state the driver cannot identify is retained as
 `component_state_unknown`; it can only produce PENDING, never a false progress
-PASS or FAIL. The generic card/text assertions need separate V2 rendering support.
+PASS or FAIL.
+
+`card_text_now` reads legacy message/embed copy and nested Discord V2 type-10
+text displays from refreshed messages. Unreadable current messages are PENDING
+for both presence and absence checks; button labels do not count as card copy.
+Observer fingerprints include components so component-only edits remain visible.
+This card-only extraction does not add component footer text to answer matching:
+anchored answers still match the whole content after removing only a recorded
+QA-agent subtext header.
