@@ -32,6 +32,7 @@ from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
+from mux.state.store import StateStore
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -80,6 +81,8 @@ class TurnDeps:
     # Provider owners supply transports and durable stores; no credentials
     # or SDK clients are discovered by profile dispatch.
     turn_runtimes: Mapping[str, TurnRuntime] = field(default_factory=dict[str, TurnRuntime])
+    # Only prepared mux turns use this; default composition uses Postgres.
+    state_store: StateStore | None = None
 
 
 def _reveal(secret: SecretStr | None) -> str | None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -137,11 +137,13 @@ class AnthropicEvents:
         authorization: ResourceAuthorization | None = None,
         *,
         stream_read_timeout_s: float | None = None,
+        on_stop_event: Callable[[Event], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._account_scope_id = account_scope_id
         self._authorization = authorization
         self._stream_read_timeout_s = stream_read_timeout_s
+        self._on_stop_event = on_stop_event
 
     def _check(self, scope: Scope, session: ResourceRef) -> None:
         check_ref(scope, session, self._account_scope_id, "session")
@@ -291,6 +293,8 @@ class AnthropicEvents:
                     )
                     stream = _NormalizedStream(native_stream, receipt.session, False)
                     async for event in stream:
+                        if self._on_stop_event is not None:
+                            await self._on_stop_event(event)
                         if (stop := observed_stop(event, receipt)) is not None:
                             return stop
         except TimeoutError:

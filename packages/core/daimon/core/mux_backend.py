@@ -6,13 +6,14 @@ Adapters retain ownership of client configuration and lifetime.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
 from mux.contracts.config import ConfigRevision
+from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.drivers.anthropic import AnthropicManagedAgents
@@ -53,6 +54,7 @@ class TurnBackendRequest:
     config: ConfigRevision | None = None
     session: ResourceRef | None = None
     runtime: TurnRuntime | None = None
+    on_stop_event: Callable[[ResourceRef, Event], Awaitable[None]] | None = None
 
     @property
     def model(self) -> str | None:
@@ -81,12 +83,23 @@ def _anthropic_turn_backend(request: TurnBackendRequest) -> TurnBackend:
     authorization = ResourceAuthorization(
         request.scope, frozenset({("session", request.session_id)})
     )
+
+    async def on_stop_event(event: Event) -> None:
+        if request.on_stop_event is not None:
+            await request.on_stop_event(
+                resource_ref(backend, "session", request.session_id, scope=request.scope), event
+            )
+
     backend = AnthropicManagedAgents(
         request.client,
         account_scope_id=workspace,
         authorization=authorization,
         events=AnthropicEvents(
-            request.client, workspace, authorization, stream_read_timeout_s=request.read_timeout_s
+            request.client,
+            workspace,
+            authorization,
+            stream_read_timeout_s=request.read_timeout_s,
+            on_stop_event=on_stop_event if request.on_stop_event is not None else None,
         ),
     )
     return TurnBackend(

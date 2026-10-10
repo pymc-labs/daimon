@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2153,
+  "files_scanned": 2154,
   "parse_errors": [],
   "calls": [
     {
@@ -6903,8 +6903,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 189,
-      "end": 195,
+      "line": 191,
+      "end": 197,
       "scope": "open_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6914,8 +6914,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 219,
-      "end": 224,
+      "line": 221,
+      "end": 226,
       "scope": "list",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6925,8 +6925,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 165,
-      "end": 165,
+      "line": 167,
+      "end": 167,
       "scope": "send",
       "category": "production",
       "resource": "sessions.events.send",
@@ -6936,8 +6936,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 256,
-      "end": 258,
+      "line": 258,
+      "end": 260,
       "scope": "cancel",
       "category": "production",
       "resource": "sessions.events.send",
@@ -6949,8 +6949,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/turn.py",
-      "line": 290,
-      "end": 290,
+      "line": 292,
+      "end": 292,
       "scope": "wait_stopped",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -14024,6 +14024,15 @@
       "category": "production"
     },
     {
+      "file": "packages/core/daimon/core/turn/persistence.py",
+      "line": 13,
+      "module": "anthropic",
+      "names": [
+        "APIStatusError"
+      ],
+      "category": "production"
+    },
+    {
       "file": "packages/core/daimon/core/turn/posture.py",
       "line": 53,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
@@ -16891,6 +16900,24 @@
       "category": "test"
     },
     {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 12,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsEventParams"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_persistence.py",
+      "line": 560,
+      "module": "anthropic",
+      "names": [
+        "BadRequestError"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/core/tests/turn/test_posture.py",
       "line": 16,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
@@ -16930,7 +16957,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_provider_dispatch.py",
-      "line": 82,
+      "line": 85,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"

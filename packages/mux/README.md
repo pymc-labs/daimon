@@ -401,3 +401,13 @@ limit. Omitted controls retain the existing provider/template defaults and reque
 bytes. The [driver README](mux/drivers/openai/README.md) records the official
 2026-10-10 protocol audit, SDK binding boundary, nullable usage and separate Admin
 cost-accounting requirements. These controls do not register a host backend.
+
+Daimon's prepared mux turn path composes `PostgresStateStore` at its admitted
+binding boundary. The host owns the slot lease, persists and claims mutations
+before delivery, and journals normalized records before its existing reducer
+consumes them. Shared turns retain their persisted accountless slot and the
+writer's operation scope. Send claims survive restart; uncertain delivery never
+permits automatic resend. The Anthropic stop observer can forward its normalized
+wait events to this same journal without changing provider requests. Legacy
+turns and unbound direct port callers retain their previous behavior. These host
+proofs do not promote the separate C01–C18 adapter's PENDING entries.

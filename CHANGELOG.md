@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restrict live budget admission to Haiku 5.5, Gemini 3.8 Flash and its approved 503 fallback IDs, and GPT-6 Luna; reviewed prices remain required and fallback enforcement stays in the Gemini harness.
 - Dispatch opt-in host turn preparation, backend composition and codecs by the admitted profile, with authorized native binding and injected transport/journal/usage context; preserve default Anthropic requests.
 
+- Persist prepared mux turns through binding-owned StateStore leases, claimed operations and normalized journals; keep legacy turns free of these reads and writes.
 
 - Pin Gemini live smoke to 3.8 Flash with create-503-only Flash fallbacks, dated reviewed prices, separate attempt receipts and nullable per-call usage capture; retain unverified alias holds.
 - Register the real Anthropic driver with the offline C01–C18 conformance runner using actual SDK wire scripts; report sixteen typed provider/host gaps and withhold certification.

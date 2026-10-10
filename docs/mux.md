@@ -797,7 +797,8 @@ existing per-call read timeout. A temporary host edge decodes the opaque native
 JSON snapshot for existing reducers and hooks; SDK objects never cross neutral
 ports. Normalized root outcomes select the host termination reason after its
 existing failure refinements. Replay, cancellation and orphan cleanup use the same bound session ports.
-No StateStore journal or additional database writes are introduced.
+Legacy turns introduce no StateStore journal or additional database writes.
+Prepared mux turns use the binding-owned persistence path described below.
 
 The Anthropic-only `anthropic.session_system_message@1` config carries privileged
 text framing for the initial handoff batch. Its closed schema accepts text
@@ -1030,3 +1031,45 @@ and durable journal/usage stores. The host does no credential discovery in this
 seam. Anthropic remains the default and keeps its existing model-less binding
 and requests. Other runnable profiles require an explicit model; registering a
 factory alone does not make its profile runnable at channel admission.
+
+### Prepared mux turn persistence
+
+With `DAIMON_TURN__PATH=mux`, prepared turns acquire the persisted binding's
+slot lease before opening the provider stream. Private sessions are adopted
+with their native IDs through binding CAS on the Anthropic path; shared sessions use the binding
+already published by shared-thread preparation, with an accountless slot.
+The writer's admitted tenant/account remains the operation owner. Legacy turns
+perform none of these StateStore reads or writes.
+
+An input, action decision, cancel or archive persists its intent and wins
+`claim_send` before provider mutation. A committed sent claim or uncertain
+acknowledgement is replayed without another send; an acknowledged receipt is
+restored. Reusing an operation key for changed input raises `OperationConflict`.
+Only an explicit HTTP client refusal permits a fresh send attempt. A prepared
+turn uses its current invocation observation ID by default; callers resuming
+a known invocation supply its original `operation_key` to `run_prepared_turn`.
+A mapping's older active-message marker never becomes a new invocation's key.
+
+Normalized stream and replay records commit to the binding-owned journal
+before reaching the existing reducers. Overlap is deduplicated by native source
+ID, revision and preview authority. A stream gap checkpoints its last cursor
+without fabricating completion; the host still replays through its existing
+native history walk. Cancel acknowledgements stay distinct from independently
+observed stop events, which are also journaled. Lease renewal runs during the
+turn, sends have a timeout below the lease TTL, and losing renewal cancels the
+pump. Claims, receipt commits and journal appends all require the active fence.
+
+Direct driver calls without a prepared binding context retain their existing
+port behavior and are not claimed to persist a complete turn journal. Native
+confirmation recovery retains its existing HTTP proof and bounds while keeping
+the prepared mux turn's claimed mutations and journaled stream records under
+the same lease. Provider conformance certification remains separate from the
+host restart and wire-parity proofs.
+
+Foreign provider preparation must publish its actual `ProviderBinding` to the
+injected StateStore before running a prepared turn. The host consumes that
+binding only when profile, native session, channel, scope and configuration
+revision match. It never adopts an Anthropic mapping for another provider. The
+registered codec receives `TurnCodecRequest.persistence` and owns forwarding
+its neutral records and mutations through this journal/claim context. Missing
+native references or bindings fail before provider I/O.
