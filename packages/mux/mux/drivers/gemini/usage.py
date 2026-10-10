@@ -19,10 +19,17 @@ def observation_from_interaction(
     root_turn: str,
     model: ModelRef,
 ) -> UsageObservation:
-    meter = object_value(raw["usage"]) if raw.get("usage") is not None else {}
+    metadata = raw.get("usageMetadata")
+    meter = object_value(metadata if metadata is not None else raw.get("usage") or {})
+    names = {
+        "total_input_tokens": "promptTokenCount",
+        "total_cached_tokens": "cachedContentTokenCount",
+        "total_output_tokens": "candidatesTokenCount",
+        "total_thought_tokens": "thoughtsTokenCount",
+    }
 
     def count(name: str) -> int | None:
-        value = meter.get(name)
+        value = meter.get(names[name] if metadata is not None else name)
         if value is None:
             return None
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:

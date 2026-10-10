@@ -339,6 +339,13 @@ Gemini F1 maps bash, read, edit, grep, glob and write through its native
 `code_execution` tool. Native scripted records exercise each route in normalized
 replay; missing calls fail. The complete default remains typed PENDING for binary
 skill deployment and authenticated MCP/session adapters.
+
+The Gemini live smoke pins `gemini-3.8-flash` and advances to the two reviewed
+Flash fallbacks only after a definite create HTTP 503. Separate reservations,
+fallback receipts and per-response usage counters preserve failed holds and
+settle known cumulative usage once. The moving alias remains estimated until
+its resolved tariff is verified. See `mux/drivers/gemini/PRICING.md` and
+`LIVE-CERT.md`; MockTransport preparation reads no real key.
 ### Offline Anthropic C01–C18 registration
 
 The test adapter in `tests/drivers/anthropic/conformance_adapter.py` explicitly

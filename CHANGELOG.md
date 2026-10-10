@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dispatch opt-in host turn preparation, backend composition and codecs by the admitted profile, with authorized native binding and injected transport/journal/usage context; preserve default Anthropic requests.
 
 
+- Pin Gemini live smoke to 3.8 Flash with create-503-only Flash fallbacks, dated reviewed prices, separate attempt receipts and nullable per-call usage capture; retain unverified alias holds.
 - Register the real Anthropic driver with the offline C01–C18 conformance runner using actual SDK wire scripts; report sixteen typed provider/host gaps and withhold certification.
 - Refuse a default-capability turn whose running record omits or mismatches its declared root identity, or whose records name another root before or after running.
 - Route responder-identity reads through scoped native session ports, preserving SDK null metadata and reuse of the observed response for snapshot backfill.

@@ -4,7 +4,7 @@ write the shared spend ledger, enable a host backend or make a provider call.
 From the repository root, create an empty private output directory, then run:
 
 ```bash
-uv run python -m mux.drivers.gemini.live_cert --model gemini-3.5-flash-lite --output /absolute/empty/output
+uv run python -m mux.drivers.gemini.live_cert --model gemini-3.8-flash --output /absolute/empty/output
 ```
 
 This exercises the pinned SDK's real serialization with a synthetic response.
@@ -18,15 +18,18 @@ returns a full live certificate.
 After lead authorization, the live command is:
 
 ```bash
-uv run python -m mux.drivers.gemini.live_cert --live --model gemini-3.5-flash-lite --budget /absolute/reviewed-budget.json --output /absolute/empty/output
+uv run python -m mux.drivers.gemini.live_cert --live --model gemini-3.8-flash --budget /absolute/reviewed-budget.json --output /absolute/empty/output
 ```
 
-Live preparation and the direct SDK entry require exactly `gemini-3.5-flash-lite`
-before key loading or client creation, even if another model has configured prices.
-No Pro, larger Flash tier, alias or fallback is allowed. The official offline runtime
-model table (`source-G-runtime.txt:735-749`) lists Flash-Lite as the tier optimized
-for cost-sensitive tasks. It supplies no numeric rates; add only that exact ID when
-its rates have been verified. The provider's implicit 3.8 Flash default is never used.
+Live preparation and the direct SDK entry require exactly `gemini-3.8-flash`
+before key loading or client creation. Only a create POST returning HTTP 503
+permits `gemini-flash-latest`, then `gemini-3.5-flash-lite`, in that order. There
+are at most three POSTs, with a fresh reservation and driver per attempt.
+Authentication, rate limits, network errors, ambiguous acceptance and GET or
+cancel failures never permit another model. Direct fallback selection and Pro
+are refused. All three reviewed prices and N9's matching allowlist must be
+present before key access. Carlos's 2026-10-10 primary rule supersedes the old
+Flash-Lite-only pin.
 
 Only this mode reads `~/.config/daimon-nc/gemini.env`. The file must be owned by
 the running user, mode 0600, with one `GEMINI_API_KEY=...` assignment. No ambient
@@ -38,12 +41,12 @@ allocation. Live preparation and the SDK entry reject any other ledger path
 before key loading or client creation; private ledgers are allowed only for
 MockTransport runs. The N9 guard refuses reservations exceeding the 80% threshold ($24),
 persists reservations before I/O and retains uncertain/failed spend. The model
-price table is intentionally empty: the lead must add reviewed per-million-token
-input/cached-input/cache-write-input/output rates. Missing prices refuse before
+price table is dated in `PRICING.md`, including the conservative alias bound.
+Missing prices refuse before
 provider I/O; test prices are synthetic and confined to the mock ledger. Do not
 initialize, replace or reset the existing shared ledger.
 
-The smoke permits one create POST, uses zero SDK retries, and requests the
+Each attempt permits one create POST, uses zero SDK retries, and requests the
 provider's documented `agent_config.max_total_tokens=4096`. It reserves 32768
 input and 32768 output tokens, polls usage for overruns, and stops at 120 seconds.
 Timeout/failure requests bounded cancellation only when a native interaction ID
@@ -52,6 +55,18 @@ Unknown usage retains the financial reservation; overruns block future admission
 The smoke requires the exact `GEMINI_SMOKE_OK` saved reply and one observed root
 completion. Credential-safe metadata and normalized events are recorded through
 N9's recorder; request body values and SDK objects are not exported.
+
+Separate mode-0600 attempt receipts log the actual selected model, preceding
+503, eligible successor, dated rates, actual USD and held USD. Every HTTP
+response, including refusals and repeated reads, saves a sanitized four-counter
+usage artifact. Only one cumulative snapshot settles each interaction; polling
+does not multiply charges. The moving alias retains its hold until its resolved
+price is verified. A non-JSON refusal records unknown counters and its status.
+N9's actual-spend contract retains known counters on incomplete or unverified
+results and still latches overruns before pricing. Accepted POST usage also
+survives a failed poll. Cancel POST metadata is recorded after cleanup reaches
+transport; cancellation never changes the selected model. Expired or undated
+primary/Lite prices refuse before key access.
 
 The official local runtime snapshot (`source-G-runtime.txt:1314-1319`) describes
 max_total_tokens as best effort and excludes cached tokens. The financial

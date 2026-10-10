@@ -100,6 +100,7 @@ async def test_sdk_errors_are_owned_and_do_not_echo_provider_secrets(
                 {"agent": "antigravity-preview-05-2026", "input": "hello"}
             )
         assert exc.value.category == category
+        assert exc.value.native_code == ("503" if status == 503 else None)
         assert "SECRET" not in str(exc.value)
         assert exc.value.__cause__ is None
         assert len(calls) == 1
