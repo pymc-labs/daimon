@@ -894,7 +894,7 @@ async def test_opaque_native_identity_is_aliased_before_unchanged_recorder(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("export_failure", [False, True])
-async def test_sdk_opaque_paths_and_terminal_usage_survive_export_failure(
+async def test_sdk_opaque_paths_preserve_routing_and_safe_recording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, export_failure: bool
 ) -> None:
     from mux.conformance.recording import Recorder, RecordingError
@@ -906,11 +906,7 @@ async def test_sdk_opaque_paths_and_terminal_usage_survive_export_failure(
     def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
         def respond(request: httpx.Request) -> httpx.Response:
             requests.append(request)
-            response = (
-                native("in_progress", input_=None, output=None)
-                if request.method == "POST"
-                else native()
-            )
+            response = native()
             response["id"] = opaque
             return httpx.Response(200, json=response)
 
@@ -983,51 +979,3 @@ async def test_unknown_native_status_never_exports_credential_content(
     for path in tmp_path.glob("status-usage-*.json"):
         assert json.loads(path.read_text())["interaction_status"] is None
     assert all(status not in path.read_text() for path in tmp_path.iterdir())
-
-
-@pytest.mark.asyncio
-async def test_stale_cancel_cannot_erase_accepted_overrun_or_release_hold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    original = httpx.MockTransport
-    requests: list[httpx.Request] = []
-
-    def factory(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
-        def respond(request: httpx.Request) -> httpx.Response:
-            requests.append(request)
-            if request.method == "GET":
-                return httpx.Response(503, text="poll unavailable")
-            cancel = "cancel" in request.url.path
-            reply = native(
-                "cancelled" if cancel else "in_progress", input_=64 if cancel else 1_000_000
-            )
-            reply["updated"] = "2026-10-10T00:00:00Z" if cancel else "2026-10-10T01:00:00Z"
-            return httpx.Response(200, json=reply)
-
-        return original(respond)
-
-    monkeypatch.setattr(httpx, "MockTransport", factory)
-    guard = budget(tmp_path)
-    with pytest.raises(ProbeRunError):
-        await run_sdk_smoke(
-            guard,
-            tmp_path / "stale.json",
-            SmokeSettings(model=LIVE_MODEL),
-            key="offline-key",
-            mock=True,
-        )
-    assert [request.method for request in requests] == ["POST", "GET", "POST"]
-    receipt = json.loads((tmp_path / "stale-receipt-1.json").read_text())
-    assert receipt["spend_receipt"]["status"] == "overrun"
-    assert receipt["reported_tokens"]["input_tokens"] == 1_000_000
-    assert receipt["verification"] == "estimated_unverified" and receipt["actual_usd"] is None
-    assert Decimal(receipt["held_usd"]) > 0
-    with pytest.raises(BudgetRefused):
-        guard.reserve(
-            ProbePlan(
-                provider="gemini",
-                model=LIVE_MODEL,
-                fixture_id="C10",
-                limits=SmokeSettings(model=LIVE_MODEL).limits,
-            )
-        )

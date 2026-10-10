@@ -78,11 +78,6 @@ installed, and importing this module performs no I/O.
 
 Live evidence uses stable short aliases for opaque route segments and normalized
 identity fields before the unchanged recorder. Real provider IDs remain in memory
-for routing; message/tool content is still fully audited. Revision history from
-`usage.reconcile()` is reduced to the latest revision of the single interaction.
-Response-hook sidecars project terminal status into a closed vocabulary; unknown
-values are null. Raw HTTP usage never overrides settlement. The driver binds
-observations to the accepted interaction and checks native timestamp freshness.
-An independent observed-overrun latch preserves its original facts even when
-newer snapshots claim smaller totals. Failed tape export can still settle the
-latest verified normalized observation. Repeated polls are never summed.
+for routing; message/tool content is still fully audited. HTTP usage sidecars
+project interaction_status into a closed vocabulary; unknown values become null.
+This delta leaves merged #650 settlement behaviour unchanged.

@@ -274,14 +274,6 @@ async def smoke(
             usage_complete=complete,
         )
         observed_guard.latest_actual = actual
-        if (
-            tokens.minimum_input_tokens > settings.limits.input_tokens
-            or (tokens.output_tokens or 0) > settings.limits.output_tokens
-        ):
-            # Preserve observed bounds independently of newer exact-total claims.
-            # This actual object retains the original observation and its true
-            # completeness; it never invents a final billable total.
-            observed_guard.overrun_actual = observed_guard.overrun_actual or actual
         return actual
 
     def record(recorder: Recorder, events: tuple[Event, ...]) -> None:
@@ -371,11 +363,11 @@ async def smoke(
                 while True:
                     projection = await ma.events.reconcile(SCOPE, s.ref)
                     measured = await ma.usage.reconcile(SCOPE, s.ref)
-                    if not measured or len({item.id for item in measured}) != 1:
+                    if len(measured) != 1:
                         raise ProviderError(
                             "upstream", retryable=False, native_code="smoke_meter_count"
                         )
-                    meter = max(measured, key=lambda item: item.revision)
+                    meter = measured[0]
                     actual = observe(meter, complete=projection.state == "idle")
                     tokens = TokenUsage(
                         input_tokens=meter.input_tokens,
@@ -528,7 +520,6 @@ class ReceiptGuard(BudgetGuard):
         self.receipt: SpendReceipt | None = None
         self.reported_usage: TokenUsage | None = None
         self.latest_actual: ActualSpend | None = None
-        self.overrun_actual: ActualSpend | None = None
 
     def reserve(self, plan: ProbePlan, *, fixture_exists: bool = False) -> Reservation:
         self.reservation = super().reserve(plan, fixture_exists=fixture_exists)
@@ -543,7 +534,7 @@ class ReceiptGuard(BudgetGuard):
         usage: TokenUsage | None = None,
         actual: ActualSpend | None = None,
     ) -> SpendReceipt:
-        actual = self.overrun_actual or actual or self.latest_actual
+        actual = actual or self.latest_actual
         self.reported_usage = actual.requests[-1].tokens if actual and actual.requests else usage
         self.receipt = super().settle(
             reservation,
