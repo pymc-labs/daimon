@@ -9,16 +9,21 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.core.config import McpSettings
+from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.tool_safety import ToolCall
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .harness import make_bot
@@ -166,3 +171,54 @@ async def test_drain_waits_for_budget_notices_before_closing() -> None:
         await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]
 
     assert order == ["notices", "close"], "pending notices finish while the client is open"
+
+
+async def test_drain_retires_live_confirmation_before_client_close() -> None:
+    bot = make_bot(_make_runtime())
+    edit_started = asyncio.Event()
+    finish_edit = asyncio.Event()
+    closed = False
+    message = MagicMock()
+
+    async def edit_card(**_kwargs: object) -> None:
+        assert not closed
+        edit_started.set()
+        await finish_edit.wait()
+        assert not closed
+
+    message.edit = AsyncMock(side_effect=edit_card)
+    channel = MagicMock(send=AsyncMock(return_value=message))
+    prompt = prompt_for_tool_call(
+        ToolCall(tool_use_id="tu_1", server_name="linear", tool_name="create_issue", input={}),
+        requester_platform_user_id="111",
+        now=datetime.now(UTC),
+    )
+
+    async def turn() -> None:
+        bot._processing.add(789)  # pyright: ignore[reportPrivateUsage]
+        bot._track_processing_task(789)  # pyright: ignore[reportPrivateUsage]
+        try:
+            await discord_confirmation_hook(channel)(prompt)
+        finally:
+            bot._release_thread(789)  # pyright: ignore[reportPrivateUsage]
+
+    async def close() -> None:
+        nonlocal closed
+        assert edit_started.is_set()
+        assert finish_edit.is_set()
+        assert message.edit.await_count == 1
+        closed = True
+
+    bot.close = close  # type: ignore[method-assign]
+    turn_task = asyncio.create_task(turn())
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    with patch("daimon.adapters.discord.bot._DRAIN_GRACE_S", 0.01):
+        drain = asyncio.create_task(bot._drain_and_close())  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait({asyncio.create_task(edit_started.wait())}, timeout=1.0)
+        assert not closed
+        finish_edit.set()
+        await drain
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn_task
+    assert closed

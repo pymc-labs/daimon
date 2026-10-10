@@ -333,6 +333,35 @@ async def test_a_slow_card_edit_returns_within_budget_and_still_lands() -> None:
     assert pending_card_edits() == 0
 
 
+async def test_drain_card_edits_is_immediate_when_empty_and_leaves_hung_edit_running() -> None:
+    import asyncio
+
+    from daimon.core.posted_controls.lifecycle import (
+        drain_card_edits,
+        pending_card_edits,
+        queue_card_edit,
+    )
+
+    assert await drain_card_edits(10.0) == 0
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def hung_edit() -> None:
+        started.set()
+        await release.wait()
+
+    task = queue_card_edit(
+        hung_edit(), card_key="hung-edit", failure_errors=(ValueError,), failed_event="test.failed"
+    )
+    await started.wait()
+    start = asyncio.get_running_loop().time()
+    assert await drain_card_edits(0.02) == 1
+    assert asyncio.get_running_loop().time() - start < 0.5
+    assert pending_card_edits() == 1 and not task.cancelled()
+    release.set()
+    assert await drain_card_edits(1.0) == 0
+
+
 async def test_a_card_edit_failure_inside_the_budget_is_logged_not_raised() -> None:
     from daimon.core.posted_controls.lifecycle import edit_card_within
 

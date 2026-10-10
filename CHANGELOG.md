@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Approval cards still up during a Discord restart are retired before the client closes, so their buttons no longer stay live.
+
 ### Changed
 
 - Staging QA records deployment images and restart evidence, keeps deploy-interrupted runs silent and PENDING, and retries once after workers settle within the pass budget.

@@ -62,6 +62,27 @@ import discord
 
 log = structlog.get_logger()
 
+# Terminal writes and their repairs may outlive the turn that started them.
+_RETAINED_CARD_TASKS: set[asyncio.Task[object]] = set()
+
+
+async def drain_retained_card_tasks(timeout_s: float) -> int:
+    """Wait for retained Discord card writes without cancelling them."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while pending := {task for task in _RETAINED_CARD_TASKS if not task.done()}:
+        _, pending = await asyncio.wait(
+            pending, timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+        )
+        if pending:
+            return len(pending)
+    return 0
+
+
+def _retain_card_task(task: asyncio.Task[object]) -> None:
+    _RETAINED_CARD_TASKS.add(task)
+    task.add_done_callback(_RETAINED_CARD_TASKS.discard)
+
+
 SendFn = Callable[..., Awaitable[discord.Message]]
 EditFn = Callable[..., Awaitable[discord.Message | None]]
 DeleteFn = Callable[[discord.Message], Awaitable[None]]
@@ -199,6 +220,7 @@ class _CardWriteSequencer:
             ),
             name="discord.terminal_reassert",
         )
+        _retain_card_task(self.repair_task)
         owner._terminal_reassert_task = self.repair_task  # pyright: ignore[reportPrivateUsage]
 
     async def _repair(
@@ -625,6 +647,7 @@ class DiscordTurnLifecycle:
                                 )
 
                     task = asyncio.create_task(finish_terminal(), name="discord.terminal_edit")
+                    _retain_card_task(task)
                     self._card_writes.terminal_tasks.add(task)
                     task.add_done_callback(self._card_writes.terminal_tasks.discard)
                     task.add_done_callback(

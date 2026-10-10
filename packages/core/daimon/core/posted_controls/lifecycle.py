@@ -34,6 +34,14 @@ def pending_card_edits() -> int:
     return len(_BACKGROUND_EDITS)
 
 
+async def drain_card_edits(timeout_s: float) -> int:
+    """Wait for queued edits without cancelling any that outlive the deadline."""
+    pending = {task for task in _BACKGROUND_EDITS if not task.done()}
+    if pending:
+        _, pending = await asyncio.wait(pending, timeout=timeout_s)
+    return len(pending)
+
+
 def cancel_pending_card_edits() -> None:
     """Cancel every unfinished card edit; for test isolation only."""
     for task in list(_BACKGROUND_EDITS):
