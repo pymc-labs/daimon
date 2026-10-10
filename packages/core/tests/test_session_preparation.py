@@ -1925,7 +1925,7 @@ async def test_a_sealed_turn_on_a_reused_session_keeps_its_narrower_seal(
         deps, _sealed(_admission(account=account), seal_id="vault"), tenant=tenant, account=account
     )
     assert isinstance(reused, PreparedTurn) and reused.reused
-    await _stamp_reused_seal(deps, reused, now=lambda: _NOW)
+    await _stamp_reused_seal(deps, reused, tenant_id=tenant.id, now=lambda: _NOW)
     await transport.client().beta.sessions.events.send(
         reused.ma_session_id, events=[{"type": "user.message", "content": []}]
     )
@@ -2618,6 +2618,7 @@ async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_eng
                 deps,
                 first.ma_session_id,
                 replace(first.admission, origin_seal_ids=frozenset({"channel-1", "thread-1"})),
+                tenant_id=tenant.id,
                 now=lambda: _NOW,
             )
         return value

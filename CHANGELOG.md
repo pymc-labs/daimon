@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backend can't run on this deployment yet is refused with a message naming
   the channel's backend, never quietly run on another one.
 - Prepare offline live-scenario recipes for the 33 immutable oracle cases, with typed blockers and structural outcome assertions for the disposable Haiku QA harness.
+- Route turn seal reads and metadata updates through scoped backend ports, preserving nullable native metadata, DB publication order and SDK request bytes; prepared legacy replay and interruption retain their admitted tenant/account scope.
 
 - Refresh the shared legacy/mux oracle for main's Discord agent-name fallback, preserving exact requests, accounting and continuation facts.
 

@@ -900,6 +900,13 @@ Headless routine turns on the mux path pass the caller's authorized tenant and
 account to the shared turn driver. A missing identity is rejected before session
 assembly or provider I/O. The default legacy path retains its existing requests.
 
+Prepared turns also carry their admitted tenant/account scope through legacy
+replay, interruption and confirmation recovery. Seal publication commits before
+the existing provider read and conditional metadata update. The native
+`anthropic.session_reads@1` extension preserves omitted fields and nullable
+location metadata without constructing a provider binding. The metadata-only
+update retains the original request bytes, existing seals and busy retry policy.
+
 ## Remaining CLI, Discord memory and scheduler calls
 
 CLI and Discord memory reads retain their existing tenant authorization, pagination, formatting and errors while using the memory ports. Environment forks retain explicit null descriptions and the original native config key order. Scheduler refresh and cleanup use tenant/account scope from the session rows already read, including cleanup after an account is erased. Raw `daimon sessions get` remains a workspace operator inspection under an explicit platform scope and adds no database work. The opt-in CLI mux turn resolves and verifies the local operator's tenant/account before provider work; legacy turns retain their existing requests, deadline and billing exemption.

@@ -241,6 +241,14 @@ requires an authoritative root idle or termination record before its deadline,
 ignores previews and interrupt echoes, and closes the private stream on every
 exit. The typed `anthropic.event_history@1` extension normalizes a full SDK
 paginator walk without changing its request or termination rules.
+
+The typed `anthropic.session_reads@1` extension returns the original native
+session JSON after scope, reference and tenant-tag checks. It preserves partial
+SDK responses and nullable location metadata without constructing a binding;
+generic session records retain their validation. Turn seal stamping uses this
+read and the existing metadata-only update port, with no extra provider request.
+Prepared legacy replay and interruption pass the caller's admitted scope to the
+private transport while preserving SDK traffic and recovery behavior.
 The Anthropic environment driver exposes a scoped create-and-discard edge for legacy environment forks that ignored the SDK reply. It validates the request configuration and tenant authorization without decoding unused response fields; generic Environment records retain their existing validation.
 
 MCP agent chat and session inspection use tenant/account scopes derived from

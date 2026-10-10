@@ -48,6 +48,7 @@ from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, Resource
 from mux.drivers.anthropic.sessions_lifecycle import (
     AnthropicSessions,
     AnthropicWorkspaceTransfer,
+    SessionReads,
     SessionWalk,
     WorkspaceTransfer,
 )
@@ -115,6 +116,7 @@ class AnthropicManagedAgents:
             (CoreAdmin, "anthropic.core_admin", 1): AnthropicCoreAdmin(
                 client, self.account_scope_id, authorization
             ),
+            (SessionReads, "anthropic.session_reads", 1): native_sessions,
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
             (SessionTools, "anthropic.session_tools", 1): AnthropicSessionTools(
                 client, self.account_scope_id, authorization

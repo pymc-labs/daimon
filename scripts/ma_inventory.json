@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2132,
+  "files_scanned": 2129,
   "parse_errors": [],
   "calls": [
     {
@@ -1410,30 +1410,6 @@
         "skill_id",
         "type"
       ],
-      "response_access": []
-    },
-    {
-      "file": "packages/core/daimon/core/turn/prepare.py",
-      "line": 598,
-      "end": 598,
-      "scope": "stamp_session_seal",
-      "category": "production",
-      "resource": "sessions.retrieve",
-      "call": "deps.anthropic.beta.sessions.retrieve(ma_session_id)",
-      "request_keys": [],
-      "response_access": [
-        "current.metadata"
-      ]
-    },
-    {
-      "file": "packages/core/daimon/core/turn/prepare.py",
-      "line": 602,
-      "end": 611,
-      "scope": "stamp_session_seal",
-      "category": "production",
-      "resource": "sessions.update",
-      "call": "deps.anthropic.beta.sessions.update(ma_session_id, metadata=dict(origin_stamp(channel_id=admission.origin_channel_id, thread_id=admission.origin_thread_id, seal=recorded | admission.origin_seal_ids)))",
-      "request_keys": [],
       "response_access": []
     },
     {
@@ -5791,6 +5767,69 @@
       "response_access": []
     },
     {
+      "file": "packages/core/tests/turn/test_seal_stamp_ports.py",
+      "line": 110,
+      "end": 110,
+      "scope": "test_metadata_only_update_matches_original_wire_and_publishes_first",
+      "category": "test",
+      "resource": "sessions.retrieve",
+      "call": "client.beta.sessions.retrieve('session')",
+      "request_keys": [],
+      "response_access": [
+        "current.metadata"
+      ]
+    },
+    {
+      "file": "packages/core/tests/turn/test_seal_stamp_ports.py",
+      "line": 114,
+      "end": 124,
+      "scope": "test_metadata_only_update_matches_original_wire_and_publishes_first",
+      "category": "test",
+      "resource": "sessions.update",
+      "call": "client.beta.sessions.update('session', metadata=cast(dict[str, str | None], origin_stamp(channel_id='channel', thread_id='thread', seal=seal_ids(current.metadata) | {'channel'})))",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/turn/test_turn_call_scopes.py",
+      "line": 94,
+      "end": 96,
+      "scope": "test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_requests",
+      "category": "test",
+      "resource": "sessions.events.send",
+      "call": "client.beta.sessions.events.send('session', events=[{'type': 'user.interrupt'}])",
+      "request_keys": [
+        "type"
+      ],
+      "response_access": []
+    },
+    {
+      "file": "packages/core/tests/turn/test_turn_call_scopes.py",
+      "line": 97,
+      "end": 97,
+      "scope": "test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_requests",
+      "category": "test",
+      "resource": "sessions.events.stream",
+      "call": "client.beta.sessions.events.stream(session_id='session')",
+      "request_keys": [],
+      "response_access": [
+        "stream.close"
+      ]
+    },
+    {
+      "file": "packages/core/tests/turn/test_turn_call_scopes.py",
+      "line": 92,
+      "end": 92,
+      "scope": "test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_requests",
+      "category": "test",
+      "resource": "sessions.events.list",
+      "call": "client.beta.sessions.events.list(session_id='session')",
+      "request_keys": [],
+      "response_access": [
+        "event.type"
+      ]
+    },
+    {
       "file": "packages/mux/mux/drivers/anthropic/core_admin.py",
       "line": 60,
       "end": 60,
@@ -6700,8 +6739,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 399,
-      "end": 399,
+      "line": 414,
+      "end": 414,
       "scope": "walk",
       "category": "production",
       "resource": "sessions.list",
@@ -6711,8 +6750,19 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 384,
-      "end": 384,
+      "line": 365,
+      "end": 365,
+      "scope": "read_native",
+      "category": "production",
+      "resource": "sessions.retrieve",
+      "call": "self._client.beta.sessions.retrieve(ref.id)",
+      "request_keys": [],
+      "response_access": []
+    },
+    {
+      "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
+      "line": 399,
+      "end": 399,
       "scope": "list",
       "category": "production",
       "resource": "sessions.list",
@@ -6722,8 +6772,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 347,
-      "end": 347,
+      "line": 351,
+      "end": 351,
       "scope": "send",
       "category": "production",
       "resource": "sessions.create",
@@ -6733,8 +6783,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 354,
-      "end": 354,
+      "line": 358,
+      "end": 358,
       "scope": "create",
       "category": "production",
       "resource": "sessions.create",
@@ -6744,8 +6794,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 362,
-      "end": 362,
+      "line": 377,
+      "end": 377,
       "scope": "retrieve",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -6755,8 +6805,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/sessions_lifecycle.py",
-      "line": 493,
-      "end": 495,
+      "line": 508,
+      "end": 510,
       "scope": "apply_update",
       "category": "production",
       "resource": "sessions.update",
@@ -6766,8 +6816,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 42,
-      "end": 47,
+      "line": 58,
+      "end": 63,
       "scope": "latest_idle_is_settled",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6777,8 +6827,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 54,
-      "end": 54,
+      "line": 70,
+      "end": 70,
       "scope": "replay",
       "category": "production",
       "resource": "sessions.events.list",
@@ -6788,8 +6838,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 27,
-      "end": 27,
+      "line": 43,
+      "end": 43,
       "scope": "send",
       "category": "production",
       "resource": "sessions.events.send",
@@ -6799,8 +6849,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 35,
-      "end": 38,
+      "line": 51,
+      "end": 54,
       "scope": "open_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6810,8 +6860,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 61,
-      "end": 61,
+      "line": 77,
+      "end": 77,
       "scope": "open_interrupt_stream",
       "category": "production",
       "resource": "sessions.events.stream",
@@ -6821,8 +6871,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 64,
-      "end": 64,
+      "line": 80,
+      "end": 80,
       "scope": "archive",
       "category": "production",
       "resource": "sessions.archive",
@@ -6832,8 +6882,8 @@
     },
     {
       "file": "packages/mux/mux/drivers/anthropic/transport.py",
-      "line": 30,
-      "end": 30,
+      "line": 46,
+      "end": 46,
       "scope": "status",
       "category": "production",
       "resource": "sessions.retrieve",
@@ -16998,7 +17048,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_run_prepared_turn.py",
-      "line": 579,
+      "line": 580,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -17007,7 +17057,7 @@
     },
     {
       "file": "packages/core/tests/turn/test_run_prepared_turn.py",
-      "line": 712,
+      "line": 713,
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
@@ -17083,6 +17133,15 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_retry_status_retrying",
       "names": [
         "BetaManagedAgentsRetryStatusRetrying"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/core/tests/turn/test_turn_call_scopes.py",
+      "line": 9,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
       ],
       "category": "test"
     },

@@ -173,6 +173,10 @@ class SessionWalk(Protocol):
     def walk(self, scope: Scope) -> AsyncIterator[Session]: ...
 
 
+class SessionReads(Protocol):
+    async def read_native(self, scope: Scope, ref: ResourceRef) -> dict[str, JsonValue]: ...
+
+
 def _config[T: NativeConfig](extension: ExtensionConfig, namespace: str, model: type[T]) -> T:
     if extension.namespace != namespace or extension.version != 1:
         raise ValueError(f"expected {namespace}@1")
@@ -354,6 +358,17 @@ class AnthropicSessions:
                 self._client.beta.sessions.create(**cast(SessionCreateParams, payload))
             )
         return self._session(scope, native)
+
+    async def read_native(self, scope: Scope, ref: ResourceRef) -> dict[str, JsonValue]:
+        """Scoped SDK-accepted snapshot without constructing a generic binding."""
+        self._check(scope, ref, "session")
+        native = await provider_call(self._client.beta.sessions.retrieve(ref.id))
+        snapshot = _native_json(native)
+        if not isinstance(snapshot, dict):
+            raise ValueError("a session response must be a JSON object")
+        metadata = snapshot.get("metadata")
+        check_record(scope, ref.id, metadata if isinstance(metadata, dict) else None)
+        return snapshot
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         self._check(scope, ref, "session")

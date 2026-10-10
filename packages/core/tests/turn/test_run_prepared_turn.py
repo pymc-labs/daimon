@@ -64,6 +64,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.contracts.ids import Scope
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -1653,6 +1654,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         anthropic: object,
         session_id: str,
         user_message: str,
+        scope: Scope,
         lifecycle: TurnLifecycle,
         cancel: asyncio.Event,
         render_interval_s: object,
@@ -1664,6 +1666,8 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         send_guard: object = None,
     ) -> TurnState:
         nonlocal call_count
+        assert scope.tenant_id == str(tenant.id) and scope.account_id == str(account.id)
+        assert not scope.is_platform and not scope.is_legacy_host_authorized
         call_count += 1
         err = TurnError(kind="upstream", message="not found", cause=dead_session_cause)
         state = TurnState(error=err)
@@ -1757,6 +1761,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         anthropic: object,
         session_id: str,
         user_message: str,
+        scope: Scope,
         lifecycle: TurnLifecycle,
         cancel: asyncio.Event,
         render_interval_s: object,
@@ -1768,6 +1773,8 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         send_guard: object = None,
     ) -> TurnState:
         nonlocal call_count
+        assert scope.tenant_id == str(tenant.id) and scope.account_id == str(account.id)
+        assert not scope.is_platform and not scope.is_legacy_host_authorized
         call_count += 1
         if call_count == 1:
             err = TurnError(kind="upstream", message="not found", cause=dead_session_cause)

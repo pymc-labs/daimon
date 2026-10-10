@@ -26,7 +26,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
 import structlog
@@ -39,6 +39,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 )
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
+from daimon.core.mux_compat import legacy_call
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
@@ -70,6 +72,10 @@ from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_recording import record_turn_usage
+from mux.contracts.ids import Revision, Scope
+from mux.contracts.resources import SessionSpec
+from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -563,8 +569,23 @@ async def _decide_reuse_again(
     return replace(prepared, admission=current)
 
 
+def admitted_session_scope(admission: Admission, *, tenant_id: uuid.UUID, session_id: str) -> Scope:
+    """Use the admitted tenant and account without another ownership lookup."""
+    if admission.grant is not None and admission.grant.tenant_id != tenant_id:
+        raise ScopeViolation(session_id, "the prepared turn belongs to another tenant")
+    return resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(admission.account_id),
+        authorization_id="admitted-turn",
+    )
+
+
 async def _stamp_reused_seal(
-    deps: TurnDeps, prepared: PreparedTurn, *, now: Callable[[], dt.datetime]
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    now: Callable[[], dt.datetime],
 ) -> None:
     """Add this sealed turn's seal to a session it reuses.
 
@@ -577,30 +598,49 @@ async def _stamp_reused_seal(
     this turn: running it unstamped is the leak this exists to close.
     """
     if prepared.reused:
-        await stamp_session_seal(deps, prepared.ma_session_id, prepared.admission, now=now)
+        await stamp_session_seal(
+            deps, prepared.ma_session_id, prepared.admission, tenant_id=tenant_id, now=now
+        )
 
 
 async def stamp_session_seal(
-    deps: TurnDeps, ma_session_id: str, admission: Admission, *, now: Callable[[], dt.datetime]
+    deps: TurnDeps,
+    ma_session_id: str,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    now: Callable[[], dt.datetime],
 ) -> None:
     """Add `admission`'s seal to an existing session's recorded seal (`_stamp_reused_seal`)."""
     if not admission.origin_seal_ids or admission.origin_channel_id is None:
         return
+    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=ma_session_id)
     # Publish first, in a short transaction; no MA request holds the policy lock.
     async with deps.sessionmaker.begin() as db:
         await record_session_seals(
             db,
-            tenant_id=admission.grant.tenant_id if admission.grant is not None else None,
+            tenant_id=tenant_id,
             ma_session_id=ma_session_id,
             seals=admission.origin_seal_ids,
         )
     try:
-        current = await deps.anthropic.beta.sessions.retrieve(ma_session_id)
-        recorded = seal_ids(current.metadata)
+        backend = managed_agents(
+            deps.anthropic,
+            scope=scope,
+            resources=frozenset({("session", ma_session_id), ("agent", admission.agent.id)}),
+        )
+        ref = resource_ref(backend, "session", ma_session_id, scope=scope)
+        reads = backend.extension(SessionReads, namespace="anthropic.session_reads", version=1)
+        native = await legacy_call(reads.read_native(scope, ref))
+        metadata = native.get("metadata")
+        recorded = seal_ids(cast("dict[str, str | None] | None", metadata))
         if admission.origin_seal_ids <= recorded:
             return
-        await deps.anthropic.beta.sessions.update(
-            ma_session_id,
+        revision = Revision(local=0)
+        desired = SessionSpec(
+            agent=resource_ref(backend, "agent", admission.agent.id, scope=scope),
+            agent_revision=revision,
+            config_revision=0,
             metadata=dict(
                 origin_stamp(
                     channel_id=admission.origin_channel_id,
@@ -608,6 +648,10 @@ async def stamp_session_seal(
                     seal=recorded | admission.origin_seal_ids,
                 )
             ),
+        )
+        plan = await backend.sessions.plan_update(scope, ref, desired)
+        await legacy_call(
+            backend.sessions.apply_update(scope, plan, expected=revision, key=str(uuid.uuid4()))
         )
     except anthropic_pkg.NotFoundError:
         log.info("turn.seal_stamp_session_gone", ma_session_id=ma_session_id)
@@ -739,7 +783,7 @@ async def bind_session_impl(
         )
         if isinstance(outcome, PreparationDeferred):
             prepared_turn = await _decide_reuse_again(deps, outcome.prepared, now=now)
-            await _stamp_reused_seal(deps, prepared_turn, now=now)
+            await _stamp_reused_seal(deps, prepared_turn, tenant_id=tenant_id, now=now)
             return prepared_turn
         if isinstance(outcome, PreparationBusy):
             raise SessionBusyError(
@@ -753,7 +797,7 @@ async def bind_session_impl(
                 preserved=outcome.preserved,
             )
         prepared_turn = await _decide_reuse_again(deps, outcome, now=now)
-        await _stamp_reused_seal(deps, prepared_turn, now=now)
+        await _stamp_reused_seal(deps, prepared_turn, tenant_id=tenant_id, now=now)
         return prepared_turn
 
     try:
