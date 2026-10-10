@@ -9,6 +9,8 @@ Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test datab
 
 Fixture setup obtains mapped metadata through the public `daimon.testing.effect_recorder.database_metadata()` helper. It pins defaults on the actual mapped tables, including Python UUID/time defaults that database reflection would omit, without importing private core models from the test tree.
 
+UUID defaults on the nine additive tables from `0077_neutral_state` use a separate deterministic sequence starting at UUID integer `(1 << 120) + 1`, reset for each scenario. Host-table defaults and application UUIDs keep their original sequence, so optional lease/journal persistence cannot shift later turn controls or continuation owners. Existing tenant references and explicitly supplied binding/operation/journal keys retain their supplied values. Regression probes insert zero, one and three lease rows between host allocations against real Postgres; canonical golden files stay unchanged.
+
 ```bash
 uv run pytest -n 2 -q tests/parity/test_ma_goldens.py tests/parity/test_ma_call_ratchet.py
 uv run python tests/golden/runner.py plain_discord approval_card

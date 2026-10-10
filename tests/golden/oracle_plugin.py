@@ -65,6 +65,20 @@ TEST_DSN = os.environ["DAIMON_DATABASE__TEST_URL"]
 OUTPUT = Path(os.environ["DAIMON_ORACLE_OUTPUT"])
 COLLECTION_IDS = itertools.count(0x100000)
 HTTP_TURNS: list[HttpTurnFixtures] = []
+# Additive tables from 0077_neutral_state never allocate legacy host-control IDs.
+NEUTRAL_STATE_TABLES = frozenset(
+    {
+        "channel_config_revision",
+        "provider_binding_slot",
+        "provider_binding",
+        "thread_lease",
+        "operation",
+        "journal_session",
+        "journal",
+        "usage_observation",
+        "accounting_outbox",
+    }
+)
 PATCH.setattr(uuid, "uuid4", lambda: uuid.UUID(int=next(COLLECTION_IDS)))
 
 
@@ -280,11 +294,17 @@ def pytest_runtest_setup(item: Any) -> None:
     def fixed_uuid(context: Any) -> uuid.UUID:
         return next_uuid()
 
+    neutral_ids = itertools.count(1)
+
+    def fixed_neutral_uuid(context: Any) -> uuid.UUID:
+        return uuid.UUID(int=(1 << 120) + next(neutral_ids))
+
     def fixed_now(context: Any) -> datetime:
         return NOW
 
     metadata = database_metadata()
     for table in metadata.tables.values():
+        uuid_default = fixed_neutral_uuid if table.name in NEUTRAL_STATE_TABLES else fixed_uuid
         for column in table.columns:
             column_default = cast(Any, column.default)
             server_default = cast(Any, column.server_default)
@@ -293,13 +313,13 @@ def pytest_runtest_setup(item: Any) -> None:
                 and column_default is not None
                 and callable(column_default.arg)
             ):
-                PATCH.setattr(column_default, "arg", fixed_uuid)
+                PATCH.setattr(column_default, "arg", uuid_default)
             elif (
                 isinstance(column.type, Uuid)
                 and server_default is not None
                 and "gen_random_uuid" in str(server_default.arg)
             ):
-                PATCH.setattr(column, "default", ColumnDefault(fixed_uuid))
+                PATCH.setattr(column, "default", ColumnDefault(uuid_default))
             if isinstance(column.type, DateTime):
                 if column_default is not None and callable(column_default.arg):
                     PATCH.setattr(column_default, "arg", fixed_now)
