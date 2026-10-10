@@ -239,6 +239,7 @@ def _run_grant_command(
                                     is_external=False,
                                     config=settings.github_app,
                                     fernet=fernet,
+                                    mounted_only=True,
                                 )
                                 if _grant_session_action(action, snapshot, urls) == "rotate":
                                     # The scheduler refresh and turn start/finish take the

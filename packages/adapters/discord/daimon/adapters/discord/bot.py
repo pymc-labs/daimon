@@ -2475,15 +2475,8 @@ class DaimonBot(commands.Bot):
                         return False
                     if response.status >= 500:
                         return False
-            destination_id = notice.origin_thread_id or notice.origin_parent_channel_id
-            if destination_id is None:
-                return True  # Old invitations have no public origin; never send a DM.
-            destination = await self._channel_by_id(int(destination_id))
-            if not isinstance(destination, discord.abc.Messageable):
-                return True
-            await destination.send(
-                notice.public_text, allowed_mentions=discord.AllowedMentions.none()
-            )
+            # Only the person who connected hears about it, privately. Nobody else in
+            # the channel needs a follow-up message.
             return True
         except aiohttp.ClientError:
             return False

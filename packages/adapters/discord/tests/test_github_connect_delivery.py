@@ -24,7 +24,7 @@ class _Sessions:
 
 
 @pytest.mark.asyncio
-async def test_expired_followup_posts_count_only_in_origin_thread(
+async def test_expired_followup_posts_nothing_in_the_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -48,9 +48,9 @@ async def test_expired_followup_posts_count_only_in_origin_thread(
         notice_claimed_at=datetime.now(UTC),
     )
     assert await DaimonBot._send_connect_notice(bot, notice)  # type: ignore[arg-type]
-    bot._channel_by_id.assert_awaited_once_with(200)
+    bot._channel_by_id.assert_not_awaited()
     bot.open_member_dm.assert_not_awaited()
-    assert thread.send.await_args.args[0] == "Connected 1 repo(s), Read and write. Ready."
+    thread.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

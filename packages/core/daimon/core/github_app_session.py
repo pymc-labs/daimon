@@ -94,7 +94,9 @@ async def effective_repo_urls(
     is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
+    mounted_only: bool = False,
 ) -> tuple[str, ...]:
+    """Every repo the agent can reach, or with `mounted_only` just the mounted working repo."""
     urls, _ = await effective_repo_state(
         sessionmaker,
         tenant_id=tenant_id,
@@ -103,6 +105,7 @@ async def effective_repo_urls(
         is_external=is_external,
         config=config,
         fernet=fernet,
+        mounted_only=mounted_only,
     )
     return urls
 
@@ -116,6 +119,7 @@ async def effective_repo_state(
     is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
+    mounted_only: bool = False,
 ) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
     if is_external:
         return (), {}
@@ -135,8 +139,18 @@ async def effective_repo_state(
             fernet=fernet,
             cache=REQUESTER_CACHE,
         )
+    mounted = _mounted_repo_ids(
+        [repo.repo_id for _, repo, _ in rows],
+        working_ids={grant.repo_id for grant, _, _ in rows if grant.is_working_repo},
+    )
     return (
-        tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows)),
+        tuple(
+            sorted(
+                f"https://github.com/{repo.repo_full_name}"
+                for _, repo, _ in rows
+                if not mounted_only or repo.repo_id in mounted
+            )
+        ),
         {repo.repo_id: dict(PERMISSION_PROFILES[profile]) for _, repo, profile in rows},
     )
 
@@ -373,7 +387,13 @@ async def prepare_app_access(
         raise
     by_repo = {repo_id: item.token for item in tokens for repo_id in item.repo_ids}
     resources: list[Resource] = []
+    mounted = _mounted_repo_ids(
+        [repo.repo_id for _, repo, _ in rows],
+        working_ids={grant.repo_id for grant, _, _ in rows if grant.is_working_repo},
+    )
     for grant, repo, _ in rows:
+        if repo.repo_id not in mounted:
+            continue
         owner, name = repo.repo_full_name.split("/", 1)
         resources.append(
             {
@@ -385,6 +405,18 @@ async def prepare_app_access(
         )
     working = next((by_repo[grant.repo_id] for grant, _, _ in rows if grant.is_working_repo), None)
     return AppSessionAccess(tuple(resources), tuple(tokens), working or tokens[0].token)
+
+
+#: The sandbox holds at most one repo: the agent's working repo, chosen in setup.
+#: Every other granted repo is reachable through the vault tokens only and is
+#: cloned on demand (Derick, 2026-10-10). Mounting all grants made Managed Agents
+#: fail provisioning at 75 repos.
+MAX_MOUNTED_REPOS = 1
+
+
+def _mounted_repo_ids(repo_ids: list[int], *, working_ids: set[int]) -> set[int]:
+    """Only the working repo is mounted; none when the agent has no working repo."""
+    return {repo_id for repo_id in dict.fromkeys(repo_ids) if repo_id in working_ids}
 
 
 async def revoke_app_access(
@@ -629,6 +661,9 @@ async def _current_app_access(
     tokens: list[AppToken] = []
     resources: list[Resource] = []
     working_token: str | None = None
+    mounted = _mounted_repo_ids(
+        [repo_id for row in ordered for repo_id in row.repo_ids], working_ids=working_ids
+    )
     for group_index, row in enumerate(ordered):
         token = decrypt_issued_token(row, fernet=fernet)
         if (
@@ -656,6 +691,8 @@ async def _current_app_access(
             )
         )
         for repo_id in row.repo_ids:
+            if repo_id not in mounted:
+                continue
             repo = repos[repo_id]
             owner, name = repo.repo_full_name.split("/", 1)
             resources.append(

@@ -317,6 +317,8 @@ async def desired_snapshot_for(
                 is_external=is_external,
                 config=github_app or GithubAppSettings(),
                 fernet=fernet,
+                # Compared with the session's mounted resources: the working repo only.
+                mounted_only=True,
             )
             if mode == "app"
             else ()

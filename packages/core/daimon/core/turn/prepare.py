@@ -56,6 +56,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.github_access import get_agent_mode
+from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -334,6 +335,15 @@ async def create_ma_session(
         isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
         for resource in ma_session.resources
     )
+    # App tokens sit in the vault even when no working repo is mounted; record an
+    # issue time only when this session was actually delivered some.
+    has_app_tokens = False
+    if github_mode == "app":
+        async with deps.sessionmaker() as session:
+            has_app_tokens = any(
+                row.status == "delivered"
+                for row in await list_session_tokens(session, session_id=ma_session.id)
+            )
     snapshot = snapshot_from_created_session(
         ma_session,
         env_sha256=env_sha256,
@@ -343,7 +353,7 @@ async def create_ma_session(
         env_file_id=None,
         # `resolve_clone_token` minted the repo credential inside the
         # `create_session` call above, so "now" is when it was issued.
-        repo_token_issued_at=int(time.time()) if has_repo else None,
+        repo_token_issued_at=int(time.time()) if has_repo or has_app_tokens else None,
         vault_id=(
             ma_session.vault_ids[-1]
             if github_mode == "app" and ma_session.vault_ids

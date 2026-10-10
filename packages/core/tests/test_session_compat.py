@@ -437,3 +437,49 @@ def test_default_capabilities_match_the_probed_managed_agents_behaviour() -> Non
         )
         == DEFAULT_MA_CAPABILITIES
     ), "the default capabilities are the probe results; flipping one degrades to replacement"
+
+
+def test_token_only_app_session_is_reused_and_still_rotates() -> None:
+    # No working repo: nothing mounted, so recorded and desired repo sets are both
+    # empty and the session is reused; its vault tokens still refresh by age.
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(),
+        repo_resource_ids={},
+        vault_id="session-vault",
+        repo_token_issued_at=int(NOW.timestamp()),
+    )
+    desired = recorded.model_copy(update={"repo_token_issued_at": None})
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+        )
+        == ReuseAsIs()
+    )
+    stale = recorded.model_copy(update={"repo_token_issued_at": int(NOW.timestamp()) - 2400})
+    decision = decide_session_compatibility(
+        recorded=stale, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+    )
+    assert isinstance(decision, UpdateInPlace)
+    assert RotateAppTokens(resource_ids={}) in decision.ops
+
+
+def test_app_session_without_tokens_never_rotates() -> None:
+    # Zero grants: no mounted repo and no issued tokens, so no rotation however old.
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(),
+        repo_resource_ids={},
+        vault_id="session-vault",
+        repo_token_issued_at=None,
+    )
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=recorded, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+        )
+        == ReuseAsIs()
+    )
