@@ -146,6 +146,7 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     assert answer == "expired"
     assert sender.activities[-1].id == "m-1", "the posted card is edited in place"
     assert "Expired" in _json(sender, -1) and "Action.Execute" not in _json(sender, -1)
+    assert "Approval timed out. Ask again to run it." in _json(sender, -1)
     token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
     assert token is not None
     assert cards._controls.missing_message(token.group(1)) == EXPIRED_MESSAGE

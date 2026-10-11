@@ -41,6 +41,7 @@ CONFIRMATION_ACTION_PATTERN: Final[re.Pattern[str]] = re.compile(
 NOT_YOURS_MESSAGE: Final[str] = "Only {requester} can approve or deny this request."
 NO_LONGER_PENDING_MESSAGE: Final[str] = "This request was already answered."
 EXPIRED_MESSAGE: Final[str] = "This request expired."
+EXPIRED_FOOTER: Final[str] = "Approval timed out. Ask again to run it."
 
 
 class ConfirmationCard(BaseModel):
@@ -99,7 +100,13 @@ def build_confirmation_card(
             if state == "approved"
             else prompt.denied_action or f"{prompt.title.removesuffix('?')} not completed"
         )
-        footer = "by {requester}" if state in {"approved", "denied"} else None
+        footer = (
+            "by {requester}"
+            if state in {"approved", "denied"}
+            else EXPIRED_FOOTER
+            if state == "expired"
+            else None
+        )
     return ConfirmationCard(
         state=state,
         headline=headline,

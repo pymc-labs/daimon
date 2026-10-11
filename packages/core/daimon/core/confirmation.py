@@ -46,7 +46,7 @@ ConfirmationAnswer = Literal["approved", "denied", "expired"]
 #: How long a card waits for its button before the action is refused. The
 #: session sits idle meanwhile (no model spend), and the per-turn ceiling
 #: still bounds the whole turn.
-CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
+CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=5)
 
 
 class ConfirmationPrompt(BaseModel):
