@@ -617,10 +617,11 @@ async def set_channel_rule(
     the channel names it (`_archive_unused_copy`).
     """
     if resource_host is not None and (
-        resource_host.scope.tenant_id != str(tenant_id)
-        or (
-            actor_account_id is not None and resource_host.scope.account_id != str(actor_account_id)
-        )
+        # A native host acts for exactly one account; the caller must name it,
+        # so a host for another account in this tenant can never be accepted.
+        actor_account_id is None
+        or resource_host.scope.tenant_id != str(tenant_id)
+        or resource_host.scope.account_id != str(actor_account_id)
     ):
         raise ScopeViolation(channel_id, "channel has a foreign resource host or actor")
     ask = _Ask(channel_id, readers, writers, release_agents, subject)

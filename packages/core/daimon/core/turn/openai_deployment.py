@@ -79,6 +79,33 @@ def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
         raise AdmissionDenied(reason="backend_unsupported") from None
 
 
+def authorized_deployments(tenant_id: str) -> tuple[OpenAIDeployment, ...]:
+    """Every explicit OpenAI deployment the operator's manifest grants one tenant.
+
+    For callers outside a turn (the CLI, MCP tools) that route a tenant's or
+    channel's resources natively only where the operator authorized it. The
+    same manifest and limits as `load_deployment`. No manifest, no row for the
+    tenant, or a file that cannot be read or validated means none: nothing is
+    authorized, and callers keep their existing path.
+    """
+    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not manifest_path:
+        return ()
+    try:
+        with Path(manifest_path).open("rb") as manifest:
+            raw = manifest.read(_MAX_MANIFEST_BYTES + 1)
+        if len(raw) > _MAX_MANIFEST_BYTES:
+            return ()
+        return tuple(
+            OpenAIDeployment.model_validate(row)
+            for row in _MANIFEST.validate_json(raw)
+            if row.get("profile") == "openai.persistent_workspace"
+            and row.get("tenant_id") == tenant_id
+        )
+    except (OSError, ValidationError):
+        return ()
+
+
 def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRuntime:
     revision = request.admission.backend_revision
     if revision is None or revision.model != "gpt-6-luna":

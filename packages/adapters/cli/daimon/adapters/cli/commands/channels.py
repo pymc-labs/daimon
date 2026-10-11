@@ -16,10 +16,17 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
-from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime
+from daimon.adapters.cli.runtime import (
+    FACE_WAIT_S,
+    CliRuntime,
+    ResourceHostMismatch,
+    build_runtime,
+    request_resource_host,
+)
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
     ChannelBudgetError,
@@ -43,6 +50,7 @@ from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_admins import (
@@ -469,6 +477,59 @@ async def channels_list(
 
 
 _ADMIN_COLUMNS = ("channel_id", "role_ids", "user_ids", "updated_at")
+
+
+_OPENAI_PROFILE = "openai.persistent_workspace"
+_ANTHROPIC_PROFILE = "anthropic.managed_agents"
+
+
+async def _copy_resource_host(
+    rt: CliRuntime, *, tenant_id: uuid.UUID, platform: str, channel: str
+) -> tuple[NeutralResourceHost, uuid.UUID] | None:
+    """The OpenAI host a channel's own copy is made through, or None for the existing path.
+
+    Only with the operator capability (`rt.resource_hosts`). The channel's
+    backend is read fresh, here. A host is requested only for an OpenAI channel
+    the operator's deployment manifest authorizes for exactly this revision, in
+    the factory's workspace, under that deployment's account. Any other OpenAI
+    channel keeps the existing path; a channel on another non-Anthropic backend
+    cannot be copied yet.
+    """
+    factory = rt.resource_hosts
+    if factory is None:
+        return None
+    from daimon.core.turn.openai_deployment import authorized_deployments
+
+    async with rt.sessionmaker() as session:
+        revision = await current_backend(session, channel_ref(tenant_id, platform, channel))
+    if revision is None or revision.profile == _ANTHROPIC_PROFILE:
+        return None
+    if revision.profile != _OPENAI_PROFILE:
+        raise ChannelRuleRefused(
+            "invalid", message="This channel's backend can't make its own copy of an agent yet."
+        )
+    authorized = [
+        deployment
+        for deployment in authorized_deployments(str(tenant_id))
+        if deployment.platform == platform
+        and deployment.channel_id == channel
+        and deployment.config_digest == revision.digest
+        and deployment.project == factory.account_scope_id
+    ]
+    if len(authorized) != 1:
+        return None
+    account_id = uuid.UUID(authorized[0].account_id)
+    try:
+        host = request_resource_host(
+            rt,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            workspace=authorized[0].project,
+            operation_key=f"cli-channel-copy:{uuid.uuid4()}",
+        )
+    except ResourceHostMismatch as exc:
+        raise ChannelRuleRefused("invalid", message=str(exc)) from exc
+    return host, account_id
 
 
 def _ids(
@@ -1013,6 +1074,11 @@ async def channels_rule_set(
     )
     public_url = rt.settings.mcp.public_url if copy_from is not None else None
     try:
+        hosted = (
+            await _copy_resource_host(rt, tenant_id=tenant_id, platform=platform, channel=channel)
+            if copy_from is not None and not thread
+            else None
+        )
         change = await set_channel_rule(
             rt.anthropic,
             rt.sessionmaker,
@@ -1028,6 +1094,9 @@ async def channels_rule_set(
             channel_label=label,
             public_url=str(public_url) if public_url is not None else None,
             release_agents=release_agents,
+            resource_host=hosted[0] if hosted is not None else None,
+            # The authorized deployment's account: core binds the host's scope to it.
+            actor_account_id=hosted[1] if hosted is not None else None,
         )
     except ChannelRuleRefused as exc:
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")

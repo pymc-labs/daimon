@@ -454,6 +454,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
             copy_from="source",
             channel_label="Team Alpha",
             resource_host=host,
+            actor_account_id=uuid.UUID(case.scope.account_id),
         )
         repeated = await set_channel_rule(
             legacy,
@@ -469,6 +470,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
             copy_from="source",
             channel_label="Team Alpha",
             resource_host=host,
+            actor_account_id=uuid.UUID(case.scope.account_id),
         )
     case.trace.assert_consumed()
     anthropic.assert_consumed()

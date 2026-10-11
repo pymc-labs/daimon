@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -12,7 +13,14 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
-from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime
+from daimon.adapters.cli.runtime import (
+    CLI_AUTHORIZATION_ID,
+    FACE_WAIT_S,
+    CliRuntime,
+    build_runtime,
+    cli_principal_id,
+    request_resource_host,
+)
 from daimon.adapters.cli.tenant import (
     TenantSelector,
     discover_tenant,
@@ -161,6 +169,12 @@ async def agents_get(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
+    hosted = await _hosted_agent(rt, tenant_id=tenant_id, name=name)
+    if hosted is not None:
+        emit_rows(
+            console, [hosted], columns=("name", "id", "description", "created_at"), as_json=as_json
+        )
+        return
     agent = await find_agent_by_daimon_tag(
         rt.anthropic, tenant_id=tenant_id, name=name, include_archived=include_archived
     )
@@ -172,6 +186,90 @@ async def agents_get(
         columns=("name", "id", "description", "created_at"),
         as_json=as_json,
     )
+
+
+class _HostedAgentRow(BaseModel):
+    """An OpenAI agent read back from its provider, as `agents get` reports it."""
+
+    name: str
+    id: str
+    description: str | None
+    created_at: datetime
+    model: str
+    skills: tuple[str, ...]
+
+
+async def _hosted_agent(
+    rt: CliRuntime, *, tenant_id: uuid.UUID, name: str
+) -> _HostedAgentRow | None:
+    """The named agent from the OpenAI catalog, read back from the provider, or None.
+
+    Only with the operator capability (`rt.resource_hosts`), and only for a
+    tenant the operator's deployment manifest authorizes in the factory's
+    workspace: any other tenant keeps the existing path without the catalog
+    being opened. Under each authorized account the neutral catalog is read
+    fresh, and a host is requested only when an active agent has that name.
+    The readback retrieves the provider's agent and refuses one that differs
+    from the catalog row.
+    """
+    factory = rt.resource_hosts
+    if factory is None:
+        return None
+    from daimon.core.turn.openai_deployment import authorized_deployments
+
+    accounts = sorted(
+        {
+            deployment.account_id
+            for deployment in authorized_deployments(str(tenant_id))
+            if deployment.project == factory.account_scope_id
+        }
+    )
+    if not accounts:
+        return None
+    from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+    from mux.contracts.ids import Scope
+
+    catalog = PostgresNeutralCatalog(
+        rt.sessionmaker, provider="openai", account_scope_id=factory.account_scope_id
+    )
+    for account in accounts:
+        scope = Scope(
+            tenant_id=str(tenant_id),
+            account_id=account,
+            principal_id=cli_principal_id(rt),
+            authorization_id=CLI_AUTHORIZATION_ID,
+        )
+        named = [
+            row
+            for row in await catalog.list_agents(scope)
+            if row.agent.lifecycle == "active"
+            and (row.agent.spec.metadata or {}).get(MA_METADATA_KEY_NAME, row.agent.spec.name)
+            == name
+        ]
+        if not named:
+            continue
+        # Refuses, rather than falls back, if the host is for any other scope.
+        host = request_resource_host(
+            rt,
+            tenant_id=tenant_id,
+            account_id=uuid.UUID(account),
+            workspace=factory.account_scope_id,
+            operation_key=f"cli-agent-get:{uuid.uuid4()}",
+        )
+        view = await host.find(name)
+        if view is None:
+            return None
+        fresh = await host.read(view.revision.catalog_id)
+        spec = fresh.agent.spec
+        return _HostedAgentRow(
+            name=name,
+            id=fresh.agent.ref.id,
+            description=spec.description,
+            created_at=fresh.agent.created_at,
+            model=spec.model.id,
+            skills=tuple(skill.id for skill in spec.skills or ()),
+        )
+    return None
 
 
 class _GoogleBindingRow(BaseModel):

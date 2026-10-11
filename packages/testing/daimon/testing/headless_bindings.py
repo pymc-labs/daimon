@@ -20,11 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -33,13 +32,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+from anthropic import AsyncAnthropic
 from pydantic import JsonValue
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
 )
@@ -52,47 +49,70 @@ _GUILD_ID = 700000000000000027
 _REQUESTER = "7000000000000000270"
 _MA_AGENT_ID = "agent_qa_headless_new27"
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)\}")
-_OWNED_DATABASE = "DAIMON_DATABASE__TEST_URL"
 
 
 class BindingRefused(ValueError):
     """A binding was pointed at something this run does not own; nothing was contacted."""
 
 
-def _owned_database_identity(database_url: str) -> tuple[object, ...]:
-    """The QA host's disposable-DB policy, then this run's own test DB only."""
-    from daimon.testing.qa_mcp_host import QaHostError, check_database
+_OFFLINE_BASE_URL = "https://anthropic.invalid"
+
+
+def refuse_ambient_anthropic() -> None:
+    """Refuse any ambient provider setting by name, never reading a value.
+
+    The shared check (`daimon.testing.isolated_sdk`) snapshots names by
+    iteration and refuses every known SDK setting and any other
+    ANTHROPIC_/OPENAI_/GOOGLE_/GEMINI_ name, present even empty.
+    """
+    from daimon.testing.isolated_sdk import (
+        AmbientSDKConfigurationError,
+        _require_clean_environment,  # pyright: ignore[reportPrivateUsage]
+    )
 
     try:
-        check_database(database_url)
-    except QaHostError as err:
+        _require_clean_environment()
+    except AmbientSDKConfigurationError as err:
         raise BindingRefused(str(err)) from None
-    owned = os.environ.get(_OWNED_DATABASE)
-    if not owned:
-        raise BindingRefused(f"{_OWNED_DATABASE} names no owned test database")
-    url, mine = make_url(database_url), make_url(owned)
-    identity = (url.host, url.port or 5432, url.database, url.username)
-    if identity != (mine.host, mine.port or 5432, mine.database, mine.username):
-        raise BindingRefused(f"database {url.database!r} is not this run's test database")
-    return identity
 
 
-def check_owned_sessionmaker(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
-    """Refuse, before any connection, a factory not explicitly bound to the owned test DB.
+def isolated_anthropic(handler: Callable[[httpx.Request], httpx.Response]) -> AsyncAnthropic:
+    """An offline SDK client from the shared isolated builder, over `handler`.
 
-    Only the factory's configuration is read; no session is opened and the
-    engine never connects.
+    The builder refuses ambient settings before construction and before every
+    copy, and passes every credential, routing and header value explicitly.
     """
-    if sessionmaker.kw.get("binds"):
-        raise BindingRefused("per-entity binds are refused; bind one engine explicitly")
-    bind = sessionmaker.kw.get("bind")
-    if isinstance(bind, AsyncConnection):
-        engine = bind.engine
-    elif isinstance(bind, AsyncEngine):
-        engine = bind
-    else:
-        raise BindingRefused("the session factory needs an explicit AsyncEngine bind")
-    _owned_database_identity(engine.url.render_as_string(hide_password=False))
+    from daimon.testing.isolated_sdk import build_async_anthropic
+
+    refuse_ambient_anthropic()
+    return build_async_anthropic(
+        transport=httpx.MockTransport(handler),
+        api_key="offline-fixture",
+        base_url=_OFFLINE_BASE_URL,
+    )
+
+
+def _refuse_all(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(500, json={"error": {"message": "not served offline"}})
+
+
+def check_owned_sessionmaker(sessionmaker: object) -> None:
+    """Refuse, before any connection, a factory whose bind or any routed bind is not owned.
+
+    The shared policy (`daimon.testing.db.require_owned_sessionmaker`) reads
+    only the factory's configuration: no session is opened, no engine connects.
+    """
+    from daimon.testing.db import require_owned_sessionmaker
+
+    try:
+        require_owned_sessionmaker(sessionmaker)
+    except ValueError as err:
+        raise BindingRefused(str(err)) from None
+
+
+# Settings must name a database; the app is handed the owned factory instead, so
+# this placeholder is never connected to and no engine is built from it.
+_UNUSED_DSN = "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused_qa"
 
 
 def _owned_url(url: str, origins: frozenset[str]) -> str:
@@ -189,6 +209,7 @@ async def submit_mcp_token(
     whether the token was stored.
     """
     check_owned_sessionmaker(sessionmaker)
+    refuse_ambient_anthropic()
     import discord
     from cryptography.fernet import Fernet
     from daimon.adapters.discord.credential_modals import McpCredentialModal
@@ -205,7 +226,6 @@ async def submit_mcp_token(
         peek_credential_request,
     )
     from daimon.testing.factories import make_account, make_tenant
-    from daimon.testing.ma import build_stub_anthropic
     from pydantic import HttpUrl
 
     async with sessionmaker() as session, session.begin():
@@ -260,7 +280,7 @@ async def submit_mcp_token(
     settings.mcp.jwt_secret.get_secret_value.return_value = "q" * 32
     runtime = DiscordRuntime(
         settings=settings,
-        anthropic=build_stub_anthropic(managed_agents),
+        anthropic=isolated_anthropic(managed_agents),
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
@@ -424,7 +444,9 @@ def http_check_holds(assertion: Mapping[str, JsonValue], receipt: HttpReceipt) -
 
 
 @asynccontextmanager
-async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[dict[str, str]]:
+async def serve_catalog_hosts(
+    sessionmaker: async_sessionmaker[AsyncSession], root: Path
+) -> AsyncIterator[dict[str, str]]:
     """Serve the real MCP, notebook and report apps on loopback for `http_check`.
 
     Yields the catalog's `{env.*}` origins. Each app is built by its production
@@ -434,7 +456,6 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
     """
     from daimon.adapters.mcp.server import create_mcp_app
     from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
-    from daimon.testing.ma import build_stub_anthropic
     from daimon.testing.qa_mcp_host import scrubbed_environment
     from notebook_host import config as notebook_config
     from notebook_host import main as notebook_main
@@ -442,12 +463,13 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
     from report_host import config as report_config
     from report_host import main as report_main
 
-    _owned_database_identity(database_url)
+    check_owned_sessionmaker(sessionmaker)
+    refuse_ambient_anthropic()
     admin = [SecretStr(secrets.token_urlsafe(32))]
     with scrubbed_environment():
         settings = Settings(
             _env_file=None,  # pyright: ignore[reportCallIssue]
-            database=DatabaseSettings(url=PostgresDsn(database_url)),
+            database=DatabaseSettings(url=PostgresDsn(_UNUSED_DSN)),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-qa-synthetic-no-egress")),
             mcp=McpSettings(
                 jwt_secret=SecretStr(secrets.token_urlsafe(48)),
@@ -455,7 +477,11 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
             ),
         )
         mcp = create_mcp_app(
-            settings=settings, anthropic=build_stub_anthropic(), billing_config=None
+            settings=settings,
+            # The validated factory itself: its schema, routing and provenance are kept.
+            sessionmaker=sessionmaker,
+            anthropic=isolated_anthropic(_refuse_all),
+            billing_config=None,
         )
         notebooks = notebook_main.create_app(
             notebook_config.Settings(
@@ -480,3 +506,14 @@ async def serve_catalog_hosts(database_url: str, root: Path) -> AsyncIterator[di
             "env.notebook_host": notebook_origin,
             "env.report_host": report_origin,
         }
+
+
+def credential_request_route(bind: object) -> dict[type, object]:
+    """A per-model `binds` entry routing the credential-request model to `bind`.
+
+    For guard proofs: tests outside this package may not import ORM models, so
+    the real model reaches a session factory's routing map through here.
+    """
+    from daimon.core._models import CredentialRequest
+
+    return {CredentialRequest: bind}
