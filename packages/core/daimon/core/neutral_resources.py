@@ -158,7 +158,11 @@ class NeutralResourceHost:
         self.operation_key = operation_key
         self.resolve_pin = resolve_pin
         self._gemini_catalog: NativeCatalogReadback | None = None
-        if backend.capabilities().provider == "gemini":
+        if backend.capabilities().provider == "gemini" and (
+            resource_catalog_enabled is not False
+            or catalog_adapter is not None
+            or getattr(backend, "catalog_adapter", None) is not None
+        ):
             if (
                 resource_catalog_enabled is not True
                 or catalog_adapter is None
@@ -177,18 +181,22 @@ class NeutralResourceHost:
                 sessions, provider="gemini", account_scope_id=account_scope_id
             )
             return
-        if backend.capabilities().provider != "openai":
+        provider = backend.capabilities().provider
+        if provider == "openai":
+            profile = "openai.persistent_workspace"
+        elif provider == "gemini":
+            profile = "gemini.inline_reuse"
+        else:
             raise UnsupportedCapability(
-                ("neutral_resource_host_after_g2",), backend.capabilities().profile_id
+                ("neutral_resource_host_provider",), backend.capabilities().profile_id
             )
-        if backend.capabilities().profile_id != "openai.persistent_workspace":
+        if backend.capabilities().profile_id != profile:
             raise UnsupportedCapability(
                 ("neutral_resource_host_profile",), backend.capabilities().profile_id
             )
-        # Build the store from the same explicit routing tuple. An empty
-        # caller-supplied catalog cannot certify its private provider/workspace.
+        # Preserve the already signed inline host; it is not native A1 evidence.
         self.catalog = PostgresNeutralCatalog(
-            sessions, provider="openai", account_scope_id=account_scope_id
+            sessions, provider=provider, account_scope_id=account_scope_id
         )
 
     def check(self, agent: Agent) -> None:
@@ -226,13 +234,18 @@ class NeutralResourceHost:
             return row
         fresh = await self.backend.agents.retrieve(self.scope, row.agent.ref)
         self.check(fresh)
+        tools = (
+            _openai_native_tools(row.agent.spec)
+            if fresh.ref.provider == "openai"
+            else tuple(row.agent.spec.tools or ())
+        )
         if (
             fresh.ref != row.agent.ref
             or fresh.spec.name != row.agent.spec.name
             or fresh.spec.model != row.agent.spec.model
             or fresh.spec.system != row.agent.spec.system
             or fresh.spec.skills != row.agent.spec.skills
-            or tuple(fresh.spec.tools or ()) != _openai_native_tools(row.agent.spec)
+            or tuple(fresh.spec.tools or ()) != tools
             or tuple(fresh.spec.mcp_servers or ()) != tuple(row.agent.spec.mcp_servers or ())
             or any(
                 (fresh.spec.metadata or {}).get(key) != (row.agent.spec.metadata or {}).get(key)
@@ -432,8 +445,9 @@ class NeutralResourceHost:
             for tool in original.tools or ()
             if tool.kind != "mcp_toolset" or tool.name in server_names
         )
-        if not any(tool.name == "bash" and tool.kind == "builtin" for tool in tools):
-            tools += (ToolSpec(name="bash", kind="builtin"),)
+        execution = "bash" if self.backend.capabilities().provider == "openai" else "code_execution"
+        if not any(tool.name == execution and tool.kind == "builtin" for tool in tools):
+            tools += (ToolSpec(name=execution, kind="builtin"),)
         system = original.system
         if (original.metadata or {}).get(MA_METADATA_KEY_ISOLATED) != "true":
             system = apply_credential_guidance(system or "")
@@ -454,6 +468,9 @@ class NeutralResourceHost:
 
     async def retire(self, catalog_id: str) -> None:
         row = await self.entry(catalog_id)
+        if row.agent.ref.provider == "gemini":
+            # No fictional native deletion or local tombstone on a refused delete.
+            raise UnsupportedCapability(("agent_delete",), self.backend.capabilities().profile_id)
         await self.catalog.put_agent(
             self.scope,
             catalog_id,
@@ -597,12 +614,21 @@ class _NeutralSkillAddHost:
         await self.recheck(row.agent)
         pins = row.agent.spec.skills or ()
         present = skill_id in self.attached_ids(row.agent)
+        replacement: dict[str, object] = {"version": uploaded.version}
+        if row.agent.ref.provider == "gemini":
+            # Gemini binds its inline digest to the concrete version hash.
+            replacement["digest"] = uploaded.version
         wanted = tuple(
-            pin.model_copy(update={"version": uploaded.version}) if pin.id == skill_id else pin
-            for pin in pins
+            pin.model_copy(update=replacement) if pin.id == skill_id else pin for pin in pins
         )
         if not present:
-            wanted += (SkillRef(id=skill_id, version=uploaded.version),)
+            wanted += (
+                SkillRef(
+                    id=skill_id,
+                    version=uploaded.version,
+                    digest=uploaded.version if row.agent.ref.provider == "gemini" else None,
+                ),
+            )
         if len(wanted) > AGENT_SKILL_CAP:
             raise SkillIngestError(
                 "Uploaded, but not attached: remove a skill, then add this again."

@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-I7-MCP-OAUTH-DISCOVERY",
+  "scenario_sha256": "85ae51df972c745edccfa895c7310ef3bcf5e368bd6fb7db948d70addd4e316d",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

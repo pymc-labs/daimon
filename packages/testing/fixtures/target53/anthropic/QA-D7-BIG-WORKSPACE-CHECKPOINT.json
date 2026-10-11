@@ -1,0 +1,159 @@
+{
+  "scenario_id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+  "scenario_sha256": "b44930e88ec880aa25b198748b1c99f5b143c4aac2db329c71a913149849d8f3",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "QA checkpoint check. Run: head -c 40M /dev/urandom > qa_big.bin in your working directory, then reply with only: BIG-OK",
+      "events": [
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA checkpoint check. Run: head -c 40M /dev/urandom > qa_big.bin in your working directory, then reply with only: BIG-OK"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:bash:2",
+          "type": "agent.tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "bash",
+          "input": {
+            "command": "head -c 40M /dev/urandom > qa_big.bin"
+          },
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:bash:2:result",
+          "type": "agent.tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "tool_use_id": "qa-anthropic:41b2175092a471b8-turn-1:bash:2",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "BIG-OK"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:41b2175092a471b8-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "request_text": "Reply with only: PONG",
+      "events": [
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-2:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Reply with only: PONG"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-2:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-2:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-2:answer:2",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "PONG"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-2:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:41b2175092a471b8-turn-2:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:41b2175092a471b8-turn-2:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

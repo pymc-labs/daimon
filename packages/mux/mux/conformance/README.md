@@ -67,6 +67,15 @@ No Postgres implementation or host integration is certified by the memory oracle
 - C03 races same-key sends, reconstructs a receipt after restart, rejects changed
   content and another principal, and retains unknown delivery after a timeout
   following upstream acceptance. Retries must not add upstream effects.
+  Before the second distinct new-turn send, a bounded 60-second barrier requires
+  saved authoritative completion for the first accepted root and fresh idle
+  occupancy with no active root. A queued receipt without a root may join its
+  saved input identity to that root. Every poll checks all pages for conflicting
+  roots or reassignment against the acknowledged or previously resolved root,
+  before occupancy can authorize another send. Idle alone, EOF, previews and child or
+  foreign terminals never permit the second send; expiry refuses before the
+  acknowledgement-loss fault or provider mutation. Product send guards remain
+  unchanged.
   The memory store does not suspend inside its transactions, so its default
   sends serialize. A checked-in yielding wrapper suspends between intent and
   claim transactions, proves three claim contenders overlap, and rejects a

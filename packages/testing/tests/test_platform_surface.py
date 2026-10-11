@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -15,7 +16,11 @@ from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing.ma import build_no_retry_anthropic
+from daimon.testing.isolated_sdk import (
+    SDK_ENV_VARS,
+    AmbientSDKConfigurationError,
+    build_async_anthropic,
+)
 from daimon.testing.platform_surface import PlatformSurfaceCapture
 from daimon.testing.slack_surface import SlackSurfaceHarness
 from daimon.testing.teams_surface import TeamsSurfaceHarness
@@ -441,7 +446,13 @@ async def test_actual_host_driver_pumps_scripted_provider_into_real_platform_pos
         sent_event_bodies=bodies,
         stream_hits=hits,
     )
-    async with build_no_retry_anthropic(router) as provider:
+    async with build_async_anthropic(
+        transport=httpx.MockTransport(router.dispatch),
+        api_key="test",
+        base_url="https://api.anthropic.com",
+        headers={},
+        max_retries=0,
+    ) as provider:
 
         async def invoke(lc: Lifecycle) -> TurnState:
             await lc.post_initial()
@@ -456,9 +467,14 @@ async def test_actual_host_driver_pumps_scripted_provider_into_real_platform_pos
             )
 
         capture = await h.run(invoke)
-    assert capture.text_capture_complete and body(capture) == "provider answer"
-    assert hits == ["sess:1"] and len(bodies) == 1
-    assert capture.session_id == "sess:1" and capture.root_turn_id == "root:1"
+    if not capture.text_capture_complete or body(capture) != "provider answer":
+        raise AssertionError("host driver did not deliver its real platform answer")
+    if hits != ["sess:1"] or len(bodies) != 1:
+        raise AssertionError("host driver changed its scripted request count")
+    if capture.session_id != "sess:1" or capture.root_turn_id != "root:1":
+        raise AssertionError("platform capture changed its owned session/root")
+    if not provider.is_closed():
+        raise AssertionError("isolated provider HTTP client was not closed")
 
 
 async def test_replaced_opaque_slack_draft_still_prevents_complete_text_coverage() -> None:
@@ -567,3 +583,40 @@ async def test_teams_lost_retirement_or_controls_leaves_incomplete_capture(call:
         assert "Working on it" in " ".join(capture.messages[0].card_texts)
     else:
         assert not capture.messages[-1].control_labels
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+@pytest.mark.parametrize("name", [n for n in SDK_ENV_VARS if n.startswith("ANTHROPIC_")])
+@pytest.mark.parametrize("empty", [False, True])
+async def test_actual_platform_host_refuses_hostile_environment_before_http(
+    monkeypatch: pytest.MonkeyPatch, platform: str, name: str, empty: bool
+) -> None:
+    # Exercise the exact host caller above, not just the shared factory. Only
+    # invented settings exist here; never fetch or scrub operator values.
+    value = (
+        ""
+        if empty
+        else (
+            "https://probe.invalid"
+            if name == "ANTHROPIC_BASE_URL"
+            else "X-Probe-Evil: offline-hostile-setting"
+            if name == "ANTHROPIC_CUSTOM_HEADERS"
+            else "offline-hostile-setting"
+        )
+    )
+    ambient: dict[str, str] = {}
+
+    def forbidden_http(*args: object, **kwargs: object) -> None:
+        raise AssertionError("hostile platform provider reached HTTP allocation")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "environ", ambient)
+        scoped.setenv(name, value)
+        scoped.setattr(httpx, "AsyncClient", forbidden_http)
+        scoped.setattr(httpx, "Client", forbidden_http)
+        with pytest.raises(AmbientSDKConfigurationError) as error:
+            await test_actual_host_driver_pumps_scripted_provider_into_real_platform_posts(platform)
+        if name not in str(error.value) or (value and value in str(error.value)):
+            raise AssertionError("platform refusal exposed a value or lost the setting name")
+        if ambient != {name: value}:
+            raise AssertionError("platform provider changed the environment")

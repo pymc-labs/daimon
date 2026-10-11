@@ -1,0 +1,188 @@
+{
+  "scenario_id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+  "scenario_sha256": "f493f41c51eb81bb210a167c794aa2e401ca8f2383a6fb6d9feaf04e3e53ff8a",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki.",
+      "events": [
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Attach the MCP server at https://mcp.deepwiki.com/mcp to this channel's agent as deepwiki."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "attach_mcp_server",
+          "input": {
+            "agent_name": "qa-channel-agent",
+            "server_name": "deepwiki",
+            "url": "https://mcp.deepwiki.com/mcp",
+            "origin_context_id": "qa-origin-QA-NEW17-MCP-USABLE-NEXT-MESSAGE-1"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:380e24608b9bbbad-turn-1:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"name\":\"qa-channel-agent\",\"mcp_servers\":[{\"name\":\"deepwiki\",\"url\":\"https://mcp.deepwiki.com/mcp\"}]}"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Attached deepwiki; its tools will be available on your next message."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:380e24608b9bbbad-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "request_text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is.",
+      "events": [
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use deepwiki to say in one line what the repo pymc-labs/pymc-marketing is."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "ask_question",
+          "input": {
+            "repoName": "pymc-labs/pymc-marketing",
+            "question": "What is this repository?"
+          },
+          "mcp_server_name": "deepwiki",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:380e24608b9bbbad-turn-2:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "A Python package for Bayesian marketing models built with PyMC."
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "pymc-marketing is a Python package for Bayesian marketing models built with PyMC."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:380e24608b9bbbad-turn-2:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:380e24608b9bbbad-turn-2:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

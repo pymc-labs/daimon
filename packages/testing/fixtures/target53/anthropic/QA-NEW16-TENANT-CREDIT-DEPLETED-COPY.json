@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+  "scenario_sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

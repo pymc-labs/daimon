@@ -16,7 +16,7 @@ from mux.conformance.runner import (
 from mux.contracts.actions import UserMessage
 from mux.contracts.errors import BindingConflict, OperationConflict, ScopeViolation
 from mux.contracts.events import Event, NativeProvenance, TextPart
-from mux.contracts.ids import ResourceRef
+from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import SendReceipt
 from mux.state.journal import JournalEntry
@@ -28,6 +28,8 @@ from mux.state.usage_ledger import OutboxRow
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 TTL = timedelta(minutes=5)
+C03_COMPLETION_TIMEOUT_S = 60.0
+C03_COMPLETION_POLL_S = 0.1
 
 
 async def refused(error: type[Exception], call: Awaitable[object], message: str) -> None:
@@ -117,6 +119,81 @@ def recovered_receipt(
         )
 
 
+async def c03_completion(
+    ma: ManagedAgents, scope: Scope, session: ResourceRef, receipt: SendReceipt
+) -> None:
+    """Acceptance/replay is not root completion or permission for another turn.
+
+    Read authoritative saved root history and current occupancy, never infer
+    completion from EOF, a child/preview, elapsed sleep or an idle-only snapshot.
+    A queued receipt may acquire its root later through its saved input identity.
+    Every poll must preserve that identity, including all saved-history pages.
+    """
+    root = receipt.turn_id or None
+    try:
+        async with asyncio.timeout(C03_COMPLETION_TIMEOUT_S):
+            while True:
+                ended: set[str] = set()
+                input_roots: set[str] = set()
+                cursor: str | None = None
+                cursors: set[str] = set()
+                while True:
+                    page = await ma.events.list(scope, session, page=PageRequest(cursor=cursor))
+                    for event in page.data:
+                        if (
+                            event.session_id != session.id
+                            or event.native.provider != session.provider
+                            or event.authority not in ("record", "reconciled")
+                            or event.thread_id is not None
+                            or not event.turn_id
+                        ):
+                            continue
+                        if (
+                            event.type == "user.message"
+                            and event.payload.get("input_id") in receipt.input_ids
+                        ):
+                            input_roots.add(event.turn_id)
+                        if (
+                            event.type == "session.turn_ended"
+                            and event.payload.get("root_turn_id") == event.turn_id
+                        ):
+                            ended.add(event.turn_id)
+                    if not page.has_more:
+                        break
+                    require(
+                        page.next_cursor is not None and page.next_cursor not in cursors,
+                        "C03: completion history pagination did not advance",
+                    )
+                    cursor = page.next_cursor
+                    if cursor is not None:
+                        cursors.add(cursor)
+                require(len(input_roots) <= 1, "C03: saved input has conflicting root identities")
+                observed_root = next(iter(input_roots), None)
+                require(
+                    root is None or observed_root is None or observed_root == root,
+                    "C03: saved input root identity changed",
+                )
+                if root is None:
+                    root = observed_root
+                current = await ma.sessions.retrieve(scope, session)
+                require(
+                    current.ref.id == session.id and current.ref.provider == session.provider,
+                    "C03: completion occupancy belongs to another session",
+                )
+                if (
+                    root
+                    and root in ended
+                    and current.state == "idle"
+                    and current.active_root_turn is None
+                ):
+                    return
+                await asyncio.sleep(C03_COMPLETION_POLL_S)
+    except TimeoutError:
+        raise ConformanceFailure(
+            "C03: first root completion was not observed before deadline"
+        ) from None
+
+
 async def c03(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
     if store is None:
         return Result("C03", "pending", ("a StateStore adapter is required for operation probes",))
@@ -143,6 +220,14 @@ async def c03(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         persisted is not None and persisted.operation.id == completed[0].operation_id,
         "C03: receipt identity must match the persisted operation",
     )
+    require(
+        persisted is not None
+        and persisted.result.get("input_ids") == list(completed[0].input_ids)
+        and (
+            completed[0].turn_id is None or persisted.result.get("turn_id") == completed[0].turn_id
+        ),
+        "C03: acknowledged input/root identity must match durable evidence",
+    )
     restarted = t.restart_store(store)
     replay = await ma.events.send(s.scope, s.session.ref, inputs, key="same-key")
     require(replay == completed[0], "C03: restart must reconstruct the existing receipt")
@@ -168,6 +253,7 @@ async def c03(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport)
         "C03: another principal must not inherit an operation receipt",
     )
     require(t.mutation_count == before + 1, "C03: rejected replay must precede provider writes")
+    await c03_completion(ma, s.scope, s.session.ref, completed[0])
     t.fault("timeout_after_accept")
     unknown = await ma.events.send(s.scope, s.session.ref, inputs, key="unknown-key")
     require(unknown.status == "outcome_unknown", "C03: acceptance timeout must stay unknown")

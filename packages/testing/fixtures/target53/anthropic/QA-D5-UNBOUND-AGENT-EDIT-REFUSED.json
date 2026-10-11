@@ -1,0 +1,130 @@
+{
+  "scenario_id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+  "scenario_sha256": "4323ee270fa53d2f44f41c5c37d15ba0ae9b6ad02054a8887fbb9f4a4e76b52c",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki.",
+      "events": [
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Update the agent named qa-unbound-qa-fixture-0001: set its description to 'qa probe'. Also attach the MCP server https://mcp.deepwiki.com/mcp to it as deepwiki."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "update_agent",
+          "input": {
+            "name": "qa-unbound-qa-fixture-0001",
+            "description": "qa probe",
+            "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:376437ddfa0dbb12-turn-1:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "This agent is not bound to the caller's channel. Nothing changed."
+            }
+          ],
+          "is_error": true
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:mcp:3",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "attach_mcp_server",
+          "input": {
+            "agent_name": "qa-unbound-qa-fixture-0001",
+            "server_name": "deepwiki",
+            "url": "https://mcp.deepwiki.com/mcp",
+            "origin_context_id": "qa-origin-QA-D5-UNBOUND-AGENT-EDIT-REFUSED-1"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:mcp:3:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:376437ddfa0dbb12-turn-1:mcp:3",
+          "content": [
+            {
+              "type": "text",
+              "text": "This agent is not bound to the caller's channel. Nothing changed."
+            }
+          ],
+          "is_error": true
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:answer:4",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "I cannot edit that agent from this channel. Ask an admin to bind it here first."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:376437ddfa0dbb12-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:376437ddfa0dbb12-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

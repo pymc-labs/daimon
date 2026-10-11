@@ -1,0 +1,271 @@
+{
+  "scenario_id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+  "scenario_sha256": "b01080a8c2f67a74893bf26418671a8069a2961145eeb668e757be38b7d592ac",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "Add this skill to this channel's agent.",
+      "events": [
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Add this skill to this channel's agent."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "add_skill",
+          "input": {
+            "agent_name": "qa-channel-agent",
+            "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+            "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-1"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:7b73cebe501933bd-turn-1:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preview the qa-echo-skill bundle before confirming."
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Preview: qa-echo-skill. Confirm to add it."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:7b73cebe501933bd-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "request_text": "yes please",
+      "events": [
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "yes please"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "add_skill",
+          "input": {
+            "agent_name": "qa-channel-agent",
+            "skill_md": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n",
+            "origin_context_id": "qa-origin-QA-NEW18-SKILL-ADD-YES-PLEASE-2",
+            "content_hash": "500762765154184498354ff728da0675ecff81cac8b599ae20d43ecf9a3ad892"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:7b73cebe501933bd-turn-2:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "Confirmation is linked to the preview and this follow-up; approval capture is required."
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "I requested confirmation for qa-echo-skill."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:7b73cebe501933bd-turn-2:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-2:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "request_text": "What is the QA echo phrase?",
+      "events": [
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is the QA echo phrase?"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:bash:2",
+          "type": "agent.tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "bash",
+          "input": {
+            "command": "cat .agents/skills/qa-echo-skill/SKILL.md"
+          },
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:bash:2:result",
+          "type": "agent.tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "tool_use_id": "qa-anthropic:7b73cebe501933bd-turn-3:bash:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "---\nname: qa-echo-skill\ndescription: QA fixture skill. When asked for the QA echo phrase, reply ECHO-SKILL-OK.\n---\n\n# qa-echo-skill\n\nWhen the user asks for \"the QA echo phrase\", reply exactly `ECHO-SKILL-OK`.\n"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "ECHO-SKILL-OK"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:7b73cebe501933bd-turn-3:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7b73cebe501933bd-turn-3:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

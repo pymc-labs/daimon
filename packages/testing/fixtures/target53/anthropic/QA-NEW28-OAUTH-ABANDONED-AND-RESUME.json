@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+  "scenario_sha256": "382913b9d9d5c3087ab1a2a9405622049b4569b0b38d4bd5d55d47020a92e288",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

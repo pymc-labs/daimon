@@ -154,8 +154,9 @@ exercising retry behavior.
 The existing `build_fake_anthropic`, `build_stub_anthropic`,
 `build_no_retry_anthropic` and `ScriptedTransport.client` inherit the isolation guard. Their test key, provider
 URL, SDK timeout and retry behavior are preserved: fake/stub use two retries;
-scripted defaults to zero and honors its explicit retry budget. The existing
-`build_no_retry_anthropic` remains a separate builder outside this change.
+scripted defaults to zero and honors its explicit retry budget. The no-retry
+builder accepts either a handler or `MARouter` and keeps zero retries, including
+409/429/5xx errors. Its SDK copies retain that budget and the isolation guard.
 
 ## Owned database session factories
 
@@ -174,6 +175,16 @@ Offline admin proof fixtures skip a contributor's plain local `daimon_test`
 outside exact GitHub Actions CI, with a clear lane-database/isolation reason.
 The shared admission guard remains strict: invalid CI provenance and routed
 foreign engines are errors, rather than skipped authorization failures.
+
+# Offline platform surface capture
+
+`SlackSurfaceHarness` and `TeamsSurfaceHarness` run an invocation against the
+unchanged platform `TurnLifecycle`. They capture the adapter's actual outgoing
+SDK payloads in-process, without Slack or Teams credentials or network calls.
+This observes adapter posts, rather than a provider answer or headless return.
+Use the repository environment (`uv sync --frozen --all-packages --all-extras`);
+the harnesses require their respective installed adapter packages.
+
 ```python
 from daimon.testing.slack_surface import SlackSurfaceHarness
 
@@ -227,6 +238,8 @@ alone cannot establish what was visible earlier. Control labels and card text
 are visible leaves, but the receipt does not certify card finalization, tool or
 approval effects, admission, platform ingress, authentication or live delivery.
 No QA cell becomes PASS just because a harness returned a receipt.
+
+# Isolated provider SDK clients
 
 Pinned OpenAI and Gemini provider replays use the shared isolated SDK factories,
 with explicit offline transports and zero retries. Ambient provider settings
@@ -306,6 +319,56 @@ its ingress prefilter may return before core admission. A metered first turn,
 ledger join and executable administrative setup require separate observations.
 This hook neither mutates budgets/credit nor binds the source executor itself.
 
+```python
+import httpx
+from daimon.testing.isolated_sdk import build_async_openai
+
+transport = httpx.MockTransport(
+    lambda request: httpx.Response(200, json={"data": [], "object": "list"})
+)
+async with build_async_openai(transport=transport) as client:
+    models = await client.models.list()
+```
+
+Construction raises `AmbientSDKConfigurationError` if any variable in
+`SDK_ENV_VARS` is present, even with an empty value and even for another provider.
+Gemini additionally refuses every `GOOGLE_`/`GEMINI_` variable name (case
+insensitive), including empty or unknown future settings; unknown names and all
+values are omitted from errors. Checks iterate names before set membership,
+avoiding `os.environ` membership's implicit value lookup. Both `GOOGLE_API_KEY`
+and `GEMINI_API_KEY` are refused before Gemini construction, even with an explicit
+test key, because Google GenAI 2.7 reads them unconditionally. This includes
+provider keys, webhook/admin keys, org/project settings, custom headers, base
+URLs, Anthropic identity/configuration and Gemini credential,
+Vertex and replay settings. Errors name variables without exposing values. The
+factories never clear the process environment; explicit test keys prevent
+credential-chain fallback. Start tests in a clean environment or remove only
+the relevant variables with a scoped test fixture. Missing keys, routes or
+transports also fail before HTTP client construction. Generic proxy and certificate environment settings are
+ignored by the supplied clients.
+
+The existing `build_fake_anthropic`, `build_stub_anthropic` and
+`ScriptedTransport.client` inherit the isolation guard. Their test key, provider
+URL, SDK timeout and retry behavior are preserved: fake/stub use two retries;
+scripted defaults to zero and honors its explicit retry budget. The existing
+`build_no_retry_anthropic` remains a separate builder outside this change.
+
+## Owned database session factories
+
+Call `daimon.testing.db.require_owned_sessionmaker(factory_or_engine)` before
+opening a test-hook session. It validates the main bind and every routed
+`binds` value, including connection binds' engines, without connecting or
+changing the factory. Only local PostgreSQL `daimon_test_nc_*` lane databases
+are allowed. The `daimon_test` exception requires both `GITHUB_ACTIONS=true`
+and `CI=true`, plus `build_test_engine` provenance for a current-process
+`test_w<pid>_<8hex>` or `test_f<pid>_<8hex>` schema on every engine. Execution
+options and engine clones do not establish that provenance. Unbound factories,
+foreign or synchronous binds, URL overrides and malformed routing maps fail
+before I/O. Ordinary fixtures retain their existing behavior.
+
+For native artifact bytes, real adapter upload capture, and conservative PDF
+checks, see [output ownership observations](OUTPUT-OWNERSHIP.md). Synthetic
+protocol controls never certify model generation or a catalog PASS.
 ## Read-only turn accounting
 
 `daimon.testing.turn_accounting.TurnAccountingReader` reads Anthropic, OpenAI

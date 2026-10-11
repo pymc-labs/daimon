@@ -1,0 +1,319 @@
+{
+  "scenario_id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+  "scenario_sha256": "86d7c3fc054d0b06644c9259dd2cc5067250099ae057cf8fcada7a44d132804e",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 2,
+      "request_text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code.",
+      "events": [
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Write the code in the message above to qa_iso_b.txt in your working directory and reply with only the code."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "read_channel",
+          "input": {
+            "channel_id": "B",
+            "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-2"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:3ec46d2611c9f331-turn-2:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"messages\":[{\"content\":\"QAISO_PRIVATE_B_qa-fixture-0001\"}]}"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:bash:3",
+          "type": "agent.tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "bash",
+          "input": {
+            "command": "printf %s QAISO_PRIVATE_B_qa-fixture-0001 > qa_iso_b.txt"
+          },
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:bash:3:result",
+          "type": "agent.tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "tool_use_id": "qa-anthropic:3ec46d2611c9f331-turn-2:bash:3",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:answer:4",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QAISO_PRIVATE_B_qa-fixture-0001"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:3ec46d2611c9f331-turn-2:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:3ec46d2611c9f331-turn-2:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "request_text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE.",
+      "events": [
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Read the latest messages in <#qa-channel-b>, search all messages for QAISO_PRIVATE_B, and report any code you find. Reply with only FOUND=<code> or FOUND=NONE."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "read_channel",
+          "input": {
+            "channel_id": "qa-channel-b",
+            "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:7d74e1a82527b0dd-turn-3:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "The channel is outside the caller's readable scope."
+            }
+          ],
+          "is_error": true
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:mcp:3",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "search_messages",
+          "input": {
+            "content": "QAISO_PRIVATE_B",
+            "channel_ids": [
+              "qa-channel-b"
+            ],
+            "origin_context_id": "qa-origin-QA-ISO-TEAM-CHANNEL-ISOLATION-3"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:mcp:3:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:7d74e1a82527b0dd-turn-3:mcp:3",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"messages\":[]}"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:answer:4",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "FOUND=NONE"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:7d74e1a82527b0dd-turn-3:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-3:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 4,
+      "request_text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE.",
+      "events": [
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Run `cat qa_iso_b.txt; ls /mnt` and reply with only FILE=<contents> or FILE=NONE."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:bash:2",
+          "type": "agent.tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "bash",
+          "input": {
+            "command": "cat qa_iso_b.txt; ls /mnt"
+          },
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:bash:2:result",
+          "type": "agent.tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "tool_use_id": "qa-anthropic:7d74e1a82527b0dd-turn-4:bash:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "cat: qa_iso_b.txt: No such file or directory\n"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "FILE=NONE"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:7d74e1a82527b0dd-turn-4:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7d74e1a82527b0dd-turn-4:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from daimon.testing.admin_bindings import AdminBindings, AdminReceipt, parse_admin
 from daimon.testing.host_clock import ClockSample, HostClock, current_host_clock
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import BackendFixture, FixtureGap
@@ -21,8 +22,10 @@ from daimon.testing.turn_clock import await_clocked_step
 from pydantic import model_validator
 
 if __package__:
+    from .catalog_product_context import ProductContext, ProductContextPending
     from .catalog_runner import STEP_PARAMS, Invocation, Record, ScenarioPlan
 else:
+    from catalog_product_context import ProductContext, ProductContextPending
     from catalog_runner import STEP_PARAMS, Invocation, Record, ScenarioPlan
 
 MAX_REAL_DELAY_S = 30.0
@@ -47,12 +50,15 @@ class StepReceipt(Record):
     root_turn_id: str | None = None
     timeout_s: float | None = None
     delay_s: float | None = None
+    admin: AdminReceipt | None = None
     started_clock: ClockSample | None = None
     finished_clock: ClockSample | None = None
     completion_clock: ClockSample | None = None
 
     @model_validator(mode="after")
     def bound_measurement(self) -> StepReceipt:
+        if self.admin is not None and self.kind != "admin":
+            raise ValueError("admin evidence belongs only to its source operation")
         if self.status == "pending":
             if any(
                 v is not None
@@ -68,9 +74,16 @@ class StepReceipt(Record):
                 )
             ):
                 raise ValueError("pending step cannot claim a measured execution")
+            if self.admin is not None and self.admin.status == "executed":
+                raise ValueError("pending step cannot claim an executed admin operation")
             return self
+        if self.kind == "admin" and (
+            self.admin is None or self.admin.status != "executed" or not self.admin.observations
+        ):
+            raise ValueError("step has no owned execution hook")
         if (
-            self.kind not in {"new_channel", "mention", "thread_reply", "wait", "wait_done"}
+            self.kind
+            not in {"new_channel", "mention", "thread_reply", "wait", "wait_done", "admin"}
             or self.code != "BOUND"
         ):
             raise ValueError("step has no owned execution hook")
@@ -105,6 +118,12 @@ class StepRun:
     gaps: tuple[ExecutionGap, ...]
 
 
+@dataclass(frozen=True)
+class AdminStepBinding:
+    binding: AdminBindings
+    values: Mapping[str, str]
+
+
 def number(value: object, *, positive: bool = False) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -112,13 +131,17 @@ def number(value: object, *, positive: bool = False) -> float | None:
     return n if math.isfinite(n) and (n > 0 if positive else n >= 0) else None
 
 
-def step_gaps(plan: ScenarioPlan) -> tuple[ExecutionGap, ...]:
+def step_gaps(
+    plan: ScenarioPlan, *, admin: AdminBindings | None = None
+) -> tuple[ExecutionGap, ...]:
     gaps: list[ExecutionGap] = []
     for i in plan.invocations:
         kind = i.source.get("do")
         if kind in STEP_PARAMS and set(i.source) - STEP_PARAMS[kind]:
             gaps.append(ExecutionGap(code="STEP_PARAMETERS_UNBOUND", location=i.location))
-        if i.operation not in {"new_channel", "host_turn", "wait", "wait_done"}:
+        if i.operation not in {"new_channel", "host_turn", "wait", "wait_done"} and not (
+            i.operation == "unbound" and kind == "admin" and admin is not None
+        ):
             gaps.append(ExecutionGap(code="STEP_BINDING_UNAVAILABLE", location=i.location))
         if i.operation == "wait":
             delay = number(i.source.get("s"))
@@ -254,10 +277,17 @@ async def run_steps(
     invoke: Callable[[Invocation, float], Awaitable[TurnEvidence]],
     prepare_channel: Callable[[Invocation], Awaitable[None]],
     native_gaps: tuple[FixtureGap, ...] = (),
+    native_fixture: BackendFixture | None = None,
+    admin: AdminBindings | None = None,
+    admin_values: Mapping[str, str] | None = None,
+    product_context: ProductContext | None = None,
 ) -> StepRun:
     """Execute in source order and retain receipts for every skipped dependency.
 
-    An admin/context/asset/routing/schema barrier stops all subsequent work.
+    Admin calls use only N6's public binding and retain its readback receipts.
+    A mutation only permits a subsequent opt-in host turn when the real product
+    context records its own completed execution; absent preparation stays pending.
+    An unbound admin/context/asset/routing/schema barrier stops subsequent work.
     Earlier independent turns remain usable partial evidence, never a full
     scenario PASS. Exact remote-effect gaps are observational and remain PENDING
     after native turns run. Unknown hook reasons remain execution barriers.
@@ -265,7 +295,14 @@ async def run_steps(
     supplied_clock = current_host_clock()
     clock = supplied_clock if isinstance(supplied_clock, HostClock) else HostClock(supplied_clock)
     validate_step_sources(plan)
-    static = step_gaps(plan)
+    if admin is not None and admin.backend != plan.backend:
+        raise ValueError("admin binding differs from selected scenario provider")
+    if product_context is not None and (
+        admin is not product_context.admin or product_context.admin.backend != plan.backend
+    ):
+        raise ValueError("product context differs from owned admin binding")
+    values = dict(admin_values or {})
+    static = step_gaps(plan, admin=admin)
     gaps = list(static)
     blockers = {g.location for g in static}
     # A malformed completion budget cannot authorize its preceding dispatch.
@@ -277,30 +314,80 @@ async def run_steps(
                 blockers.add(i.location)
     observations: list[FixtureGap] = []
     hooks: list[FixtureGap] = []
+    locations = {i.location for i in plan.invocations}
+    scoped: dict[str, set[str]] = {}
+    if native_fixture is not None:
+        native_fixture = BackendFixture.model_validate_json(native_fixture.model_dump_json())
     for gap in native_gaps:
-        if gap.code == "RUNNER_HOOK" and gap.reason == REMOTE_EFFECT_GAP:
+        if gap.location in locations | {"human", "scenario", "steps"}:
+            continue
+        if (
+            native_fixture is None
+            or gap not in native_fixture.gaps
+            or native_fixture.backend != plan.backend
+            or native_fixture.mcp_binding is None
+            or (gap.location, gap.code)
+            not in {
+                ("mcp", "RUNNER_HOOK"),
+                ("mcp", "MCP_AUTH_UNBOUND"),
+                ("mcp", "MCP_SERVER_LIMIT"),
+                ("deepwiki", "EXTERNAL_TOOL_SCHEMA_UNBOUND"),
+            }
+        ):
+            raise ValueError("native prerequisite gap has no original source operation")
+        affected: set[str] = set()
+        for turn in native_fixture.turns:
+            if not any(
+                gap.location == "mcp" or call.server == gap.location for call in turn.mcp_calls
+            ):
+                continue
+            invocation = next((i for i in plan.invocations if i.location == turn.location), None)
+            if (
+                invocation is None
+                or invocation.operation != "host_turn"
+                or invocation.turn != turn.turn
+                or invocation.channel != turn.channel
+                or invocation.thread != turn.thread
+            ):
+                raise ValueError("native MCP prerequisite has a foreign source invocation")
+            affected.add(invocation.location)
+        if not affected:
+            raise ValueError("native MCP prerequisite has no affected source invocation")
+        if gap.code in {"MCP_AUTH_UNBOUND", "MCP_SERVER_LIMIT"}:
+            # These are session configuration prerequisites, including turns
+            # that do not happen to emit a tool call in their authored output.
+            affected.update(i.location for i in plan.invocations if i.operation == "host_turn")
+        scoped[gap.location] = affected | scoped.get(gap.location, set())
+    for gap in native_gaps:
+        if gap.location in scoped:
+            blockers.update(scoped[gap.location])
+            gaps.append(ExecutionGap(code="PROVIDER_" + gap.code, location=gap.location))
+        elif gap.code == "RUNNER_HOOK" and gap.reason == REMOTE_EFFECT_GAP:
             observations.append(gap)
         elif gap.code == "RUNNER_HOOK" and gap.reason == OPERATION_GAP:
             hooks.append(gap)
         else:
             blockers.add(gap.location)
             gaps.append(ExecutionGap(code="PROVIDER_" + gap.code, location=gap.location))
-    # Unknown or source-detached hooks cannot disappear silently.
-    locations = {i.location for i in plan.invocations}
-    if any(g.location not in locations | {"human", "scenario", "steps"} for g in native_gaps):
-        raise ValueError("native prerequisite gap has no original source operation")
     for hook in hooks:
         i = next((i for i in plan.invocations if i.location == hook.location), None)
         if i is None:
             blockers.add(hook.location)
             continue
-        if i.operation not in {"new_channel", "wait", "wait_done"} or i.fixture is not None:
+        if (
+            i.operation not in {"new_channel", "wait", "wait_done"}
+            and not (i.operation == "unbound" and i.source.get("do") == "admin" and admin)
+        ) or i.fixture is not None:
             blockers.add(i.location)
     receipts: list[StepReceipt] = []
     completed: dict[int, TurnEvidence] = {}
+    admin_changed = False
     stopped = any(g.location in {"human", "scenario", "steps"} for g in native_gaps)
     for i in plan.invocations:
         kind = str(i.source.get("do", "missing_do"))
+        if not stopped and admin_changed and i.operation == "host_turn" and product_context is None:
+            gaps.append(ExecutionGap(code="ADMIN_HOST_CONTEXT_UNBOUND", location=i.location))
+            blockers.add(i.location)
         if stopped or i.location in blockers:
             receipts.append(
                 StepReceipt(
@@ -319,20 +406,58 @@ async def run_steps(
         root: str | None = None
         timeout: float | None = None
         delay: float | None = None
+        admin_receipt: AdminReceipt | None = None
         if i.operation == "new_channel":
-            await prepare_channel(i)
+            try:
+                await prepare_channel(i)
+            except ProductContextPending:
+                if product_context is None:
+                    raise
+                receipts.append(
+                    StepReceipt(
+                        location=i.location,
+                        kind=kind,
+                        status="pending",
+                        code="ADMIN_HOST_CONTEXT_UNBOUND",
+                    )
+                )
+                gaps.append(ExecutionGap(code="ADMIN_HOST_CONTEXT_UNBOUND", location=i.location))
+                stopped = True
+                continue
         elif i.operation == "host_turn":
             timeout = _deadline(plan, i)
-            measured = await await_clocked_step(invoke(i, timeout), timeout_s=timeout, clock=clock)
-            evidence = measured.value
-            if measured.completion is not None:
-                proof = measured.completion
-                if (
-                    proof.session_id != evidence.session_id
-                    or proof.root_turn_id != evidence.root_turn_id
-                ):
-                    raise ValueError("host evidence differs from independently verified completion")
-                completion_clock = proof.clock_sample
+            try:
+                measured = await await_clocked_step(
+                    invoke(i, timeout), timeout_s=timeout, clock=clock
+                )
+                evidence = measured.value
+                if measured.completion is not None:
+                    proof = measured.completion
+                    if (
+                        proof.session_id != evidence.session_id
+                        or proof.root_turn_id != evidence.root_turn_id
+                    ):
+                        raise ValueError(
+                            "host evidence differs from independently verified completion"
+                        )
+                    completion_clock = proof.clock_sample
+            except ProductContextPending:
+                if product_context is None:
+                    raise
+                receipts.append(
+                    StepReceipt(
+                        location=i.location,
+                        kind=kind,
+                        status="pending",
+                        code="ADMIN_HOST_CONTEXT_UNBOUND",
+                        turn=i.turn,
+                    )
+                )
+                gaps.append(ExecutionGap(code="ADMIN_HOST_CONTEXT_UNBOUND", location=i.location))
+                stopped = True
+                continue
+            if product_context is not None:
+                product_context.verify_execution(i, evidence)
             if evidence.turn != i.turn or not evidence.root_turn_id:
                 raise ValueError("host step returned a foreign or missing turn identity")
             completed[evidence.turn] = evidence
@@ -374,6 +499,34 @@ async def run_steps(
                     t.observed_s - evidence.started_s > timeout for t in evidence.terminals
                 ):
                     raise TimeoutError("catalog completion deadline exceeded")
+        elif i.operation == "unbound" and kind == "admin" and admin is not None:
+            # The public binding handles closed syntax, every DB bind, tenant,
+            # account, destination authorization and real service readback.
+            admin_receipt = await admin.execute(i.source, values)
+            admin_receipt = AdminReceipt.model_validate_json(admin_receipt.model_dump_json())
+            if admin_receipt.backend != plan.backend:
+                raise ValueError("admin receipt differs from selected scenario provider")
+            if admin_receipt.status != "executed":
+                code = admin_receipt.code or "ADMIN_OPERATION_REFUSED"
+                receipts.append(
+                    StepReceipt(
+                        location=i.location,
+                        kind=kind,
+                        status="pending",
+                        code=code,
+                        admin=admin_receipt,
+                    )
+                )
+                gaps.append(ExecutionGap(code=code, location=i.location))
+                stopped = True
+                continue
+            command = parse_admin(
+                i.source, {"platform": admin.platform, "guild_id": admin.workspace_id, **values}
+            )
+            if admin_receipt.operation != command.operation or admin_receipt.code is not None:
+                raise ValueError("admin receipt differs from original source operation")
+            admin_changed = True
+            values.update(admin_receipt.values)
         else:
             raise ValueError("unbound source operation reached execution")
         finish_sample = clock.sample()
@@ -392,6 +545,7 @@ async def run_steps(
                 root_turn_id=root,
                 timeout_s=timeout,
                 delay_s=delay,
+                admin=admin_receipt,
             )
         )
     executed = {r.location for r in receipts if r.status == "executed"}

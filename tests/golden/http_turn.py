@@ -16,6 +16,7 @@ import anthropic
 import httpx
 import pytest
 from daimon.testing import turn_fakes
+from daimon.testing.isolated_sdk import build_async_anthropic
 from daimon.testing.ma import list_response, send_events_response
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 
@@ -160,10 +161,13 @@ class HttpTurnFixtures:
                 script.queue(ScriptedReply(request.method, request.url.path, response))
                 return script.dispatch(request)
 
-            result = anthropic.AsyncAnthropic(
+            result = build_async_anthropic(
+                transport=httpx.MockTransport(dispatch),
                 api_key="offline-fixture",
+                base_url="https://api.anthropic.com",
+                headers={},
                 max_retries=0,
-                http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch)),
+                timeout=anthropic.DEFAULT_TIMEOUT,
             )
             self.clients[key] = result
             return result

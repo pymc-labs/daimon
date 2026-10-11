@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add explicitly injected Gemini conformance recovery and pinned inline-skill preparation hooks, with isolated actual-SDK offline crash/deployment proofs and honest shared-fixture PENDING boundaries.
+
+- Restack the signed offline QA replay, artifact, preparation and credential bindings with current ingress and separate product-profile reporting; frozen catalog assertions and goldens stay unchanged.
+
 - Pin the separately signed F2-R2 workload and zero-message acceptance envelopes; reject rewritten financial approvals and retain merged A7 claim/output evidence.
 - Document the optional native footer-cost context in the prepared-turn public contract and verify its unset default.
 
@@ -130,7 +134,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an owned-test read-only turn accounting API with native usage revisions, explicit dated rate/model attribution, infrastructure unknowns and independent coverage/settlement completeness across Anthropic, OpenAI and Gemini.
 - Add opt-in in-process Discord gateway ingress with explicit HTTP/clock dependencies and real admission, queue, title-request and history observations; validate nested admission dependencies at the real callback while ordinary construction remains unchanged.
 - Add explicit offline Discord Forbidden-path conformance observation with real ingress, serialized parent notices, configured backend readback and mutation-sensitive provider-turn write checks that retain default host naming.
-- Add explicitly injected Gemini conformance recovery and pinned inline-skill preparation hooks, with isolated actual-SDK offline crash/deployment proofs and honest shared-fixture PENDING boundaries.
 
 - Add an offline Anthropic default-capability proof with eleven authored skills, builtin tools, vault-backed loopback MCP reads and normalized replay; live certification remains separate.
 - Add an opt-in test-session ownership guard that validates the main database bind and every routed bind before connections, including the registered isolated-CI exception. Its real-database policy tests skip plain local contributor databases outside GitHub Actions CI.

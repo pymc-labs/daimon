@@ -29,6 +29,7 @@ from daimon.testing.provider_replay import (
 )
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import (
+    NativePart,
     TextPart,
     ToolResultPayload,
     ToolUsePayload,
@@ -45,7 +46,7 @@ from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport as OpenAITransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
-from mux.errors import ProviderError
+from mux.errors import ProviderError, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
 from pydantic import JsonValue, ValidationError
 
@@ -79,7 +80,7 @@ def updated(tape: ProviderTape, **changes: JsonValue) -> ProviderTape:
     CASES,
     ids=[f"{s.scenario_id}:{p.backend}:{t.turn}" for s, p, t in CASES],
 )
-async def test_every_authored_native_turn_traverses_actual_sdk_and_port(
+async def test_every_authored_native_turn_traverses_sdk_or_reports_explicit_auth_refusal(
     scenario: ScenarioFixture,
     fixture: BackendFixture,
     turn: NativeTurn,
@@ -116,7 +117,20 @@ async def test_every_authored_native_turn_traverses_actual_sdk_and_port(
             assert isinstance(replay.transport, GeminiTransport)
             # A follow-up's POST is tested below through a retained driver/binding.
             # Here validate its unchanged exact wire body using the real SDK edge.
-            if "previous_interaction_id" in turn.request:
+            if "previous_interaction_id" in turn.request or fixture.mcp_binding is not None:
+                if fixture.mcp_binding is not None:
+                    # Native authenticated wire templates do not certify the
+                    # absent Gemini driver resolver; do not strip auth to pass.
+                    assert any(g.code == "MCP_AUTH_UNBOUND" for g in fixture.gaps)
+                # A driver-edge auth guard cannot treat literal fixture headers
+                # as resolver authority. Keep this authored input BLOCKED and
+                # leave its HTTP/SSE tape unconsumed rather than imply execution.
+                if fixture.mcp_binding is not None:
+                    with pytest.raises(UnsupportedCapability) as refused:
+                        await replay.transport.create(turn.request)
+                    assert refused.value.missing == ("unbound_mcp_authentication",)
+                    assert replay.wire.requests == [] and replay.wire.violations == []
+                    return
                 created = await replay.transport.create(turn.request)
                 assert created["id"] == turn.root_id
                 stream = await replay.transport.open_stream(turn.root_id)
@@ -178,7 +192,7 @@ async def test_every_authored_native_turn_traverses_actual_sdk_and_port(
                 receipt = await driver_g.events.send(
                     SCOPE, session_g.ref, (message,), key="qa-send"
                 )
-                assert receipt.turn_id == turn.root_id
+                assert receipt.turn_id == turn.root_id, replay.wire.violations
                 if turn.completion_gate:
                     replay.wire.release(turn.completion_gate)
                 stream_g = await driver_g.events.open_stream(SCOPE, session_g.ref)
@@ -351,7 +365,7 @@ def test_source_traversal_and_unmatched_secret_headers_are_not_recorded(tmp_path
 
 def test_pack_keeps_all_53_sources_context_numbering_and_typed_gaps() -> None:
     assert len(PACK.scenarios) == 53
-    assert sum(len(p.turns) for s in PACK.scenarios for p in s.providers) == 64
+    assert sum(len(p.turns) for s in PACK.scenarios for p in s.providers) == 96
     scenario, native = PACK.select("QA-I6-BARE-MENTION-THREAD-TITLE", "openai")
     assert [t.turn for t in native.turns] == [2]
     assert scenario.invocations[1]["operation"] == "context"
@@ -471,7 +485,7 @@ async def test_gemini_two_turns_keep_real_binding_history_and_exact_post_count()
                 (UserMessage(content=(TextPart(text=turn.request_text),)),),
                 key="one" if index == 0 else "two",
             )
-            assert receipt.turn_id == turn.root_id
+            assert receipt.turn_id == turn.root_id, replay.wire.violations
             stream = await driver.events.open_stream(SCOPE, session.ref)
             events = [e async for e in stream]
             await close_iterator(stream)
@@ -524,3 +538,52 @@ def test_native_blob_pin_rejects_mutation(tmp_path: Path) -> None:
         load_provider_fixtures(
             tmp_path / "fixtures/index.json", catalog_root=tmp_path / "fixtures/catalog"
         )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "fixture", "turn"),
+    [(s, p, t) for s, p, t in CASES if p.backend == "gemini" and p.mcp_binding is not None],
+    ids=[
+        f"{s.scenario_id}:{t.turn}"
+        for s, p, t in CASES
+        if p.backend == "gemini" and p.mcp_binding is not None
+    ],
+)
+def test_blocked_gemini_mcp_templates_retain_pure_decoding_not_execution_credit(
+    scenario: ScenarioFixture,
+    fixture: BackendFixture,
+    turn: NativeTurn,
+) -> None:
+    from datetime import UTC, datetime
+
+    from mux.drivers.gemini.normalize import saved_events
+
+    assert any(g.code == "MCP_AUTH_UNBOUND" for g in fixture.gaps)
+    events = list(
+        saved_events(
+            turn.snapshot,
+            ref("gemini", turn.session_id),
+            root=turn.root_id,
+            now=datetime(2026, 10, 10, tzinfo=UTC),
+        )
+    )
+    calls = {
+        p.call_id: p
+        for e in events
+        if isinstance(p := e.typed_payload(), ToolUsePayload) and p.executor == "mcp"
+    }
+    results = {
+        p.call_id: p for e in events if isinstance(p := e.typed_payload(), ToolResultPayload)
+    }
+    assert set(calls) == {call.call_id for call in turn.mcp_calls}
+    for expected in turn.mcp_calls:
+        assert calls[expected.call_id].tool_name == expected.name
+        assert calls[expected.call_id].input == expected.arguments
+        assert calls[expected.call_id].mcp_server == expected.server
+        result = results[expected.call_id]
+        assert result.is_error == expected.result["isError"]
+        assert len(result.content) == 1 and isinstance(result.content[0], NativePart)
+        assert result.content[0].namespace == "gemini.tool_result"
+        assert result.content[0].payload["result"] == expected.result
+    # These are hypothetical decoded records, not provider dispatch, completion,
+    # authenticated host execution or observations for the outcome oracle.

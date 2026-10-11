@@ -93,6 +93,50 @@ the resource-host stack does not provide neutral channel-copy archive. Binding
 an agent-scoped upload would not preserve the frozen channel-skill semantics.
 These paths need their owning product edges before they can execute; the
 optional callback does not waive those gaps.
+observations or admission gaps. Resource operations use the optional `resource_edge(AdminCommand) -> AdminReceipt`.
+`daimon.testing.admin_resources.ResourceAdminBindings` now supplies real rule/copy
+and confirmed Add-skill services. Attach it to `binding.resource_edge`; provide
+an actual driver, explicit provider workspace and run operation-key namespace
+for OpenAI/Gemini, plus an exact path-to-checked-bundle fixture manifest. Commands
+never read arbitrary fixture paths. Each operation derives its key from the
+original command and bundle hash; a two-channel isolation setup does not reuse
+one mutation key. Fresh authorization also runs inside the callback.
+
+Fork receipts expose the persisted `fork.name`; alternate backends also expose
+`fork.id`, `fork.catalog_id` and `fork.catalog_revision`. Add-skill refreshes
+those identities after immutable publication, so subsequent preparation can
+use the current catalog revision. N9 must merge these returned fixture values
+and prepare with the actual binding scope, persisted backend revision and fresh
+policy. Default agents/library fixtures must themselves be provisioned through
+product APIs, as the tests do; a fixture value alone cannot create an agent.
+
+| Resource source sets | Anthropic | OpenAI/Gemini |
+|---|---|---|
+| D14, D8, ISO, NEW12, NEW17, NEW18 | Actual copy and product archive | Actual copy; cleanup pending |
+| D1, D7 | Actual channel-skill add/remove with readback | ADMIN_NEUTRAL_CHANNEL_SKILLS_UNBOUND |
+| NEW19 | Actual fork/Add; delete pending | Actual fork/Add; delete and cleanup pending |
+| D5 | ADMIN_AGENT_SPEC_FIXTURE_UNBOUND / ADMIN_AGENT_ARCHIVE_UNBOUND | Same |
+
+This continuation binds eight additional Anthropic **admin sets** (potential
+8 bucket removals, total26 with common's18) after runner composition; no full
+cell PASS is claimed. All resource sets on OpenAI/Gemini still have a pending
+teardown or channel-skill edge. OpenAI cleanup is
+`ADMIN_NEUTRAL_COPY_ARCHIVE_UNBOUND`; Gemini is
+`ADMIN_GEMINI_AGENT_DELETE_UNSUPPORTED`. Both refuse before catalog/native
+mutation. Channel-extra skills are never replaced by an agent upload. NEW19's
+missing delete edge is `ADMIN_SKILL_DELETE_PRODUCT_EDGE_UNBOUND`, even though
+its source permits one specific expected CLI failure: pending is not that failure.
+The unbound agent YAML is not replaced with a fabricated resource.
+
+The frozen negative credit command contains `-<balance>`; current CLI accepts
+positive credits only. N2 owns credential submit and D14's CLI assertions;
+N9 owns source order, outcomes and platform observations. These callbacks
+neither wire the runner nor replace the unchanged actual CLI with a simulated
+output. Actual-SDK proofs include source-owned skill reupload on fork and the
+retained Gemini skill in an interaction request. Scripted native responses and
+Gemini MemoryStorage/StateStore are offline fixtures, not production durability
+or live capability certification. Default Anthropic fork requests are compared
+as raw bytes with the direct product service. No production edge is changed.
 
 Run the included focused tests on the lane DB. They also cover repeated product
 provisioning/configuration, denied cross-tenant/channel operations, token/unknown
@@ -105,3 +149,12 @@ Every sessionmaker destination is checked before I/O: the main bind and each per
 Both provisioning and callbacks use the public `daimon.testing.db.require_owned_sessionmaker()` guard. They validate every main/model bind with the shared isolated-CI exception; no admin-local database policy remains. Offline HTTP clients disable ambient proxy and TLS overrides.
 
 Admin SDK clients are built through the shared `daimon.testing.isolated_sdk` factories, including their guarded SDK reconstruction and native User-Agent preservation. ORM-specific bind routing tests live in the permitted `packages/testing/tests` tree; the T9 allowlist is unchanged.
+
+Dispatched and direct resource callbacks require the same loopback/database/CI
+provenance guard before DB or SDK I/O. CI regressions read the original fixture
+database/schema and real fork/attachment catalog state; plain shared-CI engines,
+remote hosts and URL overrides refuse before connection or native requests.
+
+Resource fixtures refuse provider SDK environment overrides by name rather than erasing them, and construct explicit offline SDK clients. Direct resource callbacks also reject late Anthropic overrides and foreign per-model routes before I/O.
+
+Resource fixtures use shared OpenAI/Gemini factories, with complete owned sync/async/TLS transports and SDK reconstruction guards. Actual fixture-constructor value traps cover SSL_CERT_FILE, SSL_CERT_DIR and HTTPS_PROXY; late OpenAI settings are rejected by copy, with_options and the product SDKTransport constructor before native I/O. Both admin API test modules now live in packages/testing/tests.

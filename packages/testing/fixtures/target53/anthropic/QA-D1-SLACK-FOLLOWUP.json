@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-D1-SLACK-FOLLOWUP",
+  "scenario_sha256": "c8763338a57830bec4071e7567d407e7a45ae4b395e48b71e488e33e74f97e87",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

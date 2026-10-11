@@ -10,7 +10,8 @@ import argparse
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -22,6 +23,8 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState, extract_final_response
+from daimon.testing.admin_bindings import AdminBindings
+from daimon.testing.anthropic_fixtures import load_anthropic_fixtures
 from daimon.testing.discord_surface import DiscordSurfaceCapture
 from daimon.testing.host_clock import current_host_clock
 from daimon.testing.ma import send_events_response
@@ -56,7 +59,7 @@ from daimon.testing.provider_fixtures import (
 )
 from daimon.testing.turn_clock import ClockedLifecycle, NativeRoot, await_root_completion
 from mux.contracts.events import TurnEndedPayload
-from mux.contracts.ids import ResourceRef, Scope, ThreadRef
+from mux.contracts.ids import Provider, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.resources.session_tools import SessionTools
 from mux.state.memory import MemoryStateStore
@@ -64,6 +67,8 @@ from mux.state.store import binding_slot
 from pydantic import Field, JsonValue, computed_field, model_validator
 
 if __package__:
+    from .anthropic_catalog_replay import AnthropicRecipe, AnthropicTurnSource
+    from .catalog_product_context import ProductContext
     from .catalog_runner import (
         FROZEN_TARGET_SHA256,
         PROVIDERS,
@@ -75,7 +80,7 @@ if __package__:
         expand_text,
         sha,
     )
-    from .catalog_steps import ExecutionGap, StepReceipt, run_steps, step_gaps
+    from .catalog_steps import AdminStepBinding, ExecutionGap, StepReceipt, run_steps, step_gaps
     from .discord_catalog_surface import bind_discord_text
     from .gemini_catalog_replay import execute_gemini_turns
     from .headless_output import HeadlessOutput, capture_headless_return
@@ -85,7 +90,18 @@ if __package__:
         bind_platform_text,
         evaluate_platform_catalog,
     )
+    from .rejected_token_catalog import (
+        SCENARIO as REJECTED_TOKEN_SCENARIO,
+    )
+    from .rejected_token_catalog import (
+        RejectedTokenBinding,
+        RejectedTokenRun,
+        rejected_token_host_outcome,
+        rejected_token_outcome,
+    )
 else:
+    from anthropic_catalog_replay import AnthropicRecipe, AnthropicTurnSource
+    from catalog_product_context import ProductContext
     from catalog_runner import (
         FROZEN_TARGET_SHA256,
         PROVIDERS,
@@ -97,7 +113,7 @@ else:
         expand_text,
         sha,
     )
-    from catalog_steps import ExecutionGap, StepReceipt, run_steps, step_gaps
+    from catalog_steps import AdminStepBinding, ExecutionGap, StepReceipt, run_steps, step_gaps
     from discord_catalog_surface import bind_discord_text
     from gemini_catalog_replay import execute_gemini_turns
     from headless_output import HeadlessOutput, capture_headless_return
@@ -106,6 +122,13 @@ else:
         CatalogLifecycle,
         bind_platform_text,
         evaluate_platform_catalog,
+    )
+    from rejected_token_catalog import SCENARIO as REJECTED_TOKEN_SCENARIO
+    from rejected_token_catalog import (
+        RejectedTokenBinding,
+        RejectedTokenRun,
+        rejected_token_host_outcome,
+        rejected_token_outcome,
     )
 
 
@@ -228,7 +251,8 @@ class CellResult(Record):
     source_sha256: str
     product_profile: ProductProfileName = "default"
     profile_state: Literal["executed", "unavailable", "unbound"] = "executed"
-    mode: Literal["offline_scripted"] = "offline_scripted"
+    mode: Literal["offline_scripted", "offline_admin_credential"] = "offline_scripted"
+    admin_credential: RejectedTokenRun | None = Field(default=None, exclude_if=lambda v: v is None)
     gaps: tuple[ExecutionGap, ...]
     evidence: RunEvidence
     catalog_outcome: OutcomeReport
@@ -248,6 +272,8 @@ class CellResult(Record):
     def status(self) -> Status:
         if self.catalog_outcome.status == "FAIL" or self.host_outcome.status == "FAIL":
             return "FAIL"
+        if self.mode == "offline_admin_credential" and self.host_outcome.status == "PENDING":
+            return "PENDING"
         if self.gaps:
             return "PENDING"
         return self.catalog_outcome.status
@@ -261,12 +287,43 @@ class CellResult(Record):
             raise ValueError("expected failure differs from reviewed catalog source")
         return self
 
+    @model_validator(mode="after")
+    def credential_administration_is_not_a_turn(self) -> CellResult:
+        admin = self.admin_credential
+        if admin is None:
+            if self.mode == "offline_admin_credential":
+                raise ValueError("credential administration needs its actual observation envelope")
+            return self
+        if (
+            self.mode != "offline_admin_credential"
+            or (self.scenario_id, self.backend, self.source_sha256)
+            != (admin.scenario_id, admin.backend, admin.source_sha256)
+            or (self.evidence.scenario_id, self.evidence.backend)
+            != (self.scenario_id, self.backend)
+            or self.evidence.turns
+            or self.gaps
+            or self.step_receipts
+            or self.headless_outputs
+            or self.discord_surfaces
+            or self.platform_surfaces
+            or self.rendered_text
+            or self.expected_failure is not None
+            or self.request_count != 0
+            or self.catalog_outcome != rejected_token_outcome(admin)
+            or self.host_outcome != rejected_token_host_outcome(admin)
+        ):
+            raise ValueError("credential administration cannot claim or replace turn evidence")
+        return self
+
     @computed_field
     @property
     def reported_status(
         self,
     ) -> Literal["PASS", "PASS under opt-in profile", "FAIL", "EXPECTED-FAIL", "PENDING"]:
         if self.product_profile == "opt-in-product" and self.profile_state != "executed":
+            return "PENDING"
+        # The mapped readback is diagnostic; the frozen invalid SQL earns no cell credit.
+        if self.mode == "offline_admin_credential" and self.host_outcome.status == "PENDING":
             return "PENDING"
         failures = [
             i for i, check in enumerate(self.catalog_outcome.checks) if check.status == "FAIL"
@@ -464,10 +521,13 @@ async def _run_turn(
     plan: ScenarioPlan,
     invocation: Invocation,
     tape: ReplayTurn,
-    store: MemoryStateStore,
-    binding: ProviderBinding,
-    scope: Scope,
+    store: MemoryStateStore | None,
+    binding: ProviderBinding | None,
+    scope: Scope | None,
     timeout_s: float = 10.0,
+    *,
+    native: AnthropicTurnSource | None = None,
+    product_context: ProductContext | None = None,
 ) -> tuple[
     TurnEvidence,
     int,
@@ -477,6 +537,18 @@ async def _run_turn(
     PlatformSurfaceCapture | None,
 ]:
     """Capture journal authority and all selections in this owned host window."""
+    if product_context is not None:
+        product_capture = await product_context.run(plan, invocation, native, timeout_s)
+        return (
+            product_capture.evidence,
+            product_capture.request_count,
+            product_capture.output.text if product_capture.output else "",
+            product_capture.output,
+            product_capture.lifecycle.capture,
+            product_capture.lifecycle.platform_capture,
+        )
+    if store is None or binding is None or scope is None:
+        raise ValueError("scripted host requires a selected binding and scope")
     if invocation.turn is None:
         raise ValueError("host invocation has no catalog turn")
     channel = next(b for b in plan.bindings if b.ref == invocation.channel)
@@ -497,33 +569,34 @@ async def _run_turn(
     key = f"host-turn-{invocation.turn}"
     persistence = TurnPersistence(store, binding, scope, operation_key=key)
     transport = ScriptedTransport()
-    # Verify the prepared session's frozen agent model through real SDK parsing.
-    native_session = ma_session(id=session.id, model=channel.agent_model)
-    transport.queue(
-        ScriptedReply(
-            "GET",
-            f"/v1/sessions/{session.id}",
-            httpx.Response(200, json=native_session.model_dump(mode="json")),
-        ),
-        ScriptedReply.stream(
-            f"/v1/sessions/{session.id}/events/stream",
-            [cast(dict[str, object], event) for event in tape.events],
-        ),
-        ScriptedReply(
-            "POST",
-            f"/v1/sessions/{session.id}/events",
-            send_events_response([tape.events[0]]),
-            request_json={
-                "events": [
-                    {
-                        "type": "user.message",
-                        "content": [{"type": "text", "text": tape.request_text}],
-                    }
-                ]
-            },
-            check_json=True,
-        ),
-    )
+    if native is None:
+        # Verify the prepared session's frozen agent model through real SDK parsing.
+        native_session = ma_session(id=session.id, model=channel.agent_model)
+        transport.queue(
+            ScriptedReply(
+                "GET",
+                f"/v1/sessions/{session.id}",
+                httpx.Response(200, json=native_session.model_dump(mode="json")),
+            ),
+            ScriptedReply.stream(
+                f"/v1/sessions/{session.id}/events/stream",
+                [cast(dict[str, object], event) for event in tape.events],
+            ),
+            ScriptedReply(
+                "POST",
+                f"/v1/sessions/{session.id}/events",
+                send_events_response([tape.events[0]]),
+                request_json={
+                    "events": [
+                        {
+                            "type": "user.message",
+                            "content": [{"type": "text", "text": tape.request_text}],
+                        }
+                    ]
+                },
+                check_json=True,
+            ),
+        )
     clock = current_host_clock()
     started = clock()
     root = cast(str, tape.events[0]["id"])
@@ -558,7 +631,15 @@ async def _run_turn(
             raise ValueError("native completion binding changed")
         return NativeRoot(session, root, journal)
 
-    async with transport.client() as client:
+    async with AsyncExitStack() as clients:
+        native_replay = (
+            await clients.enter_async_context(native.client(session.id)) if native else None
+        )
+        client = (
+            native_replay.client
+            if native_replay is not None
+            else await clients.enter_async_context(transport.client())
+        )
         request = TurnBackendRequest(
             profile=channel.revision.profile,
             client=client,
@@ -621,19 +702,31 @@ async def _run_turn(
                 if not states or states[-1].error is not error:
                     raise
     observed = clock()
-    # assert_consumed uses bare asserts; explicit guards must survive Python -O.
-    if transport.violations or transport.replies:
+    # Legacy ScriptedTransport uses bare asserts; native WireReplay is explicit.
+    if native_replay is not None:
+        native_replay.wire.assert_consumed()
+    elif transport.violations or transport.replies:
         raise ValueError("scripted HTTP capture did not close cleanly")
     if [event.model_dump(mode="json").get("id") for event in lifecycle.sse_events] != [
         event["id"] for event in tape.events
     ]:
         raise ValueError("scripted SSE capture did not consume every record")
+    # Normalize SDK-populated optional defaults through the same event schema.
+    # Arbitrary JSON input values remain intact; only model fields omit None.
+    if native is not None and any(
+        event.model_dump(mode="json", exclude_none=True)
+        != type(event).model_validate(expected).model_dump(mode="json", exclude_none=True)
+        for event, expected in zip(lifecycle.sse_events, tape.events, strict=True)
+    ):
+        raise ValueError("native SSE payload differs from its pinned recipe")
     operation = await store.get_operation(scope, f"{key}:send:0")
     if operation is None or not operation.result or (operation.result.get("input_ids") != [root]):
         raise ValueError("root is not the acknowledged submitted input")
     if len(states) != 1:
         raise ValueError("headless invocation did not produce exactly one host state")
     state = states[0]
+    if native is not None:
+        native.verify_usage(state)
     if state.error is None and output is None:
         raise ValueError("successful headless invocation has no return receipt")
     if output is not None and (
@@ -723,7 +816,7 @@ async def _run_turn(
         raise ValueError("host failed despite a completed or missing journal terminal")
     return (
         evidence,
-        len(transport.requests),
+        len(native_replay.wire.requests) if native_replay is not None else len(transport.requests),
         output.text if output is not None else "",
         output,
         lifecycle.capture,
@@ -736,8 +829,46 @@ async def execute_cell(
     replay: ScenarioReplay | None,
     *,
     native_gaps: tuple[FixtureGap, ...] = (),
+    native_recipe: AnthropicRecipe | None = None,
+    admin: AdminBindings | None = None,
+    admin_values: Mapping[str, str] | None = None,
+    product_context: ProductContext | None = None,
+    rejected_token: RejectedTokenBinding | None = None,
 ) -> CellResult:
+    if rejected_token is not None:
+        if native_gaps or any(
+            value is not None
+            for value in (replay, native_recipe, admin, admin_values, product_context)
+        ):
+            raise ValueError("credential administration cannot replace selected turn inputs")
+        observed = await rejected_token.execute(plan)
+        return CellResult(
+            scenario_id=plan.scenario.id,
+            backend=plan.backend,
+            scored=plan.scored,
+            source_sha256=plan.scenario.sha256,
+            mode="offline_admin_credential",
+            admin_credential=observed,
+            gaps=(),
+            evidence=RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=()),
+            catalog_outcome=rejected_token_outcome(observed),
+            host_outcome=rejected_token_host_outcome(observed),
+            input_provenance="real-modal-loopback-post-scoped-readback",
+        )
+    if native_recipe is not None:
+        native_recipe.validate(plan)
+        if replay != ScenarioReplay.model_validate(native_recipe.scenario.model_dump(mode="json")):
+            raise ValueError("Anthropic execution differs from its selected native recipe")
+        if native_gaps:
+            raise ValueError("Anthropic native gaps must come from the selected recipe")
+        native_gaps = native_recipe.execution_gaps
     gaps: list[ExecutionGap] = []
+    if native_recipe is not None:
+        gaps.extend(
+            ExecutionGap(code="PROVIDER_" + g.code, location=g.location)
+            for g in native_recipe.gaps
+            if g.location in {"mcp", "deepwiki"}
+        )
     evidence = RunEvidence(scenario_id=plan.scenario.id, backend=plan.backend, turns=())
     values = replay.values if replay is not None else {}
     try:
@@ -770,11 +901,13 @@ async def execute_cell(
     tapes: dict[int, ReplayTurn] = {}
     if replay is not None:
         tapes = {t.turn: t for t in replay.turns}
-        if set(tapes) != {i.turn for i in host_invocations}:
+        if native_recipe is None and set(tapes) != {i.turn for i in host_invocations}:
             raise ValueError("replay must cover exactly the planned host turns")
         for invocation in host_invocations:
             if invocation.turn is None or invocation.text is None:
                 raise ValueError("host invocation lacks turn/text")
+            if invocation.turn not in tapes:
+                continue  # Native recipe validation requires an explicit pinned prerequisite gap.
             if expand_text(invocation.text, replay.values) != tapes[invocation.turn].request_text:
                 raise ValueError("replay request differs from the planned text")
     if replay is not None and plan.scenario.id == TABLE_SCENARIO:
@@ -796,16 +929,48 @@ async def execute_cell(
     if replay is not None and not any(
         g.code == "REPLAY_TABLE_CONTROL_NOT_EQUIVALENT" for g in gaps
     ):
-        store = MemoryStateStore()
+        store = MemoryStateStore() if product_context is None else None
         bindings: dict[tuple[str, str], ProviderBinding] = {}
 
         async def prepare_channel(invocation: Invocation) -> None:
+            if product_context is not None:
+                await product_context.configure(invocation)
+                return
             channel = next(b for b in plan.bindings if b.ref == invocation.channel)
             check_backend(channel.revision)
+            if store is None:
+                raise ValueError("unbound scripted state")
             await store.put_config_revision(channel.revision)
 
         async def invoke(invocation: Invocation, timeout_s: float) -> TurnEvidence:
             nonlocal requests
+            if invocation.turn not in tapes:
+                raise ValueError("host reached an omitted native turn")
+            if product_context is not None:
+                result = await _run_turn(
+                    plan,
+                    invocation,
+                    tapes[invocation.turn],
+                    store,
+                    bindings.get((invocation.channel or "", invocation.thread or "")),
+                    None,
+                    timeout_s,
+                    native=native_recipe.turn(invocation.turn) if native_recipe else None,
+                    product_context=product_context,
+                )
+                turn, count, text, output, surface, platform_surface = result
+                turns.append(turn)
+                requests += count
+                rendered.append(text)
+                if output is not None:
+                    outputs.append(output)
+                if surface is not None:
+                    surfaces.append(surface)
+                if platform_surface is not None:
+                    platform_surfaces.append(platform_surface)
+                return turn
+            if store is None:
+                raise ValueError("unbound scripted state")
             channel = next(b for b in plan.bindings if b.ref == invocation.channel)
             scope = Scope(
                 tenant_id=channel.revision.channel.tenant_id,
@@ -822,7 +987,11 @@ async def execute_cell(
                     ),
                     provider="anthropic",
                     profile=channel.revision.profile,
-                    native_refs={"session": f"session-{len(bindings)}"},
+                    native_refs={
+                        "session": native_recipe.session_id(invocation.turn)
+                        if native_recipe is not None
+                        else f"session-{len(bindings)}"
+                    },
                     generation=1,
                     config_revision=channel.revision.local,
                     legacy_account_id=scope.account_id,
@@ -832,11 +1001,12 @@ async def execute_cell(
             turn, count, text, output, surface, platform_surface = await _run_turn(
                 plan,
                 invocation,
-                tapes[cast(int, invocation.turn)],
+                tapes[invocation.turn],
                 store,
                 bindings[slot],
                 scope,
                 timeout_s,
+                native=native_recipe.turn(invocation.turn) if native_recipe else None,
             )
             if surface is not None:
                 surfaces.append(surface)
@@ -850,7 +1020,13 @@ async def execute_cell(
             return turn
 
         steps = await run_steps(
-            plan, invoke=invoke, prepare_channel=prepare_channel, native_gaps=native_gaps
+            plan,
+            invoke=invoke,
+            prepare_channel=prepare_channel,
+            native_gaps=native_gaps,
+            admin=admin,
+            admin_values=admin_values,
+            product_context=product_context,
         )
         gaps.extend(steps.gaps)
         step_receipts = steps.receipts
@@ -876,7 +1052,11 @@ async def execute_cell(
         discord_surfaces=tuple(surfaces),
         platform_surfaces=tuple(platform_surfaces),
         step_receipts=step_receipts,
-        input_provenance="catalog-authored" if replay else "missing",
+        input_provenance="authored-sdk-wire"
+        if native_recipe is not None
+        else "catalog-authored"
+        if replay
+        else "missing",
     )
 
 
@@ -887,6 +1067,9 @@ async def execute_openai_cell(
     *,
     source_root: Path,
     repository_root: Path,
+    admin: AdminBindings | None = None,
+    admin_values: Mapping[str, str] | None = None,
+    product_context: ProductContext | None = None,
 ) -> CellResult:
     if (
         plan.backend != "openai"
@@ -914,7 +1097,14 @@ async def execute_openai_cell(
     rendered: tuple[str, ...] = ()
     requests = 0
     capture = await execute_openai_turns(
-        plan, scenario, fixture, source_root=source_root, repository_root=repository_root
+        plan,
+        scenario,
+        fixture,
+        source_root=source_root,
+        repository_root=repository_root,
+        admin=admin,
+        admin_values=admin_values,
+        product_context=product_context,
     )
     evidence = RunEvidence(
         scenario_id=plan.scenario.id,
@@ -959,6 +1149,9 @@ async def execute_gemini_cell(
     *,
     source_root: Path,
     repository_root: Path,
+    admin: AdminBindings | None = None,
+    admin_values: Mapping[str, str] | None = None,
+    product_context: ProductContext | None = None,
 ) -> CellResult:
     if (
         plan.backend != "gemini"
@@ -986,7 +1179,14 @@ async def execute_gemini_cell(
     rendered: tuple[str, ...] = ()
     requests = 0
     capture = await execute_gemini_turns(
-        plan, scenario, fixture, source_root=source_root, repository_root=repository_root
+        plan,
+        scenario,
+        fixture,
+        source_root=source_root,
+        repository_root=repository_root,
+        admin=admin,
+        admin_values=admin_values,
+        product_context=product_context,
     )
     evidence = RunEvidence(
         scenario_id=plan.scenario.id,
@@ -1124,18 +1324,72 @@ async def execute_catalog(
     run_id: str,
     replays: tuple[ScenarioReplay, ...],
     provider_fixtures: Path | None = None,
+    anthropic_fixtures: Path | None = None,
+    admin_runs: Mapping[tuple[str, Provider], AdminStepBinding] | None = None,
+    product_contexts: Mapping[tuple[str, Provider], ProductContext] | None = None,
+    rejected_token_runs: Mapping[tuple[str, Provider], RejectedTokenBinding] | None = None,
 ) -> ExecutionReport:
     # Always regenerate from pinned source files, never execute an unvalidated saved plan.
     matrix: CatalogMatrix = build_matrix(root, integration_sha=integration_sha, run_id=run_id)
+    admins = dict(admin_runs or {})
+    contexts = dict(product_contexts or {})
+    credential_runs = dict(rejected_token_runs or {})
+    if any(key != (REJECTED_TOKEN_SCENARIO, "anthropic") for key in credential_runs):
+        raise ValueError("rejected-token administrative opt-in is Anthropic-only (A3)")
+    if set(credential_runs) & (set(admins) | set(contexts)):
+        raise ValueError("rejected-token administrative opt-in conflicts with turn inputs")
+    cells_with_source = {(p.scenario.id, p.backend) for p in matrix.plans if p.scored}
+    if any(key not in cells_with_source for key in admins) or any(
+        selected != run.binding.backend for (_, selected), run in admins.items()
+    ):
+        raise ValueError("admin runs differ from frozen scenario/provider cells")
+    if any(key not in admins or contexts[key].admin is not admins[key].binding for key in contexts):
+        raise ValueError("product contexts require matching frozen admin runs")
     by_id = {replay.scenario_id: replay for replay in replays}
     if len(by_id) != len(replays) or set(by_id) - set(matrix.target_ids):
         raise ValueError("replays must uniquely identify frozen target scenarios")
     pack = (
         load_provider_fixtures(provider_fixtures, catalog_root=root) if provider_fixtures else None
     )
+    repository_root = Path(__file__).resolve().parents[2]
+    anthropic_pack = (
+        load_anthropic_fixtures(anthropic_fixtures, source_root=repository_root)
+        if anthropic_fixtures is not None
+        else None
+    )
+    manifest_hash = sha(anthropic_fixtures.read_bytes()) if anthropic_fixtures else ""
     cells: list[CellResult] = []
     for plan in matrix.plans:
         if plan.scored:
+            rejected_token = credential_runs.get((plan.scenario.id, plan.backend))
+            if rejected_token is not None:
+                cells.append(await execute_cell(plan, None, rejected_token=rejected_token))
+                continue
+            admin_run = admins.get((plan.scenario.id, plan.backend))
+            admin = admin_run.binding if admin_run is not None else None
+            admin_values = admin_run.values if admin_run is not None else None
+            product_context = contexts.get((plan.scenario.id, plan.backend))
+            if plan.backend == "anthropic" and anthropic_pack is not None and anthropic_fixtures:
+                entry, row = anthropic_pack.select(plan.scenario.id)
+                recipe = AnthropicRecipe(
+                    entry,
+                    row,
+                    anthropic_pack.index.codec,
+                    anthropic_fixtures,
+                    repository_root,
+                    manifest_hash,
+                )
+                cells.append(
+                    await execute_cell(
+                        plan,
+                        ScenarioReplay.model_validate(row.model_dump(mode="json")),
+                        native_recipe=recipe,
+                        admin=admin,
+                        admin_values=admin_values,
+                        product_context=product_context,
+                    )
+                )
+                continue
             if (
                 plan.backend in ("openai", "gemini")
                 and pack is not None
@@ -1151,11 +1405,22 @@ async def execute_catalog(
                         fixture,
                         source_root=provider_fixtures.parent / "catalog",
                         repository_root=Path(__file__).resolve().parents[2],
+                        admin=admin,
+                        admin_values=admin_values,
+                        product_context=product_context,
                     )
                 )
                 continue
             replay = by_id.get(plan.scenario.id) if plan.backend == "anthropic" else None
-            cells.append(await execute_cell(plan, replay))
+            cells.append(
+                await execute_cell(
+                    plan,
+                    replay,
+                    admin=admin,
+                    admin_values=admin_values,
+                    product_context=product_context,
+                )
+            )
     return ExecutionReport(
         integration_sha=matrix.integration_sha,
         target_sha256=matrix.target_sha256,
@@ -1169,6 +1434,7 @@ def main() -> None:
     parser.add_argument("catalog", type=Path)
     parser.add_argument("--replays", type=Path, required=True)
     parser.add_argument("--provider-fixtures", type=Path)
+    parser.add_argument("--anthropic-fixtures", type=Path)
     parser.add_argument("--integration-sha", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1183,6 +1449,9 @@ def main() -> None:
             run_id=args.run_id,
             replays=replays,
             provider_fixtures=args.provider_fixtures.resolve() if args.provider_fixtures else None,
+            anthropic_fixtures=args.anthropic_fixtures.resolve()
+            if args.anthropic_fixtures
+            else None,
         )
 
     result = asyncio.run(

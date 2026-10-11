@@ -222,6 +222,7 @@ def native_turn(
             "agent": "antigravity-preview-05-2026",
             "agent_config": {"type": "antigravity", "model": "gemini-3.8-flash"},
             "environment": {"type": "remote", "sources": []},
+            "tools": [],
             "input": [{"type": "text", "text": text}],
             "background": True,
             "store": True,

@@ -305,10 +305,18 @@ class ReferenceEvents(UnsupportedPort):
                             "input_id": key,
                             "content": [part.model_dump(mode="json") for part in event.content],
                         },
-                    )
+                    ).model_copy(update={"turn_id": key} if self.t.fixture == "C03" else {})
                 )
         receipt = SendReceipt(operation_id=key, status="processed", input_ids=(key,), turn_id=key)
         self.t.sends.append(SendEvidence(key, receipt))
+        if self.t.fixture == "C03":
+            self.t.history.append(
+                self.t.event(
+                    len(self.t.history),
+                    "session.turn_ended",
+                    {"root_turn_id": key, "outcome": "completed"},
+                ).model_copy(update={"turn_id": key})
+            )
         return receipt
 
     @staticmethod
@@ -444,7 +452,7 @@ class ReferenceEvents(UnsupportedPort):
 
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
         self.t.check(scope, session)
-        if self.t.fixture == "C02":
+        if self.t.fixture in ("C02", "C03"):
             return Page[Event](data=tuple(self.t.history))
         if not self.t.reconciled:
             return Page[Event](data=())

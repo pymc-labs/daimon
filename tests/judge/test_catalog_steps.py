@@ -261,3 +261,144 @@ async def test_wait_done_refuses_any_foreign_or_unverified_terminal(
     assert steps.receipts[2].code == "WAIT_DONE_TERMINAL_UNVERIFIED"
     assert all(r.status == "pending" for r in steps.receipts[3:])
     assert any(g.code == "WAIT_DONE_TERMINAL_UNVERIFIED" for g in steps.gaps)
+
+
+@pytest.mark.parametrize("backend", ("openai", "gemini"))
+@pytest.mark.parametrize(
+    "scenario_id", ("QA-NEW17-MCP-USABLE-NEXT-MESSAGE", "QA-D5-UNBOUND-AGENT-EDIT-REFUSED")
+)
+async def test_global_mcp_prerequisites_remain_zero_dispatch_pending(
+    monkeypatch: pytest.MonkeyPatch, backend: Literal["openai", "gemini"], scenario_id: str
+) -> None:
+    from . import gemini_catalog_replay, openai_catalog_replay
+
+    scenario, fixture = load_provider_fixtures(
+        FIXTURES / "index.json", catalog_root=CATALOG
+    ).select(scenario_id, backend)
+    entry = next(e for e in load_catalog(CATALOG) if e.id == scenario_id).model_copy(
+        update={"sha256": scenario.source.sha256}
+    )
+    plan = plan_scenario(entry, CATALOG, backend, run_id="mcp-refusal")
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("MCP prerequisite reached SDK allocation")
+
+    consumer = openai_catalog_replay if backend == "openai" else gemini_catalog_replay
+    monkeypatch.setattr(consumer, "provider_replay", forbidden)
+    result = await (execute_openai_cell if backend == "openai" else execute_gemini_cell)(
+        plan, scenario, fixture, source_root=CATALOG, repository_root=REPO
+    )
+    if result.status != "PENDING" or result.request_count or result.evidence.turns:
+        raise AssertionError("MCP prerequisites earned execution or full-cell credit")
+    for gap in fixture.gaps:
+        if gap.location in {"mcp", "deepwiki"} and not any(
+            g.location == gap.location and g.code == "PROVIDER_" + gap.code for g in result.gaps
+        ):
+            raise AssertionError("original MCP prerequisite disappeared")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("unknown", "foreign", "missing_intent", "foreign_call", "foreign_source", "foreign_backend"),
+)
+async def test_global_mcp_gap_requires_its_selected_source_and_call(mutation: str) -> None:
+    scenario, fixture = load_provider_fixtures(
+        FIXTURES / "index.json", catalog_root=CATALOG
+    ).select("QA-D5-UNBOUND-AGENT-EDIT-REFUSED", "openai")
+    entry = next(e for e in load_catalog(CATALOG) if e.id == scenario.scenario_id).model_copy(
+        update={"sha256": scenario.source.sha256}
+    )
+    plan = plan_scenario(entry, CATALOG, "openai", run_id="mcp-mutant")
+    gap = next(g for g in fixture.gaps if g.location == "mcp")
+    if mutation in {"unknown", "foreign"}:
+        gap = gap.model_copy(
+            update={"location": "unknown-global" if mutation == "unknown" else "deepwiki"}
+        )
+        fixture = fixture.model_copy(update={"gaps": (gap,)})
+    elif mutation == "missing_intent":
+        fixture = fixture.model_copy(update={"mcp_binding": None})
+    elif mutation in {"foreign_call", "foreign_source"}:
+        turn = fixture.turns[0]
+        turn = turn.model_copy(
+            update={"mcp_calls": ()} if mutation == "foreign_call" else {"location": "steps[0]"}
+        )
+        fixture = fixture.model_copy(update={"turns": (turn,)})
+    else:
+        plan = plan.model_copy(update={"backend": "gemini"})
+
+    async def forbidden(*args: object) -> TurnEvidence:
+        raise AssertionError("foreign MCP binding reached provider")
+
+    async def no_channel(_i: Invocation) -> None:
+        raise AssertionError("foreign MCP binding reached channel preparation")
+
+    try:
+        await run_steps(
+            plan,
+            invoke=forbidden,
+            prepare_channel=no_channel,
+            native_gaps=(gap,),
+            native_fixture=fixture,
+        )
+    except ValueError:
+        return
+    raise AssertionError("foreign global prerequisite was accepted")
+
+
+async def test_exact_remote_effect_gap_keeps_native_prefix_pending() -> None:
+    from .catalog_steps import REMOTE_EFFECT_GAP
+
+    scenario, fixture = load_provider_fixtures(
+        FIXTURES / "index.json", catalog_root=CATALOG
+    ).select("QA-NEW37-MARKDOWN-TABLE-READABLE", "openai")
+    gap = FixtureGap(code="RUNNER_HOOK", location="steps[1]", reason=REMOTE_EFFECT_GAP)
+    fixture = fixture.model_copy(update={"gaps": (gap,)})
+    scenario = scenario.model_copy(update={"providers": (fixture, scenario.providers[1])})
+    entry = next(e for e in load_catalog(CATALOG) if e.id == scenario.scenario_id).model_copy(
+        update={"sha256": scenario.source.sha256}
+    )
+    plan = plan_scenario(entry, CATALOG, "openai", run_id="remote-effect")
+    result = await execute_openai_cell(
+        plan, scenario, fixture, source_root=CATALOG, repository_root=REPO
+    )
+    if result.request_count != 6 or result.host_outcome.status != "PASS":
+        raise AssertionError("exact observational gap suppressed the owned native prefix")
+    if not any(
+        g.code == "PROVIDER_RUNNER_HOOK" and g.location == gap.location for g in result.gaps
+    ):
+        raise AssertionError("native packets erased the remote-effect prerequisite")
+    if result.status == "PASS":
+        raise AssertionError("authored packets earned full-cell remote-effect credit")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "Remote tool/workspace effects remain uncaptured.",
+        "Runner must bind the preserved operation or asset.",
+    ),
+)
+async def test_global_effect_scope_cannot_borrow_a_bound_step_exception(reason: str) -> None:
+    scenario, fixture = load_provider_fixtures(
+        FIXTURES / "index.json", catalog_root=CATALOG
+    ).select("QA-D5-UNBOUND-AGENT-EDIT-REFUSED", "openai")
+    entry = next(e for e in load_catalog(CATALOG) if e.id == scenario.scenario_id).model_copy(
+        update={"sha256": scenario.source.sha256}
+    )
+    plan = plan_scenario(entry, CATALOG, "openai", run_id="global-effects")
+    gap = next(g for g in fixture.gaps if g.location == "mcp").model_copy(update={"reason": reason})
+    fixture = fixture.model_copy(update={"gaps": (gap,)})
+
+    async def forbidden(_i: Invocation, _timeout: float) -> TurnEvidence:
+        raise AssertionError("global prerequisite borrowed a step exception")
+
+    async def prepare(_i: Invocation) -> None:
+        return None
+
+    result = await run_steps(
+        plan, invoke=forbidden, prepare_channel=prepare, native_gaps=(gap,), native_fixture=fixture
+    )
+    if not any(g.code == "PROVIDER_RUNNER_HOOK" and g.location == "mcp" for g in result.gaps):
+        raise AssertionError("global effect prerequisite disappeared")
+    if any(r.status == "executed" and r.kind == "mention" for r in result.receipts):
+        raise AssertionError("global effect prerequisite earned turn dispatch")

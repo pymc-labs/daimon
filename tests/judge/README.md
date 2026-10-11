@@ -174,8 +174,9 @@ the receipt with its independently captured root/session.
 This capture covers only `headless_return`; it does not certify a Discord post,
 card, reaction, routing or tool execution. Native text and render/on_state
 snapshots must not be substituted for a returned string. The real headless host
-test uses scripted SDK HTTP/SSE to verify that pre-tool narration, tool results
-and text beyond the host's 1000-character limit do not reach this boundary.
+test uses scripted SDK HTTP/SSE to verify that pre-tool narration and tool
+results do not reach this boundary. Main #615 returns the complete final
+response for delivery; no 1000-character truncation applies.
 The test also covers an actual tool-only empty return. It exercises the existing
 legacy headless host and driver; mux admission/session reuse are separate runner
 checks. The helper alone awards no TARGET-53 score; the executor binding below
@@ -190,7 +191,8 @@ watchdog protects the fixture process; it does not certify a catalog wait deadli
 
 The catalog executor now explicitly selects the `headless_return` output
 boundary. Its real mux driver invocation returns the final response after the
-last tool, with the same 1000-character limit as the production headless host.
+last tool, preserving the complete final response returned by the production
+headless host (main #615).
 The executor receives that returned string through `capture_headless_return`
 and binds it to the acknowledged journal root/session, checking its minted
 evidence ID and monotonic capture window. It accepts no deserialized output
@@ -286,7 +288,7 @@ acknowledged native session/root identity, the host window and surviving-message
 consistency with the complete send/edit/delete history. `VisibleText` includes
 surviving message content, embed text and component labels in post order. Drafts
 and deleted messages remain diagnostic history. Long replies retain the adapter's
-actual split messages, independently of the headless return's 1000-character cap.
+actual split messages, independently of the complete headless return.
 
 A single completed delivery closes this transport's text window. Partial adapter
 delivery and attachment pixels leave coverage incomplete. Billing-dependent text
@@ -361,3 +363,76 @@ hooks clear only after an owned step actually runs; unknown hooks remain barrier
 No catalog operation or assertion is removed, and all source mappings are
 validated for completeness and order before any channel/turn callback. Anthropic
 missing inputs remain PENDING; their pinned replay fixture handoff belongs to N3.
+
+The Anthropic native manifest is an opt-in input to the same catalog executor:
+
+```sh
+uv run python tests/judge/headless_executor.py /path/to/frozen/catalog \
+  --replays tests/judge/fixtures/catalog_anthropic.json \
+  --anthropic-fixtures packages/testing/fixtures/target53/anthropic/index.json \
+  --provider-fixtures packages/testing/fixtures/target53/index.json \
+  --integration-sha <40-character-integration-head> --run-id native-offline \
+  --output native-results.json
+```
+
+The selected manifest owns all 53 Anthropic inputs, including empty recipes;
+none falls back to the old five replies. The consumer verifies source/codec,
+original invocation text, frozen agent model, persisted session slots, every
+native SSE record, owned root terminals, request consumption and the mux usage
+fold. Native usage is synthetic replay evidence, never billed spend. Text comes
+from actual selected adapter captures, not native render narration.
+
+Completion gates remain PENDING until an owned clock/concurrency hook exists.
+Recipe-wide missing MCP/Deepwiki effects conservatively block dispatch and retain
+their original diagnostic location. Manual triggers, context/routing, assets,
+admin operations and catalog capabilities still need their respective bindings.
+This path does not infer approvals, tool side effects, files or remote delivery.
+The default CLI and `execute_cell` replay path keep their original selection.
+
+Focused verification: `uv run pytest tests/judge/test_anthropic_catalog.py
+ tests/judge/test_headless_executor.py tests/judge/test_catalog_steps.py -q -n 2`.
+
+## Ordered admin consumer
+
+`run_steps`, each provider cell executor, and `execute_catalog` accept explicitly
+provisioned N6 admin bindings. `execute_catalog(admin_runs=...)` keys each
+`AdminStepBinding(binding, values)` by `(scenario_id, provider)`; unknown scored
+keys and provider mismatches refuse. No CLI subprocess, operator config or live
+provider discovery is available. The caller owns and closes the binding.
+
+Admin invocations retain their source mapping and location. Executed receipts
+contain N6's real DB/service readbacks and measured windows; pending/refused
+receipts stop subsequent dependencies with their original code. Exact operation
+runner hooks clear only after execution. Portability, catalog/effect, long-wait
+and ungranted channel-message gaps remain. A later host dispatch after an admin
+mutation has `ADMIN_HOST_CONTEXT_UNBOUND`: existing native replay hosts use a
+synthetic memory context, while admin operations use the real provisioned DB
+scope. No policy/cap/budget/skill effect or full-cell success is claimed until
+the owning product path connects those contexts.
+
+D1/D7 first reach the public add/remove API through real native prefixes on all
+three providers. Common head ef01727 has no skill resource edge; it returns
+`ADMIN_RESOURCE_EDGE_UNBOUND`, never invented success. N6's separate resource
+callback can execute Anthropic channel-skill mutations, once its dependency is
+composed and an actual owned library skill is supplied. OpenAI/Gemini channel
+skills remain unsupported; uploading an agent skill does not substitute for them.
+Frozen source/tape predicates are never changed to remove those gaps.
+
+
+The offline catalog executor accepts an explicit per-cell `ProductContext`
+alongside its matching `AdminBindings`. It maps catalog destinations to owned
+channels and threads, uses `configure_channel` and the actual database revision,
+then calls real admission, `prepare_session_for_turn` with the product session
+operations, and `run_prepared_turn`. Its journal and input acknowledgement come
+from Postgres, with no memory-store substitution or manually adopted session.
+N6's public resource edge supplies D1/D7 skill attachment/removal and readback.
+
+Each Anthropic turn needs a separately source-pinned `ProductTurnRecipe` covering
+admission, preparation and the native turn requests. The original native source,
+codec, root, session, text, normalized events and usage remain pinned. A missing,
+busy, deferred or refused preparation preserves `ADMIN_HOST_CONTEXT_UNBOUND`;
+changing an admin policy alone provides no full-cell execution credit. The
+current public preparation function does not dispatch provider-native sessions,
+so OpenAI/Gemini opt-ins retain that gap before SDK or memory-store allocation.
+Without the opt-in, existing catalog replay behavior is unchanged. These are
+offline input/host proofs, with no live provider or model-behavior certification.

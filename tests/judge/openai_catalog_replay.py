@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from daimon.core.channel_backend import check_backend
+from daimon.testing.admin_bindings import AdminBindings
 from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import (
@@ -23,10 +25,12 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.state.memory import MemoryStateStore
 
 if __package__:
+    from .catalog_product_context import ProductContext
     from .catalog_runner import Invocation, ScenarioPlan, expand_text
     from .catalog_steps import ExecutionGap, StepReceipt, run_steps, validate_native_coverage
     from .openai_catalog_host import OpenAITurnCapture, run_openai_turn
 else:
+    from catalog_product_context import ProductContext
     from catalog_runner import Invocation, ScenarioPlan, expand_text
     from catalog_steps import ExecutionGap, StepReceipt, run_steps, validate_native_coverage
     from openai_catalog_host import OpenAITurnCapture, run_openai_turn
@@ -117,6 +121,9 @@ async def execute_openai_turns(
     *,
     source_root: Path,
     repository_root: Path,
+    admin: AdminBindings | None = None,
+    admin_values: Mapping[str, str] | None = None,
+    product_context: ProductContext | None = None,
 ) -> OpenAICapture:
     """Validate all inputs, execute the owned prefix, retain later barriers."""
     if (
@@ -159,6 +166,35 @@ async def execute_openai_turns(
         if slot not in slots and native.session_id in slots.values():
             raise ValueError("OpenAI distinct host slots alias the same session")
         slots[slot] = native.session_id
+    if product_context is not None:
+
+        async def configure_product(invocation: Invocation) -> None:
+            await product_context.configure(invocation)
+
+        async def invoke_product(invocation: Invocation, _timeout_s: float) -> TurnEvidence:
+            await product_context.native_pending(invocation)
+            raise ValueError("unbound provider product preparation returned")
+
+        gate_gaps = tuple(
+            FixtureGap(
+                code="RUNNER_HOOK",
+                location=t.location,
+                reason="Completion gate needs an owned concurrency hook.",
+            )
+            for t in fixture.turns
+            if t.completion_gate
+        )
+        steps = await run_steps(
+            plan,
+            invoke=invoke_product,
+            prepare_channel=configure_product,
+            native_gaps=(*fixture.gaps, *gate_gaps),
+            native_fixture=fixture,
+            admin=admin,
+            admin_values=admin_values,
+            product_context=product_context,
+        )
+        return OpenAICapture((), 0, steps.receipts, steps.gaps)
     store = MemoryStateStore()
     bindings: dict[tuple[str, str], ProviderBinding] = {}
     history: dict[str, list[NativeTurn]] = {}
@@ -167,6 +203,9 @@ async def execute_openai_turns(
     sentinel_wire = ScriptedTransport()
 
     async def prepare_channel(invocation: Invocation) -> None:
+        if product_context is not None:
+            await product_context.configure(invocation)
+            return
         channel = next(b for b in plan.bindings if b.ref == invocation.channel)
         check_backend(channel.revision)
         await store.put_config_revision(channel.revision)
@@ -175,6 +214,8 @@ async def execute_openai_turns(
 
         async def invoke(invocation: Invocation, timeout_s: float) -> TurnEvidence:
             nonlocal requests
+            if product_context is not None:
+                await product_context.native_pending(invocation)
             if invocation.turn is None:
                 raise ValueError("OpenAI invocation lacks a turn")
             native = by_turn[invocation.turn]
@@ -251,6 +292,10 @@ async def execute_openai_turns(
             invoke=invoke,
             prepare_channel=prepare_channel,
             native_gaps=(*fixture.gaps, *gate_gaps),
+            native_fixture=fixture,
+            admin=admin,
+            admin_values=admin_values,
+            product_context=product_context,
         )
     if sentinel_wire.requests or sentinel_wire.violations:
         raise ValueError("OpenAI host attempted an Anthropic fallback")

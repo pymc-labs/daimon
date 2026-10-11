@@ -225,6 +225,10 @@ class AdminBindings:
     async def close(self) -> None:
         await self.anthropic.close()
 
+    async def authorize_command(self, command: AdminCommand) -> None:
+        """Recheck a resource callback against the owned lane DB and destinations."""
+        await self._authorize(command)
+
     async def _authorize(self, command: AdminCommand | None = None) -> None:
         _require_isolated_sdk_environment()
         require_owned_sessionmaker(self.sessions)

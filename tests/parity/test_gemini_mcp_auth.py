@@ -6,7 +6,8 @@ import copy
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -15,9 +16,9 @@ import httpx
 import pytest
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
 from daimon.testing.db import build_test_engine
+from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_host, cleanup, schema_exists, serve
 from google import genai
-from google.genai.types import HttpOptions, HttpRetryOptions
 from mux.contracts.actions import UserMessage, UserToolResult
 from mux.contracts.events import NativePart, TextPart, ToolResultPayload, ToolUsePayload
 from mux.contracts.extensions import ExtensionConfig
@@ -54,13 +55,6 @@ TOOLS = (
     ToolSpec(name="url_context", kind="builtin"),
     ToolSpec(name="echo", kind="custom", input_schema={"type": "object", "properties": {}}),
 )
-
-
-@pytest.fixture(autouse=True)
-def offline_gemini_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in tuple(os.environ):
-        if name.startswith(("GOOGLE_", "GEMINI_")):
-            monkeypatch.delenv(name)
 
 
 class Resolver:
@@ -151,24 +145,29 @@ class Wire:
         return httpx.Response(200, json=raw)
 
 
+@asynccontextmanager
+async def mcp_sdk(transport: httpx.MockTransport) -> AsyncIterator[genai.Client]:
+    client = build_gemini_client(
+        transport=transport,
+        api_key="offline-placeholder",
+        base_url="https://offline.invalid",
+        api_version="v1beta",
+        headers={},
+    )
+    try:
+        yield client
+    finally:
+        try:
+            await client.aio.aclose()
+        finally:
+            client.close()
+
+
 @pytest.fixture
 async def sdk_wire() -> AsyncIterator[tuple[SDKTransport, Wire]]:
     wire = Wire()
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(wire.handle), trust_env=False
-    ) as http:
-        client = genai.Client(
-            api_key="offline-placeholder",
-            http_options=HttpOptions(
-                base_url="https://offline.invalid",
-                httpx_async_client=http,
-                retry_options=HttpRetryOptions(attempts=1),
-            ),
-        )
-        try:
-            yield SDKTransport(client), wire
-        finally:
-            await client.aio.aclose()
+    async with mcp_sdk(httpx.MockTransport(wire.handle)) as client:
+        yield SDKTransport(client), wire
 
 
 async def gemini_auth_session(
@@ -896,59 +895,44 @@ async def test_real_loopback_read_pair_uses_only_the_owned_bound_bearer_and_clea
                 saved = interaction("interaction-loopback", steps=steps)
                 return httpx.Response(200, json=saved)
 
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(bridge), trust_env=False
-            ) as http:
-                client = genai.Client(
-                    api_key="offline-placeholder",
-                    http_options=HttpOptions(
-                        base_url="https://offline.invalid",
-                        httpx_async_client=http,
-                        retry_options=HttpRetryOptions(attempts=1),
-                    ),
+            async with mcp_sdk(httpx.MockTransport(bridge)) as client:
+                caplog.set_level(logging.DEBUG)
+                driver, storage, state, session = await gemini_auth_session(
+                    SDKTransport(client), resolve
                 )
-                try:
-                    caplog.set_level(logging.DEBUG)
-                    driver, storage, state, session = await gemini_auth_session(
-                        SDKTransport(client), resolve
-                    )
-                    receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="pair")
-                    assert receipt.status == "queued" and len(resolutions) == 2
-                    page = await driver.events.list(SCOPE, session.ref, page=PageRequest())
-                    payloads = [e.typed_payload() for e in page.data]
-                    calls = [p for p in payloads if isinstance(p, ToolUsePayload)]
-                    assert {p.tool_name for p in calls} == {"describe_agent", "list_my_sessions"}
-                    assert all(p.executor == "mcp" and p.mcp_server == "daimon-mcp" for p in calls)
-                    observed = [p for p in payloads if isinstance(p, ToolResultPayload)]
-                    assert len(observed) == 2
-                    for result in observed:
-                        assert result.is_error is False and isinstance(
-                            result.content[0], NativePart
-                        )
-                        assert result.content[0].payload["result"] == results[result.call_id]
-                    assert "qa-agent" in json.dumps(results["describe_agent"])
-                    assert QA_SESSION_ID in json.dumps(results["list_my_sessions"])
-                    for header in ({}, {"Authorization": "Bearer wrong-owned-bearer"}):
-                        response = await host.post(
-                            loopback, json=INIT_BODY, headers={**INIT_HEADERS, **header}
-                        )
-                        assert response.status_code == 401
-                    qa.bearer.revoke()
+                receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="pair")
+                assert receipt.status == "queued" and len(resolutions) == 2
+                page = await driver.events.list(SCOPE, session.ref, page=PageRequest())
+                payloads = [e.typed_payload() for e in page.data]
+                calls = [p for p in payloads if isinstance(p, ToolUsePayload)]
+                assert {p.tool_name for p in calls} == {"describe_agent", "list_my_sessions"}
+                assert all(p.executor == "mcp" and p.mcp_server == "daimon-mcp" for p in calls)
+                observed = [p for p in payloads if isinstance(p, ToolResultPayload)]
+                assert len(observed) == 2
+                for result in observed:
+                    assert result.is_error is False and isinstance(result.content[0], NativePart)
+                    assert result.content[0].payload["result"] == results[result.call_id]
+                assert "qa-agent" in json.dumps(results["describe_agent"])
+                assert QA_SESSION_ID in json.dumps(results["list_my_sessions"])
+                for header in ({}, {"Authorization": "Bearer wrong-owned-bearer"}):
                     response = await host.post(
-                        loopback,
-                        json=INIT_BODY,
-                        headers={**INIT_HEADERS, "Authorization": "Bearer " + qa.bearer.token},
+                        loopback, json=INIT_BODY, headers={**INIT_HEADERS, **header}
                     )
                     assert response.status_code == 401
-                    requests.clear()
-                    with pytest.raises(ProviderError, match="mcp_secret_unavailable"):
-                        await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="revoked")
-                    assert requests == [] and await state.get_operation(SCOPE, "revoked") is None
-                    async with storage.transaction() as records:
-                        assert qa.bearer.token not in repr(records)
-                    assert qa.bearer.token not in caplog.text
-                finally:
-                    await client.aio.aclose()
+                qa.bearer.revoke()
+                response = await host.post(
+                    loopback,
+                    json=INIT_BODY,
+                    headers={**INIT_HEADERS, "Authorization": "Bearer " + qa.bearer.token},
+                )
+                assert response.status_code == 401
+                requests.clear()
+                with pytest.raises(ProviderError, match="mcp_secret_unavailable"):
+                    await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="revoked")
+                assert requests == [] and await state.get_operation(SCOPE, "revoked") is None
+                async with storage.transaction() as records:
+                    assert qa.bearer.token not in repr(records)
+                assert qa.bearer.token not in caplog.text
         assert qa.manifest.refused_egress == []
     finally:
         await qa.engine.dispose()
@@ -1035,3 +1019,46 @@ async def test_authenticated_payload_preserves_existing_token_limit_and_flash_co
     assert [c["model"] for c in configurations] == ["gemini-3.8-flash", "gemini-flash-latest"]
     assert [c["max_total_tokens"] for c in configurations] == [320, 320]
     assert [r.outcome for r in accounting.receipts] == ["refused", "accepted"]
+
+
+class NamesOnly(Mapping[str, str]):
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((self.name,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key: str) -> str:
+        if key != self.name:
+            raise KeyError(key)
+        raise AssertionError("Gemini MCP test client read an ambient SDK value")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    (
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+        "OPENAI_CUSTOM_HEADERS",
+        "aNtHrOpIc_FUTURE_SETTING",
+    ),
+)
+async def test_both_gemini_mcp_test_clients_refuse_names_before_http_allocation(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Gemini MCP test allocated HTTP before ambient refusal")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "environ", NamesOnly(name))
+        scoped.setattr(httpx, "Client", forbidden)
+        scoped.setattr(httpx, "AsyncClient", forbidden)
+        with pytest.raises(ValueError, match="refuses ambient"):
+            async with mcp_sdk(httpx.MockTransport(Wire().handle)):
+                raise AssertionError("Gemini MCP test admitted ambient options")

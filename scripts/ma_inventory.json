@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2501,
+  "files_scanned": 2536,
   "parse_errors": [],
   "calls": [
     {
@@ -9674,8 +9674,8 @@
     },
     {
       "file": "tests/golden/http_turn.py",
-      "line": 179,
-      "end": 179,
+      "line": 183,
+      "end": 183,
       "scope": "replay",
       "category": "test",
       "resource": "sessions.events.list",
@@ -9685,8 +9685,8 @@
     },
     {
       "file": "tests/golden/http_turn.py",
-      "line": 172,
-      "end": 172,
+      "line": 176,
+      "end": 176,
       "scope": "send",
       "category": "test",
       "resource": "sessions.events.send",
@@ -9696,8 +9696,8 @@
     },
     {
       "file": "tests/golden/http_turn.py",
-      "line": 176,
-      "end": 176,
+      "line": 180,
+      "end": 180,
       "scope": "stream",
       "category": "test",
       "resource": "sessions.events.stream",
@@ -9707,8 +9707,8 @@
     },
     {
       "file": "tests/golden/http_turn.py",
-      "line": 183,
-      "end": 183,
+      "line": 187,
+      "end": 187,
       "scope": "retrieve",
       "category": "test",
       "resource": "sessions.retrieve",
@@ -18694,6 +18694,33 @@
       "category": "test-support"
     },
     {
+      "file": "packages/testing/daimon/testing/admin_resources.py",
+      "line": 16,
+      "module": "anthropic.types.beta",
+      "names": [
+        "BetaManagedAgentsAgent"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/anthropic_fixtures.py",
+      "line": 15,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test-support"
+    },
+    {
+      "file": "packages/testing/daimon/testing/anthropic_fixtures.py",
+      "line": 16,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsStreamSessionEvents"
+      ],
+      "category": "test-support"
+    },
+    {
       "file": "packages/testing/daimon/testing/anthropic_live.py",
       "line": 25,
       "module": "anthropic",
@@ -19281,6 +19308,24 @@
       "category": "test"
     },
     {
+      "file": "packages/testing/tests/test_anthropic_fixtures.py",
+      "line": 16,
+      "module": "anthropic",
+      "names": [
+        "APIConnectionError"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "packages/testing/tests/test_anthropic_fixtures.py",
+      "line": 17,
+      "module": "anthropic.types.beta.sessions",
+      "names": [
+        "BetaManagedAgentsSpanModelRequestEndEvent"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/testing/tests/test_anthropic_live.py",
       "line": 1143,
       "module": "anthropic",
@@ -19685,6 +19730,24 @@
       "category": "test"
     },
     {
+      "file": "tests/judge/catalog_product_context.py",
+      "line": 49,
+      "module": "anthropic_catalog_replay",
+      "names": [
+        "AnthropicTurnSource"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/catalog_product_context.py",
+      "line": 55,
+      "module": "anthropic_catalog_replay",
+      "names": [
+        "AnthropicTurnSource"
+      ],
+      "category": "test"
+    },
+    {
       "file": "tests/judge/discord_catalog_surface.py",
       "line": 8,
       "module": "anthropic.types",
@@ -19703,6 +19766,26 @@
       "category": "test"
     },
     {
+      "file": "tests/judge/headless_executor.py",
+      "line": 70,
+      "module": "anthropic_catalog_replay",
+      "names": [
+        "AnthropicRecipe",
+        "AnthropicTurnSource"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/headless_executor.py",
+      "line": 103,
+      "module": "anthropic_catalog_replay",
+      "names": [
+        "AnthropicRecipe",
+        "AnthropicTurnSource"
+      ],
+      "category": "test"
+    },
+    {
       "file": "tests/judge/openai_catalog_host.py",
       "line": 12,
       "module": "anthropic",
@@ -19717,6 +19800,33 @@
       "module": "anthropic.types",
       "names": [
         "RawMessageStreamEvent"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/product_preparation_fixtures.py",
+      "line": 41,
+      "module": "anthropic_catalog_replay",
+      "names": [
+        "AnthropicRecipe"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/test_catalog_product_context.py",
+      "line": 11,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/judge/test_product_preparation_fixtures.py",
+      "line": 18,
+      "module": "anthropic_catalog_replay",
+      "names": [
+        "AnthropicRecipe"
       ],
       "category": "test"
     },
@@ -19741,6 +19851,15 @@
     {
       "file": "tests/parity/test_f2_anthropic_default_capability.py",
       "line": 21,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
+      "file": "tests/parity/test_golden_http_sdk_isolation.py",
+      "line": 13,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic"

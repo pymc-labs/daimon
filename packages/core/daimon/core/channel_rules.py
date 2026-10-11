@@ -66,7 +66,7 @@ from daimon.core.stores.access_policy import (
 from daimon.core.stores.neutral_catalog import CatalogConflict
 from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
-from mux.errors import ProviderError, ScopeViolation
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -563,7 +563,7 @@ async def _archive_unused_copy(
             if made is None or made.id != agent_id:
                 return
             await resource_host.retire(made.revision.catalog_id)
-    except (APIError, ProviderError, CatalogConflict):
+    except (APIError, ProviderError, CatalogConflict, UnsupportedCapability):
         _log.warning("channel_rules.copy_archive_failed", exc_info=True, **log_fields)
 
 

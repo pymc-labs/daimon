@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+  "scenario_sha256": "b69bbbfa18136846c9616b331c60052bf35ef72886ff241fed6e9177062aa6b2",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

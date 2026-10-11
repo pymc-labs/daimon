@@ -10,12 +10,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
-from typing import Literal, NoReturn
+from typing import Literal, NoReturn, Protocol
 
 import httpx
 from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
@@ -31,7 +31,15 @@ _SELECTIONS: dict[Backend, tuple[str, str, str, str, str]] = {
     "openai": ("openai.persistent_workspace", "gpt-6-luna", "agents-sessions", "openai", "2.54.0"),
     "gemini": ("gemini.inline_reuse", "gemini-3.8-flash", "interactions", "google-genai", "2.7.0"),
 }
-_HEADERS = ("content-type", "accept", "openai-beta", "api-revision", "idempotency-key")
+_HEADERS = (
+    "content-type",
+    "accept",
+    "openai-beta",
+    "api-revision",
+    "idempotency-key",
+    "anthropic-beta",
+    "anthropic-version",
+)
 
 
 class Record(BaseModel):
@@ -54,6 +62,8 @@ class SourcePin(Record):
 
 class WireFrame(Record):
     payload: Object
+    # Anthropic's SDK dispatches by the SSE event name, not only payload.type.
+    sse_event: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]+$")
     # External virtual-clock/concurrency hooks release these; no wall-clock sleeps.
     after_gate: str | None = None
 
@@ -121,28 +131,53 @@ class ProviderTape(Record):
         return self
 
 
+class WireScript(Protocol):
+    @property
+    def replies(self) -> tuple[WireReply, ...]: ...
+
+
+class GateWait(Record):
+    """An actual paused wire iterator; no native/host/render success claim."""
+
+    gate: str = Field(min_length=1)
+    reply_id: str = Field(min_length=1)
+    frame_index: int = Field(ge=0)
+
+
 class _SSE(httpx.AsyncByteStream):
-    def __init__(self, replay: WireReplay, reply: WireReply) -> None:
+    def __init__(
+        self, replay: WireReplay, reply: WireReply, on_blocked: Callable[[str], None]
+    ) -> None:
         self.replay, self.reply = replay, reply
+        self.on_blocked = on_blocked
         self.delivered = 0
         self.closed = False
+        self.waiting: GateWait | None = None
         self._closed_event = asyncio.Event()
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        for frame in self.reply.frames or ():
+        for index, frame in enumerate(self.reply.frames or ()):
             if frame.after_gate:
-                gate = asyncio.create_task(self.replay.gate(frame.after_gate).wait())
+                release = self.replay.gate(frame.after_gate)
+                if not release.is_set():
+                    self.waiting = GateWait(
+                        gate=frame.after_gate, reply_id=self.reply.id, frame_index=index
+                    )
+                    self.on_blocked(frame.after_gate)
+                gate = asyncio.create_task(release.wait())
                 closed = asyncio.create_task(self._closed_event.wait())
                 try:
                     await asyncio.wait((gate, closed), return_when=asyncio.FIRST_COMPLETED)
                 finally:
+                    self.waiting = None
                     for task in (gate, closed):
                         task.cancel()
                     await asyncio.gather(gate, closed, return_exceptions=True)
             if self.closed:
                 return
             self.delivered += 1
-            yield ("data: " + json.dumps(frame.payload) + "\n\n").encode()
+            event = f"event: {frame.sse_event}\n" if frame.sse_event else ""
+            yield (event + "data: " + json.dumps(frame.payload) + "\n\n").encode()
         if self.reply.hold_open:
             await self._closed_event.wait()
 
@@ -159,16 +194,49 @@ class WireReplay:
     Unexpected traffic remains a violation even if an SDK wraps the exception.
     """
 
-    def __init__(self, tape: ProviderTape) -> None:
+    def __init__(self, tape: WireScript) -> None:
         self.tape = tape
         self.requests: list[RecordedRequest] = []
         self.violations: list[str] = []
         self._consumed: set[str] = set()
         self._gates: dict[str, asyncio.Event] = {}
+        self._blocked: dict[str, asyncio.Event] = {}
         self._streams: list[_SSE] = []
 
     def gate(self, name: str) -> asyncio.Event:
         return self._gates.setdefault(name, asyncio.Event())
+
+    def _frame_blocked(self, name: str) -> None:
+        self._blocked.setdefault(name, asyncio.Event()).set()
+
+    def held(self, name: str) -> tuple[GateWait, ...]:
+        """Current wire holds, excluding released, cancelled or closed streams."""
+        if self.gate(name).is_set():
+            return ()
+        return tuple(
+            stream.waiting
+            for stream in self._streams
+            if not stream.closed and stream.waiting is not None and stream.waiting.gate == name
+        )
+
+    async def wait_blocked(self, name: str) -> tuple[GateWait, ...]:
+        """Wait for a scripted frame hold, then recheck its current identity.
+
+        A completed/stale hold is refused. The owner supplies an outer deadline
+        and independently binds native acceptance, running render and routing
+        before releasing; reaching this boundary proves only a wire pause.
+        """
+        if not any(
+            frame.after_gate == name for reply in self.tape.replies for frame in reply.frames or ()
+        ):
+            raise ValueError("replay gate has no scripted frame")
+        if self.gate(name).is_set():
+            raise ValueError("replay gate already released")
+        await self._blocked.setdefault(name, asyncio.Event()).wait()
+        waits = self.held(name)
+        if not waits:
+            raise ValueError("replay frame is no longer held")
+        return waits
 
     def release(self, name: str) -> None:
         known = {gate for reply in self.tape.replies for gate in reply.releases}
@@ -223,7 +291,7 @@ class WireReplay:
         for name in matched.releases:
             self.release(name)
         if matched.frames is not None:
-            source = _SSE(self, matched)
+            source = _SSE(self, matched, self._frame_blocked)
             self._streams.append(source)
             return httpx.Response(
                 matched.status, headers={"content-type": "text/event-stream"}, stream=source
@@ -269,19 +337,24 @@ async def provider_replay(
     transport = httpx.MockTransport(wire.dispatch)
     if backend == "openai":
         async with build_async_openai(
+            transport=transport,
             api_key="offline-placeholder",
             base_url="https://offline.invalid/v1",
-            transport=transport,
+            headers={},
         ) as client:
             yield ProviderReplay(backend, OpenAITransport(client), wire)
     else:
         gemini = build_gemini_client(
+            transport=transport,
             api_key="offline-placeholder",
             base_url="https://offline.invalid",
-            transport=transport,
+            api_version="v1beta",
+            headers={},
         )
         try:
             yield ProviderReplay(backend, GeminiTransport(gemini), wire)
         finally:
-            await gemini.aio.aclose()
-            gemini.close()
+            try:
+                await gemini.aio.aclose()
+            finally:
+                gemini.close()
