@@ -716,12 +716,16 @@ class DiscordBackend:
                     "deployment probe requires one verified full image SHA for all workers"
                 )
             workers = obj(data.get("workers"))
-            if set(workers) != {
-                "daimon-discord-1",
+            # Deploys overlap the Discord containers, so compose numbers the
+            # surviving one -1, -2, -3...; the other services keep -1.
+            if sorted(
+                re.sub(r"^daimon-discord-\d+$", "daimon-discord-N", name) for name in workers
+            ) != [
+                "daimon-discord-N",
+                "daimon-scheduler-1",
                 "daimon-slack-1",
                 "daimon-teams-1",
-                "daimon-scheduler-1",
-            } or any(value != image for value in workers.values()):
+            ] or any(value != image for value in workers.values()):
                 raise Pending("deployment probe found missing or mixed worker images")
             return image
         except (OSError, subprocess.TimeoutExpired, ValueError) as exc:

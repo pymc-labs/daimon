@@ -27,6 +27,7 @@ from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.stores.discord_gateway_lease import GatewayLease, GatewayLeaseLost
 from daimon.core.stores.worker_ownership import (
     OWNER_LOSS_GRACE_S,
     OWNER_PROBE_INTERVAL_S,
@@ -46,6 +47,10 @@ class OwnershipExpired(Exception):
     """A replacement may already have reclaimed this owner's work."""
 
 
+class GatewayLeaseExpired(OwnershipExpired, GatewayLeaseLost):
+    """Another process may already have taken the Discord gateway."""
+
+
 @asynccontextmanager
 async def hold_worker_owner(
     engine: AsyncEngine,
@@ -53,8 +58,13 @@ async def hold_worker_owner(
     owner_key: int,
     ownership_lost: asyncio.Event,
     probe_interval_s: float = OWNER_PROBE_INTERVAL_S,
-) -> AsyncIterator[None]:
-    """Retry brief owner-connection loss; fail stop before reclaim becomes safe."""
+    gateway_lock_key: int | None = None,
+) -> AsyncIterator[GatewayLease]:
+    """Retry brief owner-connection loss; fail stop before reclaim becomes safe.
+
+    Yields the gateway lease that shares this owner connection: a lease that
+    cannot be re-confirmed after a reconnect fails stop like an expired owner.
+    """
     # asyncpg failures can surface as raw socket errors, not SQLAlchemyError.
     failures = (
         SQLAlchemyError,
@@ -63,6 +73,16 @@ async def hold_worker_owner(
         PostgresError,
         OSError,
         TimeoutError,
+    )
+
+    connection: AsyncConnection | None = None
+    # Serialises the heartbeat probe, reconnects and gateway lease queries on the one connection.
+    connection_lock = asyncio.Lock()
+    lease = GatewayLease(
+        owner_key,
+        connection=lambda: connection,
+        lock=connection_lock,
+        **({} if gateway_lock_key is None else {"lock_key": gateway_lock_key}),
     )
 
     async def acquire(*, reconnect: bool = False) -> AsyncConnection:
@@ -82,6 +102,8 @@ async def hold_worker_owner(
                 {"key": owner_key, "grace": OWNER_LOSS_GRACE_S},
             ):
                 raise OwnershipExpired("owner heartbeat expired before reacquisition")
+            if reconnect and lease.held and not await lease.confirm_after_reconnect(candidate):
+                raise GatewayLeaseExpired("gateway lease moved on during owner reconnect")
             await candidate.execute(
                 text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at)
                      VALUES (:key, clock_timestamp())
@@ -114,7 +136,7 @@ async def hold_worker_owner(
             raise
 
     async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
-        connection: AsyncConnection | None = await acquire()
+        connection = await acquire()
 
     async def discard() -> None:
         nonlocal connection
@@ -132,8 +154,8 @@ async def hold_worker_owner(
         while True:
             await asyncio.sleep(probe_interval_s)
             try:
-                assert connection is not None
-                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
+                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S), connection_lock:
+                    assert connection is not None
                     await connection.execute(
                         text("""UPDATE discord_worker_heartbeats
                              SET seen_at = clock_timestamp() WHERE owner_key = :key"""),
@@ -145,7 +167,7 @@ async def hold_worker_owner(
                 log.warning("discord.worker_owner_probe_failed", error_type=type(err).__name__)
             deadline = asyncio.get_running_loop().time() + OWNER_RETRY_BUDGET_S
             try:
-                async with asyncio.timeout_at(deadline):
+                async with asyncio.timeout_at(deadline), connection_lock:
                     await discard()
                     while True:
                         try:
@@ -169,7 +191,7 @@ async def hold_worker_owner(
 
     guard_task = asyncio.create_task(guard(), name="discord.worker_owner_guard")
     try:
-        yield
+        yield lease
     finally:
         guard_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -210,6 +232,9 @@ class DiscordRuntime:
     mcp_token_probe: McpTokenProbe | None = None
     # Members' current roles, re-read outside their turns (`channel_admin_roles`).
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
+    # Decides which Discord process may hold the gateway during a deploy overlap.
+    # None means "no lease to take" (tests, tools that never connect).
+    gateway_lease: GatewayLease | None = None
 
 
 @asynccontextmanager
@@ -256,7 +281,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
         try:
             async with hold_worker_owner(
                 owner_engine, owner_key=owner_key, ownership_lost=ownership_lost
-            ):
+            ) as gateway_lease:
                 yield DiscordRuntime(
                     owner_key=owner_key,
                     ownership_lost=ownership_lost,
@@ -269,6 +294,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[DiscordRuntime]:
                     resolver_cache=resolver_cache,
                     turn_deps=turn_deps,
                     mcp_token_probe=probe_bearer_token,
+                    gateway_lease=gateway_lease,
                 )
         finally:
             await drain_outcomes()

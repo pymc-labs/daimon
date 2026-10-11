@@ -369,6 +369,60 @@ jobs:
               # after SIGTERM (_DRAIN_GRACE_S), but docker kills a container
               # 10s after SIGTERM by default, so every recreate cut live
               # turns and left a "Daimon restarted" card behind.
+              # Discord overlap. Stop-first recreation leaves the gateway closed
+              # until the new process has imported, built its runtime and
+              # connected (~14s), and any interaction in that gap gets no ack.
+              # Start the new replica beside the old one instead: it warms up and
+              # then waits on the Discord gateway lease (a Postgres advisory
+              # lock). The old process keeps serving until it is stopped, drains,
+              # closes its gateway and releases the lease; the new one connects
+              # right after. Compose numbers containers max+1, so the names
+              # alternate (daimon-discord-1, -2, -3...); never assume `-1`.
+              OLD_DISCORD=$(sudo -E docker compose -f compose.worker.yml ps -a -q discord)
+              OLD_COUNT=$(printf "%s\n" "$OLD_DISCORD" | grep -c . || true)
+              sudo -E docker compose -f compose.worker.yml up -d --no-deps --no-recreate \
+                --scale discord=$((OLD_COUNT + 1)) discord
+              NEW_DISCORD=""
+              for id in $(sudo -E docker compose -f compose.worker.yml ps -a -q discord); do
+                printf "%s\n" "$OLD_DISCORD" | grep -q "^$id" || NEW_DISCORD="$NEW_DISCORD $id"
+              done
+              # Do not stop the old process until the new one is a warm standby
+              # (container up, liveness responder bound, which main binds before
+              # it waits for the lease). An idle old process would otherwise
+              # close the gateway at once and the gap would again include the
+              # new process startup. If the new one never gets there, fail the
+              # deploy and leave the old one serving.
+              discord_ready=""
+              for i in $(seq 1 40); do
+                sleep 3
+                discord_ready=1
+                for id in $NEW_DISCORD; do
+                  running=$(sudo docker inspect --format "{{.State.Running}}" "$id")
+                  restarts=$(sudo docker inspect --format "{{.RestartCount}}" "$id")
+                  if [ "$running" != "true" ] || [ "$restarts" != "0" ] \
+                    || ! sudo docker exec "$id" python -c "import urllib.request; from daimon.core.config import load_settings; urllib.request.urlopen(\"http://localhost:%d/\" % load_settings().discord.health_port, timeout=3)" 2>/dev/null; then
+                    discord_ready=""
+                  fi
+                done
+                if [ -n "$NEW_DISCORD" ] && [ -n "$discord_ready" ]; then
+                  echo "new discord replica is a warm standby (attempt $i)"
+                  break
+                fi
+                discord_ready=""
+              done
+              if [ -z "$discord_ready" ]; then
+                echo "new discord replica not ready after 120s; keeping the old one" >&2
+                sudo docker logs --tail 50 $NEW_DISCORD >&2 || true
+                sudo docker rm -f $NEW_DISCORD || true
+                exit 1
+              fi
+              if [ -n "$OLD_DISCORD" ]; then
+                # Same grace as below: the old process drains in-flight turns.
+                sudo docker stop -t 95 $OLD_DISCORD
+                sudo docker rm $OLD_DISCORD
+              fi
+              # Discord is already on the new image with the same config, so this
+              # leaves the new replica alone and recreates the other services.
               sudo -E docker compose -f compose.worker.yml up -d --remove-orphans --timeout 95
               # Gate: the slack worker must come up and stay up. Its liveness
               # responder binds only once startup is done (including

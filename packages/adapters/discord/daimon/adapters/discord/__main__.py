@@ -38,6 +38,42 @@ async def drain_on_owner_loss(bot: DaimonBot) -> None:
         os._exit(1)
 
 
+async def start_when_leased(
+    bot: DaimonBot, token: str, *, stop: asyncio.Event, started: asyncio.Event
+) -> None:
+    """Connect to the gateway only once this process holds the gateway lease.
+
+    A standby (the new container during a deploy overlap) is fully warm but
+    idle here; the old process releases the lease after closing its gateway.
+    `stop` ends the wait without touching the lease; `started` is set the moment
+    the gateway connection begins, so a later stop must drain instead.
+    """
+    lease = bot.runtime.gateway_lease
+    if lease is not None:
+        acquire = asyncio.create_task(
+            lease.acquire(bot.runtime.ownership_lost), name="discord.gateway_lease"
+        )
+        stopper = asyncio.create_task(stop.wait(), name="discord.gateway_wait_stop")
+        try:
+            await asyncio.wait({acquire, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopper.cancel()
+            if not acquire.done():
+                acquire.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await acquire
+        if acquire.cancelled():
+            return
+        acquire.result()
+        if stop.is_set():
+            await lease.release()
+            return
+    if stop.is_set():
+        return
+    started.set()
+    await bot.start(token)
+
+
 async def main() -> None:
     settings = load_settings()
     if settings.discord is None:
@@ -60,9 +96,17 @@ async def main() -> None:
         bot = DaimonBot(runtime=runtime, intents=intents)
         bot.wake_poller_enabled = True
         loop = asyncio.get_running_loop()
+        stop, started = asyncio.Event(), asyncio.Event()
+
+        def on_signal() -> None:
+            stop.set()
+            # Before the gateway connection there is nothing to drain.
+            if started.is_set():
+                asyncio.create_task(bot._drain_and_close())  # pyright: ignore[reportPrivateUsage]  # entrypoint owns the bot lifecycle
+
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(bot._drain_and_close()))  # pyright: ignore[reportPrivateUsage]  # entrypoint owns the bot lifecycle
+                loop.add_signal_handler(sig, on_signal)
         # OB-3 liveness responder on the loop asyncio.run() created (co-location is
         # the property that a hung loop fails the probe and Fly restarts us).
         health_server = await start_liveness_responder(settings.discord.health_port)
@@ -75,7 +119,12 @@ async def main() -> None:
                 settings.observability.health_interval_s,
                 lambda: (bot.turn_queue.in_flight(), bot.turn_queue.in_flight_max()),
             ):
-                await bot.start(settings.discord.bot_token.get_secret_value())
+                await start_when_leased(
+                    bot,
+                    settings.discord.bot_token.get_secret_value(),
+                    stop=stop,
+                    started=started,
+                )
         finally:
             owner_drain.cancel()
             with contextlib.suppress(asyncio.CancelledError):

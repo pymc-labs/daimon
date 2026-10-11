@@ -8,7 +8,7 @@ the Daimon-created threads. It restores the guild's previous turn cap.
 
 Backend example:
 
-    docker exec daimon-discord-1 python /tmp/hackathon_load_rehearsal.py \
+    docker exec "$(docker ps -q -f name=daimon-discord)" python /tmp/hackathon_load_rehearsal.py \
       --install --turn-load --cleanup --run-id rehearsal-1 --tenants 50 \
       --turns 20 --arrival-seconds 1800 --max-usd 5 \
       --staging-marker-id "$STAGING_MARKER_TENANT_ID" --i-am-staging

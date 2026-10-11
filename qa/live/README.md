@@ -294,9 +294,9 @@ Timer and manual entrypoints must share `live_lock`; the default is `~/.local/st
 
 Staging runs require a read-only `staging.deployment_probe` argv hook. JSON stdin
 contains `env: staging`, the QA `guild_id`, and `read_only: true`. Return JSON
-`{"image":"<full SHA>","workers":{"daimon-discord-1":"<full SHA>",
+`{"image":"<full SHA>","workers":{"daimon-discord-<N>":"<full SHA>",
 "daimon-slack-1":"<full SHA>","daimon-teams-1":"<full SHA>",
-"daimon-scheduler-1":"<full SHA>"}}` only after checking all running worker
+"daimon-scheduler-1":"<full SHA>"}}` (the Discord container number changes on every deploy) only after checking all running worker
 images. Missing, mixed, or unavailable workers remain PENDING before any trigger.
 
 Results record start/end images, scoped draining and orphan-retirement events,

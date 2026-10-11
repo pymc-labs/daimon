@@ -25,6 +25,7 @@ from sqlalchemy import (
     LargeBinary,
     Numeric,
     PrimaryKeyConstraint,
+    SmallInteger,
     Text,
     UniqueConstraint,
     func,
@@ -3258,3 +3259,13 @@ class DiscordWorkerHeartbeat(Base):
     __tablename__ = "discord_worker_heartbeats"
     owner_key: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DiscordGatewayLease(Base):
+    """The last process to hold the Discord gateway lease, and whether it let go cleanly."""
+
+    __tablename__ = "discord_gateway_lease"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

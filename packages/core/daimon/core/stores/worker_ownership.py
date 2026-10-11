@@ -1,7 +1,7 @@
 """Liveness of adapter processes holding a PostgreSQL session advisory lock."""
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 # From the last committed heartbeat, stop occurs within probe interval + probe
 # timeout + reconnect budget + hard exit. The margin covers event-loop scheduling
@@ -20,7 +20,7 @@ OWNER_LOSS_GRACE_S = (
 )
 
 
-async def owner_is_alive(session: AsyncSession, owner_key: int) -> bool:
+async def owner_is_alive(session: AsyncSession | AsyncConnection, owner_key: int) -> bool:
     """Keep a disconnected owner protected until its fail-stop bound expires."""
     return bool(
         await session.scalar(

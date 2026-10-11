@@ -850,3 +850,28 @@ drain and cleanup before Docker sends SIGKILL. When recreating containers, use
 the compose grace. The managed deploy fetches its worker compose asset from
 GCS; its source lives in `pymc-labs/daimon-infra` and an operator uploads changes
 with OpenTofu before the next app deployment.
+
+### Discord overlap during deployment
+
+Recreating the Discord container stop-first leaves the gateway closed until the
+new process has started (about 14 seconds), and a button or slash command used in
+that gap gets no response. The managed deploy therefore starts the new Discord
+container beside the old one (`docker compose up -d --no-deps --no-recreate
+--scale discord=N+1 discord`), waits until it answers its liveness port, then
+stops and removes the old container with a 95-second timeout, and only then
+recreates the other services. Compose numbers the new container one higher than
+the highest existing one, so the Discord container is not always
+`daimon-discord-1`.
+
+Only one Discord process may be connected to the gateway. The new process starts
+fully, then waits on a gateway lease: a PostgreSQL session advisory lock taken on
+the connection it already holds for worker ownership, with the holder recorded in
+`discord_gateway_lease`. The old process keeps handling everything, including
+button clicks for its in-flight turns, while it drains. It releases the lease
+after it has closed its gateway, and the standby connects at once. If the old
+process dies without releasing, the standby waits until that process's ownership
+heartbeat has expired (the same bound the worker-ownership fail-stop uses)
+before connecting. A standby that receives SIGTERM exits without touching the
+lease. A holder that loses its owner connection and cannot retake the lease stops.
+To use the same pattern with your own deploy scripts, start the new Discord
+container before stopping the old one and give it the same database.

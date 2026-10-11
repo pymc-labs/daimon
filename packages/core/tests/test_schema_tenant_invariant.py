@@ -30,6 +30,7 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "tenants": "identity table — `id` is the tenant_id",
     # One row per running Discord worker process, not per tenant.
     "discord_worker_heartbeats": "process liveness for worker ownership; holds no tenant data",
+    "discord_gateway_lease": "one row per database: which process holds the Discord gateway; no tenant data",
     # Keyed by agent_id, which is uuid5(tenant_id, ma_agent_id) via
     # derive_agent_uuid — tenant-salted, so globally unique per tenant.
     "agent_github_binding": "keyed by tenant-salted agent_id (uuid5)",

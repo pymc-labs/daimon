@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deploys no longer leave Discord buttons and slash commands unanswered for about 14 seconds: the new Discord container starts beside the old one and takes over the gateway through a database lease as soon as the old one has drained and closed.
 - The report viewer loads its stylesheet and script on installs that resolve FastAPI before 0.137, instead of staying on "Loading…".
 - Replacement checkpoints now report priced model calls in turn outcomes while retaining their predecessor-channel debits.
 - Restart recovery detaches a chat session when interrupting its orphaned turn fails, so the next message starts a fresh session instead of reaching a busy one.
