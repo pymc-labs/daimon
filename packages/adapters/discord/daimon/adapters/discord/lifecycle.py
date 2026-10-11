@@ -44,6 +44,7 @@ from daimon.adapters.discord.tables import render_discord_tables
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
@@ -1005,9 +1006,9 @@ class DiscordTurnLifecycle:
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Provider observations are priced by host billing. Until a public
-            # display tariff is supplied, omit cost rather than synthesize MA usage.
-            self._state = dataclasses.replace(self._state, cost_str=None)
+            # Only an opted-in, authorized host attempt supplies a complete
+            # native cost. Compatibility counters never become an MA meter.
+            self._state = dataclasses.replace(self._state, cost_str=native_footer_text(t))
             return
         cost = cost_of_totals(
             state.usage_totals,

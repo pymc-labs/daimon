@@ -128,7 +128,8 @@ def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> Billing
     ):
         raise ScopeViolation(prepared.ma_session_id, "native recorder has no authorized session")
     return ObservationBilled(
-        record=cast(ObservationRecorder, prepared._record)  # pyright: ignore[reportPrivateUsage]
+        record=cast(ObservationRecorder, prepared._record),  # pyright: ignore[reportPrivateUsage]
+        native_footer_cost=prepared.native_footer_cost,
     )
 
 

@@ -300,6 +300,7 @@ async def test_ci_builder_provenance_does_not_transfer_to_engine_clones(
 
 @pytest.mark.parametrize("ci_metadata", [False, True])
 async def test_real_fixture_sessionmaker_keeps_its_registered_schema_and_binding(
+    db_preflight,
     db_engine: AsyncEngine,
     db_schema: str,
     db_session_factory: async_sessionmaker[AsyncSession],

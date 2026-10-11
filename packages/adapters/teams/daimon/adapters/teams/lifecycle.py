@@ -33,6 +33,7 @@ from daimon.adapters.teams.provider_events import ProviderDraft
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.message_split import split_fenced
+from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -326,7 +327,9 @@ class TeamsTurnLifecycle:
         return format_summary(
             agent_name=None if named_above else self._agent_name,
             elapsed_seconds=self._clock() - self._state.started_at,
-            cost=format_cost(cost),
+            cost=native_footer_text(t)
+            if self._provider_draft is not None or isinstance(t, ProviderUsageTotals)
+            else format_cost(cost),
             left=await self._balance(),
         )
 

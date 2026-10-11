@@ -240,6 +240,72 @@ completion receipts do not establish that additional coverage.
 scripted defaults to zero and honors its explicit retry budget. The no-retry
 builder accepts either a handler or `MARouter` and keeps zero retries, including
 409/429/5xx errors. Its SDK copies retain that budget and the isolation guard.
+
+## Metered channel budget proofs
+
+`daimon.testing.channel_accounting.ChannelAccounting(sessions, scope, platform,
+channel_id)` supplies an explicit owned-database accounting seam. Its
+`snapshot(now=...)` reads channel ledger entries, usage projections, net spend
+and the current production budget status in one repeatable read-only transaction.
+All-time channel spend and the budget's windowed spend are separate. Every bind
+must pass the shared owned/isolated-CI guard and use the same engine.
+
+`await run_turn(deps=..., prepared=..., pricing=ControlledTurnPricing(...),
+thread_id=..., external_user_id=..., user_message=..., lifecycle=..., cancel=...,
+operation_key=..., binding=...)` drives the actual `run_prepared_turn` and turn
+driver. Preparation, admission, isolated offline provider transports and actual
+post capture belong to the caller. The seam binds the real legacy/provider usage
+recorder to explicit **mock** prices instead of trusting the preparation's
+recorder callback. It inserts no ledger or usage rows directly. Native providers
+require their current durable binding and unchanged native usage; missing actual
+infrastructure retains pending usage. It supports one root, without delegation
+or recovery. The receipt retains the real host outcome, before/after independent
+snapshots, new debit rows, pricing policy and explicit issues.
+The success flag requires a completed single attempt; a failed or cancelled
+turn can still carry genuine reconciled provider charges in its readback.
+It correlates the run's observed meter with its exact persisted observation,
+native root, revision and debit key. Another root's real charge or an ambiguous
+native meter does not certify this run. Native revisions are included in the
+same read-only snapshot, scoped through the channel's durable binding slots.
+
+The proof uses USD 100 per million input/output tokens, zero explicitly
+inapplicable offline native infrastructure and markup 1. A mocked 100-input /
+50-output turn generates one genuine USD 0.015000 ledger debit through production
+billing, exhausting the original USD 0.01 total channel budget. These exaggerated
+rates exercise host arithmetic; they are not current provider prices or live
+spend. Anthropic runs an isolated SDK HTTP/SSE fixture. OpenAI/Gemini accounting
+proofs mock only the TurnIO boundary and use their real usage normalizers; this
+does not certify their native codecs. The API alone proves neither first-turn
+posted text nor the next admission refusal/no-send. Consumers retain those
+independent NEW15 checks and do not promote source cells from a helper PASS.
+
+## Host admission evidence
+
+`daimon.testing.admission_evidence.admission_edge` observes one owned attempt.
+Pass the actual `TurnDeps`, authorized tenant `Scope`, backend label, platform,
+channel/thread/caller identity, capture ID and an `invoke(observer)` coroutine.
+Install that observer on core `admit(..., observer=observer)` inside the invocation
+and run the real adapter refusal handler. Core emits only the actual admitted
+decision or typed denial; its default observer is `None`. An ordinary observer
+exception preserves the host decision and produces an opt-in failure warning.
+
+Supply `effects()` with independently captured `AdmissionEffects` (actual
+`VisibleText`, `LogObservation`, reactions and coverage), a monotonic injectable
+clock, and an independently observed cumulative `native_send_count()` covering
+session creation and model input sends. Existing agent/environment metadata reads
+are distinct from native work. Unknown counts return `None`; missing counts,
+adapter coverage or a core decision remain typed PENDING. The hook checks every
+database bind before invoking anything, validates identity and capture windows,
+and records positive native-send deltas rather than hiding violated denials.
+
+Receipts contain no provider session/root or completed-turn evidence. Backend
+labels do not certify provider execution, live timing or a full catalog scenario.
+Capture a silent refusal as empty notices/reactions; never render a notice or
+manufacture a log from its reason. Discord's writers-none path is log-only, and
+its ingress prefilter may return before core admission. A metered first turn,
+ledger join and executable administrative setup require separate observations.
+This hook neither mutates budgets/credit nor binds the source executor itself.
+
 ## Read-only turn accounting
 
 `daimon.testing.turn_accounting.TurnAccountingReader` reads Anthropic, OpenAI
@@ -507,3 +573,107 @@ Both require the exact native budget and effective tool allowlist. The old
 Each still needs its own separately signed source/binding GO and exclusive attempt
 marker. Financial signatures authorize neither execution nor a retry by themselves.
 No acceptance or workload is run by composing this entry.
+`FooterAccountingHook.evaluate_turn` binds this reader to actual accepted Discord
+footer payloads. Supply `capture`, an authoritative `terminal`, independently
+normalized native `receipts`, per-revision `attributions`, an independent native
+`inventory`, and `markup`. It compares receipts against latest durable revisions;
+historical cumulative revisions are not added as extra work. A sealed request
+walk can establish complete Anthropic request-span coverage without inventing
+an aggregate observation. Unknown rates, container time, incomplete inventory or
+unsettled outbox leave checks PENDING. A known ledger debit is never an unknown
+provider total. The original `evaluate` path remains available.
+
+Complete controlled accounting returns `ledger_matches_usage` PASS. The footer
+check additionally requires an actual accepted `used` footer matching the queried
+ledger debit. OpenAI/Gemini currently omit that field, so their posted-cost check
+remains PENDING. Independent inventory, rates and native receipts must come from
+the admitted execution path; never enumerate the DB being checked to mint them.
+Offline control receipts prove host arithmetic only, not catalog execution or
+live spend. C12 aggregate certification remains cut.
+
+## Structural post-history predicates
+
+`daimon.testing.post_structure.post_history_from_capture` converts a real
+`DiscordSurfaceHarness` receipt into the optional `TurnEvidence.post_history`,
+retaining every accepted send, edit, delete and final survivor. Supply the actual
+`PostRootAcknowledgement` independently; the helper never invents a provider
+root, input ID, terminal record or coverage. Ordinary turns omit the field.
+
+The outcome oracle accepts `message_count` with explicit `min`/`max` bounds,
+`fences_balanced`, `chunks_gap_max_s` with a nonnegative `max`,
+`footer_on_last_message`, and `card_edits_min` with `min` and `during: running`.
+All require a complete, acknowledged history matched to an authoritative
+completed root. Missing evidence stays PENDING; invalid histories fail.
+
+Answer counts use surviving messages with nonempty raw content; status embeds
+and deleted drafts do not count as answer chunks. Fence checks inspect every
+answer chunk separately, matching line-fence delimiters and lengths. Chunk gaps
+use the first accepted observation of each final chunk's exact body, rather than
+the earlier status-card creation time or a later footer edit. Text predicates
+stay PENDING when attachments leave text coverage incomplete. Footer position
+requires a raw embed footer only on the final answer message; flattened hints
+and footer-looking body text cannot certify it.
+
+Running card edits join actual accepted edit events to complete progress-card
+observations by message identity and timestamp. A sufficient number inside
+complete native tool start/end intervals proves a lower bound during running.
+Missing or insufficient intervals stay PENDING; an injected clock or a
+progress-looking card alone does not prove native execution. Fewer eligible
+edits across complete post/card captures fails the minimum. Sends and final
+footer edits do not count.
+
+These are adapter-boundary predicates. They do not certify native completion,
+real Discord delivery, chunk-reply ingress or whole catalog scenarios. The
+NEW10 chunk-2 reply and D6 long-running source cells remain PENDING until their
+actual ingress and native evidence are independently bound.
+
+The credential-expiry clock proofs admit their configured database before
+requesting engine, schema-sweep or cleanup fixtures. Plain contributor-local
+`daimon_test` skips before setup; foreign destinations fail before connection.
+Registered isolated GitHub Actions CI schemas retain the shared admission rule.
+
+### D11 across actual platform posts
+
+`FooterAccountingHook.evaluate_turn` accepts the original Discord capture or a
+`PlatformSurfaceCapture` from the restored Slack/Teams harnesses. Bind the same
+session/root/platform/destination as the independent usage inventory. The reader
+retains native revision versions and accepted post receipt IDs; it reads the
+owned ledger/outbox through `TurnAccountingReader` without writes. Slack cost is
+read only from posted context blocks; Teams only from the visible small summary
+TextBlock. Answer text, notification fallbacks and controls cannot supply it.
+
+Provide complete `RevisionRateAttribution` entries, with independently dated
+controlled rates and explicit infrastructure evidence, plus the native inventory
+seal and terminal. Missing rates, duration, totals, settlement or capture remain
+PENDING with their typed reason. Once those prerequisites are complete, the
+frozen D11 requirement for a posted cost executes: no cost is **FAIL /
+POSTED_COST_MISSING**, rather than PENDING. The unchanged native OpenAI/Gemini
+adapters currently omit cost, so their controlled D11 outcome is FAIL even when
+independent host arithmetic passes. Anthropic's controlled priced-footer proof
+passes. These component controls certify neither live prices nor complete source
+scenario ingress. No source assertion or aggregate usage row is manufactured.
+
+Accounting fixtures admit the configured destination before requesting any engine,
+sweep or cleanup fixture. Plain local `daimon_test` skips; owned lane databases and
+registered isolated GitHub Actions schemas retain the shared guard policy.
+
+The native caller regression also executes N9's actual OpenAI/Gemini SDK and host
+path, consumes its accepted post capture and recorded terminal, and independently
+normalizes the served native usage snapshot. The private case keeps the frozen
+D11 assertions verbatim, uses an owned UUID tenant, and pins Gemini's codec to
+reviewed merged #838; frozen source files and pins remain untouched. Complete
+controlled rate/infrastructure inventories settle the same native revision through
+host accounting. These proofs report the observed native cost omission as FAIL,
+with no PASS promotion or claim about live rates, spend or source ingress.
+
+
+The opt-in product profile includes `turn.native_footer_cost`; default reports
+never include `PASS under opt-in profile` in default counts. Native footer tests
+record normalized usage during actual SDK/host execution, use the existing
+bounded final usage walk, capture real Discord/Slack/Teams posts and independently
+query the owned ledger/outbox. Complete controlled usage and prices prove host
+arithmetic only; they do not certify live spend or source ingress. Missing
+inventory, rates, infrastructure or settlement remains pending in accounting;
+a complete posted capture without the frozen required dollar field is an
+executed failure. Other unavailable opt-in declarations still refuse the full
+product profile; a D11 component control does not certify those other factories.

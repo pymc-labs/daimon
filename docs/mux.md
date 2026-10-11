@@ -1689,3 +1689,26 @@ required-action occupancy. C04/C11 remain shared-fixture PENDING until complete
 host/provider envelopes are composed. See
 `packages/mux/mux/drivers/gemini/CONFORMANCE-HOOKS.md`
 for the evidence boundary; no live calls or default selection changes.
+
+### D11 native footer binding (offline QA)
+
+`daimon.testing.d11_binding.D11TurnBinding` connects explicit OpenAI/Gemini QA
+turns to the real recorder and the read-only per-turn accounting API. Construct
+a fresh binding inside each profile factory, after authorizing a UUID tenant,
+native session/root/model and persisted provider binding in an owned test DB.
+Install `binding.billing()` before native dispatch. The default profile gets no
+native cost context; the opt-in profile gets its root-bound cost context. Missing
+rates, infrastructure evidence or native totals never become guessed charges.
+
+After dispatch, call `await binding.evaluate(evidence=run_evidence,
+capture=actual_adapter_capture, receipts=native_receipts, inventory=native_inventory,
+assertions=source_assertions)`. Supply normalized receipts and an exhausted
+inventory independently from the native execution, never from queried ledger
+rows. The returned result validates accepted post history and raw text payloads,
+evaluates every supplied predicate and replaces only the two D11 accounting
+checks with the owned ledger join. Complete opted results are labelled
+`PASS under opt-in profile`; complete default native posts lacking dollars fail.
+Unknown coverage or cost retains its typed accounting reason. Controlled rates
+prove offline host arithmetic only. The consumer must retain all independent
+source, ingress and capability gaps; this hook cannot certify those gaps or live
+spend. C12 aggregate coverage remains deferred.

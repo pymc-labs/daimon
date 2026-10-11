@@ -875,6 +875,31 @@ commit, so a batch failure rolls back every debit and emits no usage sample.
 Gemini Flash currently retains interaction usage; this API refuses to invent
 independent child meters or add delegated costs to potentially inclusive totals.
 
+
+### Explicit offline footer accounting hooks
+
+`daimon.testing.footer_accounting.FooterAccountingHook` joins real
+`DiscordSurfaceCapture` posts with a read-only, consistent snapshot of an
+authorized binding's persisted usage revisions, accounting outbox and tenant
+ledger. Supply independently captured normalized `UsagePriceReceipt` values,
+including the native revision, dated controlled price, explicit infrastructure
+cost/source, and an authoritative root terminal. The shared owned-sessionmaker
+guard checks every bind before connection; plain local `daimon_test` is refused
+by design (use an owned lane database, or the registered isolated CI schema).
+
+`evaluate` returns the two D11 checks and the independently read ledger amount.
+The actual embed's `used` field is parsed from accepted adapter payloads; balance
+values and draft/model text cannot substitute for a footer. Signed correction
+debits/credits are joined by exact observation/revision keys. Unknown pricing,
+container time, pending outbox, or incomplete native turn coverage remain
+PENDING. A complete root turn usage receipt can prove controlled host arithmetic;
+request-span subtotals and delegated/covered aggregates cannot certify a complete
+turn. OpenAI/Gemini currently omit the display cost, so their footer check remains
+PENDING. These hooks never certify live spend, change adapter defaults, create
+aggregate rows, or restore the cut C12 aggregate certification. The catalog
+executor must separately bind actual capture/receipts; installing a hook does not
+promote a source cell.
+
 Offline tests can read normalized native revisions through
 `stores.turn_usage.read_accounting_revisions` without claiming or replaying the
 accounting outbox. `daimon.testing.turn_accounting.TurnAccountingReader` adds a
@@ -901,3 +926,37 @@ path. Unknown usage stays pending; known
 charges remain idempotent, and later verified revisions settle only their delta.
 An unavailable final meter does not establish zero cost or release an unverified
 reservation. Local storage, validation and accounting failures still propagate.
+
+
+`evaluate_turn` consumes the read-only `TurnAccountingReader` API with independent
+normalized native receipts, per-revision `RevisionRateAttribution` evidence and
+`TurnUsageInventory`. A sealed, completely priced and settled request walk can
+resolve Anthropic request-span coverage without inventing a turn observation.
+The hook compares native versions/counts independently of persisted rows, joins
+signed corrections once, and parses the actual posted footer. Unknown rates,
+container time or inventory leave the result PENDING; a known debit cannot fill
+in an unknown cost. The complete-turn path leaves the original `evaluate`
+contract available and changes no posted cost or default product behavior.
+
+
+The additive `FooterAccountingHook.evaluate_turn` joins that complete per-turn
+snapshot to actual Discord, Slack or Teams adapter captures. Every post receipt
+is retained and the platform/destination/root must match the authorized binding.
+Cost comes from the accepted embed/context/Adaptive Card summary leaf, never from
+answer text or the queried ledger. Once capture, inventory, rates, infrastructure
+and settlement are complete, a missing required displayed cost is an executed
+D11 **FAIL / POSTED_COST_MISSING**. This currently describes unchanged native
+OpenAI/Gemini footers even when controlled host arithmetic passes. Unknown facts
+still return typed PENDING. The older `evaluate` interface remains unchanged;
+controlled component results are not live-spend or full catalog certificates.
+
+
+Native OpenAI/Gemini platform footers can show settled turn cost with
+`DAIMON_TURN__NATIVE_FOOTER_COST=true` (default `false`). The host must supply
+verified rates for the resolved model and complete native usage, infrastructure
+and current-root settlement. The displayed `used` amount includes the configured
+markup and follows the ledger's per-charge rounding. Unknown measurement shows
+`Cost unknown`; an incomplete total shows `Cost partial`, without a numeric
+subtotal. This option supplies no rates and starts no reconciliation timer.
+With the option off, native footers keep their previous appearance. Anthropic
+footers keep their existing appearance and arithmetic with either value.

@@ -43,6 +43,7 @@ from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
+from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
@@ -176,6 +177,7 @@ class PreparedTurn:
     backend: ManagedAgents | None = None
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
+    native_footer_cost: NativeFooterCostContext | None = None
 
 
 @dataclass(frozen=True)

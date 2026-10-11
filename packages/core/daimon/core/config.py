@@ -1241,6 +1241,16 @@ class TurnSettings(BaseModel):
         ),
     )
 
+    native_footer_cost: bool = Field(
+        default=False,
+        description=(
+            "Display settled native OpenAI/Gemini turn cost on platform footers. "
+            "Requires complete normalized usage, verified rates and root accounting. "
+            "Incomplete totals display Cost unknown or Cost partial, never an estimate. "
+            "Off by default; Anthropic footers are unchanged with either value."
+        ),
+    )
+
     channel_backends: bool = Field(
         default=False,
         description=(

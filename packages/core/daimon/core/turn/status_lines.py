@@ -82,7 +82,11 @@ def format_summary(
     fields = [
         agent_name or None,
         format_duration(elapsed_seconds),
-        f"{cost} used" if cost is not None else None,
+        cost
+        if cost in ("Cost unknown", "Cost partial")
+        else f"{cost} used"
+        if cost is not None
+        else None,
         left,
     ]
     return SUMMARY_GAP.join(field for field in fields if field)

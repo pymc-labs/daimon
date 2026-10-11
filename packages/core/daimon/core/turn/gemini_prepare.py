@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from uuid import NAMESPACE_URL, uuid5
 
+from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
@@ -125,6 +126,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 raise
         session_ref = session.ref
     else:
+        binding = prior
         session_ref = ResourceRef(
             id=prior.native_refs["session"],
             kind="session",
@@ -150,6 +152,18 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_changed_admission",), PROFILE)
 
+    footer_cost = (
+        NativeFooterCostContext(
+            request.deps.sessionmaker,
+            request.scope,
+            binding,
+            session_ref,
+            request.deps.markup,
+        )
+        if request.deps.native_footer_cost
+        else None
+    )
+
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
             raise ScopeViolation(observation.id, "Gemini billing received foreign usage")
@@ -160,7 +174,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             if observation.model.id == "gemini-flash-latest"
             else usage.prices.get(observation.model.id)
         )
-        return await record_provider_usage(
+        settled = await record_provider_usage(
             sessionmaker=request.deps.sessionmaker,
             binding_id=binding_id,
             observation=observation,
@@ -174,6 +188,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             channel_id=current.budget_channel_id or current.origin_channel_id,
         )
 
+        if footer_cost is not None:
+            footer_cost.note(
+                observation,
+                price=price,
+                infrastructure_usd=usage.infrastructure_usd,
+                settled=settled,
+            )
+        return settled
+
     return PreparedTurn(
         admission=replace(current, backend_revision=config),
         ma_session_id=session_ref.id,
@@ -184,4 +207,5 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         _record=record,
         backend=backend,
         session_ref=session_ref,
+        native_footer_cost=footer_cost,
     )

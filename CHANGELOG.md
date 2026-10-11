@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Pin the separately signed F2-R2 workload and zero-message acceptance envelopes; reject rewritten financial approvals and retain merged A7 claim/output evidence.
+- Add an explicit offline D11 native-turn binding that records real usage and joins accepted adapter posts to owned per-turn accounting; opt-in results retain their profile label and default missing-cost footers fail.
+
+- Add default-off native OpenAI/Gemini footer costs from complete settled usage and verified rates; unknown or partial costs are explicit, and Anthropic footers stay unchanged.
+
+- Join actual Slack/Teams footer posts to independently priced turn accounting; complete native captures without the required cost now fail the offline D11 assertion, while incomplete evidence stays pending.
+
+- Add opt-in offline continuity evidence hooks for neutral-provider snapshot loss, history restart, and isolated Postgres ledger/outbox recovery. Synthetic accounting requires an owned local `daimon_test_nc_*` database, or GitHub Actions CI with a registered isolated test schema, before connection. Offline SDK probes refuse ambient configuration; accounting tests skip plain local contributor databases outside GitHub Actions CI. Controlled faults remain distinct from native provider proof; unsupported coverage arrangements retain their conformance gap.
+
+- Add an opt-in owned-database routine clock hook that executes real scheduler, delivery and explicitly bound credential-form expiry ticks with captured Discord posts; unbound expiry remains explicitly unavailable and invalid database ownership fails closed before setup or completed waits.
+
+- Add explicit offline footer/accounting joins over real Discord posts and owned usage/outbox/ledger reads, including independently sealed complete-turn usage and rate evidence; incomplete price, infrastructure and turn coverage remain pending.
+
+- Add an opt-in passive host admission observer and owned offline evidence hook for actual gate decisions, adapter refusal effects and independently counted native sends; incomplete capture remains pending without fabricated provider turns.
+
+- Check answer counts, code fences, chunk timing, final footer placement and witnessed running-card edits against complete acknowledged offline Discord post history, keeping missing ingress and native evidence PENDING.
 
 - Accept processed A7 send claims and preserve audited per-leg final output through later proof failures.
 - Pin the partial OpenAI CERT-M2 tape/receipt hashes and historical SDK/API revision; disclose recovered HTTP 409 cleanup in each live PASS row.

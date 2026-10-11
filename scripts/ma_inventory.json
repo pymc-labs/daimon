@@ -1,5 +1,5 @@
 {
-  "files_scanned": 2465,
+  "files_scanned": 2478,
   "parse_errors": [],
   "calls": [
     {
@@ -7507,63 +7507,6 @@
       "response_access": [
         "created.id"
       ]
-    },
-    {
-      "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1481,
-      "end": 1484,
-      "scope": "invoke",
-      "category": "test",
-      "resource": "sessions.threads.events.stream",
-      "call": "context.client.beta.sessions.threads.events.stream(session_id=session.ref.id, thread_id='root-owned')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/testing/tests/test_f2_native_bounds.py",
-      "line": 151,
-      "end": 151,
-      "scope": "test_native_agent_wire_has_disabled_defaults_and_exact_mcp_allowlist",
-      "category": "test",
-      "resource": "agents.create",
-      "call": "client.beta.agents.create(name='f2', model=MODEL, tools=[])",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/testing/tests/test_f2_native_bounds.py",
-      "line": 99,
-      "end": 99,
-      "scope": "test_sdk_budget_and_effective_tool_readback_before_any_message",
-      "category": "test",
-      "resource": "sessions.create",
-      "call": "client.beta.sessions.create(agent='ag_probe', environment_id='env_probe')",
-      "request_keys": [],
-      "response_access": [
-        "reply.id"
-      ]
-    },
-    {
-      "file": "packages/testing/tests/test_f2_native_bounds.py",
-      "line": 154,
-      "end": 154,
-      "scope": "test_native_agent_wire_has_disabled_defaults_and_exact_mcp_allowlist",
-      "category": "test",
-      "resource": "agents.create",
-      "call": "client.beta.agents.create(name='foreign', model='other-model')",
-      "request_keys": [],
-      "response_access": []
-    },
-    {
-      "file": "packages/testing/tests/test_f2_native_bounds.py",
-      "line": 97,
-      "end": 97,
-      "scope": "test_sdk_budget_and_effective_tool_readback_before_any_message",
-      "category": "test",
-      "resource": "sessions.create",
-      "call": "client.beta.sessions.create(agent='ag_probe', environment_id='env_probe')",
-      "request_keys": [],
-      "response_access": []
     },
     {
       "file": "packages/testing/tests/test_ma.py",
@@ -18695,7 +18638,7 @@
     },
     {
       "file": "packages/testing/daimon/testing/anthropic_live.py",
-      "line": 25,
+      "line": 24,
       "module": "anthropic",
       "names": [
         "AsyncAnthropic",
@@ -18709,45 +18652,6 @@
       "module": "anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/f2_native_bounds.py",
-      "line": 12,
-      "module": "anthropic",
-      "names": [
-        "AsyncAnthropic"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/f2_native_bounds.py",
-      "line": 13,
-      "module": "anthropic.resources.beta",
-      "names": [
-        "AsyncAgents",
-        "AsyncSessions"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/f2_native_bounds.py",
-      "line": 14,
-      "module": "anthropic.types.beta",
-      "names": [
-        "AgentCreateParams",
-        "BetaManagedAgentsAgent",
-        "BetaManagedAgentsSession"
-      ],
-      "category": "test-support"
-    },
-    {
-      "file": "packages/testing/daimon/testing/f2_native_bounds.py",
-      "line": 15,
-      "module": "anthropic.types.beta.session_create_params",
-      "names": [
-        "SessionCreateParams"
       ],
       "category": "test-support"
     },
@@ -19272,8 +19176,17 @@
       "category": "test-support"
     },
     {
+      "file": "packages/testing/tests/test_admission_evidence.py",
+      "line": 18,
+      "module": "anthropic",
+      "names": [
+        "AsyncAnthropic"
+      ],
+      "category": "test"
+    },
+    {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1143,
+      "line": 1032,
       "module": "anthropic",
       "names": [
         "AsyncStream"
@@ -19282,16 +19195,7 @@
     },
     {
       "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 1595,
-      "module": "anthropic.types.beta.sessions",
-      "names": [
-        "BetaManagedAgentsSpanModelRequestEndEvent"
-      ],
-      "category": "test"
-    },
-    {
-      "file": "packages/testing/tests/test_anthropic_live.py",
-      "line": 2333,
+      "line": 1462,
       "module": "anthropic.types.beta.sessions",
       "names": [
         "BetaManagedAgentsSpanModelRequestEndEvent"

@@ -30,7 +30,7 @@ from daimon.core.stores.domain import CredentialRequestRow
 
 import discord
 
-__all__ = ["edit_posted_card"]
+__all__ = ["edit_expired_posted_card", "edit_posted_card"]
 
 _log = structlog.get_logger()
 

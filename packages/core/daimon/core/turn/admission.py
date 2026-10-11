@@ -93,6 +93,7 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
+    AdmissionDenialReason,
     AdmissionDenied,
     DmSourceSealedError,
     MissingTurnConfigError,
@@ -108,7 +109,9 @@ from mux.state.lease import Slot
 __all__ = [
     "Admission",
     "AdmissionDenied",
+    "AdmissionDecision",
     "AdmissionGrant",
+    "AdmissionObserver",
     "DmSource",
     "MissingTurnConfigError",
     "admit",
@@ -222,6 +225,39 @@ class Admission:
     backend_ever_shared: bool = field(default=False, compare=False, repr=False)
 
 
+@dataclass(frozen=True)
+class AdmissionDecision:
+    """Observed host gate result; never a provider session or completed turn.
+
+    Notices and refusal logs remain adapter-owned. ``account_id`` is present
+    only when the existing observation has resolved it before the decision.
+    """
+
+    tenant_id: uuid.UUID
+    platform: str
+    external_user_id: str
+    channel_id: str
+    thread_id: str | None
+    account_id: uuid.UUID | None
+    reason: AdmissionDenialReason | None
+
+    @property
+    def admitted(self) -> bool:
+        return self.reason is None
+
+
+type AdmissionObserver = Callable[[AdmissionDecision], None]
+
+
+def _observe_admission(observer: AdmissionObserver, decision: AdmissionDecision) -> None:
+    # An explicitly installed observer is passive: its failure must not turn a
+    # refusal into a different exception or revoke a successfully resolved grant.
+    try:
+        observer(decision)
+    except Exception:
+        _log.warning("turn.admission_observer_failed")
+
+
 async def admit(
     deps: TurnDeps,
     *,
@@ -238,6 +274,7 @@ async def admit(
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
+    observer: AdmissionObserver | None = None,
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -264,9 +301,35 @@ async def admit(
             )
     except BaseException as exc:
         observation.finish(error=exc)
+        if observer is not None and isinstance(exc, AdmissionDenied):
+            _observe_admission(
+                observer,
+                AdmissionDecision(
+                    tenant_id,
+                    platform,
+                    external_user_id,
+                    channel_id,
+                    thread_id,
+                    observation.account_id,
+                    exc.reason,
+                ),
+            )
         raise
     observation.account_id = result.account_id
     observation.agent_id = result.agent.id
+    if observer is not None:
+        _observe_admission(
+            observer,
+            AdmissionDecision(
+                tenant_id,
+                platform,
+                external_user_id,
+                channel_id,
+                thread_id,
+                result.account_id,
+                None,
+            ),
+        )
     return replace(result, observation=observation)
 
 

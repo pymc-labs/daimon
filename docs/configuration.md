@@ -1168,6 +1168,15 @@ Experimental neutral turn ports; legacy remains the default.
 Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
 opts into neutral Events/Sessions ports. Off by default.
 
+### `DAIMON_TURN__NATIVE_FOOTER_COST`
+
+`bool` · optional · default `False`
+
+Display settled native OpenAI/Gemini turn cost on platform footers. Requires complete
+normalized usage, verified rates and root accounting. Incomplete totals display Cost
+unknown or Cost partial, never an estimate. Off by default; Anthropic footers are
+unchanged with either value.
+
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
 `bool` · optional · default `False`

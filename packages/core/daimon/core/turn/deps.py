@@ -79,6 +79,7 @@ class TurnDeps:
     turn_path: Literal["legacy", "mux"] | None = None
     # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
     channel_backends: bool = False
+    native_footer_cost: bool = False
     # Provider owners supply transports and durable stores; no credentials
     # or SDK clients are discovered by profile dispatch.
     turn_runtimes: Mapping[str, TurnRuntime] = field(default_factory=dict[str, TurnRuntime])
@@ -129,6 +130,9 @@ def build_turn_deps(
         turn_path=turn_settings.path if isinstance(turn_settings, TurnSettings) else None,
         channel_backends=(
             turn_settings.channel_backends if isinstance(turn_settings, TurnSettings) else False
+        ),
+        native_footer_cost=(
+            turn_settings.native_footer_cost if isinstance(turn_settings, TurnSettings) else False
         ),
         sessionmaker=sessionmaker,
         deployment_default=deployment_default,

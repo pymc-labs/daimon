@@ -526,6 +526,7 @@ async def poll_deliveries_once(
     post: RoutinePoster,
     now: datetime,
     owner: str | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> int:
     """Claim due posts for `platform`, post each, settle. Returns how many."""
     lease_owner = owner or f"{platform}:{uuid.uuid4()}"
@@ -552,7 +553,7 @@ async def poll_deliveries_once(
                 owner=lease_owner,
                 status=outcome.status,
                 note=outcome.note,
-                now=datetime.now(UTC),
+                now=datetime.now(UTC) if clock is None else clock(),
             )
         log.info(
             "routine.delivery_settled",

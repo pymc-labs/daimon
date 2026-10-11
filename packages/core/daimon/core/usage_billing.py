@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from daimon.core.native_footer_cost import NativeFooterCostContext
 from mux.contracts.usage import UsageObservation
 
 
@@ -32,3 +33,4 @@ class ObservationBilled:
     """
 
     record: ObservationRecorder
+    native_footer_cost: NativeFooterCostContext | None = None

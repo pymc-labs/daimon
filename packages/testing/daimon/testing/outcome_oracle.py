@@ -33,6 +33,11 @@ SUPPORTED_ASSERTION_KINDS = frozenset(
         "text_absent",
         "no_preamble",
         "no_blank_message",
+        "message_count",
+        "fences_balanced",
+        "chunks_gap_max_s",
+        "footer_on_last_message",
+        "card_edits_min",
         "card_finalized",
         "progress_seen",
         "tool_succeeded",
@@ -822,6 +827,27 @@ def evaluate(
                 blank = BlankMessageExpectation.model_validate(dict(assertion))
                 turn = turns.get(blank.turn)
                 check = no_blank_message_check(turn, blank) if turn is not None else None
+            elif kind in (
+                "message_count",
+                "fences_balanced",
+                "chunks_gap_max_s",
+                "footer_on_last_message",
+                "card_edits_min",
+            ):
+                # Post-history capture is opt-in; retain legacy verdict bytes.
+                legacy_turn = turns.get(number) if number is not None else None
+                if legacy_turn is None or legacy_turn.post_history is None:
+                    checks.append(
+                        CheckResult(
+                            kind=label, turn=number, status="PENDING", code="UNSUPPORTED_KIND"
+                        )
+                    )
+                    continue
+                from daimon.testing.post_structure import parse_expectation, structure_check
+
+                structural = parse_expectation(assertion)
+                turn = turns.get(structural.turn)
+                check = structure_check(turn, structural) if turn is not None else None
             elif kind in ("card_finalized", "progress_seen"):
                 card = CardExpectation.model_validate(dict(assertion))
                 turn = turns.get(card.turn)

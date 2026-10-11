@@ -21,6 +21,7 @@ from daimon.core.mux_backend import (
     TurnRuntime,
     register_turn_backend,
 )
+from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
@@ -356,24 +357,45 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         if native.state == "terminated":
             raise ContinuityLost(binding.id, ("OpenAI session terminated",))
     ref = native.ref
+    footer_cost = (
+        NativeFooterCostContext(
+            request.deps.sessionmaker, request.scope, binding, ref, request.deps.markup
+        )
+        if request.deps.native_footer_cost
+        else None
+    )
 
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
             raise ScopeViolation(ref.id, "OpenAI host usage differs from bound root session")
-        return await record_provider_usage(
+        infrastructure = await runtime.infrastructure(observation)
+        settled = await record_provider_usage(
             sessionmaker=request.deps.sessionmaker,
             binding_id=binding.id,
             observation=observation,
             tenant_id=request.tenant_id,
             platform_user_id=request.external_user_id,
             provider_price=runtime.price,
-            infrastructure_usd=await runtime.infrastructure(observation),
+            infrastructure_usd=infrastructure,
             billing_grain="turn",
             managed_session_id=ref.id,
             model_id="gpt-6-luna",
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
         )
+
+        if footer_cost is not None:
+            from mux.contracts.ids import ModelRef
+
+            footer_cost.note(
+                observation.model_copy(
+                    update={"model": ModelRef(provider="openai", id="gpt-6-luna")}
+                ),
+                price=runtime.price,
+                infrastructure_usd=infrastructure,
+                settled=settled,
+            )
+        return settled
 
     return PreparedTurn(
         admission=request.admission,
@@ -385,6 +407,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         _record=record,
         backend=backend,
         session_ref=ref,
+        native_footer_cost=footer_cost,
     )
 
 

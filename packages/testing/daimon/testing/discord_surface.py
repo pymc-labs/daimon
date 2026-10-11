@@ -11,6 +11,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import discord
@@ -295,6 +296,7 @@ class DiscordSurfaceHarness:
         clock: Callable[[], float] = time.monotonic,
         agent_name: str = "Daimon",
         model_id: str = "claude-haiku-5-5",
+        markup: Decimal = Decimal(1),
         render_tables: bool = False,
         unprompted: bool = False,
         notify_on_completion: bool = False,
@@ -392,6 +394,7 @@ class DiscordSurfaceHarness:
             delete=self.transport.delete,
             agent_name=agent_name,
             model_id=model_id,
+            markup=markup,
             clock=clock,
             render_tables=render_tables,
             unprompted=unprompted,
