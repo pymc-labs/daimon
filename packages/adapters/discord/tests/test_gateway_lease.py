@@ -331,6 +331,7 @@ def _started_bot(events: list[str], *, closes: bool = True) -> MagicMock:
 
     bot.start = AsyncMock(side_effect=run)
     bot.is_closed = MagicMock(side_effect=lambda: closed)
+    bot.close = AsyncMock()
     return bot
 
 
@@ -340,6 +341,35 @@ async def test_lease_is_released_when_start_returns_after_a_clean_close() -> Non
     bot = _started_bot(events)
     await start_when_leased(bot, "token", stop=asyncio.Event(), started=asyncio.Event())
     assert events == ["acquire_begin", "acquired", "start", "start_returned", "release"]
+
+
+async def test_lease_waits_for_an_in_progress_close_to_finish() -> None:
+    """is_closed() is true once closing starts; start() may return before it ends."""
+    events: list[str] = []
+    bot = _started_bot(events)
+    gate = asyncio.Event()
+
+    async def close() -> None:
+        await gate.wait()
+        events.append("closed")
+
+    bot.close = AsyncMock(side_effect=close)
+    task = asyncio.create_task(
+        start_when_leased(bot, "token", stop=asyncio.Event(), started=asyncio.Event())
+    )
+    await asyncio.sleep(0.1)
+    assert "release" not in events
+    gate.set()
+    await asyncio.wait_for(task, timeout=2)
+    assert events[-2:] == ["closed", "release"]
+
+
+async def test_failed_close_does_not_release_the_lease() -> None:
+    events: list[str] = []
+    bot = _started_bot(events)
+    bot.close = AsyncMock(side_effect=OSError("close frame not sent"))
+    await start_when_leased(bot, "token", stop=asyncio.Event(), started=asyncio.Event())
+    assert "release" not in events
 
 
 async def test_drain_does_not_release_the_lease_itself() -> None:

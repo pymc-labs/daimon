@@ -25,6 +25,10 @@ import discord
 
 log = structlog.get_logger()
 
+# Closing the gateway takes well under a second; past this the lease is left to
+# drop with the owner connection, and the successor waits on liveness instead.
+GATEWAY_CLOSE_WAIT_S = 30
+
 
 async def drain_on_owner_loss(bot: DaimonBot) -> None:
     await bot.runtime.ownership_lost.wait()
@@ -79,8 +83,24 @@ async def start_when_leased(
         # lease lives on. Released only after a clean close, so a successor
         # connects after this process has left the gateway; on ownership loss
         # the successor must wait for this process to stop being alive.
-        if lease is not None and bot.is_closed() and not bot.runtime.ownership_lost.is_set():
+        if lease is not None and bot.is_closed() and await _gateway_closed(bot):
             await lease.release()
+
+
+async def _gateway_closed(bot: DaimonBot) -> bool:
+    """Whether the close that `is_closed()` reports has finished, and cleanly.
+
+    `is_closed()` turns true when closing starts, and `start()` can return while
+    the drain task is still inside `close()`. `close()` is idempotent and waits
+    for that close to finish (or re-raises its failure).
+    """
+    try:
+        async with asyncio.timeout(GATEWAY_CLOSE_WAIT_S):
+            await bot.close()
+    except Exception as err:  # includes TimeoutError
+        log.warning("discord.gateway_close_unconfirmed", error_type=type(err).__name__)
+        return False
+    return not bot.runtime.ownership_lost.is_set()
 
 
 async def main() -> None:
