@@ -97,14 +97,18 @@ class GatewayLease:
                                 previous = (row[0], row[1]) if row is not None else None
                             await conn.commit()
                         if conn is not None and taken_on is not None:
-                            if previous is not None:
-                                blocked = not previous[1] and await owner_is_alive(
-                                    conn, previous[0]
+                            # A process from before the lease may be connected
+                            # without holding it: on the first rollout, and again
+                            # after a rollback, when an old row is still there.
+                            blocked = await self._other_owner_alive(conn)
+                            if not blocked and previous is not None:
+                                # Our own unreleased row means our earlier take
+                                # committed but its acknowledgement was lost.
+                                blocked = (
+                                    not previous[1]
+                                    and previous[0] != self.owner_key
+                                    and await owner_is_alive(conn, previous[0])
                                 )
-                            else:
-                                # Never recorded: a process from before the lease
-                                # may be connected without holding it.
-                                blocked = await self._other_owner_alive(conn)
                             if not blocked:
                                 await conn.execute(
                                     text("""INSERT INTO discord_gateway_lease

@@ -377,6 +377,62 @@ async def test_empty_lease_row_waits_for_an_unrecorded_live_owner(
             await session.commit()
 
 
+async def test_recorded_lease_still_waits_for_a_live_pre_lease_owner(
+    db_nullpool_engine: AsyncEngine, lock_key: int
+) -> None:
+    """After a rollback to pre-lease code, a cleanly released row is left behind."""
+    await _reset(db_nullpool_engine)
+    legacy_key = randbits(30)
+    factory = async_sessionmaker(db_nullpool_engine)
+    async with factory() as session:
+        await session.execute(
+            text("""INSERT INTO discord_gateway_lease
+                 (id, holder_owner_key, acquired_at, released_at)
+                 VALUES (1, :key, clock_timestamp(), clock_timestamp())"""),
+            {"key": randbits(30)},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO discord_worker_heartbeats (owner_key, seen_at)"
+                " VALUES (:key, clock_timestamp())"
+            ),
+            {"key": legacy_key},
+        )
+        await session.commit()
+    try:
+        async with _process(db_nullpool_engine, lock_key) as (new, _):
+            waiter = asyncio.create_task(new.acquire(asyncio.Event()))
+            await asyncio.sleep(0.8)
+            assert not waiter.done(), "the rolled-back process is still connected"
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+    finally:
+        async with factory() as session:
+            await session.execute(
+                text("DELETE FROM discord_worker_heartbeats WHERE owner_key = :key"),
+                {"key": legacy_key},
+            )
+            await session.commit()
+
+
+async def test_own_unreleased_row_is_retaken_at_once(
+    db_nullpool_engine: AsyncEngine, lock_key: int
+) -> None:
+    """A take that committed but lost its acknowledgement must not wait on itself."""
+    await _reset(db_nullpool_engine)
+    async with _process(db_nullpool_engine, lock_key) as (lease, _):
+        async with async_sessionmaker(db_nullpool_engine)() as session:
+            await session.execute(
+                text("""INSERT INTO discord_gateway_lease
+                     (id, holder_owner_key, acquired_at, released_at)
+                     VALUES (1, :key, clock_timestamp(), NULL)"""),
+                {"key": lease.owner_key},
+            )
+            await session.commit()
+        await asyncio.wait_for(lease.acquire(asyncio.Event()), timeout=2)
+        assert lease.held
+
+
 async def test_leaving_the_runtime_without_release_frees_the_successor_at_once(
     db_nullpool_engine: AsyncEngine, lock_key: int
 ) -> None:
