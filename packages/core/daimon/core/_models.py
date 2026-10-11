@@ -3259,6 +3259,7 @@ class DiscordWorkerHeartbeat(Base):
     __tablename__ = "discord_worker_heartbeats"
     owner_key: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_aware: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
 class DiscordGatewayLease(Base):

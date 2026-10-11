@@ -70,6 +70,8 @@ async def _lock_granted(engine: AsyncEngine, lock_key: int) -> bool:
 async def _reset(engine: AsyncEngine) -> None:
     async with async_sessionmaker(engine)() as session:
         await session.execute(text("DELETE FROM discord_gateway_lease"))
+        # Earlier tests that fail-stop leave heartbeats behind, as production does.
+        await session.execute(text("DELETE FROM discord_worker_heartbeats"))
         await session.commit()
 
 
@@ -335,6 +337,56 @@ async def test_ownership_loss_does_not_release_the_lease() -> None:
 
 def test_runtime_fields_include_the_lease() -> None:
     assert "gateway_lease" in {f.name for f in dataclasses.fields(DiscordRuntime)}
+
+
+async def test_empty_lease_row_waits_for_an_unrecorded_live_owner(
+    db_nullpool_engine: AsyncEngine, lock_key: int
+) -> None:
+    """A process from before the lease is connected without ever recording itself."""
+    await _reset(db_nullpool_engine)
+    legacy_key = randbits(30)
+    factory = async_sessionmaker(db_nullpool_engine)
+    async with factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO discord_worker_heartbeats (owner_key, seen_at)"
+                " VALUES (:key, clock_timestamp())"
+            ),
+            {"key": legacy_key},
+        )
+        await session.commit()
+    try:
+        async with _process(db_nullpool_engine, lock_key) as (new, _):
+            waiter = asyncio.create_task(new.acquire(asyncio.Event()))
+            await asyncio.sleep(0.8)
+            assert not waiter.done(), "the legacy process is still connected"
+            async with factory() as session:  # it exits gracefully: its row goes
+                await session.execute(
+                    text("DELETE FROM discord_worker_heartbeats WHERE owner_key = :key"),
+                    {"key": legacy_key},
+                )
+                await session.commit()
+            await asyncio.wait_for(waiter, timeout=3)
+            assert new.held
+    finally:
+        async with factory() as session:
+            await session.execute(
+                text("DELETE FROM discord_worker_heartbeats WHERE owner_key = :key"),
+                {"key": legacy_key},
+            )
+            await session.commit()
+
+
+async def test_leaving_the_runtime_without_release_frees_the_successor_at_once(
+    db_nullpool_engine: AsyncEngine, lock_key: int
+) -> None:
+    """bot.start raising or any runtime exit: the heartbeat row goes, so no liveness wait."""
+    await _reset(db_nullpool_engine)
+    async with _process(db_nullpool_engine, lock_key) as (old, _):
+        await old.acquire(asyncio.Event())
+    async with _process(db_nullpool_engine, lock_key) as (new, _):
+        waited_ms = await asyncio.wait_for(new.acquire(asyncio.Event()), timeout=2)
+        assert waited_ms < 1000
 
 
 async def test_taking_the_lease_overwrites_an_earlier_holders_clean_release(

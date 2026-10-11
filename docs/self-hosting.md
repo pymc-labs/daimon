@@ -873,5 +873,5 @@ process dies without releasing, the standby waits until that process's ownership
 heartbeat has expired (the same bound the worker-ownership fail-stop uses)
 before connecting. A standby that receives SIGTERM exits without touching the
 lease. A holder that loses its owner connection and cannot retake the lease stops.
-To use the same pattern with your own deploy scripts, start the new Discord
+The first process to take the lease with no earlier holder recorded also waits for any Discord process from before the lease to exit, so the first deploy of this change still replaces the container stop-first. The deploy script falls back to stop-first for an image that lacks the lease, so a rollback to an older image behaves as it did before. To use the same pattern with your own deploy scripts, start the new Discord
 container before stopping the old one and give it the same database.

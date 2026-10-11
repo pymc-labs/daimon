@@ -97,11 +97,15 @@ class GatewayLease:
                                 previous = (row[0], row[1]) if row is not None else None
                             await conn.commit()
                         if conn is not None and taken_on is not None:
-                            if (
-                                previous is None
-                                or previous[1]
-                                or not await owner_is_alive(conn, previous[0])
-                            ):
+                            if previous is not None:
+                                blocked = not previous[1] and await owner_is_alive(
+                                    conn, previous[0]
+                                )
+                            else:
+                                # Never recorded: a process from before the lease
+                                # may be connected without holding it.
+                                blocked = await self._other_owner_alive(conn)
+                            if not blocked:
                                 await conn.execute(
                                     text("""INSERT INTO discord_gateway_lease
                                          (id, holder_owner_key, acquired_at, released_at)
@@ -131,6 +135,20 @@ class GatewayLease:
             if taken_on is not None and not self.held:
                 await self._unlock(taken_on)
             raise
+
+    async def _other_owner_alive(self, conn: AsyncConnection) -> bool:
+        """A live owner from before the lease. Lease-aware owners are ordered by the lock."""
+        keys = (
+            await conn.scalars(
+                text("""SELECT owner_key FROM discord_worker_heartbeats
+                     WHERE owner_key != :me AND NOT lease_aware"""),
+                {"me": self.owner_key},
+            )
+        ).all()
+        for key in keys:
+            if await owner_is_alive(conn, key):
+                return True
+        return False
 
     async def confirm_after_reconnect(self, candidate: AsyncConnection) -> bool:
         """Retake the lock on a replacement owner connection; False if it moved on."""

@@ -105,9 +105,10 @@ async def hold_worker_owner(
             if reconnect and lease.held and not await lease.confirm_after_reconnect(candidate):
                 raise GatewayLeaseExpired("gateway lease moved on during owner reconnect")
             await candidate.execute(
-                text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at)
-                     VALUES (:key, clock_timestamp())
-                     ON CONFLICT (owner_key) DO UPDATE SET seen_at = clock_timestamp()"""),
+                text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at, lease_aware)
+                     VALUES (:key, clock_timestamp(), true)
+                     ON CONFLICT (owner_key) DO UPDATE SET
+                       seen_at = clock_timestamp(), lease_aware = true"""),
                 {"key": owner_key},
             )
             await candidate.commit()
