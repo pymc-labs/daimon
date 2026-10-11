@@ -284,3 +284,19 @@ discord_startup_replay	StartupReplay	ReplayNoAdmission	violates:NoDuplicate	83	-
 discord_startup_replay	StartupReplay	ReplayNoGrace	violates:NoTakeoverOfLiveWorker	94	-	connection loss lets another worker reclaim before the live owner stops
 discord_startup_replay	StartupReplay	ReplayShortGrace	violates:NoTakeoverOfLiveWorker	234	-	grace shorter than retry plus stop allows live-owner takeover
 discord_startup_replay	StartupReplay	ReplayRecoveryWitness	violates:NoTransientRecovery	36	-	a transient probe failure can recover while the worker stays live
+# ---- Discord gateway handover ----
+discord_gateway_handover	GatewayHandover	GatewaySafe	clean	704	-	designed protocol with a readiness-gated deploy, one connection loss, one SIGKILL: at most one handler, graceful gap only after New is ready
+discord_gateway_handover	GatewayHandover	GatewayProgress	clean	704	-	liveness (weak fairness): New eventually connects, including after a connection loss or SIGKILL
+discord_gateway_handover	GatewayHandover	GatewayThree	clean	8638	-	three processes (a second restart): at most one handler
+discord_gateway_handover	GatewayHandover	GatewayTrustLockNoLoss	clean	112	-	lock alone suffices when the holder's connection never drops
+discord_gateway_handover	GatewayHandover	GatewayUnlockBeforeCloseAccepting	clean	1574	-	early release still keeps accepting new work to one process (draining Old rejects mentions)
+discord_gateway_handover	GatewayHandover	GatewayStopFirst	violates:GapBounded	8	-	today's stop-first deploy: the gap includes New's start-up
+discord_gateway_handover	GatewayHandover	GatewayNoWaitReady	violates:GapBounded	26	-	start New alongside but SIGTERM Old before New has built its runtime: same gap
+discord_gateway_handover	GatewayHandover	GatewayUnlockBeforeClose	violates:AtMostOneHandler	252	-	lease released before the gateway closes: New connects while Old is still connected
+discord_gateway_handover	GatewayHandover	GatewayTrustLockOnly	violates:AtMostOneHandler	33	-	lock without lease check: Old's connection drops, New connects while Old still on the gateway
+discord_gateway_handover	GatewayHandover	GatewayShortGrace	violates:AtMostOneHandler	208	-	heartbeat grace shorter than the holder's fail-stop: New connects before Old stops
+discord_gateway_handover	GatewayHandover	GatewayStaleRelease	violates:AtMostOneHandler	2244	-	released_at not cleared on take: a third process trusts a stale release
+discord_gateway_handover	GatewayHandover	GatewayWitnessLoss	violates:NoUncleanHandover	203	-	witness: New can connect after Old's owner connection is lost
+discord_gateway_handover	GatewayHandover	GatewayWitnessKill	violates:NoKillHandover	186	-	witness: New can connect after Old is SIGKILLed
+discord_gateway_handover	GatewayHandover	GatewayWitnessRecovery	violates:NoRecovery	7	-	witness: a holder can recover its connection and keep serving
+discord_gateway_handover	GatewayHandover	GatewayWitnessWait	violates:NoWaiting	33	-	witness: New can find a holder unreleased and wait for owner_is_alive to clear
