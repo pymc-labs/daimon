@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route legacy session budget-stamp reads through the tenant-scoped native session port, preserving SDK requests, partial metadata and retry behavior.
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 - Discord operators can opt in to queue wording on an initial mention's existing progress card while it waits behind the tenant cap; the same card returns to ordinary progress when its turn starts.
+- Add default-off Gemini chat Add-skill routing through an explicitly granted A1 native catalog host, preserving channel isolation, selected-agent identity and shared confirmation behavior.
 
 - Preserve session-only Anthropic model overrides through the scoped native session port when composing main into neutral core.
 - Discord restart recovery reads its mapped session through tenant-scoped provider authorization, preserving native requests and completed-turn replay.
