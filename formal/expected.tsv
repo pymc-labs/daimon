@@ -300,3 +300,6 @@ discord_gateway_handover	GatewayHandover	GatewayWitnessLoss	violates:NoUncleanHa
 discord_gateway_handover	GatewayHandover	GatewayWitnessKill	violates:NoKillHandover	186	-	witness: New can connect after Old is SIGKILLed
 discord_gateway_handover	GatewayHandover	GatewayWitnessRecovery	violates:NoRecovery	7	-	witness: a holder can recover its connection and keep serving
 discord_gateway_handover	GatewayHandover	GatewayWitnessWait	violates:NoWaiting	33	-	witness: New can find a holder unreleased and wait for owner_is_alive to clear
+discord_gateway_handover	GatewayHandover	GatewayBootstrap	clean	439	-	legacy (pre-lease) Old plus the bootstrap rule: New waits until no other owner is alive
+discord_gateway_handover	GatewayHandover	GatewayBootstrapProgress	clean	439	-	liveness with a legacy Old: New eventually connects
+discord_gateway_handover	GatewayHandover	GatewayBootstrapNoWait	violates:AtMostOneHandler	73	-	legacy Old, no bootstrap rule: an empty lease row lets New connect beside Old

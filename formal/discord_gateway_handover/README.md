@@ -92,6 +92,9 @@ TLC 2.19 (tla2tools v1.7.4), one worker, from `formal/check.sh`.
 | `GatewayTrustLockOnly` | violates `AtMostOneHandler` | 33 | Lock without lease check, with a connection loss. |
 | `GatewayShortGrace` | violates `AtMostOneHandler` | 208 | Heartbeat grace can elapse before the holder stops. |
 | `GatewayStaleRelease` | violates `AtMostOneHandler` | 2244 | `released_at` not cleared when taking the lease. |
+| `GatewayBootstrap` | clean | 439 | Legacy (pre-lease) Old plus the bootstrap rule: `AtMostOneHandler`, `GapBounded`. |
+| `GatewayBootstrapProgress` | clean | 439 | `NewEventuallyConnects` with a legacy Old. |
+| `GatewayBootstrapNoWait` | violates `AtMostOneHandler` | 73 | Legacy Old, no bootstrap rule. |
 | `GatewayWitnessLoss` | violates `NoUncleanHandover` | 203 | Reachable: New connects after Old's connection is lost. |
 | `GatewayWitnessKill` | violates `NoKillHandover` | 186 | Reachable: New connects after Old is SIGKILLed. |
 | `GatewayWitnessRecovery` | violates `NoRecovery` | 7 | Reachable: Old recovers its connection and keeps serving. |
@@ -110,6 +113,12 @@ TLC 2.19 (tla2tools v1.7.4), one worker, from `formal/check.sh`.
 **`GatewayShortGrace`.** Same loss. The heartbeat grace expires while Old, which has not stopped yet, is still connected. New holds the lock, sees Old not alive and connects. The grace has to outlast the whole fail-stop path (A5).
 
 **`GatewayStaleRelease`.** Old releases cleanly and sets `released_at`. New takes the lease and connects but leaves `released_at` set. New's connection is dropped. A third process gets the lock, reads the old `released_at`, and connects while New is still on the gateway. The holder must clear `released_at` when it takes the lease.
+
+**`GatewayBootstrapNoWait`.** First rollout, or a rollback to a pre-lease image: Old is connected but never took the lease, so the lease row has no previous holder, yet Old still holds its own owner lock and heartbeat. New builds, gets the free gateway lock, sees an empty row and connects at once. Both are on the gateway. With the bootstrap rule New waits until no other owner is alive (owner lock held or heartbeat fresher than grace), which a legacy Old clears by exiting gracefully (heartbeat deleted) or by failing the grace after a crash or SIGKILL.
+
+## Legacy Old (first rollout, rollback)
+
+`LegacyOld` makes Old pre-lease code: connected, owner lock and heartbeat present, no gateway lock, empty lease row, no release on exit (`runtime.py:171-193` deletes only the heartbeat). `BootstrapRule` is the designed rule: with no recorded holder, `ClearToGo` requires every other process to be not alive. The deploy's stop-first path for an image without lease code is not modelled; it is the `GatewayStopFirst` shape. Legacy Old's teardown after closing the gateway is inside the gap, but New is already past start-up, so `GapBounded` still holds.
 
 ## Replay status
 

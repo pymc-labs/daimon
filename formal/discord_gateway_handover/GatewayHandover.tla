@@ -12,7 +12,9 @@ CONSTANTS Procs,
           ClearOnTake,       \* the new holder resets released_at when it takes the lease
           ShortGrace,        \* heartbeat grace may elapse before a disconnected holder has stopped
           AllowLoss,         \* one owner-connection loss on a connected process
-          AllowKill          \* one SIGKILL after SIGTERM
+          AllowKill,         \* one SIGKILL after SIGTERM
+          LegacyOld,         \* Old is pre-lease code: connected, owner lock + heartbeat, never takes the lease
+          BootstrapRule      \* empty lease row: wait until no other owner is alive before connecting
 
 Old == 1
 New == 2
@@ -37,6 +39,7 @@ vars == <<phase, gw, draining, termed, drained, conn, graceOpen, ownerState, loc
           leaseHolder, leaseRel, claim, relStage, everConn, lossSeen, killSeen>>
 
 Running(p) == phase[p] \in {"ready", "connected"}
+Legacy(p) == LegacyOld /\ p = Old
 Alive(p) == conn[p] \/ graceOpen[p]            \* owner_is_alive: lock held OR heartbeat unexpired
 Drop(p) == IF lockHolder = p THEN 0 ELSE lockHolder
 Set(f, p, v) == [f EXCEPT ![p] = v]
@@ -49,8 +52,8 @@ Init == /\ phase = [p \in Procs |-> IF p = Old THEN "connected" ELSE "off"]
         /\ conn = [p \in Procs |-> p = Old]
         /\ graceOpen = [p \in Procs |-> p = Old]
         /\ ownerState = [p \in Procs |-> "ok"]
-        /\ lockHolder = Old
-        /\ leaseHolder = Old
+        /\ lockHolder = IF LegacyOld THEN 0 ELSE Old
+        /\ leaseHolder = IF LegacyOld THEN 0 ELSE Old
         /\ leaseRel = FALSE
         /\ claim = [p \in Procs |-> IF p = Old THEN "taken" ELSE "none"]
         /\ relStage = [p \in Procs |-> 0]
@@ -83,12 +86,15 @@ PollLock(p) == /\ phase[p] = "ready" /\ conn[p] /\ ~termed[p]
                               leaseHolder, leaseRel, relStage, everConn, lossSeen, killSeen>>
 
 ReadLease(p) == /\ claim[p] = "held" /\ lockHolder = p
-                /\ claim' = Set(claim, p, IF leaseHolder = 0 \/ leaseRel \/ leaseHolder = p
+                /\ claim' = Set(claim, p, IF leaseRel \/ leaseHolder = p \/ (leaseHolder = 0 /\ ~BootstrapRule)
                                           THEN "go" ELSE "wait")
                 /\ UNCHANGED <<phase, gw, draining, termed, drained, conn, graceOpen, ownerState,
                                lockHolder, leaseHolder, leaseRel, relStage, everConn, lossSeen, killSeen>>
 
-Recheck(p) == /\ claim[p] = "wait" /\ lockHolder = p /\ ~Alive(leaseHolder)
+\* Waiting rule: a recorded holder must be dead; with no recorded holder (bootstrap) no other owner may be alive.
+ClearToGo(p) == IF leaseHolder = 0 THEN \A q \in Procs \ {p} : ~Alive(q) ELSE ~Alive(leaseHolder)
+
+Recheck(p) == /\ claim[p] = "wait" /\ lockHolder = p /\ ClearToGo(p)
               /\ claim' = Set(claim, p, "go")
               /\ UNCHANGED <<phase, gw, draining, termed, drained, conn, graceOpen, ownerState,
                              lockHolder, leaseHolder, leaseRel, relStage, everConn, lossSeen, killSeen>>
@@ -132,7 +138,7 @@ CloseGw(p) == /\ gw[p] /\ drained[p]
 
 WriteReleased(p) == /\ Running(p) /\ termed[p] /\ drained[p] /\ everConn[p]
                     /\ (UnlockBeforeClose \/ ~gw[p])
-                    /\ conn[p] /\ ownerState[p] = "ok" /\ lockHolder = p /\ relStage[p] = 0
+                    /\ ~Legacy(p) /\ conn[p] /\ ownerState[p] = "ok" /\ lockHolder = p /\ relStage[p] = 0
                     /\ leaseHolder' = p /\ leaseRel' = TRUE
                     /\ relStage' = Set(relStage, p, 1)
                     /\ UNCHANGED <<phase, gw, draining, termed, drained, conn, graceOpen, ownerState,
@@ -147,7 +153,7 @@ Unlock(p) == /\ relStage[p] = 1 /\ conn[p] /\ lockHolder = p
 \* Graceful runtime teardown: heartbeat row deleted and owner lock released if the connection is alive.
 Exit(p) == /\ Running(p) /\ ~gw[p]
            /\ (termed[p] \/ ownerState[p] = "lost")
-           /\ (~everConn[p] \/ relStage[p] = 2 \/ ~conn[p] \/ ownerState[p] = "lost")
+           /\ (~everConn[p] \/ Legacy(p) \/ relStage[p] = 2 \/ ~conn[p] \/ ownerState[p] = "lost")
            /\ phase' = Set(phase, p, "exited")
            /\ graceOpen' = Set(graceOpen, p, IF conn[p] THEN FALSE ELSE graceOpen[p])
            /\ conn' = Set(conn, p, FALSE)
@@ -188,9 +194,9 @@ Probe(p) == /\ Running(p) /\ ownerState[p] = "ok" /\ ~conn[p]
                            leaseHolder, leaseRel, claim, relStage, everConn, lossSeen, killSeen>>
 
 \* Reacquire owner lock (heartbeat unexpired) and, designed, the gateway lock if still free.
-Recover(p) == /\ Running(p) /\ ownerState[p] = "retry" /\ graceOpen[p] /\ lockHolder = 0
+Recover(p) == /\ Running(p) /\ ownerState[p] = "retry" /\ graceOpen[p] /\ (Legacy(p) \/ lockHolder = 0)
               /\ conn' = Set(conn, p, TRUE)
-              /\ lockHolder' = p
+              /\ lockHolder' = IF Legacy(p) THEN lockHolder ELSE p
               /\ ownerState' = Set(ownerState, p, "ok")
               /\ UNCHANGED <<phase, gw, draining, termed, drained, graceOpen, leaseHolder, leaseRel,
                              claim, relStage, everConn, lossSeen, killSeen>>
