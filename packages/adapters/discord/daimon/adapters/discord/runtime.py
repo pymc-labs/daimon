@@ -199,7 +199,8 @@ async def hold_worker_owner(
             await guard_task
         if connection is not None:  # pyright: ignore[reportUnnecessaryComparison]  # guard can discard it
             try:
-                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S):
+                # The lock: a lease call still on this connection must finish first.
+                async with asyncio.timeout(OWNER_PROBE_TIMEOUT_S), connection_lock:
                     await connection.execute(
                         text("DELETE FROM discord_worker_heartbeats WHERE owner_key = :key"),
                         {"key": owner_key},

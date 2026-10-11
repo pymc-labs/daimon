@@ -848,12 +848,6 @@ class DaimonBot(commands.Bot):
         if retained:
             log.warning("discord.drain_retained_card_tasks_pending", remaining=retained)
         await self.close()
-        # Last, so a successor connects only after this process has left the
-        # gateway. Not on ownership loss: that is no clean hand-over, and the
-        # successor must wait for this process to stop being alive.
-        lease = self.runtime.gateway_lease
-        if lease is not None and not self.runtime.ownership_lost.is_set():
-            await lease.release()
 
     async def setup_hook(self) -> None:
         """Arm orphan recovery and load command Cogs before on_ready syncs the tree."""

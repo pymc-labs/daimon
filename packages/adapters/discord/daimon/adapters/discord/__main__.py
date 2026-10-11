@@ -71,7 +71,16 @@ async def start_when_leased(
     if stop.is_set():
         return
     started.set()
-    await bot.start(token)
+    try:
+        await bot.start(token)
+    finally:
+        # Here rather than in the drain task: bot.start returns once close()
+        # is done, and the runtime then tears down the owner connection the
+        # lease lives on. Released only after a clean close, so a successor
+        # connects after this process has left the gateway; on ownership loss
+        # the successor must wait for this process to stop being alive.
+        if lease is not None and bot.is_closed() and not bot.runtime.ownership_lost.is_set():
+            await lease.release()
 
 
 async def main() -> None:

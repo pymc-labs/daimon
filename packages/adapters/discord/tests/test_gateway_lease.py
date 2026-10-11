@@ -290,6 +290,7 @@ async def test_bot_does_not_start_before_the_lease_is_held() -> None:
         events.append("start")
 
     bot.start = AsyncMock(side_effect=record_start)
+    bot.is_closed = MagicMock(return_value=False)
     started = asyncio.Event()
     task = asyncio.create_task(
         start_when_leased(bot, "token", stop=asyncio.Event(), started=started)
@@ -317,22 +318,52 @@ async def test_stop_while_waiting_exits_without_starting_or_touching_the_lease()
     assert not started.is_set()
 
 
-async def test_lease_is_released_only_after_the_gateway_is_closed() -> None:
+def _started_bot(events: list[str], *, closes: bool = True) -> MagicMock:
+    bot = MagicMock()
+    bot.runtime = _runtime(_fake_lease(events))
+    closed = False
+
+    async def run(_token: str) -> None:
+        nonlocal closed
+        events.append("start")
+        closed = closes
+        events.append("start_returned")
+
+    bot.start = AsyncMock(side_effect=run)
+    bot.is_closed = MagicMock(side_effect=lambda: closed)
+    return bot
+
+
+async def test_lease_is_released_when_start_returns_after_a_clean_close() -> None:
+    """In the main task, before the runtime tears down the owner connection."""
+    events: list[str] = []
+    bot = _started_bot(events)
+    await start_when_leased(bot, "token", stop=asyncio.Event(), started=asyncio.Event())
+    assert events == ["acquire_begin", "acquired", "start", "start_returned", "release"]
+
+
+async def test_drain_does_not_release_the_lease_itself() -> None:
+    """The drain task racing the runtime teardown on the owner connection failed on staging."""
     events: list[str] = []
     bot = make_bot(_runtime(_fake_lease(events)))
     bot.close = AsyncMock(side_effect=lambda: events.append("close"))  # type: ignore[method-assign]
     await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]
-    assert events == ["close", "release"]
+    assert events == ["close"]
+
+
+async def test_gateway_still_open_does_not_release_the_lease() -> None:
+    events: list[str] = []
+    bot = _started_bot(events, closes=False)
+    await start_when_leased(bot, "token", stop=asyncio.Event(), started=asyncio.Event())
+    assert "release" not in events
 
 
 async def test_ownership_loss_does_not_release_the_lease() -> None:
     events: list[str] = []
-    runtime = _runtime(_fake_lease(events))
-    bot = make_bot(runtime)
-    bot.close = AsyncMock(side_effect=lambda: events.append("close"))  # type: ignore[method-assign]
-    runtime.ownership_lost.set()
-    await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]
-    assert events == ["close"]
+    bot = _started_bot(events)
+    bot.runtime.ownership_lost.set()
+    await start_when_leased(bot, "token", stop=asyncio.Event(), started=asyncio.Event())
+    assert "release" not in events
 
 
 def test_runtime_fields_include_the_lease() -> None:
