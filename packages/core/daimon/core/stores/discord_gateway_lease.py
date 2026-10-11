@@ -180,6 +180,10 @@ class GatewayLease:
                          WHERE id = 1 AND holder_owner_key = :key"""),
                     {"key": self.owner_key},
                 )
+                # Commit before unlocking: the unlock takes effect at once, and a
+                # waiter that read the release uncommitted would treat it as
+                # unclean and wait for this process to stop being alive.
+                await conn.commit()
                 await conn.scalar(text("SELECT pg_advisory_unlock(:key)"), {"key": self._lock_key})
                 await conn.commit()
                 self.held = False
