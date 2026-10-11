@@ -23,6 +23,7 @@ from google import genai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.adapters.mcp.tools._gemini_resources import GeminiSkillCapability
     from daimon.core.neutral_resources import NeutralResourceHost
 
 
@@ -60,3 +61,6 @@ class McpRuntime:
     # The explicit operator deployment capability for OpenAI agents. None (the
     # default) keeps every tool on its existing Anthropic path.
     resource_hosts: McpResourceHostFactory | None = field(default=None)
+
+    # Separate explicit capability; absent/disabled keeps existing dispatch.
+    gemini_skill_capability: GeminiSkillCapability | None = field(default=None)

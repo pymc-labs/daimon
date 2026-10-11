@@ -38,6 +38,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._channel_policy import load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
 from daimon.adapters.mcp.tools._openai_resources import (
     gate_view,
     openai_skill_host,
@@ -438,9 +439,13 @@ async def _add_skill_impl(
     if sum(source is not None for source in (skill_md, attachment_url, repo_url)) != 1:
         raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
-    # None unless the operator opted in and this channel's authorized deployment
-    # is OpenAI; then the agent and its skills live behind that host.
-    hosted = await openai_skill_host(runtime, auth, origin, operation="skill-add")
+    # Gemini uses a separate default-off operator grant and the A1 catalog.
+    # Otherwise retain the existing OpenAI/Anthropic selection unchanged.
+    hosted = await gemini_skill_host(
+        runtime, auth, origin, capability=runtime.gemini_skill_capability, operation="skill-add"
+    )
+    if hosted is None:
+        hosted = await openai_skill_host(runtime, auth, origin, operation="skill-add")
     if hosted is None:
         agent = await resolve_setup_agent(
             runtime,
@@ -614,7 +619,7 @@ async def _add_skill_impl(
             "Preview it again if they still want it."
         ) from exc
     except MuxError as exc:
-        # The OpenAI host's own errors; their text is never relayed.
+        # The resource host's own errors; their text is never relayed.
         raise ToolError(
             "Adding the skill failed upstream; it is not attached. Try again later."
         ) from exc
