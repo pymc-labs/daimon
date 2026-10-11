@@ -1902,6 +1902,8 @@ async def test_an_agent_another_channel_keeps_to_itself_is_refused_alike_from_he
     for backend in ("anthropic", "openai"):
         world = await _world(db_session_factory)
         elsewhere = "222222222222222222"
+        # After the member's own grant, which would otherwise pin "helper" to ROOM.
+        auth, origin = await _cards_off_turn(world)
         async with db_session_factory.begin() as session:
             await set_access_policy(
                 session,
@@ -1911,7 +1913,6 @@ async def test_an_agent_another_channel_keeps_to_itself_is_refused_alike_from_he
                     agent_rules={"helper": AgentRule(runs_in=(elsewhere,))},
                 ),
             )
-        auth, origin = await _cards_off_turn(world)
         room = tmp_path / backend
         room.mkdir()
         hosts = await _openai_room(world, monkeypatch, room) if backend == "openai" else None
@@ -1952,7 +1953,7 @@ async def test_an_agent_the_callers_view_hides_resolves_as_missing_behind_the_ho
     async def hiding_view(*_args: object, **_kwargs: object) -> _Hides:
         return _Hides()
 
-    monkeypatch.setattr(_rule_view, "load_caller_view", hiding_view)
+    monkeypatch.setattr(_rule_view, "load_isolation_view", hiding_view)
     with pytest.raises(ToolError, match="missing or changed"):
         await _add_skill_impl(
             world.runtime,

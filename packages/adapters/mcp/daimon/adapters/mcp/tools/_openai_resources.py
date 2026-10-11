@@ -147,7 +147,7 @@ async def resolve_host_agent(
     id); an agent the caller's channel isolation hides resolves as missing; and
     the named id must be the current agent. Same refusals, before any change.
     """
-    from daimon.adapters.mcp.tools._rule_view import load_caller_view
+    from daimon.adapters.mcp.tools._rule_view import load_isolation_view
     from daimon.core.stores.domain import CHAT_PLATFORMS
 
     if auth.platform in CHAT_PLATFORMS and expected_ma_agent_id is None:
@@ -156,7 +156,7 @@ async def resolve_host_agent(
             "Which current agent should I configure? Nothing was changed."
         )
     view = await host.find(name)
-    caller = await load_caller_view(runtime, auth, location_channel_id=location_channel_id)
+    caller = await load_isolation_view(runtime, auth, location_channel_id=location_channel_id)
     seen = view if view is not None and caller.sees_agent(gate_view(view.revision.agent)) else None
     if expected_ma_agent_id is not None:
         if seen is not None and seen.id == expected_ma_agent_id:

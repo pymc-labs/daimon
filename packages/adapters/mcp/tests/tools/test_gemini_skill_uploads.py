@@ -29,9 +29,11 @@ from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.neutral_resources import NeutralResourceHost
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
+from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
@@ -274,11 +276,35 @@ async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
         )
         auth = dataclasses.replace(
             auth,
+            administered_channel_ids=frozenset({ROOM}),
             chat_agent_id=derive_agent_uuid(
                 tenant_id=world.tenant_id, ma_agent_id=row.agent.ref.id
             ),
         )
         async with db_session_factory.begin() as session:
+            # Main's shared-agent policy requires actual channel ownership,
+            # including for a native catalog agent; keep this caller a member.
+            await set_access_policy(
+                session,
+                tenant_id=world.tenant_id,
+                policy=TenantAccessPolicy(agent_rules={"helper": AgentRule(runs_in=(ROOM,))}),
+            )
+            await set_channel_admins(
+                session,
+                tenant_id=world.tenant_id,
+                platform="discord",
+                channel_id=ROOM,
+                role_ids=[],
+                user_ids=[USER],
+                actor_account_id=world.account_id,
+            )
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=world.tenant_id, channel_id=ROOM),
+                tenant_id=world.tenant_id,
+                agent_name="helper",
+                mode="agent",
+            )
             native_origin = await create_origin(
                 session,
                 tenant_id=world.tenant_id,
@@ -386,6 +412,35 @@ async def test_chat_identity_refuses_before_bundle_preview_or_native_write(
     with pytest.raises(ToolError, match="Pass expected_ma_agent_id|missing or changed"):
         await case.call(expected=expected)
     assert not case.wire.requests and await case.pending() == 0
+
+
+@pytest.mark.parametrize("missing", ["agent_rule", "channel_admin"])
+async def test_real_channel_ownership_precedes_bundle_preview(
+    case: Case, missing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with case.world.runtime.session_factory.begin() as session:
+        if missing == "agent_rule":
+            await set_access_policy(
+                session, tenant_id=case.world.tenant_id, policy=TenantAccessPolicy()
+            )
+        else:
+            await set_channel_admins(
+                session,
+                tenant_id=case.world.tenant_id,
+                platform="discord",
+                channel_id=ROOM,
+                role_ids=[],
+                user_ids=[],
+                actor_account_id=case.world.account_id,
+            )
+
+    def forbidden_bundle(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("ownership must precede source loading")
+
+    monkeypatch.setattr(skill_uploads, "_load_bundle", forbidden_bundle)
+    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+        await case.call()
+    assert not case.wire.requests and not case.world.created and await case.pending() == 0
 
 
 async def test_actual_own_reader_policy_hides_unruled_helper_before_preview(
