@@ -25,6 +25,7 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
         "artifact_store",
         "teams_client",
         "group_lookups",
+        "slack_http",
     }, (
         "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + group lookups"
     )

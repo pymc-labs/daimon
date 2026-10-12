@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import aiohttp
 from cryptography.fernet import InvalidToken
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -50,11 +51,16 @@ def _build_retry_handlers() -> list[AsyncRetryHandler]:
     return [*async_default_handlers(), AsyncRateLimitErrorRetryHandler()]
 
 
+def _slack_session(runtime: McpRuntime) -> aiohttp.ClientSession | None:
+    """The app's shared aiohttp session; None makes slack_sdk open one per call."""
+    return runtime.slack_http.get() if runtime.slack_http is not None else None
+
+
 async def slack_web_client(runtime: McpRuntime, *, team_id: str) -> AsyncWebClient:
     """Resolve + decrypt the workspace bot token and build a per-call client.
 
-    ``AsyncWebClient`` opens an aiohttp session per request when none is
-    injected, so no close/context-manager is needed.
+    The client rides the app's shared aiohttp session, which the app closes,
+    so no close/context-manager is needed.
     """
     if runtime.fernet is None:
         raise ToolError("slack tools require DAIMON_CRYPTO__KEYS")
@@ -66,7 +72,9 @@ async def slack_web_client(runtime: McpRuntime, *, team_id: str) -> AsyncWebClie
         token = decrypt_token(runtime.fernet, row.encrypted_token)
     except InvalidToken as err:
         raise ToolError("workspace bot token could not be decrypted") from err
-    return AsyncWebClient(token=token, retry_handlers=_build_retry_handlers())
+    return AsyncWebClient(
+        token=token, retry_handlers=_build_retry_handlers(), session=_slack_session(runtime)
+    )
 
 
 @dataclass(frozen=True)
@@ -104,7 +112,11 @@ async def slack_read_client(
                 "disconnect and reconnect via /privacy"
             ) from err
         return SlackReadClient(
-            client=AsyncWebClient(token=user_token, retry_handlers=_build_retry_handlers()),
+            client=AsyncWebClient(
+                token=user_token,
+                retry_handlers=_build_retry_handlers(),
+                session=_slack_session(runtime),
+            ),
             runs_as_user=True,
         )
     return SlackReadClient(

@@ -10,6 +10,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools.slack._client import (  # pyright: ignore[reportPrivateUsage]
     _require_slack_identity,
     _require_team_id,
@@ -309,3 +310,46 @@ async def test_slack_clients_register_rate_limit_retry_handler(
         assert AsyncConnectionErrorRetryHandler in handler_types, (
             f"the {label} client must keep the SDK's default connection-error retry"
         )
+
+
+@pytest.mark.asyncio
+async def test_slack_clients_ride_the_runtime_slack_session(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bot and user clients share the app's aiohttp session instead of opening
+    one per API call; the token stays per client."""
+    fernet_key = SecretStr(Fernet.generate_key().decode("ascii"))
+    fernet = build_multifernet((fernet_key.get_secret_value(),))
+    async with committing_sessionmaker() as session:
+        await upsert_slack_bot_token(
+            session, team_id="T_SHARED", encrypted_token=encrypt_token(fernet, "xoxb-bot")
+        )
+        await upsert_slack_user_token(
+            session,
+            team_id="T_SHARED",
+            slack_user_id="U_SHARED",
+            encrypted_token=encrypt_token(fernet, "xoxp-user"),
+            scopes="channels:history",
+        )
+        await session.commit()
+
+    slack_http = SlackHttpSession()
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),
+        settings=_build_settings(fernet_key=fernet_key),
+        deployment_default=DeploymentDefault(),
+        fernet=fernet,
+        slack_http=slack_http,
+    )
+
+    bot_client = await slack_web_client(runtime, team_id="T_SHARED")
+    read = await slack_read_client(runtime, team_id="T_SHARED", slack_user_id="U_SHARED")
+    shared = slack_http.get()
+    await slack_http.close()
+
+    assert bot_client.session is shared, "the bot client must ride the shared session"
+    assert read.client.session is shared, "the user client must ride the shared session"
+    assert (bot_client.token, read.client.token) == ("xoxb-bot", "xoxp-user"), (
+        "each client keeps its own token"
+    )

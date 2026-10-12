@@ -12,11 +12,13 @@ import each other.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import aiohttp
 import httpx
 from cryptography.fernet import InvalidToken, MultiFernet
+from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.channel_admins import GroupLookupFailed, GroupMembers, GroupMembersCache
 from daimon.core.github_credentials import decrypt_token
@@ -72,6 +74,7 @@ class GroupLookups:
     teams_client: TeamsBotClient | None
     discord: DiscordMembers | None = None
     cache: GroupMembersCache = field(default_factory=GroupMembersCache)
+    slack_http: SlackHttpSession | None = None
 
     def members(self, platform: str, workspace_id: str) -> GroupMembers | None:
         """The lookup for groups of `workspace_id` on `platform`; None when none can run.
@@ -113,9 +116,15 @@ class GroupLookups:
             token = decrypt_token(self.fernet, row.encrypted_token)
         except InvalidToken as exc:
             raise GroupLookupFailed("bot token could not be decrypted") from exc
-        client = AsyncWebClient(token=token, timeout=_SLACK_TIMEOUT_S)
+        client = AsyncWebClient(
+            token=token,
+            timeout=_SLACK_TIMEOUT_S,
+            session=self.slack_http.get() if self.slack_http is not None else None,
+        )
         try:
-            response = await client.usergroups_users_list(usergroup=group_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+            # A shared session ignores the client's timeout; bound the call here.
+            async with asyncio.timeout(_SLACK_TIMEOUT_S):
+                response = await client.usergroups_users_list(usergroup=group_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         except (TimeoutError, SlackApiError, aiohttp.ClientError) as exc:
             raise GroupLookupFailed(type(exc).__name__) from exc
         users: object = response.get("users")  # pyright: ignore[reportUnknownMemberType]  # SlackResponse.get is untyped
