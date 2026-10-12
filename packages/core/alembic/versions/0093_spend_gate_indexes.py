@@ -14,8 +14,8 @@ downgrade: safe
 
 from alembic import op
 
-revision: str = "0091_spend_gate_indexes"
-down_revision: str | None = "0090_session_settle_request"
+revision: str = "0093_spend_gate_indexes"
+down_revision: str | None = "0092_routine_post_source"
 branch_labels: str | None = None
 depends_on: str | None = None
 
