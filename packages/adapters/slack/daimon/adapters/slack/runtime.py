@@ -118,6 +118,9 @@ def open_slack_http_session() -> aiohttp.ClientSession:
     return aiohttp.ClientSession(
         # An injected session's timeout replaces AsyncWebClient's; keep its 30 s.
         timeout=aiohttp.ClientTimeout(total=30),
+        # Unbounded like the per-call sessions it replaces: a pool cap would
+        # queue calls inside the 30 s total timeout.
+        connector=aiohttp.TCPConnector(limit=0),
         # A cookie one workspace's call sets must not ride along on another's.
         cookie_jar=aiohttp.DummyCookieJar(),
     )
