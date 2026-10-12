@@ -84,7 +84,7 @@ from daimon.adapters.discord.errors import (
     generate_request_id,
     render_error,
 )
-from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
@@ -92,6 +92,7 @@ from daimon.adapters.discord.turn_card_recovery import (
     post_initial_turn_card,
     retire_terminal_turn_card,
 )
+from daimon.adapters.discord.turn_posts import TurnPostRecorder
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard import (
     _authorize_tap,  # pyright: ignore[reportPrivateUsage]  # shared requester-only gate the sibling dispatch classes use -- reused verbatim so authorization logic exists in exactly one place
@@ -574,6 +575,29 @@ async def run_wizard_submit_turn_observed(
         async def _send_embed(**kwargs: Any) -> discord.Message:  # noqa: ANN401
             return await transport.send(**kwargs)
 
+        # Recorded like a mention turn's posts, so a reply to the answer starts
+        # a turn (a webhook post cannot be pinged) and its agent can tidy it.
+        recorder = TurnPostRecorder(
+            sessionmaker=bot.runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            ma_agent_id=agent.id,
+            requester_id=interaction.user.id,
+        )
+        thread = channel if isinstance(channel, discord.Thread) else None
+
+        def _turn_send(turn_id: uuid.UUID) -> SendFn:
+            if thread is None:
+                return _send_embed
+            return recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport)
+
+        def _on_replacement(
+            turn_id: uuid.UUID,
+        ) -> Callable[[discord.Message], Awaitable[None]] | None:
+            if thread is None:
+                return None
+            in_thread = thread
+            return lambda msg: recorder.message(in_thread, msg, turn_card_intent_id=turn_id)
+
         async def _edit_message(
             msg: discord.Message,
             **kwargs: Any,  # noqa: ANN401
@@ -597,7 +621,7 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
-                send=_send_embed,
+                send=_turn_send(turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
                 agent_name=agent.name,
@@ -609,6 +633,7 @@ async def run_wizard_submit_turn_observed(
                     allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
                 ),
                 on_first_post=on_first_post,
+                on_replacement=_on_replacement(turn_id),
             )
 
         # The card and its durable intent go up before the turn waits for a
@@ -711,7 +736,7 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 render_tables=bot.runtime.settings.table_rendering.get(row.tenant_id, False)
                 is True,
-                send=_send_embed,
+                send=_turn_send(turn_card_intent.id),
                 edit=_edit_message,
                 agent_name=agent.name,
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
@@ -726,6 +751,7 @@ async def run_wizard_submit_turn_observed(
                 # embed is edited into this turn's answer rather than left
                 # standing next to a second, successful message.
                 adopt_message_ref=lifecycle.release_message_ref(),
+                on_replacement=_on_replacement(turn_card_intent.id),
             )
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
