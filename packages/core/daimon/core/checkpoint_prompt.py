@@ -45,8 +45,11 @@ matrix §A/§D):
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
 import uuid
+from textwrap import indent
 from typing import Literal
 
 HANDOFF_FILENAME_PREFIX = "daimon-handoff-"
@@ -76,6 +79,7 @@ CHECKPOINT_OUTPUTS_DIR = "/mnt/session/outputs"
 #: archive is over the cap. The archive is deleted first, so a rejected
 #: transfer leaves nothing behind in the old session's outputs.
 HANDOFF_TOO_LARGE_MARKER = "HANDOFF_TOO_LARGE"
+HANDOFF_INCOMPLETE_MARKER = "HANDOFF_INCOMPLETE"
 
 #: Where the host mounts the finished bundle in the SUCCESSOR workspace. The
 #: prompt names it so the session it asks can see what the archive is for.
@@ -90,12 +94,236 @@ CHECKPOINT_EXCLUDED_GLOBS: tuple[str, ...] = (
     ".venv",
     "__pycache__",
     ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".tox",
+    "coverage",
 )
 
-# Written inside the sandbox, outside every archived root (``/tmp`` itself is
-# not archived — only ``/tmp/work`` is), so the list of oversized files never
-# ends up inside the archive it filters.
-_EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
+_BUILT_MARKER_PATH = "/tmp/daimon-handoff-built"
+
+#: Where the git step saves what a fresh mount of the repository cannot give
+#: back: its remote, HEAD and branch, the commits on no remote
+#: (`local-commits.bundle`) and its untracked and ignored files
+#: (`files.tar`). The binary patch stays at `$HOME/uncommitted.patch`.
+REPO_STATE_DIR = "repo-state"
+
+# These scripts are sent as readable heredocs, with no nested shell quoting.
+# The inventory excludes reproducible caches and records every size omission.
+_REPO_FILE_LIST_SCRIPT = r"""import json, os, subprocess, sys
+repo, cap, inventory, omitted = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+caches = set(sys.argv[5:]) | {'.git'}
+paths = subprocess.check_output(['git', '-C', repo, 'ls-files', '-z', '--others']).split(b'\0')
+total = 0
+with open(inventory, 'wb') as listing, open(omitted, 'a') as skipped:
+    for path in sorted(p for p in paths if p):
+        name = os.fsdecode(path)
+        if name.endswith('.env') or caches.intersection(name.split('/')):
+            continue
+        size = os.lstat(os.path.join(repo, name)).st_size
+        if total + size > cap:
+            skipped.write(json.dumps(os.path.join(repo, name)) + '\n')
+            continue
+        listing.write(path + b'\0')
+        total += size
+"""
+
+# Merge the inherited archive and the current files by member path. Current
+# files win; keep at most one size-bounded repository capture that cannot yet
+# be superseded. Never re-capture restored prior captures or add the mounted
+# archive itself. Nothing is extracted into (or changes) the working checkout.
+_ARCHIVE_SCRIPT = r"""import copy, hashlib, io, json, os, pathlib, shutil, subprocess, sys
+import tarfile, tempfile
+home, outputs, scratch, inherited, archive, marker, omitted, repo, cap, capture = sys.argv[1:11]
+cap = int(cap)
+roots = [pathlib.Path(p) for p in (home, outputs, scratch)]
+caches = set(sys.argv[11:])
+excluded = EXCLUDED_PATHS
+def allowed(name):
+    path = pathlib.PurePosixPath('/' + name)
+    if '..' in path.parts or path.name.endswith('.env') or path.name == 'inherited-handoff.tar.gz':
+        return False
+    if any(str(path) == p or str(path).startswith(p + '/') for p in excluded):
+        return False
+    if repo and (str(path) == repo or str(path).startswith(repo + '/')):
+        return False
+    for root in roots:
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts and relative.parts[0].startswith('.') and root != roots[1]:
+            return False
+        if caches.intersection(relative.parts):
+            return False
+        if '.git' in relative.parts and 'objects' in relative.parts:
+            return False
+        return not (root == roots[1] and path.name.startswith('daimon-handoff-'))
+    return False
+current = {}
+for root in roots:
+    root.mkdir(parents=True, exist_ok=True)
+    for base, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if allowed(str(pathlib.Path(base, d)).lstrip('/'))
+            and pathlib.Path(base, d) != roots[0] / 'prior-repo-state')
+        paths = [pathlib.Path(base)] + [pathlib.Path(base, n) for n in sorted(files)]
+        paths += [pathlib.Path(base, d) for d in dirs if pathlib.Path(base, d).is_symlink()]
+        for path in paths:
+            name = str(path).lstrip('/')
+            if allowed(name):
+                relative = path.relative_to(roots[0]) if path.is_relative_to(roots[0]) else None
+                if relative and relative.parts and relative.parts[0] == 'prior-repo-state':
+                    continue
+                artifacts = ('repo-state', 'uncommitted.patch', 'untracked.txt')
+                if (relative and relative.parts and relative.parts[0] in artifacts
+                    and capture != 'yes'):
+                    continue
+                current[name] = path
+spool = tempfile.TemporaryFile()
+previous = None
+if os.path.isfile(inherited):
+    import gzip
+    with gzip.open(inherited, 'rb') as compressed:
+        shutil.copyfileobj(compressed, spool)
+    spool.seek(0)
+    previous = tarfile.open(fileobj=spool, mode='r:')
+source = {m.offset_data: m for m in previous.getmembers()} if previous else {}
+old = {m.name: m for m in source.values() if allowed(m.name)}
+prefix = home.lstrip('/') + '/'
+def old_data(relative, saved=''):
+    member = old.get(prefix + saved + relative)
+    return previous.extractfile(member).read() if member and member.isfile() else b''
+def current_data(relative):
+    path = current.get(prefix + relative)
+    return path.read_bytes() if path and path.is_file() else b''
+if current_data('repo-state/branch.txt').strip() == b'HEAD':
+    if (old_data('repo-state/head.txt') == current_data('repo-state/head.txt')
+        and old_data('repo-state/remote.txt') == current_data('repo-state/remote.txt')):
+        branch = old_data('repo-state/branch.txt')
+        if branch.strip() and branch.strip() != b'HEAD':
+            current[prefix + 'repo-state/branch.txt'].write_bytes(branch)
+def paths_in_tar(data):
+    if not data:
+        return set()
+    with tarfile.open(fileobj=io.BytesIO(data)) as files:
+        return {m.name for m in files if not m.isdir()}
+def patch_paths(data):
+    if not data:
+        return set()
+    stats = subprocess.check_output(['git', 'apply', '--numstat', '-z'], input=data)
+    return {os.fsdecode(p.split(b'\t', 2)[-1]) for p in stats.split(b'\0') if p}
+def replaces_old_capture(saved=''):
+    if capture != 'yes':
+        return False
+    if old_data('repo-state/remote.txt', saved) != current_data('repo-state/remote.txt'):
+        return False
+    old_head = old_data('repo-state/head.txt', saved).decode().strip()
+    head = current_data('repo-state/head.txt').decode().strip()
+    ancestry = ['git', '-C', repo, 'merge-base', '--is-ancestor', old_head, head]
+    if subprocess.run(ancestry).returncode:
+        return False
+    tracked = subprocess.check_output(['git', '-C', repo, 'ls-files', '-z'])
+    available = paths_in_tar(current_data('repo-state/files.tar'))
+    available.update(os.fsdecode(p) for p in tracked.split(b'\0') if p)
+    if not paths_in_tar(old_data('repo-state/files.tar', saved)) <= available:
+        return False
+    command = ['git', '-C', repo, 'diff', '--name-only', '-z', old_head, head]
+    committed = subprocess.check_output(command)
+    changed = patch_paths(current_data('uncommitted.patch'))
+    changed.update(os.fsdecode(p) for p in committed.split(b'\0') if p)
+    return patch_paths(old_data('uncommitted.patch', saved)) <= changed
+state_names = {
+    n for n, m in old.items() if m.isfile() and (n.startswith(prefix + 'repo-state/')
+    or n in (prefix + 'uncommitted.patch', prefix + 'untracked.txt'))
+}
+prior_prefix = prefix + 'prior-repo-state/'
+prior_groups = {}
+for name, member in old.items():
+    if name.startswith(prior_prefix) and member.isfile():
+        saved = 'prior-repo-state/' + name[len(prior_prefix):].split('/')[0] + '/'
+        prior_groups.setdefault(saved, set()).add(name)
+retained = []
+for saved, names in sorted(prior_groups.items()):
+    if not replaces_old_capture(saved):
+        retained.append((saved, names))
+if state_names and any(n in current for n in state_names):
+    if replaces_old_capture():
+        for name in state_names:
+            old.pop(name)
+    else:
+        digest = hashlib.sha256()
+        for name in sorted(state_names):
+            digest.update(name[len(prefix):].encode() + b'\0')
+            digest.update(previous.extractfile(old[name]).read())
+        saved = prefix + 'prior-repo-state/' + digest.hexdigest()[:16] + '/'
+        for name in state_names:
+            member = old.pop(name)
+            renamed = saved + name[len(prefix):]
+            old[renamed] = copy.copy(member)
+            old[renamed].name = renamed
+            old[renamed].pax_headers = member.pax_headers.copy()
+            old[renamed].pax_headers.pop("path", None)
+        retained.append((saved[len(prefix):], {saved + n[len(prefix):] for n in state_names}))
+skipped = []
+if os.path.exists(omitted):
+    skipped = [json.loads(line) for line in pathlib.Path(omitted).read_text().splitlines()]
+prior_names = {n for n in old if n.startswith(prior_prefix)}
+budget = cap - sum(p.lstat().st_size for p in current.values() if p.is_file())
+budget -= sum(m.size for n, m in old.items()
+    if n not in prior_names and n not in current and m.isfile())
+keep = set()
+if retained:
+    saved, names = retained[-1]
+    if sum(old[n].size for n in names) <= max(0, budget):
+        keep = names
+    else:
+        skipped.append(home + '/' + saved.rstrip('/'))
+for saved, names in retained[:-1]:
+    if names != keep:
+        skipped.append(home + '/' + saved.rstrip('/'))
+for name in prior_names - keep:
+    old.pop(name)
+members = {}
+for name in sorted(current.keys() | old.keys()):
+    path = current.get(name)
+    if path:
+        with tarfile.open(os.devnull, 'w') as info:
+            member = info.gettarinfo(str(path), arcname=name)
+    else:
+        member = old[name]
+    if member.isfile() and member.size > cap:
+        skipped.append('/' + name)
+    else:
+        members[name] = member
+if skipped:
+    with open(home + '/HANDOFF.md', 'a') as note:
+        note.write('\nNot carried (size limit):\n' + '\n'.join(skipped) + '\n')
+    for name in skipped:
+        print('HANDOFF_OMITTED ' + json.dumps(name))
+    note = pathlib.Path(home, 'HANDOFF.md')
+    current[str(note).lstrip('/')] = note
+    with tarfile.open(os.devnull, 'w') as info:
+        members[str(note).lstrip('/')] = info.gettarinfo(str(note), arcname=str(note).lstrip('/'))
+with tarfile.open(archive, 'w:gz', dereference=False) as bundle:
+    for name, member in members.items():
+        path = current.get(name)
+        if path:
+            bundle.add(str(path), arcname=name, recursive=False)
+        elif member.isfile():
+            original = source[member.offset_data]
+            bundle.addfile(member, previous.extractfile(original))
+        else:
+            bundle.addfile(member)
+if previous:
+    previous.close()
+spool.close()
+pathlib.Path(marker).touch()
+"""
 
 #: The third archived root, after ``$HOME`` and the outputs directory. Only this
 #: subdirectory of ``/tmp``: the base image ships ~60 MB of non-hidden browser
@@ -125,12 +353,6 @@ def is_handoff_filename(filename: str) -> bool:
     return filename.startswith(HANDOFF_FILENAME_PREFIX)
 
 
-def _relative_to_root(path: str) -> str:
-    """``/root`` -> ``root``: a tar member prefix under ``-C /``."""
-
-    return path.strip().strip("/")
-
-
 def build_checkpoint_prompt(
     *,
     transfer_id: uuid.UUID,
@@ -147,10 +369,11 @@ def build_checkpoint_prompt(
 
     ``unsaved_work`` is what the person answered when asked about uncommitted
     changes in that repository, and only matters when one is mounted. The
-    default (and ``"copy"``) captures them: the patch, the untracked list, and
-    the checkout itself all travel in the archive. ``"leave"`` is the person
-    saying those changes stay where they are, so the prompt neither captures
-    them nor packs the checkout — the successor clones the repository fresh,
+    default (and ``"copy"``) captures everything a fresh mount of the
+    repository cannot give back: a binary patch, the commits on no remote and
+    the untracked and ignored files (`REPO_STATE_DIR`); the checkout itself is
+    never archived. ``"leave"`` is the person saying those changes stay where
+    they are, so the prompt does not capture them — the successor clones the repository fresh,
     and the copy that promises "the uncommitted changes stay in the old
     checkout" stays true.
     """
@@ -158,35 +381,9 @@ def build_checkpoint_prompt(
     archive_path = f"{CHECKPOINT_OUTPUTS_DIR}/{handoff_filename(transfer_id)}"
     max_bundle_bytes = max_bundle_mib * 1024 * 1024
     leave_unsaved = repo_mount_path is not None and unsaved_work == "leave"
-    home_root = _relative_to_root(home_dir)
-    outputs_root = _relative_to_root(CHECKPOINT_OUTPUTS_DIR)
-    scratch_root = _relative_to_root(CHECKPOINT_SCRATCH_DIR)
-    roots = [home_root, outputs_root, scratch_root]
-    if repo_mount_path is not None and not leave_unsaved:
-        roots.append(_relative_to_root(repo_mount_path))
-    roots_argument = " ".join(roots)
-
-    excludes = [f"--exclude-from={_EXCLUDE_LIST_PATH}"]
-    # Every dot entry directly under $HOME: .ssh, and the ~100 MB of toolchain
-    # caches the base image ships (.bun/.cargo/.rustup/.gradle/.npm/.local/
-    # .config). `*` matches `/` in a tar exclude pattern, so the subtree goes
-    # with it, while a dotfile deeper inside the task's own work is untouched.
-    excludes.append(f"--exclude='{home_root}/.*'")
-    # The scratch directory carries a working file when the agent chose it over
-    # $HOME, and nothing else worth having: its dot entries are the sandbox's
-    # own sockets and locks, and this transfer's oversize list would otherwise
-    # be archived by the tar command reading it.
-    excludes.append(f"--exclude='{scratch_root}/.*'")
-    excludes.append(f"--exclude='{_relative_to_root(_EXCLUDE_LIST_PATH)}'")
-    # The bundle being written, and any bundle a previous transfer left.
-    excludes.append(f"--exclude='{outputs_root}/{HANDOFF_FILENAME_PREFIX}*'")
-    excludes += [f"--exclude='{_relative_to_root(path)}'" for path in CHECKPOINT_EXCLUDED_PATHS]
-    excludes += [f"--exclude='*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS]
-    excludes.append("--exclude='*.env'")
-    tar_command = "\n".join(
-        [f"  tar czf {archive_path} \\"]
-        + [f"    {exclude} \\" for exclude in excludes]
-        + [f"    -C / {roots_argument}"]
+    omitted_path = _BUILT_MARKER_PATH + ".omitted"
+    cache_arguments = " ".join(
+        shlex.quote(p) for p in CHECKPOINT_EXCLUDED_GLOBS if p != ".git/objects"
     )
 
     steps: list[str] = []
@@ -206,13 +403,13 @@ def build_checkpoint_prompt(
         f"in your next workspace at {CHECKPOINT_BUNDLE_MOUNT_PATH}, and tells you there how to "
         f"unpack it. The archive is not posted to the chat: the file sweep that delivers "
         f"{CHECKPOINT_OUTPUTS_DIR} to the thread skips names starting with "
-        f"{HANDOFF_FILENAME_PREFIX}. Do exactly the steps below, in order, and add no steps "
-        "of your own. Do not open or read any image file.",
+        f"{HANDOFF_FILENAME_PREFIX}. Follow these steps in order. "
+        "Do not open or read any image file.",
         "Only the task's own work travels: the non-hidden entries in "
-        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the outputs directory, and the working "
-        "repository if one is mounted. Credential mounts, hidden directories and language "
-        "toolchains and their caches stay behind. The commands below already exclude every one "
-        "of them; run them as written and add nothing.",
+        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the outputs directory, and the unsaved "
+        "work of the working repository if one is mounted. Credential mounts, hidden "
+        "directories and language toolchains and their caches stay behind. The commands "
+        "below already exclude every one of them; run them as written and add nothing.",
     ]
     steps.append(
         "\n".join(
@@ -229,25 +426,59 @@ def build_checkpoint_prompt(
         )
     )
 
+    steps.append(
+        "\n".join(
+            [
+                step("start the capture."),
+                f"  rm -f {shlex.quote(_BUILT_MARKER_PATH)} {shlex.quote(omitted_path)}",
+            ]
+        )
+    )
+
     if repo_mount_path is not None:
         git_commands = [
             f"  git -C {repo_mount_path} rev-parse HEAD",
             f"  git -C {repo_mount_path} status --porcelain",
         ]
         if not leave_unsaved:
-            git_commands += [
-                f"  git -C {repo_mount_path} diff HEAD > {home_dir}/uncommitted.patch",
-                f"  git -C {repo_mount_path} ls-files --others --exclude-standard"
-                f" > {home_dir}/untracked.txt",
+            state = shlex.quote(f"{home_dir}/{REPO_STATE_DIR}")
+            repo = shlex.quote(repo_mount_path)
+            capture = [
+                f"mkdir -p {state}",
+                f"rm -f {state}/complete {state}/local-commits.bundle",
+                f"git -C {repo} remote get-url origin > {state}/remote.txt || :",
+                f"git -C {repo} rev-parse HEAD > {state}/head.txt",
+                f"git -C {repo} rev-parse --abbrev-ref HEAD > {state}/branch.txt",
+                f"git -C {repo} diff --binary HEAD > {shlex.quote(home_dir)}/uncommitted.patch",
+                f"git -C {repo} ls-files --others --exclude-standard "
+                f"> {shlex.quote(home_dir)}/untracked.txt",
+                f"if [ -s {state}/remote.txt ]; then "
+                f"git -C {repo} rev-list HEAD --not --remotes=origin > {state}/commits.txt; "
+                f"else git -C {repo} rev-list HEAD > {state}/commits.txt; fi",
+                f"if [ -s {state}/commits.txt ]; then git -C {repo} bundle create"
+                f" {state}/local-commits.bundle HEAD "
+                f"$(if [ -s {state}/remote.txt ]; then echo --not --remotes=origin; fi); fi",
+                f"python3 - {repo} {max_bundle_bytes} {state}/files.list "
+                f"{shlex.quote(omitted_path)} "
+                f"{cache_arguments} <<'DAIMON_FILES'",
+                _REPO_FILE_LIST_SCRIPT.rstrip(),
+                "DAIMON_FILES",
+                f"tar -C {repo} --null -T {state}/files.list -cf {state}/files.tar",
+                f"touch {state}/complete",
             ]
+            git_commands.append(
+                "  bash -e -o pipefail <<'DAIMON_REPO'\n"
+                + indent("\n".join(capture), "  ")
+                + "\n  DAIMON_REPO"
+            )
         disposition = (
             "The uncommitted changes in this checkout are deliberately being left behind: "
             "the person was asked and chose to leave them here, so do not save them to a "
             "file and do not copy them anywhere else."
             if leave_unsaved
-            else "The uncommitted work is captured as a patch on purpose."
+            else "The checkout is not archived; its unsaved work is captured instead."
         )
-        count = "two" if leave_unsaved else "four"
+        count = "two" if leave_unsaved else "three"
         steps.append(
             "\n".join(
                 [
@@ -264,30 +495,64 @@ def build_checkpoint_prompt(
         "\n".join(
             [
                 f"{step('build the archive.')} The shell starts in /, and the archive must be "
-                "written flat into the outputs directory. Run these three commands, in order, "
+                "written flat into the outputs directory. Run this shell block "
                 "exactly as written:",
+                "  set -e",
+                f"  checkpoint_failed() {{ rm -f {shlex.quote(archive_path)}; "
+                f"echo {HANDOFF_INCOMPLETE_MARKER}; }}",
+                "  trap checkpoint_failed ERR",
                 "  cd /",
                 f"  mkdir -p {home_dir}/work {CHECKPOINT_SCRATCH_DIR}",
-                f"  find {roots_argument} -type f -size +{max_bundle_mib}M > {_EXCLUDE_LIST_PATH}",
-                tar_command,
-                "The find step lists files too large to carry so tar skips them; do not edit "
-                "either command.",
+                f"  rm -f {_BUILT_MARKER_PATH}",
+                "  python3 - "
+                + " ".join(
+                    shlex.quote(p)
+                    for p in (
+                        home_dir,
+                        CHECKPOINT_OUTPUTS_DIR,
+                        CHECKPOINT_SCRATCH_DIR,
+                        CHECKPOINT_BUNDLE_MOUNT_PATH,
+                        archive_path,
+                        _BUILT_MARKER_PATH,
+                        omitted_path,
+                        repo_mount_path or "",
+                        str(max_bundle_bytes),
+                        "yes" if repo_mount_path is not None and not leave_unsaved else "no",
+                    )
+                )
+                + f" {cache_arguments} <<'DAIMON_ARCHIVE'",
+                indent(
+                    _ARCHIVE_SCRIPT.replace(
+                        "EXCLUDED_PATHS", repr(CHECKPOINT_EXCLUDED_PATHS)
+                    ).rstrip(),
+                    "  ",
+                ),
+                "  DAIMON_ARCHIVE",
+                "Inherited files are merged at their original paths; current files win. "
+                "No inherited archive is embedded. Oversized files are skipped and named "
+                "with HANDOFF_OMITTED; all other files still travel when the bundle fits.",
             ]
         )
     )
 
+    complete_conditions = [f"[ -f {_BUILT_MARKER_PATH} ]"]
+    if repo_mount_path is not None and not leave_unsaved:
+        complete_conditions.append(f"[ -f {shlex.quote(home_dir)}/{REPO_STATE_DIR}/complete ]")
     show: list[str] = [
         f"{step('check the size, then show the result.')} Run:",
-        f'  size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; '
+        f"  if ! ( {' && '.join(complete_conditions)} ); then rm -f {archive_path}; "
+        f"echo {HANDOFF_INCOMPLETE_MARKER}; else "
+        f'size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; '
         f'then rm -f {archive_path}; echo "{HANDOFF_TOO_LARGE_MARKER} $size"; '
-        f"else ls -l {archive_path}; fi",
+        f"else ls -l {archive_path}; fi; fi",
     ]
     if repo_mount_path is not None:
         show.append(f"  git -C {repo_mount_path} rev-parse HEAD")
     show.append(
         f"The archive cannot be carried above {max_bundle_mib} MiB, so that command deletes it "
         f"and prints {HANDOFF_TOO_LARGE_MARKER} instead. That is a complete answer: do not "
-        "retry, shrink or rebuild it."
+        "retry, shrink or rebuild it. A failed capture prints HANDOFF_INCOMPLETE; "
+        "include it in your reply."
     )
     steps.append("\n".join(show))
 
@@ -327,3 +592,20 @@ def checkpoint_too_large_bytes(reply: str) -> int | None:
 
     match = _TOO_LARGE_LINE.search(reply)
     return None if match is None else int(match.group(1))
+
+
+def checkpoint_omitted_files(reply: str) -> tuple[str, ...]:
+    """Size omissions explicitly emitted by the checkpoint shell, never command echoes."""
+    files: list[str] = []
+    for line in reply.splitlines():
+        line = line.strip()
+        if not line.startswith("HANDOFF_OMITTED "):
+            continue
+        try:
+            path = json.loads(line.removeprefix("HANDOFF_OMITTED "))
+        except json.JSONDecodeError:
+            path = "files named in an unreadable checkpoint omission list"
+        if not isinstance(path, str):
+            path = "files named in an unreadable checkpoint omission list"
+        files.append(path)
+    return tuple(dict.fromkeys(files))

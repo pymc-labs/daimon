@@ -28,7 +28,7 @@ CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
 # columns are untyped Text, so a value outside the Literal raises on read.
 # `transfer_kind` says how much of a task survived a session replacement;
 # a preparation's `stage` is its resume point.
-TransferKind = Literal["full", "transcript", "history"]
+TransferKind = Literal["full", "partial", "transcript", "history"]
 PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "completed", "failed"]
 # What the caller answered about uncommitted repository changes: carry them
 # into the successor's working files, or leave them in the old checkout.

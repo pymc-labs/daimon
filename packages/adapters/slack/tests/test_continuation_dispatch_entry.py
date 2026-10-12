@@ -266,7 +266,7 @@ def _make_continuation_row(
     )
 
 
-def _prepared_turn(*, account_id: uuid.UUID) -> PreparedTurn:
+def _prepared_turn(*, account_id: uuid.UUID, partial: bool = False) -> PreparedTurn:
     async def _record_noop(*, event: Any) -> None:
         return None
 
@@ -280,7 +280,9 @@ def _prepared_turn(*, account_id: uuid.UUID) -> PreparedTurn:
         reused=True,
         session_account_id=account_id,
         _record=_record_noop,
-        continuity=ContinuityOutcome(state="continued", transfer_kind="none"),
+        continuity=ContinuityOutcome(
+            state="continued", transfer_kind="partial" if partial else "none"
+        ),
     )
 
 
@@ -294,6 +296,7 @@ async def _run_continuation_and_capture_controls(
     admin_status: bool | None = False,
     prior_role: Role | None = None,
     excluded_identity: bool = False,
+    partial: bool = False,
 ) -> str:
     """Run one continuation turn and return the `user_message` it ran with.
 
@@ -344,7 +347,7 @@ async def _run_continuation_and_capture_controls(
     ):
         resolve_agent.return_value = _AGENT_ID
         resolve_env.return_value = _ENV_ID
-        bind.return_value = _prepared_turn(account_id=requester.account_id)
+        bind.return_value = _prepared_turn(account_id=requester.account_id, partial=partial)
         run_turn.return_value = RunOutcome(
             state=TurnState(),
             ma_session_id="sess_continuation_entry",
@@ -451,6 +454,23 @@ async def test_continuation_runs_without_the_account_when_auth_test_fails(
         "a failed auth.test must render no account rather than fail the continuation"
     )
     assert responder["handle"] == "@daimon", "the rest of the responder is unchanged"
+
+
+async def test_partial_handoff_notice_says_files_transferred(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    controls = await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_PARTIAL",
+        reason="task_handoff",
+        partial=True,
+    )
+    assert '"workspace": "transferred"' in controls
+    assert "some working files" in controls
 
 
 async def test_continuation_turn_omits_handoff_notice_for_private_input(

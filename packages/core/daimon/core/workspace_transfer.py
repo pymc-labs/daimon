@@ -40,6 +40,7 @@ import asyncio
 import contextlib
 import functools
 import io
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -60,12 +61,13 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_OUTPUTS_DIR,
+    HANDOFF_INCOMPLETE_MARKER,
     HANDOFF_MAX_BYTES,
     build_checkpoint_prompt,
     checkpoint_head_lines,
+    checkpoint_omitted_files,
     checkpoint_too_large_bytes,
     handoff_filename,
-    is_handoff_filename,
 )
 from daimon.core.handoff_context import (
     is_worth_checkpointing,
@@ -98,6 +100,12 @@ _MIB = 1024 * 1024
 #: so the extraction command in the framing text is one line; MA joins any
 #: mount path under `/mnt/session/uploads/` regardless (P4.d).
 HANDOFF_MOUNT_PATH = "/daimon-handoff.tar.gz"
+
+#: Longest a checkpoint turn may run, whatever the turn's own deadline. The
+#: person's message waits behind it: prod checkpoints that packed a mounted
+#: checkout ran 2m12s-2m34s. One that runs out falls to the transcript rung,
+#: which says the files did not come across, instead of holding the answer.
+CHECKPOINT_MAX_S = 90.0
 
 #: Why the workspace is being replaced, as the checkpoint controls report it.
 #: Not a reason code: the model on the giving side reads it.
@@ -134,7 +142,7 @@ GapReason = Literal[
     "archive_missing",
 ]
 
-TransferKind = Literal["full", "transcript", "history"]
+TransferKind = Literal["full", "partial", "transcript", "history"]
 
 
 @dataclass(frozen=True)
@@ -216,6 +224,11 @@ def _is_not_found(err: anthropic.APIStatusError) -> bool:
     return err.status_code == 404
 
 
+def bounded_checkpoint_deadline(turn_deadline: datetime, *, now: datetime) -> datetime:
+    """The checkpoint's deadline: the turn's, but never more than `CHECKPOINT_MAX_S` away."""
+    return min(turn_deadline, now + timedelta(seconds=CHECKPOINT_MAX_S))
+
+
 def _checkpoint_gap_reason(state: TurnState) -> GapReason | None:
     """Why the checkpoint turn failed, or None when it succeeded.
 
@@ -282,14 +295,14 @@ async def _poll_for_bundle(
     client: AsyncAnthropic,
     *,
     session_id: str,
+    filename: str,
     sleep: Callable[[float], Awaitable[None]],
 ) -> FileMetadata | None:
     """The session's handoff bundle once its size stops changing, or None.
 
     Settles only once cumulative poll time has reached `_MIN_SETTLE_S` AND
     two consecutive polls agree on `size_bytes`. An exhausted schedule
-    returns the last observation, stable or not — the caller would rather
-    try a possibly-truncated archive than silently drop the handoff.
+    returns no bundle: a possibly-truncated archive is not a full handoff.
     """
     latest: FileMetadata | None = None
     previous_size: int | None = None
@@ -300,20 +313,16 @@ async def _poll_for_bundle(
         elapsed += delay
         page = await client.beta.files.list(scope_id=session_id, betas=[_MA_BETA], limit=1000)
         latest = next(
-            (
-                meta
-                for meta in page.data
-                if meta.downloadable is True and is_handoff_filename(meta.filename)
-            ),
+            (meta for meta in page.data if meta.downloadable is True and meta.filename == filename),
             None,
         )
         if latest is None:
             previous_size = None
             continue
         if elapsed >= _MIN_SETTLE_S and latest.size_bytes == previous_size:
-            break
+            return latest
         previous_size = latest.size_bytes
-    return latest
+    return None
 
 
 async def _rehost_bundle(
@@ -412,8 +421,19 @@ async def transfer_workspace(
     transcript = render_previous_session(turns, from_agent_name=from_agent_name) if turns else None
 
     if not is_worth_checkpointing(events):
-        log.info("workspace_transfer.skipped_checkpoint", session_id=old_session_id)
-        return TranscriptOnly(transcript=transcript or "", gap_reason="not_worth_checkpointing")
+        try:
+            session = await client.beta.sessions.retrieve(old_session_id, betas=[_MA_BETA])
+        except anthropic.APIStatusError as err:
+            if not _is_not_found(err):
+                raise
+            return TranscriptOnly(transcript=transcript or "", gap_reason="session_dead")
+        inherited = any(
+            resource.type == "file" and resource.mount_path.endswith("daimon-handoff.tar.gz")
+            for resource in session.resources
+        )
+        if not inherited:
+            log.info("workspace_transfer.skipped_checkpoint", session_id=old_session_id)
+            return TranscriptOnly(transcript=transcript or "", gap_reason="not_worth_checkpointing")
 
     prompt = build_checkpoint_prompt(
         transfer_id=transfer_id,
@@ -462,7 +482,7 @@ async def transfer_workspace(
         # Nobody is watching this turn, so a tool call waiting for approval
         # would simply hang until the deadline.
         tool_confirmation=AutoApprove(),
-        deadline=checkpoint_deadline,
+        deadline=bounded_checkpoint_deadline(checkpoint_deadline, now=now()),
         # The checkpoint executes the old session: decided again right before.
         before_send=before_send,
     )
@@ -476,6 +496,8 @@ async def transfer_workspace(
         return TranscriptOnly(transcript=transcript or "", gap_reason=failure)
 
     reply = extract_final_response(state.content)
+    if re.search(rf"^\s*{HANDOFF_INCOMPLETE_MARKER}\s*$", reply, re.MULTILINE):
+        return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
     # The prompt's own size guard fired: the session deleted its archive and
     # said how big it was, so there is nothing to poll for and nothing left
     # behind in the old session's outputs.
@@ -490,7 +512,9 @@ async def transfer_workspace(
         )
         return TranscriptOnly(transcript=transcript or "", gap_reason="bundle_oversize")
 
-    bundle = await _poll_for_bundle(client, session_id=old_session_id, sleep=sleep)
+    bundle = await _poll_for_bundle(
+        client, session_id=old_session_id, filename=handoff_filename(transfer_id), sleep=sleep
+    )
     if bundle is None:
         log.warning("workspace_transfer.no_bundle", session_id=old_session_id)
         return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
@@ -529,6 +553,11 @@ async def transfer_workspace(
             head_after=last_head,
         )
         unpreserved = (*unpreserved, _COMMITTED_DURING_CHECKPOINT)
+
+    unpreserved = (
+        *unpreserved,
+        *(f"{path} (size limit)" for path in checkpoint_omitted_files(reply)),
+    )
 
     rehosted = await _rehost_bundle(client, sessionmaker, bundle=bundle, now=now)
     if isinstance(rehosted, str):
@@ -571,7 +600,15 @@ def as_prepared_replacement(
     not_carried: tuple[str, ...]
 
     if isinstance(outcome, FullHandoff):
-        transfer_kind = "full"
+        # A deliberate leave choice and the checkpoint history guard retain
+        # their existing full-with-not-carried notice. Partial means files
+        # were omitted by the size budget, rather than a chosen disposition.
+        omitted = tuple(
+            item
+            for item in outcome.unpreserved
+            if item not in {_UNSAVED_WORK_LEFT_BEHIND, _COMMITTED_DURING_CHECKPOINT}
+        )
+        transfer_kind = "partial" if omitted else "full"
         transfer_file_id = outcome.transfer_file_id
         # The successor must be told where MA actually mounts the bundle. The
         # resource is requested at `HANDOFF_MOUNT_PATH`, but every mount path is

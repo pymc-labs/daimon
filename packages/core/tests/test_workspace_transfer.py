@@ -48,6 +48,7 @@ from daimon.core.checkpoint_prompt import (
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.workspace_transfer import (
+    CHECKPOINT_MAX_S,
     CHECKPOINT_REASON_CONFIGURATION_CHANGE,
     CHECKPOINT_REASON_HANDOFF,
     CHECKPOINT_REASON_MODEL_CHANGE,
@@ -56,7 +57,9 @@ from daimon.core.workspace_transfer import (
     HistoryOnly,
     TranscriptOnly,
     _checkpoint_reason,
+    _poll_for_bundle,
     as_prepared_replacement,
+    bounded_checkpoint_deadline,
     transfer_workspace,
 )
 from daimon.testing.factories import make_tenant
@@ -432,6 +435,94 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     assert outcome.gap_reason == "not_worth_checkpointing"
     assert "hierarchical model" in outcome.transcript, "the user's own words still cross"
     assert state.sent_batches == [], "no events were sent, so no turn was billed"
+
+
+async def test_inherited_bundle_is_checkpointed_even_without_an_agent_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    uploaded = await client.beta.files.upload(file=("inherited.tar.gz", TARBALL))
+    await client.beta.sessions.resources.add(
+        old_session, type="file", file_id=uploaded.id, mount_path=HANDOFF_MOUNT_PATH
+    )
+    _seed_conversation(state, old_session, with_reply=False)
+    _script_checkpoint_reply(state, old_session, "ok")
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+    assert isinstance(outcome, FullHandoff)
+    assert state.sent_batches, "an inherited archive can contain work without a writer event"
+
+
+async def test_incomplete_capture_cannot_be_promoted_by_an_existing_bundle(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(state, old_session, "HANDOFF_INCOMPLETE")
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+    assert isinstance(outcome, TranscriptOnly)
+    assert outcome.gap_reason == "checkpoint_failed"
+
+
+async def test_bundle_poll_does_not_accept_an_archive_from_an_earlier_move() -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    session = await _make_session(client)
+    state.write_output(session, handoff_filename(UUID(int=1)), TARBALL)
+    bundle = await _poll_for_bundle(
+        client, session_id=session, filename=handoff_filename(TRANSFER_ID), sleep=_no_sleep
+    )
+    assert bundle is None
+
+
+async def test_bundle_poll_does_not_accept_an_archive_that_never_settles() -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    session = await _make_session(client)
+    meta = state.write_output(session, handoff_filename(TRANSFER_ID), TARBALL)
+
+    async def grow(delay: float) -> None:
+        current, data = state.files[meta.id]
+        state.files[meta.id] = (
+            current.model_copy(update={"size_bytes": len(data) + 1}),
+            data + b"x",
+        )
+
+    bundle = await _poll_for_bundle(
+        client, session_id=session, filename=handoff_filename(TRANSFER_ID), sleep=grow
+    )
+    assert bundle is None
 
 
 async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
@@ -841,7 +932,7 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
     )
 
     prompt = _checkpoint_instruction(state)
-    assert "diff HEAD > /root/uncommitted.patch" in prompt, "copy means capture the patch"
+    assert "diff --binary HEAD > /root/uncommitted.patch" in prompt, "copy means capture the patch"
 
     assert isinstance(outcome, FullHandoff)
     assert outcome.unpreserved == (), "nothing was left behind, so nothing is claimed to be"
@@ -864,6 +955,7 @@ def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behin
         requested_work=None,
     )
 
+    assert prepared.transfer_kind == "full", "a requested leave choice keeps its existing notice"
     system_text = prepared.system_blocks[0]["text"]
     assert "Not carried over: uncommitted repository changes were left in the old checkout" in (
         system_text
@@ -924,12 +1016,12 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
     assert "This instruction comes from the daimon host" in user_message, (
         "and the prompt itself follows them in the same message"
     )
-    assert "tar czf" in user_message, "in full, because the system block may not be read"
+    assert "<<'DAIMON_ARCHIVE'" in user_message, "in full, because the system block may not be read"
     instruction = "".join(block["text"] for block in batch[1]["content"] if block["type"] == "text")
     assert instruction.startswith("This instruction comes from the daimon host"), (
         "the same prompt also rides the privileged channel where the model takes one"
     )
-    assert "tar czf" in instruction
+    assert "<<'DAIMON_ARCHIVE'" in instruction
 
 
 async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support(
@@ -1119,3 +1211,50 @@ def test_full_handoff_framing_names_the_normalised_mount_path() -> None:
     assert "tar xzf /daimon-handoff.tar.gz" not in framing_text, (
         "the requested (un-normalised) path must never be the extraction command"
     )
+
+
+def test_a_checkpoint_never_holds_the_answer_longer_than_its_own_ceiling() -> None:
+    """Prod checkpoints that packed a mounted checkout ran 2m12s-2m34s while the
+    person's answer waited; the checkpoint now gets at most CHECKPOINT_MAX_S."""
+    far = NOW + timedelta(minutes=15)
+    assert bounded_checkpoint_deadline(far, now=NOW) == NOW + timedelta(seconds=CHECKPOINT_MAX_S)
+    near = NOW + timedelta(seconds=30)
+    assert bounded_checkpoint_deadline(near, now=NOW) == near, "an earlier turn deadline wins"
+
+
+async def test_size_omissions_mount_the_small_archive_as_partial_and_name_losses(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(state, old_session, 'HANDOFF_OMITTED "/root/work/large file.bin"')
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+    assert isinstance(outcome, FullHandoff)
+    assert outcome.unpreserved == ("/root/work/large file.bin (size limit)",)
+    prepared = as_prepared_replacement(
+        outcome,
+        destination_model_id="claude-sonnet-5",
+        from_agent_name="analysis-bot",
+        to_agent_name="analysis-bot",
+        requested_work=None,
+    )
+    assert prepared.transfer_kind == "partial"
+    assert prepared.extra_resources[0]["file_id"] == outcome.transfer_file_id
+    assert "/root/work/large file.bin (size limit)" in prepared.system_blocks[0]["text"]
+    assert "none of them came across" not in prepared.system_blocks[0]["text"]
