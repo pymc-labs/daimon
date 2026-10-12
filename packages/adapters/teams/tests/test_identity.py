@@ -178,6 +178,56 @@ def test_quoting_someone_else_is_not_a_mention(sender_id: str | None) -> None:
     assert inbound.unprompted, "only a quote of the bot's own message addresses it"
 
 
+def _html_quoting(sender_id: str, *, nested_in: str | None = None) -> dict[str, object]:
+    """A thread reply quoting the older way: a reply blockquote in the `text/html` body."""
+    quote = (
+        '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1700000000002">'
+        f'<strong itemprop="mri" itemid="{sender_id}">daimon</strong>'
+        '<span itemprop="time" itemid="1700000000002"></span>'
+        '<p itemprop="preview">Ship it Thursday.</p></blockquote>'
+    )
+    if nested_in is not None:
+        quote = (
+            '<blockquote itemtype="http://schema.skype.com/Reply" itemid="1700000000003">'
+            f'<strong itemprop="mri" itemid="{nested_in}">Ada</strong>{quote}</blockquote>'
+        )
+    payload = make_channel_activity(mention_bot=False, text="is this right?")
+    payload["attachments"] = [
+        {"contentType": "text/html", "content": f"{quote}<p>is this right?</p>"}
+    ]
+    return payload
+
+
+@pytest.mark.parametrize("sender_id", [BOT_ACCOUNT_ID, BOT_CLIENT_ID])
+def test_an_html_quote_of_the_bot_counts_as_a_mention(sender_id: str) -> None:
+    inbound = _parse(_html_quoting(sender_id))
+    assert isinstance(inbound, TeamsInbound)
+    assert not inbound.unprompted, "a client without the quotedReply entity still addresses it"
+    assert inbound.text == "is this right?", "the text is kept as sent"
+
+
+def test_an_html_quote_in_the_text_counts_as_a_mention() -> None:
+    payload = _html_quoting(BOT_ACCOUNT_ID)
+    attachments = cast(list[dict[str, str]], payload.pop("attachments"))
+    payload["text"] = attachments[0]["content"]
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound) and not inbound.unprompted, (
+        "the blockquote is read wherever it arrives"
+    )
+
+
+@pytest.mark.parametrize(
+    ("sender_id", "nested_in"),
+    [("8:orgid:" + AAD_OBJECT_ID, None), (BOT_ACCOUNT_ID, "8:orgid:" + AAD_OBJECT_ID)],
+)
+def test_an_html_quote_of_someone_else_is_not_a_mention(
+    sender_id: str, nested_in: str | None
+) -> None:
+    inbound = _parse(_html_quoting(sender_id, nested_in=nested_in))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.unprompted, "only the outer quote's sender counts, not one it quoted"
+
+
 def test_a_deleted_or_unknown_quote_is_marked_unavailable() -> None:
     payload = make_message_activity(text='<quoted messageId="gone"/>still there?')
     inbound = _parse(payload)
