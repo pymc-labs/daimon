@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -61,6 +61,9 @@ log = structlog.get_logger(__name__)
 # ``add_external_mcp_credential``) reads as "unknown version" and is refreshed
 # once, which self-heals vaults already holding a stale token.
 METADATA_VERSION_KEY = "daimon_token_version"
+
+# (account_id, agent_id, public_url) -> the vault ``ensure_agent_mcp_vault`` returned.
+type McpVaultIds = MutableMapping[tuple[uuid.UUID, uuid.UUID, str], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +352,7 @@ async def sync_agent_mcp_credentials(
     public_url: str,
     now: dt.datetime,
     exclude_github_copilot: bool = False,
+    vault_ids: McpVaultIds | None = None,
 ) -> None:
     """Ensure this caller's vault holds the agent's external MCP credentials.
 
@@ -364,6 +368,10 @@ async def sync_agent_mcp_credentials(
 
     Cheap for the common case: the DB read gates every MA call, so an agent with
     no external MCP servers pays one indexed query and nothing else.
+
+    ``vault_ids`` remembers the vault ``ensure_agent_mcp_vault`` returned, so
+    later turns skip its walk over every vault in the workspace. A cached
+    vault that has since been deleted is resolved again on the mirror's 404.
     """
     credentials = await resolve_agent_mcp_credentials(
         sessionmaker=sessionmaker,
@@ -379,17 +387,42 @@ async def sync_agent_mcp_credentials(
         )
     if not credentials:
         return
-    vault_id = await ensure_agent_mcp_vault(
-        client,
-        account_id=account_id,
-        agent_id=agent_id,
-        jwt_secret=jwt_secret,
-        public_url=public_url,
-        now=now,
-        session_factory=sessionmaker,
-    )
-    async with hold_agent_vault_lock(sessionmaker, account_id=account_id, agent_id=agent_id):
-        await mirror_credentials_into_vault(client, vault_id=vault_id, credentials=credentials)
+
+    async def ensure() -> str:
+        return await ensure_agent_mcp_vault(
+            client,
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=jwt_secret,
+            public_url=public_url,
+            now=now,
+            session_factory=sessionmaker,
+        )
+
+    async def mirror(vault_id: str) -> None:
+        async with hold_agent_vault_lock(sessionmaker, account_id=account_id, agent_id=agent_id):
+            await mirror_credentials_into_vault(client, vault_id=vault_id, credentials=credentials)
+
+    if vault_ids is None:
+        await mirror(await ensure())
+        return
+    key = (account_id, agent_id, public_url)
+    cached = vault_ids.get(key)
+    if cached is None:
+        vault_ids[key] = vault_id = await ensure()
+        await mirror(vault_id)
+        return
+    try:
+        await mirror(cached)
+    except anthropic.NotFoundError:
+        # The cached vault may have been deleted: resolve it again (outside the
+        # lock, which ensure takes itself). The same id back means the 404 was
+        # about something else, so it propagates as it would uncached.
+        vault_ids.pop(key, None)
+        vault_ids[key] = vault_id = await ensure()
+        if vault_id == cached:
+            raise
+        await mirror(vault_id)
 
 
 async def resolve_hidden_mcp_server_names(

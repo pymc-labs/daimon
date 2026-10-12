@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -22,7 +23,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores.domain import AgentMcpCredentialRow
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, not_found_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -570,3 +571,138 @@ async def test_delete_credential_matches_a_row_stored_with_a_trailing_slash(
     assert not await cred_store.list_credentials(
         db_session, tenant_id=tenant.id, agent_id=agent_id
     ), "no token row is left for the mirror to keep pushing"
+
+
+# --- sync: per-process vault id cache ------------------------------------------
+
+_VaultKey = tuple[uuid.UUID, uuid.UUID, str]
+
+
+def _vault_cache_router(
+    *, display: str, agent_id: uuid.UUID, public_url: str, gone: set[str], calls: list[str]
+) -> MARouter:
+    """One live vault `vlt_me` holding the daimon credential; `gone` ids answer 404."""
+    router = MARouter()
+
+    def list_vaults(request: httpx.Request, _m: Any) -> httpx.Response:
+        calls.append(f"GET {request.url.path}")
+        vault = {
+            "id": "vlt_me",
+            "type": "vault",
+            "display_name": display,
+            "metadata": None,
+            "archived_at": None,
+            "created_at": "2026-09-01T00:00:00Z",
+        }
+        return list_response([vault])
+
+    def list_creds(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        calls.append(f"GET {request.url.path}")
+        if match["vault"] in gone:
+            return not_found_response("vault not found")
+        jwt_credential = {
+            "id": "vcrd_jwt",
+            "metadata": {"daimon_chat_identity": str(agent_id)},
+            "type": "credential",
+            "vault_id": match["vault"],
+            "auth": {"type": "static_bearer", "mcp_server_url": public_url},
+        }
+        return list_response([jwt_credential])
+
+    def create_cred(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        calls.append(f"POST {request.url.path}")
+        body = json.loads(request.content)
+        created = {
+            "id": "vcrd_created",
+            "type": "credential",
+            "vault_id": match["vault"],
+            "auth": {"type": "static_bearer", "mcp_server_url": body["auth"]["mcp_server_url"]},
+            "metadata": body.get("metadata"),
+        }
+        return httpx.Response(200, json=created)
+
+    router.add("GET", r"/v1/vaults", list_vaults)
+    router.add("GET", r"/v1/vaults/(?P<vault>[^/]+)/credentials", list_creds)
+    router.add("POST", r"/v1/vaults/(?P<vault>[^/]+)/credentials", create_cred)
+    return router
+
+
+async def _sync_twice_with_vault_cache(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    cached_vault_id: str | None,
+    gone: set[str],
+) -> tuple[list[str], dict[_VaultKey, str], _VaultKey]:
+    """Run two per-turn syncs sharing one cache; return calls, cache and key."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    public_url = "https://mcp.example.com/mcp"
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        mcp_server_url=_URL,
+        plaintext_token="tok_1",
+    )
+    key = (account.id, agent_id, public_url)
+    vault_ids: dict[_VaultKey, str] = {} if cached_vault_id is None else {key: cached_vault_id}
+    calls: list[str] = []
+    router = _vault_cache_router(
+        display=f"daimon-mcp:{account.id}:{agent_id}",
+        agent_id=agent_id,
+        public_url=public_url,
+        gone=gone,
+        calls=calls,
+    )
+    for _ in range(2):
+        await sync_agent_mcp_credentials(
+            build_fake_anthropic(router.dispatch),
+            sessionmaker=db_session_factory,
+            fernet=fernet,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            account_id=account.id,
+            jwt_secret=b"x" * 32,
+            public_url=public_url,
+            now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+            vault_ids=vault_ids,
+        )
+    return calls, vault_ids, key
+
+
+async def test_sync_lists_vaults_once_then_reuses_the_cached_vault(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A miss resolves and caches the vault; the next turn skips the vault walk."""
+    calls, vault_ids, key = await _sync_twice_with_vault_cache(
+        db_session, db_session_factory, cached_vault_id=None, gone=set()
+    )
+
+    assert calls.count("GET /v1/vaults") == 1, f"only the first turn walks the vaults: {calls}"
+    assert vault_ids == {key: "vlt_me"}, "the miss must cache the resolved vault"
+    assert calls.count("POST /v1/vaults/vlt_me/credentials") == 2, (
+        f"both turns must still mirror into the vault: {calls}"
+    )
+
+
+async def test_sync_resolves_again_when_the_cached_vault_was_deleted(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A cached vault that now 404s is evicted, re-resolved once and mirrored into."""
+    calls, vault_ids, key = await _sync_twice_with_vault_cache(
+        db_session, db_session_factory, cached_vault_id="vlt_gone", gone={"vlt_gone"}
+    )
+
+    assert calls.count("GET /v1/vaults/vlt_gone/credentials") == 1, (
+        f"the deleted vault is tried once, then never again: {calls}"
+    )
+    assert calls.count("GET /v1/vaults") == 1, f"recovery walks the vaults exactly once: {calls}"
+    assert vault_ids == {key: "vlt_me"}, "the cache must now hold the live vault"
+    assert calls.count("POST /v1/vaults/vlt_me/credentials") == 2, (
+        f"both turns must land the credential in the live vault: {calls}"
+    )

@@ -932,6 +932,7 @@ async def _prepare_session_for_turn_locked(
                 is_external=admission.is_external,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
+                mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
             )
 
         if isinstance(decision, ReuseAsIs):
