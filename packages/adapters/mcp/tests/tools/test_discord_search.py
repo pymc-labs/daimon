@@ -269,11 +269,10 @@ def _search_response(
 
 
 def _standard_guild_member_routes() -> dict[str, Any]:
-    """Return a dict of route.path -> payload for the standard guild/member/roles
+    """Return a dict of route.path -> payload for the standard guild/member
     resolution that every search impl call triggers."""
     return {
-        "/guilds/{guild_id}": _guild_payload(),
-        "/guilds/{guild_id}/roles": [_everyone_role("111", _VIEW_CHANNEL)],
+        "/guilds/{guild_id}": {**_guild_payload(), "roles": [_everyone_role("111", _VIEW_CHANNEL)]},
         "/guilds/{guild_id}/members/{member_id}": _member_payload(),
     }
 
@@ -285,9 +284,10 @@ async def test_scoped_empty_search_explains_bot_history_permission(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload(owner_id="99")
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | history)]
+            return {
+                **_guild_payload(owner_id="99"),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | history)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload("1" if route.url.endswith("/1") else "42")
         if route.path == "/channels/{channel_id}":

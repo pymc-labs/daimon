@@ -218,9 +218,10 @@ def _patch_successful_post(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", perms)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", perms)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -293,9 +294,10 @@ async def test_app_install_button_checks_private_membership_but_allows_public_th
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":

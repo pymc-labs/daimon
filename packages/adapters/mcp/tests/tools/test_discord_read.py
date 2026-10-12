@@ -286,9 +286,10 @@ async def test_read_channel_happy_path_oldest_first(monkeypatch: pytest.MonkeyPa
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -322,9 +323,10 @@ async def test_empty_read_explains_missing_bot_history_permission(
 ) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload(owner_id="99")
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)]
+            return {
+                **_guild_payload(owner_id="99"),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload("1" if route.url.endswith("/1") else "42")
         if route.path == "/channels/{channel_id}":
@@ -345,9 +347,10 @@ async def test_empty_read_explains_missing_bot_history_permission(
 async def test_read_channel_403_missing_access_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -368,9 +371,10 @@ async def test_read_channel_full_page_returns_cursor(monkeypatch: pytest.MonkeyP
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -398,9 +402,10 @@ async def test_read_channel_passes_before_cursor(monkeypatch: pytest.MonkeyPatch
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -455,9 +460,10 @@ async def test_read_channel_bot_author_has_assistant_role(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -482,9 +488,10 @@ async def test_read_channel_rejects_thread_id(monkeypatch: pytest.MonkeyPatch) -
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -501,9 +508,10 @@ async def test_read_channel_rejects_no_view(monkeypatch: pytest.MonkeyPatch) -> 
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", 0)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", 0)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -524,9 +532,10 @@ async def test_read_channel_rejects_cross_guild(monkeypatch: pytest.MonkeyPatch)
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -543,9 +552,10 @@ async def test_read_channel_rejects_dm(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -569,9 +579,10 @@ async def test_list_channels_filters_by_view_permission(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/guilds/{guild_id}/channels":
@@ -602,9 +613,10 @@ async def test_list_channels_held_to_an_isolated_channel_lists_only_it(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/guilds/{guild_id}/channels":
@@ -636,9 +648,10 @@ async def test_list_channels_includes_category_id(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/guilds/{guild_id}/channels":
@@ -660,10 +673,8 @@ async def test_list_channels_admin_bypasses_permission_check(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            # admin role
-            return [_everyone_role("111", 8)]  # 8 = administrator
+            # 8 = administrator
+            return {**_guild_payload(), "roles": [_everyone_role("111", 8)]}
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/guilds/{guild_id}/channels":
@@ -693,9 +704,10 @@ async def test_get_message_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -718,9 +730,10 @@ async def test_get_message_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -743,9 +756,10 @@ async def test_get_message_thread_aware_denies_private_thread_non_member(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -836,9 +850,10 @@ async def test_read_thread_happy_path_oldest_first(monkeypatch: pytest.MonkeyPat
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -878,9 +893,10 @@ async def test_read_thread_full_page_returns_cursor(monkeypatch: pytest.MonkeyPa
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -911,9 +927,10 @@ async def test_read_thread_with_before_cursor(monkeypatch: pytest.MonkeyPatch) -
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -943,9 +960,10 @@ async def test_read_thread_rejects_non_thread(monkeypatch: pytest.MonkeyPatch) -
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -964,9 +982,10 @@ async def test_read_thread_private_thread_denies_non_member(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -995,9 +1014,10 @@ async def test_list_threads_merges_active_and_archived(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1056,9 +1076,10 @@ async def test_list_threads_private_thread_membership_check(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1090,9 +1111,10 @@ async def test_list_threads_rejects_voice_channel(monkeypatch: pytest.MonkeyPatc
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1111,9 +1133,10 @@ async def test_list_threads_rejects_thread_as_parent(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1132,9 +1155,10 @@ async def test_list_threads_last_activity_from_last_message_id(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1169,9 +1193,10 @@ async def test_list_threads_archived_without_last_message_uses_archive_timestamp
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":

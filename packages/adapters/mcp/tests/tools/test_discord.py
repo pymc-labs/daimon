@@ -283,9 +283,10 @@ async def test_send_message_text_only(
 ) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -336,9 +337,10 @@ async def test_send_message_long_text_is_split_before_discord_post(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -379,9 +381,10 @@ async def test_send_message_with_attachments(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -540,9 +543,10 @@ async def test_send_message_no_send_perm(
 ) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]  # no send_messages
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],  # no send_messages
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -606,9 +610,10 @@ async def test_send_message_to_thread_succeeds_for_non_admin_when_parent_uncache
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -639,9 +644,10 @@ async def test_send_message_to_thread_denied_without_thread_send_permission(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -672,11 +678,14 @@ async def test_send_message_private_thread_denied_for_nonmember_with_thread_send
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [
-                _everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES | _SEND_MESSAGES_IN_THREADS)
-            ]
+            return {
+                **_guild_payload(),
+                "roles": [
+                    _everyone_role(
+                        "111", _VIEW_CHANNEL | _SEND_MESSAGES | _SEND_MESSAGES_IN_THREADS
+                    )
+                ],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -718,12 +727,10 @@ async def test_send_message_thread_allows_public_or_member_or_moderator_without_
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         nonlocal member_checks, parent_fetches
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
             perms = _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS
             if manage_threads:
                 perms |= _MANAGE_THREADS
-            return [_everyone_role("111", perms)]
+            return {**_guild_payload(), "roles": [_everyone_role("111", perms)]}
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -875,9 +882,10 @@ async def test_post_credential_button_posts_one_button_with_the_core_custom_id(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -909,9 +917,10 @@ async def test_post_credential_button_sends_a_components_v2_card_with_no_content
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -951,9 +960,10 @@ async def test_post_credential_button_renders_the_core_built_requested_card(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1003,9 +1013,10 @@ async def test_post_credential_button_pings_only_through_the_footer_mention(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1050,9 +1061,10 @@ async def test_post_credential_button_hydrates_thread_parent_before_permission_c
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1083,9 +1095,10 @@ async def test_credential_button_checks_private_membership_but_allows_public_thr
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1120,9 +1133,10 @@ async def test_post_credential_button_denies_without_send_permission_and_posts_n
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]  # no send_messages
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],  # no send_messages
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1148,9 +1162,10 @@ async def test_post_credential_button_rejects_cross_guild_channel(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1175,9 +1190,10 @@ async def test_post_credential_button_rejects_dm_channel(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1234,9 +1250,10 @@ async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothin
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", everyone_perms)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", everyone_perms)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":

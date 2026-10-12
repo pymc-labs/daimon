@@ -244,9 +244,10 @@ def _patched_discord_rest(
         _self: discord.http.HTTPClient, route: discord.http.Route, **kwargs: Any
     ) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload(guild_id)
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role_payload(guild_id)]
+            return {
+                **_guild_payload(guild_id),
+                "roles": [_everyone_role_payload(guild_id)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload(user_id)
         if route.path == "/channels/{channel_id}":

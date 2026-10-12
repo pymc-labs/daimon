@@ -193,7 +193,19 @@ class _FakeDiscord:
                 "verification_level": 0,
                 "default_message_notifications": 0,
                 "explicit_content_filter": 0,
-                "roles": [],
+                "roles": [
+                    {
+                        "id": _GUILD,
+                        "name": "@everyone",
+                        "permissions": str(self.everyone_perms),
+                        "position": 0,
+                        "color": 0,
+                        "hoist": False,
+                        "managed": False,
+                        "mentionable": False,
+                        "flags": 0,
+                    }
+                ],
                 "emojis": [],
                 "features": [],
                 "mfa_level": 0,
@@ -204,20 +216,6 @@ class _FakeDiscord:
                 "premium_progress_bar_enabled": False,
                 "stickers": [],
             }
-        if path == "/guilds/{guild_id}/roles":
-            return [
-                {
-                    "id": _GUILD,
-                    "name": "@everyone",
-                    "permissions": str(self.everyone_perms),
-                    "position": 0,
-                    "color": 0,
-                    "hoist": False,
-                    "managed": False,
-                    "mentionable": False,
-                    "flags": 0,
-                }
-            ]
         if path == "/guilds/{guild_id}/members/{member_id}":
             return {
                 "user": _user(_CALLER, bot=False),

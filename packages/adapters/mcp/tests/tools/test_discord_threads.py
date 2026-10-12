@@ -303,14 +303,15 @@ async def test_create_thread_text_channel_happy_path_returns_thread_row(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [
-                _everyone_role(
-                    "111",
-                    _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
-                )
-            ]
+            return {
+                **_guild_payload(),
+                "roles": [
+                    _everyone_role(
+                        "111",
+                        _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
+                    )
+                ],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -368,9 +369,10 @@ async def test_create_thread_forum_channel_happy_path_returns_thread_row(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -414,9 +416,10 @@ async def test_create_thread_rejects_thread_as_parent(monkeypatch: pytest.Monkey
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -435,9 +438,10 @@ async def test_create_thread_rejects_voice_channel(monkeypatch: pytest.MonkeyPat
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -459,9 +463,10 @@ async def test_create_thread_denied_without_create_public_threads_before_any_cre
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -516,14 +521,15 @@ async def test_create_thread_forbidden_from_create_maps_to_named_tool_error(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [
-                _everyone_role(
-                    "111",
-                    _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
-                )
-            ]
+            return {
+                **_guild_payload(),
+                "roles": [
+                    _everyone_role(
+                        "111",
+                        _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
+                    )
+                ],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -567,9 +573,10 @@ def _rename_handler(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", everyone_perms)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", everyone_perms)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -691,9 +698,10 @@ async def test_rename_thread_bot_owned_thread_denied_without_post_permission(
 async def test_rename_thread_rejects_channel_id(monkeypatch: pytest.MonkeyPatch) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":
@@ -773,9 +781,10 @@ async def test_rename_thread_maps_generic_discord_refusal_to_tool_error(
 ) -> None:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}" and route.method == "GET":

@@ -139,21 +139,22 @@ def _thread(*, guild_id: str = GUILD, thread_type: int = 11) -> dict[str, Any]:
 def _handler(*, thread_guild: str = GUILD, thread_type: int = 11, member_of_thread: bool = True):
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [
-                {
-                    "id": GUILD,
-                    "name": "@everyone",
-                    "permissions": str(_VIEW_CHANNEL),
-                    "position": 0,
-                    "color": 0,
-                    "hoist": False,
-                    "managed": False,
-                    "mentionable": False,
-                    "flags": 0,
-                }
-            ]
+            return {
+                **_guild(),
+                "roles": [
+                    {
+                        "id": GUILD,
+                        "name": "@everyone",
+                        "permissions": str(_VIEW_CHANNEL),
+                        "position": 0,
+                        "color": 0,
+                        "hoist": False,
+                        "managed": False,
+                        "mentionable": False,
+                        "flags": 0,
+                    }
+                ],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member()
         if route.path == "/channels/{channel_id}":

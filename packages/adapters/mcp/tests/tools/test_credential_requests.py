@@ -289,9 +289,10 @@ def _patch_successful_post(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -329,9 +330,10 @@ def _patch_post_and_edit(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":

@@ -178,9 +178,10 @@ def _text(payload: dict[str, Any]) -> str:
 def _discord_handler(history_hits: list[str]) -> Any:
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _payloads._guild_payload(guild_id=_GUILD)  # pyright: ignore[reportPrivateUsage]
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_payloads._everyone_role(_GUILD, _VIEW_SEND_AND_HISTORY)]  # pyright: ignore[reportPrivateUsage]
+            return {
+                **_payloads._guild_payload(guild_id=_GUILD),  # pyright: ignore[reportPrivateUsage]
+                "roles": [_payloads._everyone_role(_GUILD, _VIEW_SEND_AND_HISTORY)],  # pyright: ignore[reportPrivateUsage]
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _payloads._member_payload(_CALLER)  # pyright: ignore[reportPrivateUsage]
         if route.method == "GET" and route.path == "/channels/{channel_id}":
@@ -535,9 +536,10 @@ def _discord_search_handler(search_hits: list[int]) -> Any:
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _payloads._guild_payload(guild_id=_GUILD)  # pyright: ignore[reportPrivateUsage]
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_payloads._everyone_role(_GUILD, _VIEW_SEND_AND_HISTORY)]  # pyright: ignore[reportPrivateUsage]
+            return {
+                **_payloads._guild_payload(guild_id=_GUILD),  # pyright: ignore[reportPrivateUsage]
+                "roles": [_payloads._everyone_role(_GUILD, _VIEW_SEND_AND_HISTORY)],  # pyright: ignore[reportPrivateUsage]
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _payloads._member_payload(_CALLER)  # pyright: ignore[reportPrivateUsage]
         if route.path == "/guilds/{guild_id}/channels":

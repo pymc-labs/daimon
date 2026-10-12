@@ -289,9 +289,10 @@ def _happy_path_handler(
 ) -> Any:
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -431,9 +432,10 @@ async def test_post_wizard_returns_a_url_for_every_uploaded_handle(
     def handler_factory() -> Any:
         async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
             if route.path == "/guilds/{guild_id}":
-                return _guild_payload()
-            if route.path == "/guilds/{guild_id}/roles":
-                return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+                return {
+                    **_guild_payload(),
+                    "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+                }
             if route.path == "/guilds/{guild_id}/members/{member_id}":
                 return _member_payload()
             if route.path == "/channels/{channel_id}":
@@ -493,9 +495,10 @@ async def test_post_wizard_maps_same_named_attachments_to_distinct_handles(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -583,9 +586,10 @@ async def test_post_wizard_refuses_a_channel_the_requester_cannot_see(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]  # no send_messages
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],  # no send_messages
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -622,9 +626,10 @@ async def test_post_wizard_checks_private_membership_but_allows_public_thread(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES_IN_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":

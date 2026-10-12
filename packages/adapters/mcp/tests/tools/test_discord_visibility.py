@@ -251,6 +251,36 @@ async def _setup_channel_test(
         return c, channel_raw, member
 
 
+async def test_member_permissions_come_from_the_guild_payload_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GET /guilds/{id}` alone carries the roles `permissions_for` needs.
+
+    @everyone grants nothing; the member's role grants view and send, and the
+    channel's overwrite for that role denies send. No roles request is made.
+    """
+    staff = {**_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES), "id": "555", "name": "staff"}
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return {**_guild_payload(), "roles": [_everyone_role("111", 0), staff]}
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return {**_member_payload(), "roles": ["555"]}
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload(
+                permission_overwrites=[
+                    {"id": "555", "type": 0, "allow": "0", "deny": str(_SEND_MESSAGES)}
+                ]
+            )
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    _, channel, member = await _setup_channel_test(monkeypatch, handler, channel_id="222")
+    permissions = channel.permissions_for(member)
+
+    assert permissions.view_channel, "the member's guild role grants view"
+    assert not permissions.send_messages, "the channel's role overwrite denies send"
+
+
 # ---------------------------------------------------------------------------
 # Test 1: public thread + parent grants view_channel -> passes, no thread-members probe
 # ---------------------------------------------------------------------------
@@ -264,9 +294,10 @@ async def test_public_thread_passes_when_parent_grants_view_channel(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -301,9 +332,10 @@ async def test_thread_denied_when_parent_denies_view_channel(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", 0)]  # no permissions
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", 0)],  # no permissions
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -346,9 +378,10 @@ async def test_private_thread_denied_when_not_member_and_no_manage_threads(
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         nonlocal thread_members_route_hit
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -388,9 +421,10 @@ async def test_private_thread_passes_with_manage_threads_perm(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _MANAGE_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -427,9 +461,10 @@ async def test_private_thread_passes_when_member(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -467,9 +502,10 @@ async def test_admin_bypasses_all_checks(monkeypatch: pytest.MonkeyPatch) -> Non
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", 1 << 3)]  # ADMINISTRATOR
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", 1 << 3)],  # ADMINISTRATOR
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -494,9 +530,10 @@ async def test_create_thread_admin_bypasses_all_checks(monkeypatch: pytest.Monke
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", 1 << 3)]  # ADMINISTRATOR, no other perms
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", 1 << 3)],  # ADMINISTRATOR, no other perms
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -515,14 +552,15 @@ async def test_create_thread_text_channel_passes_with_full_permissions(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [
-                _everyone_role(
-                    "111",
-                    _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
-                )
-            ]
+            return {
+                **_guild_payload(),
+                "roles": [
+                    _everyone_role(
+                        "111",
+                        _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS | _SEND_MESSAGES_IN_THREADS,
+                    )
+                ],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -541,9 +579,10 @@ async def test_create_thread_text_channel_denied_without_view_channel(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", 0)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", 0)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -568,9 +607,10 @@ async def test_create_thread_text_channel_denied_without_create_public_threads(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -591,9 +631,10 @@ async def test_create_thread_text_channel_denied_without_send_messages_in_thread
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _CREATE_PUBLIC_THREADS)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -614,9 +655,10 @@ async def test_create_thread_forum_channel_passes_without_create_public_threads(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -635,9 +677,10 @@ async def test_create_thread_forum_channel_denied_without_send_messages(
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":

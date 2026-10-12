@@ -71,16 +71,13 @@ def _require_bot_token(runtime: McpRuntime) -> str:  # pyright: ignore[reportUnu
 async def _resolve_member(  # pyright: ignore[reportUnusedFunction]  # used by _read/_search/_send
     c: discord.Client, guild_id: str, user_id: str
 ) -> tuple[discord.Guild, discord.Member]:
-    """Fetch guild + member; hydrate the role cache for REST-only ``permissions_for``."""
+    """Fetch guild + member; the guild carries the roles REST-only ``permissions_for`` needs."""
     try:
+        # `GET /guilds/{id}` returns the guild's roles and `Guild._from_data`
+        # builds the role cache from them, so no separate roles request is needed.
         guild = await c.fetch_guild(int(guild_id))
     except discord.NotFound as e:
         raise ToolError("guild not found") from e
-    # REST-only mode does not hydrate guild.roles. Without this hydration
-    # permissions_for(member) sees only @everyone and role-specific overrides
-    # are ignored. No public API for this in REST-only mode.
-    for role in await guild.fetch_roles():
-        guild._add_role(role)  # pyright: ignore[reportPrivateUsage]
     # Register this hydrated guild in the connection-state cache so a subsequent
     # ``client.fetch_channel`` reuses it instead of minting a new (empty) guild
     # via ``_get_or_create_unavailable_guild`` — which would lose the role cache
