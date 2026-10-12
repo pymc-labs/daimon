@@ -6,8 +6,10 @@ Ownership: a message is the calling agent's own only when
 `create_thread` write that row at send time (`record_agent_posts`), keyed by
 the executing agent (`chat_agent_id` for a chat turn, `agent_id` for an
 agent key). On Discord the adapter also writes one for each status card,
-answer and notice a turn posts (`source='turn'`) and for the thread it opens
-from a mention (`source='auto_thread'`), keyed by the turn's agent. Anything
+answer and notice a turn posts (`source='turn'`), for the thread it opens
+from a mention (`source='auto_thread'`), keyed by the turn's agent, and for
+a routine's delivered result (`source='routine'`), keyed by the routine's
+agent with its creator as requester. Anything
 else in a channel — a person's message, another agent's post, another
 bot's, credential cards and support-escalation posts — has no such row for
 this agent and is refused. The platform side is checked too: on Discord the
@@ -17,7 +19,8 @@ and delete only its own messages.
 A turn's posts belong to a conversation, so two more rules apply to them
 (`conversation_refusal`): the turn must be over (its status card intent is
 retired), and the person asking must be the one who started that turn, the
-one whose mention opened the thread, or a server admin. Archiving or
+one whose mention opened the thread, or a server admin. A routine's result
+takes its creator or an admin. Archiving or
 deleting an auto-opened thread takes the person who opened it or an admin.
 
 Every action is decided at call time with a fresh policy: the caller's own
@@ -330,13 +333,13 @@ async def conversation_refusal(
     requester_is_admin: bool,
     thread_opener_id: str | None = None,
 ) -> RefusalReason | None:
-    """Why a turn or auto-thread post may not be tidied for this caller, or None.
+    """Why a turn, auto-thread or routine post may not be tidied for this caller, or None.
 
     Tool posts (`source='tool'`) pass: #383's rules cover them. A turn post
     is refused while its turn is still running, so the lifecycle never edits
     a message tidy removed. Then the person asking (the caller's platform
-    user) must be the one who started that turn or opened that thread, the
-    one whose mention opened the thread the message is in
+    user) must be the one who started that turn, opened that thread or made
+    that routine, the one whose mention opened the thread the message is in
     (``thread_opener_id``), or a server admin.
     """
     if post.source == "tool":
