@@ -2080,3 +2080,28 @@ for native profiles. Events and resource references carry only the provider;
 `mux.profiles.emits_legacy_events_for` reads the registered profiles and refuses
 missing or conflicting declarations. This routing capability does not admit a
 backend or change channel configuration.
+### Agent backend selection surfaces
+
+With `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
+workspace admins can select **Model backend** in an agent's setup Details on
+Discord, Slack or Teams. Only the tenant's enabled backends are offered. Preview
+shows unsupported attachments and capabilities, shared-thread restrictions,
+and the shared service's list-price estimate or explicit unknown values. Confirm
+checks the live admin role and rereads the agent; a changed revision, policy or
+preview requires a fresh preview. **Use default** clears the agent preference.
+Existing threads retain their backend, and explicit channel overrides still
+have precedence.
+
+The CLI exposes `daimon agents backend set NAME BACKEND` and
+`daimon agents backend clear NAME`, using the existing tenant selector and
+confirmation prompt. `--yes` skips that prompt; machine-readable `--json`
+requires `--yes`. These commands use the same shared preview and transactional
+revision/audit service as the panels.
+
+The direct MCP API registers one additional admin tool, `set_agent_backend`,
+only when both settings are enabled. Its required `backend` argument selects
+an enabled backend; explicit `null` clears the preference. An optional
+`expected_revision` refuses stale callers. Agent-scoped keys, external accounts
+and chat-agent callers cannot use the direct write: chat changes go through
+the separate admin-confirmation flow. Disabled settings leave the default tool
+registry and setup controls unchanged.

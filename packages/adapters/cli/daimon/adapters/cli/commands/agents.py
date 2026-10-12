@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +28,12 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_display,
     resolve_tenant_override,
 )
+from daimon.core import channel_backend
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort
 from daimon.core.authz import Subject
-from daimon.core.config import load_settings
+from daimon.core.config import load_settings, load_turn_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
@@ -57,11 +59,14 @@ from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.tenants import list_tenants_by_platform
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 
 agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork, rule.")
 agents_app.add_typer(agent_rule_app, name="rule")
+backend_app = typer.Typer(help="Set or clear an agent's model backend.")
+if channel_backend.backend_selection_enabled(load_turn_settings()):
+    agents_app.add_typer(backend_app, name="backend")
 
 
 @agents_app.callback()
@@ -503,6 +508,144 @@ async def agents_update(
         managed=False,
     )
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
+
+
+@backend_app.command("set")
+def agents_backend_set_command(
+    ctx: typer.Context,
+    name: str,
+    backend: str,
+    yes: Annotated[bool, YES_OPTION] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Preview and set an enabled backend for new threads using this agent."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_backend_change(
+                rt=runtime,
+                console=console,
+                name=name,
+                backend=backend,
+                yes=yes,
+                as_json=as_json,
+                selector=ctx.obj,
+            )
+
+    run_cli(work(), console=console)
+
+
+@backend_app.command("clear")
+def agents_backend_clear_command(
+    ctx: typer.Context,
+    name: str,
+    yes: Annotated[bool, YES_OPTION] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Preview and clear this agent's setting; channel overrides still apply."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_backend_change(
+                rt=runtime,
+                console=console,
+                name=name,
+                backend=None,
+                yes=yes,
+                as_json=as_json,
+                selector=ctx.obj,
+            )
+
+    run_cli(work(), console=console)
+
+
+async def agents_backend_change(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    backend: str | None,
+    yes: bool,
+    as_json: bool,
+    selector: TenantSelector | None = None,
+) -> None:
+    from mux.contracts.config import BackendConfig
+
+    if not channel_backend.backend_selection_enabled(rt.settings.turn):
+        raise StoreError("Model backend selection is disabled on this deployment.")
+    try:
+        target = BackendConfig.model_validate({"backend": backend}).backend
+    except ValidationError as exc:
+        raise typer.BadParameter("Choose a backend supported by this deployment.") from exc
+    if as_json and not yes:
+        raise typer.BadParameter("Use --yes with --json after reviewing the backend preview.")
+    async with rt.sessionmaker.begin() as session:
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    actor = channel_backend.BackendActor(
+        tenant_id=tenant_id,
+        account_id=principal.account_id,
+        subject=Subject(is_admin=True),
+    )
+    service = channel_backend.make_backend_service(rt.sessionmaker, rt.settings.turn)
+    agent = await channel_backend.load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
+    )
+    preview = await service.preview(agent, target or "anthropic")
+    preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
+    if not as_json:
+        console.print(f"Model backend: {preview.target_backend}", markup=False)
+        for label, items in (
+            ("Unsupported skills", preview.unsupported_skills),
+            ("Unsupported MCPs", preview.unsupported_mcps),
+            ("Unsupported capabilities", preview.unsupported_capabilities),
+            ("Shared-thread limits", preview.shared_thread_limits),
+        ):
+            console.print(f"{label}: {', '.join(items) or 'None'}", markup=False)
+        console.print(preview.cost_line, markup=False)
+        console.print("Existing threads keep their backend; channel overrides still apply.")
+    confirm_or_abort(console, f"Change {name}'s model backend?", yes=yes)
+    current = await channel_backend.load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
+    )
+    if target is None:
+        revision = await service.clear_backend(
+            current,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+        )
+    else:
+        revision = await service.set_backend(
+            current,
+            target,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+        )
+    if as_json:
+        console.print(
+            json.dumps(
+                {
+                    "agent": name,
+                    "backend": revision.backend,
+                    "revision": revision.local,
+                    "preview": json.loads(preview_json),
+                }
+            ),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+    else:
+        console.print(f"Updated {name}'s model backend for new threads.", markup=False)
 
 
 @agents_app.command("archive")

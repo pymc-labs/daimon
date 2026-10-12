@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add scoped, audited agent backend preferences with compatibility previews, tenant allowlists, and immutable channel-over-agent resolution by scoped resource identity. Channel clears restore inheritance, and concurrent reads share the existing policy fence. Backend eligibility leaves legacy policy JSON readable during rolling upgrades and downgrade. Agent-origin native execution refuses until an authorized resource counterpart is available.
 
 - Add pure backend cost previews from existing model and runtime tariffs, with explicit unknown per-turn bounds and excluded charges.
+- Let workspace admins preview and select an agent's model backend in agent setup, or set and clear it through the CLI and direct MCP tool, when backend selection is explicitly enabled. Previews include compatibility and pricing limits; existing threads keep their backend.
 
 - Preserve OpenAI session occupancy when accepted work has no visible active root yet, allowing observation to continue without retrying creation or admitting a new turn.
 

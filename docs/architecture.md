@@ -1,5 +1,13 @@
 # Architecture
 
+With the mux turn path and channel backends enabled, an admin can choose **Model
+backend** in an agent's setup Details on Discord, Slack or Teams. The preview
+lists unsupported skills, connectors and capabilities, shared-thread limits,
+and known list prices before confirmation. Apply rereads the agent and checks
+the current admin role, tenant allowlist and preview revision through the shared
+backend service. The selection applies to new threads; existing threads retain
+their backend. Disabled settings add no controls or selection reads.
+
 The MCP `create_routine` tool can require an explicit destination when
 `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. Missing destinations are
 refused after authentication and destination-pair validation, before agent

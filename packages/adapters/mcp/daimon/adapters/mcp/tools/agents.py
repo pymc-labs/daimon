@@ -45,6 +45,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core import channel_backend
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
@@ -95,7 +96,8 @@ from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, SecretStr, ValidationError
+from mux.contracts.ids import Provider
+from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
 
 log = structlog.get_logger()
 
@@ -107,8 +109,7 @@ class AgentMcpServerInfo(BaseModel):
 
 class AgentSkillInfo(BaseModel):
     # Plain str, NOT Literal["anthropic", "custom"] — upstream-controlled
-    # value set; MA may ship a skill type the pinned SDK does not model
-    # (#214 class).
+    # value set; MA may ship a skill type the pinned SDK does not model.
     type: str
     skill_id: str
     name: str | None
@@ -249,7 +250,7 @@ def _union_tools(spec_tools: list[Tool], ma_agent: BetaManagedAgentsAgent) -> li
     * `agent_toolset_20260401` — singleton (MA allows only one)
     * `custom`         — by `name`
 
-    Caller-only fix for issue #56 bug 2: the chat `update_agent` is an
+    The chat `update_agent` is an
     additions surface (panel handles removals), so a per-field replace would
     drop everything the user didn't explicitly resend. Mirror the panel,
     which goes through `reconcile_agent`'s merge helpers.
@@ -299,7 +300,7 @@ def _reject_system_agent(agent: BetaManagedAgentsAgent) -> None:
       authoritative one. Keying on the absence of `daimon_account` alone did
       NOT work: the guild seed path account-stamps seeded agents, so the
       account key is present on them and this guard silently never fired. The
-      Discord panel hit the same trap and moved to this marker (#160); the MCP
+      Discord panel hit the same trap and moved to this marker; the MCP
       tools did not follow until now. Panel forks stamp `managed=False` and
       chat/CLI creates leave it unset, so both stay editable.
     - a missing `daimon_account` still rejects, preserving cover for older
@@ -398,7 +399,7 @@ def _reject_unknown_model(model: str) -> None:
     """Raise unless ``model`` is one this deployment meters and allows.
 
     The panel paths have validated free-text model input against
-    ALLOWED_MODEL_IDS since UX-25-03; the chat paths never did, so a typo or a
+    ALLOWED_MODEL_IDS; the chat paths never did, so a typo or a
     hallucinated id was accepted here and only surfaced later as a session that
     would not start. An unpriced id is also invisible to cost accounting —
     ``pricing.cost_of`` returns None for a model it has no rates for, so the
@@ -692,12 +693,12 @@ async def _update_agent_impl(
     if "system" in scalar_patch:
         scalar_patch["system"] = apply_credential_guidance(scalar_patch["system"])
 
-    # #144-2: version-retry closure. All agent-derived unions (skills, mcp_servers,
+    # Version-retry closure. All agent-derived unions (skills, mcp_servers,
     # tools) are recomputed from `fresh` on every attempt so a retry after a stale-
     # version conflict picks up any concurrent mutations rather than re-applying a
     # stale merge. MA treats list fields as per-field replaces; chat tools are an
     # additions surface (dedicated removal tools handle removals), so union caller's values with
-    # MA's current state — bug 2 of issue #56.
+    # MA's current state.
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         patch: dict[str, Any] = dict(scalar_patch)
         if resolved_skills is not None:
@@ -737,7 +738,7 @@ async def _update_agent_impl(
                 )
         if tools is not None:
             patch["tools"] = _union_tools(tools, fresh)
-        # #141: attaching skills to an agent that lacks agent_toolset_20260401 produces a
+        # Attaching skills to an agent that lacks agent_toolset_20260401 produces a
         # skills-unusable hole — MA rejects session creation ("skills require the read tool").
         # If this update includes skills, ensure the effective tools list carries the base toolset.
         if "skills" in patch:
@@ -859,7 +860,7 @@ async def _attach_mcp_server_impl(
     expected_ma_agent_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> AgentInfo:
-    # #142: guard the reserved daimon-mcp entry before even looking at the agent.
+    # Guard the reserved daimon-mcp entry before even looking at the agent.
     # Also reject any URL that points at the deployment's own public_url under a
     # different name — that would make the next reconcile append a second daimon-mcp.
     public_url = (
@@ -891,7 +892,7 @@ async def _attach_mcp_server_impl(
         if s.name == server_name and s.url == url:
             return await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
 
-    # #144-2: the spec recompute lives in core.mcp_attach so the Discord
+    # The spec recompute lives in core.mcp_attach so the Discord
     # credential modal performs the identical write — it must attach the server
     # it just stored a vault credential for, and cannot import this module.
     # The reserved-server guard above is not repeated there: it depends only on
@@ -999,7 +1000,92 @@ async def _archive_agent_impl(
         await clear_agent_references(session, tenant_id=auth.tenant_id, agent_name=name)
 
 
+async def _set_agent_backend_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    name: str,
+    *,
+    backend: Provider | None,
+    expected_revision: int | None = None,
+) -> dict[str, JsonValue]:
+    _require_admin(auth)
+    if auth.agent_id is not None or auth.is_external:
+        raise ToolError("An agent key or external account cannot change model backends.")
+    if auth.chat_agent_id is not None:
+        raise ToolError(
+            "Use request_agent_backend_switch in chat so the admin can confirm the preview."
+        )
+    if not channel_backend.backend_selection_enabled(runtime.settings.turn):
+        raise ToolError("Model backend selection is disabled on this deployment.")
+    service = channel_backend.make_backend_service(runtime.session_factory, runtime.settings.turn)
+    actor = channel_backend.BackendActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+    )
+    try:
+        agent = await channel_backend.load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=name,
+        )
+        preview = await service.preview(agent, backend or "anthropic")
+        current = await channel_backend.load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=name,
+        )
+        local = preview.setting_revision if expected_revision is None else expected_revision
+        if backend is None:
+            revision = await service.clear_backend(
+                current, local, actor, expected_preview_digest=preview.digest
+            )
+        else:
+            revision = await service.set_backend(
+                current, backend, local, actor, expected_preview_digest=preview.digest
+            )
+    except channel_backend.AgentBackendRefused as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "agent": name,
+        "backend": revision.backend,
+        "revision": revision.local,
+        "preview": cast(
+            dict[str, JsonValue],
+            TypeAdapter(type(preview)).dump_python(preview, mode="json"),
+        ),
+        "applies": "New threads use this setting; existing threads and channel overrides remain.",
+    }
+
+
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+    if channel_backend.backend_selection_enabled(runtime.settings.turn):
+
+        @mcp.tool(tags={"admin"})
+        async def set_agent_backend(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context,
+            name: str,
+            backend: Provider | None,
+            expected_revision: int | None = None,
+        ) -> dict[str, JsonValue]:
+            """Set an enabled model backend, or clear the agent setting with backend=null.
+
+            Admin only, for direct coding-tool or API requests. Chat turns use
+            request_agent_backend_switch so the admin confirms the preview.
+            The returned preview names compatibility limits and list prices.
+            Existing threads keep their backend; channel overrides still apply.
+            expected_revision refuses a setting changed since it was read.
+            """
+            return await _set_agent_backend_impl(
+                runtime,
+                await _auth(ctx),
+                name,
+                backend=backend,
+                expected_revision=expected_revision,
+            )
+
     @mcp.tool
     async def list_agents(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, page: str | None = None, origin_context_id: str | None = None

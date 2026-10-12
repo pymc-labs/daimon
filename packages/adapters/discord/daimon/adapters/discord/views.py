@@ -3,7 +3,7 @@
 GuardedView gates on allowed_user_id and prevents double-click via _handled flag.
 CancelView for interrupting running turns (no timeout -- lifecycle manages removal).
 
-All Views are non-persistent (VIEW-04): no custom_id, no bot.add_view(). CancelView uses
+All Views are non-persistent: no custom_id, no bot.add_view(). CancelView uses
 timeout=None -- lifecycle manages removal.
 
 The documented exceptions: the chat-initiated credential-request button

@@ -4,7 +4,7 @@ The card's words and states come from `daimon.core.posted_controls.confirmation`
 this module only draws them as a components-v2 `LayoutView` with Approve and
 Deny, and turns the click into a `ConfirmationAnswer`.
 
-The view is non-persistent (VIEW-04): the turn waiting on the answer lives in
+The view is non-persistent: the turn waiting on the answer lives in
 this process, so a live View instance holds the future and no custom_id or
 `DynamicItem` registration is needed. If the process restarts, the turn that
 was waiting dies with it and the card's buttons simply stop answering.

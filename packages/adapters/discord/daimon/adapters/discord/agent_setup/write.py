@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 def validate_model_id(model: str) -> str | None:
     """Return an error message if `model` is not in the allow-list; None if valid.
 
-    UX-25-03: Discord modals cannot contain Select components, so we validate
+    Discord modals cannot contain Select components, so we validate
     free-text input at submit time against ALLOWED_MODEL_IDS.
     """
     if model not in ALLOWED_MODEL_IDS:

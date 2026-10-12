@@ -51,6 +51,7 @@ from daimon.adapters.teams.setup_conversation import (
     end_setup_conversation,
     open_setup_conversation,
 )
+from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import queue_agent_face
@@ -58,7 +59,7 @@ from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
-from daimon.core.authz import AgentRef, build_agent_ref
+from daimon.core.authz import AgentRef, build_agent_ref, build_subject
 from daimon.core.channel_admins import (
     ChannelAdminCaller,
     load_administered_channel_ids,
@@ -100,6 +101,8 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard
+from mux.contracts.config import BackendConfig
+from mux.contracts.ids import Provider
 
 log = structlog.get_logger()
 
@@ -480,6 +483,24 @@ class SetupPanel:
                 agent_name=match.name,
             )
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
+        backend_options: tuple[Provider, ...] = ()
+        backend_selection: Provider | None = None
+        if actor.is_admin and channel_backend.backend_selection_enabled(
+            self._runtime.settings.turn
+        ):
+            service = channel_backend.make_backend_service(
+                self._runtime.sessionmaker, self._runtime.settings.turn
+            )
+            policy = await service.tenant_policy(actor.tenant_id)
+            actual = await channel_backend.load_backend_agent(
+                self._runtime.anthropic,
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                agent_name=name,
+            )
+            revision = await service.current(actual)
+            backend_options = policy.enabled_backends
+            backend_selection = revision.backend if revision is not None else None
         return cards.details_card(
             details,
             here=actor.conversation_id,
@@ -487,6 +508,8 @@ class SetupPanel:
             coding_tools=coding_tools,
             github_panel=github_panel,
             expanded=expanded,
+            backend_options=backend_options,
+            backend_selection=backend_selection,
         )
 
     async def _act(
@@ -498,6 +521,102 @@ class SetupPanel:
             return toast(DENIED)
         data = activity.value.action.data
         op, page, chat = data.get("op"), _page(data), actor.conversation_id
+        if op in ("backend_preview", "backend_confirm", "backend_cancel"):
+            name = str(data.get("agent") or "")
+            if not actor.is_admin or not channel_backend.backend_selection_enabled(
+                self._runtime.settings.turn
+            ):
+                await record_panel_write(
+                    self._runtime.sessionmaker,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    platform_user_id=actor.user_id,
+                    op="agent_backend",
+                    outcome="denied",
+                    reason="needs_admin" if not actor.is_admin else "feature_disabled",
+                    agent_name=name,
+                )
+                return toast("Model backend wasn't changed. Ask an organisation admin.")
+            if op == "backend_cancel":
+                card = await self._details(actor, name, page)
+                return replace_card(card) if card is not None else toast(GONE)
+            service = channel_backend.make_backend_service(
+                self._runtime.sessionmaker, self._runtime.settings.turn
+            )
+            actual = await channel_backend.load_backend_agent(
+                self._runtime.anthropic,
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                agent_name=name,
+            )
+            choice = str(data.get("model_backend" if op == "backend_preview" else "target") or "")
+            target = BackendConfig.model_validate(
+                {"backend": None if choice == "clear" else choice}
+            ).backend
+            if op == "backend_preview":
+                preview = await service.preview(actual, target or "anthropic")
+                return replace_card(
+                    cards.backend_preview_card(preview, agent_name=name, clear=target is None)
+                )
+            local, digest = data.get("revision"), data.get("digest")
+            if (
+                not isinstance(local, int)
+                or isinstance(local, bool)
+                or local < 0
+                or not isinstance(digest, str)
+                or not digest
+            ):
+                return toast("That preview is no longer available. Choose a model backend again.")
+            account_id = await get_or_create_account(self._runtime, actor)
+            current = await channel_backend.load_backend_agent(
+                self._runtime.anthropic,
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                agent_name=name,
+            )
+            live_actor = await card_actor(self._runtime, activity)
+            if live_actor is None:
+                return toast(DENIED)
+            verified = channel_backend.BackendActor(
+                tenant_id=live_actor.tenant_id,
+                account_id=account_id,
+                subject=build_subject(
+                    is_admin=live_actor.is_admin, platform_user_id=live_actor.user_id
+                ),
+            )
+            try:
+                if target is None:
+                    await service.clear_backend(
+                        current, local, verified, expected_preview_digest=digest
+                    )
+                else:
+                    await service.set_backend(
+                        current, target, local, verified, expected_preview_digest=digest
+                    )
+            except channel_backend.AgentBackendRefused as exc:
+                await record_panel_write(
+                    self._runtime.sessionmaker,
+                    tenant_id=actor.tenant_id,
+                    platform="teams",
+                    platform_user_id=actor.user_id,
+                    op="agent_backend",
+                    outcome="denied",
+                    reason=exc.reason,
+                    agent_name=name,
+                )
+                return toast(str(exc))
+            await record_panel_write(
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                platform_user_id=actor.user_id,
+                op="agent_backend",
+                outcome="allowed",
+                reason="completed",
+                agent_name=name,
+            )
+            card = await self._details(live_actor, name, page)
+            return replace_card(card) if card is not None else toast(GONE)
         if op == "details":
             name, expanded = str(data.get("agent") or ""), cards.expanded_list(data)
             card = await self._details(actor, name, page, expanded)

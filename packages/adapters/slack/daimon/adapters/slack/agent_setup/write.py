@@ -5,10 +5,10 @@ platform-specific runtime type and audit-display helper for their Slack
 equivalents. All core saga/store calls are reused UNCHANGED. No cross-adapter
 imports (import-linter contract).
 
-GitHub OAuth platform-keying (RESEARCH A3): the state row is keyed to
+GitHub OAuth platform-keying: the state row is keyed to
 ``platform="slack"`` with a string Slack user ID (e.g. ``"U123456"``). The
 callback resolver routes via the ``platform`` column — this prevents
-cross-platform state reuse (T-83-09).
+cross-platform state reuse.
 """
 
 from __future__ import annotations

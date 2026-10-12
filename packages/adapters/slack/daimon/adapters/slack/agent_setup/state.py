@@ -102,6 +102,9 @@ class PanelMetadata:
     root_view_id: str | None = None
     expanded: PanelExpansion | None = None
     skill_hash: str | None = None
+    backend_revision: int | None = None
+    backend_digest: str | None = None
+    backend_target: str | None = None
     repo_id: int | None = None
     selected_repo_ids: tuple[int, ...] | None = None
     github_ability: Literal["read", "write"] = "write"
@@ -147,6 +150,9 @@ class PanelMetadata:
             root_view_id=root_view_id,
             expanded=self.expanded if agent_name == self.agent_name else None,
             skill_hash=None,
+            backend_revision=None,
+            backend_digest=None,
+            backend_target=None,
             repo_id=None,
         )
 
@@ -177,6 +183,12 @@ def encode_panel_metadata(meta: PanelMetadata) -> str:
         payload["x"] = meta.expanded
     if meta.skill_hash is not None:
         payload["h"] = meta.skill_hash
+    if meta.backend_revision is not None:
+        payload["br"] = meta.backend_revision
+    if meta.backend_digest is not None:
+        payload["bd"] = meta.backend_digest
+    if meta.backend_target is not None:
+        payload["bt"] = meta.backend_target
     if meta.repo_id is not None:
         payload["g"] = meta.repo_id
     if meta.selected_repo_ids is not None:
@@ -248,6 +260,19 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
     skill_hash = payload.get("h")
     if skill_hash is not None and not isinstance(skill_hash, str):
         return None
+    backend_revision = payload.get("br")
+    backend_digest = payload.get("bd")
+    backend_target = payload.get("bt")
+    if backend_revision is not None and (
+        not isinstance(backend_revision, int)
+        or isinstance(backend_revision, bool)
+        or backend_revision < 0
+    ):
+        return None
+    if backend_digest is not None and not isinstance(backend_digest, str):
+        return None
+    if backend_target is not None and not isinstance(backend_target, str):
+        return None
     repo_id = payload.get("g")
     if repo_id is not None and (
         not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id < 1
@@ -300,6 +325,9 @@ def decode_panel_metadata(raw: str) -> PanelMetadata | None:
         root_view_id=root_view_id,
         expanded=expanded,
         skill_hash=skill_hash,
+        backend_revision=backend_revision,
+        backend_digest=backend_digest,
+        backend_target=backend_target,
         repo_id=repo_id,
         selected_repo_ids=selected,
         github_ability=ability,
