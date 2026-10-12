@@ -19,6 +19,7 @@ from daimon.core.channel_skills import (
 )
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.ma_resolver import ResolverCache
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_skills import (
     add_channel_skill,
@@ -265,3 +266,34 @@ async def test_a_turn_reads_the_channels_rows_and_drops_a_clash_with_the_agent(
     )
     rows = await list_channel_skills(db_session, tenant_id=tenant.id, platform="slack")
     assert [row.skill_id for row in rows] == ["skill_b"]
+
+
+async def test_a_shared_listing_missing_a_skill_the_agent_now_holds_is_read_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A skill the agent gained after the listing was cached still keeps a clashing
+    channel skill out: the stale listing is read again rather than trusted."""
+    tenant_id = uuid.uuid4()
+    own_b = tenant_scoped_display_title(tenant_id=tenant_id, name="b", agent_name="shared")
+    listing: list[dict[str, object]] = []
+    client = _client(listing)
+    cache = ResolverCache()
+
+    async def turn(skills: list[dict[str, str]]) -> list[str]:
+        picked = await turn_channel_skills(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id="C1",
+            agent=ma_agent(name="shared", skills=skills),
+            agent_names=("shared",),
+            rows=[_row("skill_b", "b")],
+            cache=cache,
+        )
+        return [skill.skill_id for skill in picked]
+
+    assert await turn([]) == ["skill_b"], "no clash while the agent holds nothing"
+    listing.append(_skill("skill_own_b", own_b))
+    held = [{"type": "custom", "skill_id": "skill_own_b", "version": "1"}]
+    assert await turn(held) == [], "the fresh listing shows the clash, so skill_b stays out"

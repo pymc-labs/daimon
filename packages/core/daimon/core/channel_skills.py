@@ -108,6 +108,11 @@ def _tenant_bodies(rows: Iterable[SkillListResponse], tenant_id: uuid.UUID) -> d
     return bodies
 
 
+def _lists_held_skills(rows: Iterable[SkillListResponse], agent: BetaManagedAgentsAgent) -> bool:
+    listed = {row.id for row in rows}
+    return all(skill.skill_id in listed for skill in agent.skills if skill.type == "custom")
+
+
 def _find(
     rows: Sequence[SkillListResponse], *, tenant_id: uuid.UUID, skill: str
 ) -> SkillListResponse | None:
@@ -294,6 +299,10 @@ async def turn_channel_skills(
             if cache is None
             else list_skills_lenient_cached(client, cache)
         )
+        if cache is not None and not truncated and not _lists_held_skills(listed, agent):
+            # The shared listing predates a skill the agent now holds, whose
+            # mount would escape the clash check: read it fresh.
+            listed, truncated = await list_skills_lenient(client)
         bodies = None if truncated else _tenant_bodies(listed, tenant_id)
     except (anthropic.APIError, SkillsListTruncatedError):
         _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
