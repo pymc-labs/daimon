@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
+from daimon.core.mcp_vault import VAULT_LIST_PAGE_SIZE
 from daimon.core.stores.accounts import load_live_account_ids
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -117,7 +118,7 @@ async def archive_orphan_mcp_vaults(
     async with session_factory() as session, session.begin():
         live_account_ids = await load_live_account_ids(session)
 
-    vaults = [v async for v in client.beta.vaults.list()]
+    vaults = [v async for v in client.beta.vaults.list(limit=VAULT_LIST_PAGE_SIZE)]
     orphan_ids, unparseable_ids = partition_orphan_vault_ids(
         vaults, live_account_ids=live_account_ids
     )

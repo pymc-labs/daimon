@@ -38,6 +38,10 @@ GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 # lock keys distinct from any other advisory-lock user in the same database.
 LOCK_NAMESPACE = "mcp_vault"
 
+# MA's maximum vault page size: vault listings walk every vault in the
+# workspace, so the SDK default of 20 multiplies the round trips fivefold.
+VAULT_LIST_PAGE_SIZE = 100
+
 
 async def _find_vault_by_name(
     client: AsyncAnthropic, *, display_name: str
@@ -48,7 +52,11 @@ async def _find_vault_by_name(
     MA API — so more than one vault can share a name; the oldest is always
     the canonical one (shared list-then-filter logic for both callers below).
     """
-    matching = [v async for v in client.beta.vaults.list() if v.display_name == display_name]
+    matching = [
+        v
+        async for v in client.beta.vaults.list(limit=VAULT_LIST_PAGE_SIZE)
+        if v.display_name == display_name
+    ]
     if not matching:
         return None
     return min(matching, key=lambda v: v.created_at)

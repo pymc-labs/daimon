@@ -51,7 +51,11 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
 from daimon.core.mcp_auth import mint_jwt
-from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, same_server_url
+from daimon.core.mcp_vault import (
+    GITHUB_COPILOT_MCP_URL,
+    VAULT_LIST_PAGE_SIZE,
+    same_server_url,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -125,7 +129,7 @@ async def sweep_stale_admin_credentials(
     ``anthropic.APIError`` propagates — callers at the CLI boundary decide how
     to surface failures.
     """
-    all_vaults = [v async for v in client.beta.vaults.list()]
+    all_vaults = [v async for v in client.beta.vaults.list(limit=VAULT_LIST_PAGE_SIZE)]
     daimon_mcp_ids = partition_daimon_mcp_vault_ids(all_vaults)
 
     # Build a lookup from vault_id → BetaManagedAgentsVault for display_name access.

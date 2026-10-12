@@ -132,6 +132,50 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     )
 
 
+async def test_ensure_agent_mcp_vault_walks_vault_pages_at_max_page_size(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The vault lookup asks for 100-vault pages and finds a match past page one."""
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    list_params: list[dict[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            list_params.append(dict(req.url.params))
+            if "page" not in req.url.params:
+                first = [_vault_obj("vlt_other", "unrelated", "2026-04-01T00:00:00Z")]
+                return httpx.Response(200, json={"data": first, "next_page": "p2"})
+            mine = [_vault_obj("vlt_mine", display, "2026-04-02T00:00:00Z")]
+            return httpx.Response(200, json={"data": mine, "next_page": None})
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            credential = {
+                "id": "vcrd_existing",
+                "metadata": {"daimon_chat_identity": str(agent_id)},
+                "type": "credential",
+                "vault_id": "vlt_mine",
+                "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example.com/mcp"},
+            }
+            return httpx.Response(200, json={"data": [credential], "has_more": False})
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    vault_id = await ensure_agent_mcp_vault(
+        _make_client(httpx.MockTransport(handler)),
+        account_id=account_id,
+        agent_id=agent_id,
+        jwt_secret=b"a" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+        session_factory=db_session_factory,
+    )
+
+    assert vault_id == "vlt_mine", "the match on the second page must be found"
+    assert [p.get("limit") for p in list_params] == ["100", "100"], (
+        f"every vault page must request the maximum page size, got {list_params}"
+    )
+
+
 async def test_ensure_agent_mcp_vault_cold_path_creates_vault_and_credential(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
