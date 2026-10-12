@@ -12,6 +12,7 @@ token in an ``Authorization: Bearer`` header, so the byte fetch is authed here.
 
 from __future__ import annotations
 
+import asyncio
 from typing import NotRequired, TypedDict
 
 import httpx
@@ -26,6 +27,9 @@ from daimon.core.media.vision import (
 )
 
 log = structlog.get_logger()
+
+# Private-URL reads in flight per message; a few cut latency without a burst per turn.
+_DOWNLOAD_CONCURRENCY = 4
 
 
 class SlackFile(TypedDict):
@@ -76,45 +80,72 @@ async def download_as_image_blocks(
     The rest of the batch continues; a flaky download must not abort the turn.
     The caller surfaces each skipped file's proxy URL so it stays reachable.
     """
-    blocks: list[BetaManagedAgentsImageBlockParam] = []
-    skipped: list[tuple[SlackFile, str]] = []
-    for file in files:
-        name = file["name"]
-        media_type = file["mimetype"]
-        if media_type not in VISION_MEDIA_TYPES:
-            log.warning("slack.image.skipped.media_type", name=name, media_type=media_type)
-            skipped.append((file, f"unsupported image media type: {media_type or 'unknown'}"))
-            continue
-        if file["size"] > MAX_VISION_IMAGE_BYTES:
-            log.warning("slack.image.skipped.oversize", name=name, size=file["size"])
-            skipped.append(
-                (file, f"exceeds vision size cap ({file['size']} > {MAX_VISION_IMAGE_BYTES})")
-            )
-            continue
-        if _exceeds_dimension_cap(file):
-            log.warning("slack.image.skipped.dimensions", name=name)
-            skipped.append((file, f"image dimensions exceed {MAX_VISION_IMAGE_DIMENSION}px"))
-            continue
-        if len(blocks) >= MAX_VISION_IMAGES:
-            log.warning("slack.image.skipped.count_cap", name=name)
-            skipped.append((file, f"more than {MAX_VISION_IMAGES} images in one turn"))
-            continue
-        try:
-            resp = await http_client.get(
-                file["url_private"], headers={"Authorization": f"Bearer {token}"}
-            )
-        except httpx.HTTPError as err:
-            log.warning("slack.image.skipped.fetch_error", name=name, error=str(err))
-            skipped.append((file, f"private-URL fetch failed: {err}"))
-            continue
-        if not resp.is_success:
-            log.warning("slack.image.skipped.fetch_error", name=name, status=resp.status_code)
-            skipped.append((file, f"private-URL fetch failed: HTTP {resp.status_code}"))
-            continue
-        blocks.append(
-            build_image_block(
-                resp.content,
-                media_type,  # pyright: ignore[reportArgumentType]  # gated to VISION_MEDIA_TYPES above
-            )
-        )
+    # Per file, in order: its block, or why it was skipped (None: not yet fetched).
+    outcomes: list[BetaManagedAgentsImageBlockParam | str | None] = [
+        _static_skip_reason(file) for file in files
+    ]
+    waiting = [i for i, outcome in enumerate(outcomes) if outcome is None]
+    gate = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
+
+    async def fetch(file: SlackFile) -> BetaManagedAgentsImageBlockParam | str:
+        async with gate:
+            return await _fetch_image_block(file, token=token, http_client=http_client)
+
+    # Fetch as many as there are free slots, side by side; a failed fetch frees
+    # its slot for the next file, as a one-at-a-time loop would.
+    inlined = 0
+    while waiting and inlined < MAX_VISION_IMAGES:
+        free = MAX_VISION_IMAGES - inlined
+        window, waiting = waiting[:free], waiting[free:]
+        fetched = await asyncio.gather(*(fetch(files[i]) for i in window))
+        for i, outcome in zip(window, fetched, strict=True):
+            outcomes[i] = outcome
+            inlined += not isinstance(outcome, str)
+    for i in waiting:
+        log.warning("slack.image.skipped.count_cap", name=files[i]["name"])
+        outcomes[i] = f"more than {MAX_VISION_IMAGES} images in one turn"
+
+    blocks = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+    skipped = [
+        (file, outcome)
+        for file, outcome in zip(files, outcomes, strict=True)
+        if isinstance(outcome, str)
+    ]
     return blocks, skipped
+
+
+def _static_skip_reason(file: SlackFile) -> str | None:
+    """Why the file's metadata alone rules it out; None when it may be fetched."""
+    name = file["name"]
+    media_type = file["mimetype"]
+    if media_type not in VISION_MEDIA_TYPES:
+        log.warning("slack.image.skipped.media_type", name=name, media_type=media_type)
+        return f"unsupported image media type: {media_type or 'unknown'}"
+    if file["size"] > MAX_VISION_IMAGE_BYTES:
+        log.warning("slack.image.skipped.oversize", name=name, size=file["size"])
+        return f"exceeds vision size cap ({file['size']} > {MAX_VISION_IMAGE_BYTES})"
+    if _exceeds_dimension_cap(file):
+        log.warning("slack.image.skipped.dimensions", name=name)
+        return f"image dimensions exceed {MAX_VISION_IMAGE_DIMENSION}px"
+    return None
+
+
+async def _fetch_image_block(
+    file: SlackFile, *, token: str, http_client: httpx.AsyncClient
+) -> BetaManagedAgentsImageBlockParam | str:
+    """The file's vision block, or why it could not be built."""
+    name = file["name"]
+    try:
+        resp = await http_client.get(
+            file["url_private"], headers={"Authorization": f"Bearer {token}"}
+        )
+    except httpx.HTTPError as err:
+        log.warning("slack.image.skipped.fetch_error", name=name, error=str(err))
+        return f"private-URL fetch failed: {err}"
+    if not resp.is_success:
+        log.warning("slack.image.skipped.fetch_error", name=name, status=resp.status_code)
+        return f"private-URL fetch failed: HTTP {resp.status_code}"
+    return build_image_block(
+        resp.content,
+        file["mimetype"],  # pyright: ignore[reportArgumentType]  # gated to VISION_MEDIA_TYPES by _static_skip_reason
+    )

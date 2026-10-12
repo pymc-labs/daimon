@@ -1,9 +1,11 @@
+import asyncio
 import base64
 
 import httpx
 import pytest
 from daimon.adapters.slack.vision import (
     MAX_VISION_IMAGE_BYTES,
+    MAX_VISION_IMAGES,
     SlackFile,
     download_as_image_blocks,
     is_vision_image,
@@ -90,3 +92,57 @@ async def test_download_as_image_blocks_skips_on_transport_error_and_continues()
     assert len(skipped) == 1 and skipped[0][0]["id"] == "F1", (
         "transport error skips the image, not the whole batch"
     )
+
+
+def _numbered(count: int) -> list[SlackFile]:
+    return [
+        _file(id=f"F{i}", name=f"img{i}.png", url_private=f"https://files.slack.com/f/F{i}")
+        for i in range(count)
+    ]
+
+
+def _overlap_handler(
+    tracker: dict[str, int], *, failing: frozenset[str] = frozenset()
+) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        tracker["in_flight"] += 1
+        tracker["peak"] = max(tracker["peak"], tracker["in_flight"])
+        await asyncio.sleep(0.01)
+        tracker["in_flight"] -= 1
+        file_id = request.url.path.rsplit("/", 1)[-1]
+        if file_id in failing:
+            return httpx.Response(500, content=b"boom")
+        return httpx.Response(200, content=file_id.encode())
+
+    return httpx.MockTransport(handler)
+
+
+async def test_download_as_image_blocks_overlaps_downloads_in_file_order():
+    """Several images download side by side, a few at a time, in message order."""
+    tracker = {"in_flight": 0, "peak": 0}
+    files = _numbered(8)
+    async with httpx.AsyncClient(transport=_overlap_handler(tracker)) as client:
+        blocks, skipped = await download_as_image_blocks(files, token="xoxb", http_client=client)
+
+    decoded = [base64.standard_b64decode(b["source"]["data"]).decode() for b in blocks]
+    assert decoded == [f["id"] for f in files], "blocks keep the files' order"
+    assert skipped == [], "every image fits under the cap"
+    assert 1 < tracker["peak"] <= 4, f"fetches should overlap, at most four at once: {tracker}"
+
+
+async def test_download_as_image_blocks_failed_fetch_frees_its_slot():
+    """With more images than the cap, a failed fetch lets the next image in,
+    exactly as fetching one at a time did."""
+    tracker = {"in_flight": 0, "peak": 0}
+    files = _numbered(MAX_VISION_IMAGES + 2)
+    transport = _overlap_handler(tracker, failing=frozenset({"F1"}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        blocks, skipped = await download_as_image_blocks(files, token="xoxb", http_client=client)
+
+    kept = [f["id"] for f in files if f["id"] != "F1"][:MAX_VISION_IMAGES]
+    decoded = [base64.standard_b64decode(b["source"]["data"]).decode() for b in blocks]
+    assert decoded == kept, "the cap fills in order past the failure"
+    assert [(f["id"], "fetch" in reason) for f, reason in skipped] == [
+        ("F1", True),
+        (f"F{MAX_VISION_IMAGES + 1}", False),
+    ], "the failed image and the one past the cap are skipped, in message order"
