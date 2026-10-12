@@ -282,7 +282,7 @@ async def handle_privacy_block_action(
                         tuple(k.get_secret_value() for k in runtime.settings.crypto.keys)
                     )
                     user_token = decrypt_token(fernet, token_row.encrypted_token)
-                    await AsyncWebClient(token=user_token).auth_revoke()  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    await AsyncWebClient(token=user_token, session=runtime.slack_http).auth_revoke()  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 view_id=current_view_id,
                 view=build_disconnect_result_view(

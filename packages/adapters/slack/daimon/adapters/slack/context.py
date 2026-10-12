@@ -257,6 +257,7 @@ def _without_rate_limit_wait(client: AsyncWebClient) -> AsyncWebClient:
         token=client.token,
         base_url=client.base_url,
         timeout=client.timeout,
+        session=client.session,
         retry_handlers=[
             h for h in client.retry_handlers if not isinstance(h, AsyncRateLimitErrorRetryHandler)
         ],

@@ -42,9 +42,11 @@ class TestSlackRuntime:
             "deployment_default",
             "mcp_token_probe",
             "group_members",
+            "slack_http",
         }, (
             "expected exactly settings/anthropic/sessionmaker/billing_config/http_client/"
-            f"resolver_cache/turn_deps/deployment_default/mcp_token_probe/group_members fields, "
+            "resolver_cache/turn_deps/deployment_default/mcp_token_probe/group_members/"
+            f"slack_http fields, "
             f"got {fields}"
         )
 
@@ -76,6 +78,22 @@ async def test_build_runtime_yields_wired_runtime(
         assert runtime.sessionmaker is not None, "build_runtime must wire a non-None sessionmaker"
         assert runtime.anthropic is not None, "build_runtime must wire a non-None anthropic client"
         assert runtime.http_client is not None, "build_runtime wires an http_client"
+
+
+async def test_build_runtime_opens_one_slack_session_and_closes_it_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every per-event Slack client reuses one pool, released when the process stops."""
+    _isolate_settings_env(monkeypatch)
+    monkeypatch.setenv("DAIMON_SLACK__SIGNING_SECRET", "test-signing-secret")
+    monkeypatch.setenv("DAIMON_SLACK__APP_TOKEN", "xapp-test-token")
+    settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+
+    async with build_runtime(settings) as runtime:
+        session = runtime.slack_http
+        assert session is not None, "build_runtime wires the shared Slack session"
+        assert not session.closed, "the session is open while the runtime is live"
+    assert session.closed, "leaving build_runtime closes the shared Slack session"
 
 
 async def test_main_guard_exits_cleanly_when_slack_unconfigured(

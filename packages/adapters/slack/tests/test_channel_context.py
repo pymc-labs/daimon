@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
@@ -28,7 +29,10 @@ from daimon.adapters.slack.channel_reads import (
     load_channel_read_policy,
     origin_ids,
 )
-from daimon.adapters.slack.context import build_channel_context_xml
+from daimon.adapters.slack.context import (
+    _without_rate_limit_wait,  # pyright: ignore[reportPrivateUsage]
+    build_channel_context_xml,
+)
 from daimon.adapters.slack.interactions import build_retry_handlers
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
@@ -215,6 +219,17 @@ async def test_a_rate_limited_fetch_does_not_wait_out_retry_after() -> None:
     assert time.monotonic() - started < 5, "a 429 must not hold the turn for Retry-After"
     assert len(requests) == 1, "a rate-limited fetch is not retried"
     assert _envelope(xml).attrib["status"] == "unavailable"
+
+
+async def test_dropping_the_rate_limit_wait_keeps_the_callers_session() -> None:
+    """The no-429-wait copy must ride the caller's pool, not open its own per call."""
+    async with aiohttp.ClientSession() as slack_http:
+        client = AsyncWebClient(
+            token="xoxb-test", retry_handlers=build_retry_handlers(), session=slack_http
+        )
+        copy = _without_rate_limit_wait(client)
+    assert copy.session is slack_http, "the copy must reuse the caller's aiohttp session"
+    assert copy.token == client.token, "the copy keeps the caller's token"
 
 
 async def test_a_fetch_past_the_timeout_leaves_the_context_unavailable() -> None:

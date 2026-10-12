@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import aiohttp
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
@@ -135,4 +136,43 @@ async def test_resolve_web_client_registers_rate_limit_retry_handler(
     )
     assert AsyncConnectionErrorRetryHandler in handler_types, (
         "the SDK's default connection-error retry must survive the override"
+    )
+
+
+async def test_resolve_web_client_reuses_the_runtime_slack_session(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each event gets its own token-bearing client but shares the runtime's pool,
+    so a call does not pay a fresh TCP and TLS handshake."""
+    fernet_key = Fernet.generate_key().decode()
+    fernet = build_multifernet((fernet_key,))
+    await upsert_slack_bot_token(
+        db_session,
+        team_id="T_SESSION",
+        encrypted_token=encrypt_token(fernet, "xoxb-shared-session"),
+    )
+    await db_session.flush()
+
+    settings = MagicMock()
+    settings.crypto.keys = (SecretStr(fernet_key),)
+    async with aiohttp.ClientSession() as slack_http:
+        runtime = SlackRuntime(
+            settings=settings,
+            anthropic=MagicMock(spec=AsyncAnthropic),
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            http_client=MagicMock(spec=httpx.AsyncClient),
+            resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+            turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+            slack_http=slack_http,
+        )
+
+        first = await resolve_web_client(runtime, team_id="T_SESSION")
+        second = await resolve_web_client(runtime, team_id="T_SESSION")
+
+    assert first is not None and second is not None, "a seeded token row must yield a client"
+    assert first is not second, "the client stays per-event"
+    assert first.session is slack_http and second.session is slack_http, (
+        "both clients must ride the runtime's shared aiohttp session"
     )

@@ -1467,7 +1467,9 @@ class SlackApp:
             )
             token = decrypt_token(fernet, row.encrypted_token)
             client = AsyncWebClient(  # per-event only
-                token=token, retry_handlers=build_retry_handlers()
+                token=token,
+                retry_handlers=build_retry_handlers(),
+                session=self.runtime.slack_http,
             )
 
             # (4) EXPLICIT MENTION GATE — Slack has been observed delivering

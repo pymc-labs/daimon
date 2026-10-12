@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+import aiohttp
 import httpx
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
@@ -46,6 +47,9 @@ class SlackRuntime:
     mcp_token_probe: McpTokenProbe | None = None
     # Channel admin user groups' members, kept briefly (`channel_admin_groups`).
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
+    # One connection pool for every workspace's per-event AsyncWebClient; None
+    # (tests) lets slack_sdk open a throwaway session per call.
+    slack_http: aiohttp.ClientSession | None = None
 
 
 def resolve_bot_display_name(settings: Settings) -> str:
@@ -92,6 +96,21 @@ def responder_account(bot_user_id: str) -> ResponderAccount | None:
     return ResponderAccount(user_id=bot_user_id, mention=f"<@{bot_user_id}>")
 
 
+def open_slack_http_session() -> aiohttp.ClientSession:
+    """The process's Slack Web API session; call inside the running loop.
+
+    Without an injected session slack_sdk opens and closes one per API call,
+    paying a fresh TCP and TLS handshake each time. It holds no token, so
+    sharing it keeps the per-event token rule.
+    """
+    return aiohttp.ClientSession(
+        # An injected session's timeout replaces AsyncWebClient's; keep its 30 s.
+        timeout=aiohttp.ClientTimeout(total=30),
+        # A cookie one workspace's call sets must not ride along on another's.
+        cookie_jar=aiohttp.DummyCookieJar(),
+    )
+
+
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
     engine = build_engine(
@@ -120,6 +139,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
             ),
         ) as anthropic,
         httpx.AsyncClient(timeout=30.0) as http_client,
+        open_slack_http_session() as slack_http,
     ):
         turn_deps = build_turn_deps(
             settings,
@@ -140,6 +160,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
                 turn_deps=turn_deps,
                 deployment_default=deployment_default,
                 mcp_token_probe=probe_bearer_token,
+                slack_http=slack_http,
             )
         finally:
             await drain_outcomes()

@@ -58,7 +58,7 @@ async def main() -> None:
         app = SlackApp(runtime=runtime)
         client = SocketModeClient(
             app_token=settings.slack.app_token.get_secret_value(),
-            web_client=AsyncWebClient(),
+            web_client=AsyncWebClient(session=runtime.slack_http),
         )
         client.socket_mode_request_listeners.append(app.on_request)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk list attr
 

@@ -58,5 +58,5 @@ async def resolve_web_client(runtime: SlackRuntime, *, team_id: str) -> AsyncWeb
     fernet = build_multifernet(tuple(k.get_secret_value() for k in runtime.settings.crypto.keys))
     token = decrypt_token(fernet, row.encrypted_token)
     return AsyncWebClient(  # per-event only — never cache
-        token=token, retry_handlers=build_retry_handlers()
+        token=token, retry_handlers=build_retry_handlers(), session=runtime.slack_http
     )
