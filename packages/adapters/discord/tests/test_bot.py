@@ -128,11 +128,12 @@ def _make_channel_message(
         ("tool", 777, 901, 11, False, False, False),
         ("tool", 777, 900, 10, True, True, True),
         ("tool", 777, 900, 10, True, False, False),
+        ("routine", 777, 900, 10, False, False, True),
     ],
 )
 async def test_reply_to_recorded_agent_post_starts_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
-    source: Literal["tool", "auto_thread"],
+    source: Literal["tool", "auto_thread", "routine"],
     resolved_author_id: int,
     resolved_webhook_id: int | None,
     resolved_application_id: int | None,
@@ -192,13 +193,14 @@ async def test_reply_to_recorded_agent_post_starts_turn(
         ("tool", True, False),
         ("auto_thread", True, False),
         ("turn", False, False),
+        ("routine", True, True),
     ],
-    ids=["answer-chunk", "tool-post", "thread", "not-the-bot"],
+    ids=["answer-chunk", "tool-post", "thread", "not-the-bot", "routine-result"],
 )
 async def test_identity_off_reply_to_any_answer_message_starts_a_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
     excluded: bool,
-    source: Literal["turn", "tool", "auto_thread"],
+    source: Literal["turn", "tool", "auto_thread", "routine"],
     by_bot: bool,
     expected: bool,
 ) -> None:
@@ -206,6 +208,7 @@ async def test_identity_off_reply_to_any_answer_message_starts_a_turn(
 
     Each chunk is a recorded `turn` post by the bot itself, so a reply to the
     second chunk of a long answer starts a turn just like a reply to the first.
+    A routine's result counts the same way.
     """
     from daimon.core.defaults.provisioning import provision_tenant
     from daimon.core.stores.agent_posts import record_post

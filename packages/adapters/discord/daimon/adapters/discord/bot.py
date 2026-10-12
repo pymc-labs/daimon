@@ -2456,8 +2456,12 @@ class DaimonBot(commands.Bot):
                         channel_id=str(message.channel.id),
                         message_id=str(reference.message_id),
                     )
+                # Without identity only the bot's answers and routine results
+                # count; a tool post still needs the ping.
                 reply_to_recorded_post = post is not None and (
-                    post.source != "auto_thread" if identity_on else post.source == "turn"
+                    post.source != "auto_thread"
+                    if identity_on
+                    else post.source in ("turn", "routine")
                 )
             except Exception as exc:
                 log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)
