@@ -19,19 +19,28 @@ class SlackHttpSession:
 
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
+        self._shut = False
 
-    def get(self) -> aiohttp.ClientSession:
-        """The open session, opening it if needed."""
+    def get(self) -> aiohttp.ClientSession | None:
+        """The open session, opening it if needed; None after shutdown, so a late
+        call falls back to slack_sdk's own per-call session instead of opening
+        one nothing would close."""
+        if self._shut:
+            return None
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=_SLACK_TIMEOUT_S),
+                # Unbounded like the per-call sessions it replaces: a pool cap
+                # would queue calls inside the 30 s total timeout.
+                connector=aiohttp.TCPConnector(limit=0),
                 # A cookie one workspace's call sets must not ride along on another's.
                 cookie_jar=aiohttp.DummyCookieJar(),
             )
         return self._session
 
     async def close(self) -> None:
-        """Close the session at app shutdown; a later `get` opens a new one."""
+        """Close the session at app shutdown."""
+        self._shut = True
         if self._session is not None:
             await self._session.close()
             self._session = None
