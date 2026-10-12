@@ -297,6 +297,12 @@ the original line, since a workspace without `chat:write.customize` accepts the
 post but silently drops the agent's header. The built-in agent and Teams keep
 the original line. An empty result is `skipped/no_result`.
 
+On Discord each message of a delivered result is recorded as the routine
+agent's post, with the creator as the person who asked. A reply to any of
+them starts a turn like a reply to an answer, which matters with agent
+identity on, where a webhook post cannot be pinged. The channel tidy tools
+then let the agent edit or delete it only for the creator or a server admin.
+
 The fallback direct message to the creator stays Daimon's own notice: the
 agent and schedule (`team-020-analyst, every day at 09:00 UTC`), then why the
 result came by DM, then the result, a blank line between each. The reason

@@ -107,6 +107,11 @@ It provisions and targets a single local tenant, loads the whole tree, then
 reconciles skills, environments and agents in that order, sweeping in reverse
 afterwards. Existing installs pick the change up through the per-tenant path
 described below, and `verify` is the command that walks all of them.
+Registering a tenant (here, even with `--dry-run`, and on every platform's
+join) fails before any reconcile when its id begins with the same 8 hex
+characters as an existing tenant's, since skill titles name a tenant by
+those: the operator sees an error naming the workspace, and existing tenants
+carry on normally.
 
 Everything that can fail before a write does. Bad YAML, a filename that
 disagrees with a `name`, and an agent referencing a skill directory that does

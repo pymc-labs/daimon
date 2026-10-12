@@ -1,9 +1,9 @@
 """Turn slots and the queue in front of them, one per adapter process.
 
 A turn over the global cap (`max_concurrent_turns`) or its tenant's cap waits
-here for a slot instead of being refused. The queue is backstage: a queued turn
-shows the same "Working on it…" card with Stop as a running one, and the only
-difference a person sees is time.
+here for a slot instead of being refused. A queued turn shows the same
+"Working on it…" card with Stop as a running one; the adapter may also mark the
+trigger as queued (`wait_for_slot`'s `on_queued`), as Discord does with ⌛.
 
 - Admission (`TurnQueue.admit`) runs a turn at once when its tenant and the
   process both have a free slot and nobody of its tenant is already waiting;
@@ -117,8 +117,13 @@ class TurnTicket:
     def overdue(self) -> bool:
         return self._queue.clock() - self.queued_at >= self._queue.max_wait_s
 
-    async def wait(self, cancel: asyncio.Event) -> WaitResult:
+    async def wait(
+        self, cancel: asyncio.Event, *, on_wait: Callable[[], None] | None = None
+    ) -> WaitResult:
         """Wait for a slot; returns at once for a ticket that already holds one.
+
+        `on_wait` is called once, synchronously, only when a live wait begins:
+        never for a ticket already granted, stopped or past its max wait.
 
         "cancelled" when Stop came first, including a Stop that raced the
         grant: the slot is then still held, and `release` returns it.
@@ -129,6 +134,8 @@ class TurnTicket:
             return "started"
         if self.state == "queued":
             remaining = self.queued_at + self._queue.max_wait_s - self._queue.clock()
+            if on_wait is not None and remaining > 0 and not cancel.is_set():
+                on_wait()
             settled = asyncio.ensure_future(self._settled.wait())
             stopped = asyncio.ensure_future(cancel.wait())
             try:

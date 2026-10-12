@@ -1,12 +1,14 @@
 """Record what a turn posts, so its agent can tidy it later with the tidy tools,
 and carry out an archive of the turn's own thread once the turn is over.
 
-The status card, answer chunks and in-thread notices a mention or continuation
-turn sends through `sender`, and the thread opened from a mention, get an
-`agent_posted_messages` row naming the turn's agent and the person who asked
-(`daimon.core.channel_tidy.record_turn_post`). Turn error notices
-(`_render_turn_error`), setup-wizard turns and session-output files are not
-recorded yet, so they cannot be tidied with the tools.
+The status card, answer chunks and in-thread notices a mention, continuation
+or setup-wizard turn sends through `sender`, and the thread opened from a
+mention, get an `agent_posted_messages` row naming the turn's agent and the
+person who asked (`daimon.core.channel_tidy.record_turn_post`). The row also
+lets a reply to the post start a turn. A routine's result is recorded by its
+poster (`routine_delivery`). Turn error notices (`_render_turn_error`) and
+session-output files are not recorded yet, so they cannot be tidied with the
+tools.
 """
 
 from __future__ import annotations

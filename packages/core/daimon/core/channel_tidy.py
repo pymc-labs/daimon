@@ -2,10 +2,11 @@
 
 An agent may edit or delete only messages and threads it posted itself
 (`daimon.core.stores.agent_posts`). The channel tools record their own posts;
-a chat adapter records what a turn posts with `record_turn_post`. Every edit,
-delete or archive writes one `security_audit_events` row with the target's
-ids, a keyed HMAC of the text it replaced and the turn it ran in, never the
-text. The row is written and committed before the platform call, so no change happens unaudited; a
+a chat adapter records what a turn or a routine's delivery posts with
+`record_turn_post`. Every edit, delete or archive writes one
+`security_audit_events` row with the target's ids, a keyed HMAC of the text
+it replaced and the turn it ran in, never the text. The row is written and
+committed before the platform call, so no change happens unaudited; a
 platform failure afterwards adds an `error` row.
 
 Limits count those `allowed` rows per agent: `PER_TURN_LIMIT` in one turn
@@ -236,7 +237,8 @@ async def record_turn_post(
     parent_channel_id: str | None = None,
     thread_ts: str | None = None,
 ) -> None:
-    """Record a message (`turn`) or thread (`auto_thread`) an adapter posted for a turn.
+    """Record a message (`turn`) or thread (`auto_thread`) an adapter posted for
+    a turn, or a routine's result (`routine`, requested by the routine's creator).
 
     The agent is the turn's own (`derive_agent_uuid`, the `chat_agent_id` its
     MCP token carries), so only that agent can tidy it. An `auto_thread` row

@@ -1,7 +1,8 @@
 """Async store for agent_posted_messages: what each agent posted.
 
 Rows come from the channel tools (`source='tool'`) and from the chat
-adapters for what a turn posted (`source='turn'`, `'auto_thread'`).
+adapters for what a turn posted (`source='turn'`, `'auto_thread'`) and for a
+routine's result (`source='routine'`).
 
 The channel tidy tools read this to decide whether a message is the calling
 agent's own. Rows hold ids and a keyed HMAC of the text, never the text.
@@ -25,7 +26,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PostKind = Literal["message", "thread"]
-PostSource = Literal["tool", "turn", "auto_thread"]
+PostSource = Literal["tool", "turn", "auto_thread", "routine"]
 
 
 class AgentPostRow(BaseModel):

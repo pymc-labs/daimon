@@ -461,6 +461,46 @@ async def test_a_turn_reply_outside_an_auto_thread_needs_its_own_requester(
     assert mine not in fake.messages and theirs in fake.messages, "only the caller's own turn"
 
 
+async def test_a_routine_result_is_tidied_only_for_its_creator(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    """A routine's result is the agent's post, but tidying it is its creator's call."""
+    world = await _world(committing_sessionmaker)
+    results: dict[str, str] = {}
+    for creator in (_CALLER, _SOMEONE_ELSE):
+        message_id = fake.add(_CHANNEL, content="Result from the daily routine")
+        await record_turn_post(
+            world.sessionmaker,
+            tenant_id=world.tenant_id,
+            platform="discord",
+            ma_agent_id=_AGENT,
+            channel_id=_CHANNEL,
+            message_id=message_id,
+            requester_platform_user_id=creator,
+            source="routine",
+        )
+        results[creator] = message_id
+    auth, origin = await world.turn()
+
+    await _delete_message_impl(
+        world.runtime,
+        auth,
+        channel_id=_CHANNEL,
+        message_id=results[_CALLER],
+        origin_context_id=origin,
+    )
+    with pytest.raises(ToolError, match="only the person who started this conversation"):
+        await _delete_message_impl(
+            world.runtime,
+            auth,
+            channel_id=_CHANNEL,
+            message_id=results[_SOMEONE_ELSE],
+            origin_context_id=origin,
+        )
+    assert results[_CALLER] not in fake.messages, "the creator's own result is deleted"
+    assert results[_SOMEONE_ELSE] in fake.messages, "another creator's result stays"
+
+
 async def test_a_turn_row_names_the_turns_agent_and_requester(
     committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:

@@ -18,7 +18,7 @@ The Discord process also reports Discord 429 retries by route and longest retry 
 A Discord mention gets a best-effort 👀 reaction before turn admission resolves
 its agent and environment. The reaction clears when the turn completes, fails
 or is cancelled. A queued follow-up uses ⌛ instead, cleared after its batch
-settles. An opening mention gets no reply in the parent channel while its thread
+settles. A mention waiting for a turn slot also gets ⌛, cleared when the wait ends. An opening mention gets no reply in the parent channel while its thread
 opens, and its existing acknowledgment covers naming and creation. A thread
 that cannot be opened gets one plain reply under the mention.
 
@@ -232,10 +232,12 @@ reply can still be followed by files created during the turn. The output sweep s
 the same filename and size were already attached by Daimon in that turn.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
-application-owned webhook post in the same tenant and channel. With agent
-identity off, the reply must be to a turn post the bot itself sent (the card or
-any chunk of the answer), so a reply to the second message of a long answer
-counts like a reply to the first, pinged or not. The usual
+application-owned webhook post in the same tenant and channel. Recorded posts
+are the agent's tool posts, a turn's card and answer (a setup-wizard turn's
+included) and a routine's delivered result. With agent
+identity off, the reply must be to a turn post or routine result the bot itself
+sent (the card or any chunk of the answer), so a reply to the second message of
+a long answer counts like a reply to the first, pinged or not. The usual
 admission path follows either trigger. Agent turn posts use a pool of up to
 three application-owned webhooks per text or forum channel, with each thread
 assigned by its ID; built-in Daimon posts use the bot. If a webhook is
@@ -426,7 +428,10 @@ Each adapter process keeps its slots in one `TurnQueue`
 is not refused: it joins its tenant's queue (`DAIMON_TURN_QUEUE__*`), posts the
 ordinary "Working on it…" card with Stop, and waits after the card and before
 `bind_session` (`wait_for_slot` in `packages/core/daimon/core/turn/slots.py`).
-Nothing on the card says it is queued. A released slot goes, in the same
+Nothing on the card says it is queued; on Discord the mention gets ⌛ for the
+live wait (`wait_for_slot`'s `on_queued`), cleared once the wait ends; both
+reaction calls run in the background, so they never delay Stop, the max wait or
+a granted slot. A released slot goes, in the same
 synchronous span, to the first tenant in round-robin order that has a waiting
 turn and a free tenant slot; within a tenant the queue is FIFO. A slot covers
 one turn: it is returned when the turn ends (`release_turn_slot`), and each
@@ -1793,7 +1798,7 @@ The core driver calls an optional `on_acknowledgment` lifecycle hook with
 `accepted` after the initial event send and `done` after successful answer
 delivery. Missing hooks are no-ops; reaction failures are bounded and do not
 fail the turn. Discord and Slack acknowledge admitted mentions with eyes; queued Discord
-follow-ups use an hourglass. These markers clear on every terminal path.
+follow-ups and mentions waiting for a turn slot use an hourglass. These markers clear on every terminal path.
 Opted-in tenants also get a check mark on success. Unprompted Discord turns stay silent; failures and cancellation
 do not get a completion marker. Continuations without a trigger message skip
 reactions.

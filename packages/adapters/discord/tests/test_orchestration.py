@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import types
 import uuid
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -3559,6 +3559,281 @@ class TestOverCapQueue:
             await turn
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
+
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_mention_waiting_on_the_tenant_cap_shows_the_queued_hourglass(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Cap 1, two mentions: the second gets ⌛ while it waits, then the normal lifecycle."""
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        mock_create_session.side_effect = [ma_session(id="sess-cap-1"), ma_session(id="sess-cap-2")]
+        first_running = asyncio.Event()
+        finish_first = asyncio.Event()
+
+        async def run_turn(*_args: object, **_kwargs: object) -> MagicMock:
+            if not first_running.is_set():
+                first_running.set()
+                await finish_first.wait()
+            return MagicMock()
+
+        mock_run_turn.side_effect = run_turn
+        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+        bot.runtime.settings.discord.max_concurrent_turns_per_tenant = 1  # pyright: ignore[reportOptionalMemberAccess]
+        first = _make_channel_message(channel_id=789)
+        second = _make_channel_message(channel_id=790)
+        first_calls = _record_reactions(first)
+        second_calls = _record_reactions(second)
+        for index, message in enumerate((first, second)):
+            _give_thread(message, thread_id=6000 + index, card_id=5000 + index)
+
+        first_turn = asyncio.create_task(bot.on_message(first))
+        await asyncio.wait_for(first_running.wait(), 5)
+        second_turn = asyncio.create_task(bot.on_message(second))
+        await _until(lambda: ("+", "⌛") in second_calls)
+        assert bot.turn_queue.depth(tenant.id) == 1
+        assert second_calls == [("+", "👀"), ("+", "⌛")]
+
+        finish_first.set()
+        await asyncio.wait_for(asyncio.gather(first_turn, second_turn), 5)
+        await _settle_background(bot)
+        assert second_calls == [("+", "👀"), ("+", "⌛"), ("-", "⌛"), ("-", "👀")]
+        assert first_calls == [("+", "👀"), ("-", "👀")], "a turn that never waited: no ⌛"
+        assert bot.turn_queue.in_flight() == 0
+
+    @pytest.mark.parametrize(
+        "exit_kind", ["start", "stop", "timeout", "balance", "cancel", "add_fails", "no_wait"]
+    )
+    async def test_the_hourglass_clears_on_every_end_of_the_wait(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        exit_kind: str,
+    ) -> None:
+        with patch(
+            "daimon.core.turn.slots.is_over_balance",
+            AsyncMock(return_value=exit_kind == "balance"),
+        ):
+            async with _over_cap_turn(
+                db_session,
+                db_session_factory,
+                queued=exit_kind != "no_wait",
+                max_wait_s=1.0 if exit_kind == "timeout" else 300,
+                add_fails=exit_kind == "add_fails",
+            ) as ctx:
+                if exit_kind in ("start", "balance", "add_fails"):
+                    assert ctx.held is not None
+                    ctx.held.release()
+                elif exit_kind == "stop":
+                    ctx.stop()
+                elif exit_kind == "cancel":
+                    ctx.turn.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(ctx.turn, 5)
+                await _settle_background(ctx.bot)
+                if exit_kind == "no_wait":
+                    assert ctx.calls == [("+", "👀"), ("-", "👀")]
+                else:
+                    assert ctx.calls[:2] == [("+", "👀"), ("+", "⌛")]
+                    assert sorted(ctx.calls[2:]) == sorted([("-", "⌛"), ("-", "👀")])
+                if exit_kind in ("stop", "timeout", "balance", "cancel"):
+                    ctx.create_session.assert_not_called()
+                else:
+                    ctx.create_session.assert_awaited_once()
+                if exit_kind == "stop":
+                    assert str(ctx.card.edit.await_args.kwargs["content"]).startswith("Stopped.")
+                assert ctx.bot.turn_queue.depth() == 0
+
+    @pytest.mark.parametrize("exit_kind", ["stop", "timeout", "grant"])
+    async def test_a_slow_hourglass_add_never_holds_up_the_wait(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        exit_kind: str,
+    ) -> None:
+        gate = asyncio.Event()
+        async with _over_cap_turn(
+            db_session,
+            db_session_factory,
+            add_gate=gate,
+            max_wait_s=1.0 if exit_kind == "timeout" else 300,
+        ) as ctx:
+            if exit_kind == "stop":
+                ctx.stop()
+            elif exit_kind == "grant":
+                assert ctx.held is not None
+                ctx.held.release()
+            await asyncio.wait_for(ctx.turn, 5)  # while the ⌛ PUT is still pending
+            assert ctx.calls == [("+", "👀"), ("+", "⌛"), ("-", "👀")]
+            if exit_kind == "grant":
+                ctx.create_session.assert_awaited_once()
+            else:
+                assert ctx.card.edit.await_count, "the card ends without waiting on the reaction"
+                ctx.create_session.assert_not_called()
+            assert ctx.bot.turn_queue.depth() == 0
+            gate.set()
+            await _settle_background(ctx.bot)
+            assert ctx.calls[-1] == ("-", "⌛"), "the remove waits for the add, so ⌛ never sticks"
+
+    async def test_a_slow_hourglass_remove_never_holds_a_granted_slot(
+        self,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        gate = asyncio.Event()
+        async with _over_cap_turn(db_session, db_session_factory, remove_gate=gate) as ctx:
+            assert ctx.held is not None
+            ctx.held.release()
+            await asyncio.wait_for(ctx.turn, 5)  # while the ⌛ DELETE is still pending
+            ctx.create_session.assert_awaited_once()
+            assert ("-", "⌛") in ctx.calls
+            assert ctx.bot.turn_queue.in_flight() == 0
+            gate.set()
+            await _settle_background(ctx.bot)
+
+
+def _record_reactions(message: discord.Message) -> list[tuple[str, str]]:
+    """One chronological list of the reaction calls made on `message`."""
+    calls: list[tuple[str, str]] = []
+
+    async def add(emoji: str) -> None:
+        calls.append(("+", emoji))
+
+    async def remove(emoji: str, _user: object) -> None:
+        calls.append(("-", emoji))
+
+    message.add_reaction = AsyncMock(side_effect=add)  # pyright: ignore[reportAttributeAccessIssue]
+    message.remove_reaction = AsyncMock(side_effect=remove)  # pyright: ignore[reportAttributeAccessIssue]
+    return calls
+
+
+def _give_thread(message: discord.Message, *, thread_id: int, card_id: int) -> MagicMock:
+    card = MagicMock(spec=discord.Message)
+    card.id = card_id
+    card.webhook_id = None
+    card.edit = AsyncMock(return_value=card)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = thread_id
+    thread.send = AsyncMock(return_value=card)
+    message.create_thread = AsyncMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    return thread
+
+
+async def _until(check: Callable[[], bool]) -> None:
+    async with asyncio.timeout(5):
+        while not check():
+            await asyncio.sleep(0.01)
+
+
+async def _settle_background(bot: DaimonBot) -> None:
+    while tasks := tuple(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+
+
+@dataclass
+class _OverCapTurn:
+    bot: DaimonBot
+    held: TurnTicket | None
+    thread: MagicMock
+    card: MagicMock
+    turn: asyncio.Task[None]
+    calls: list[tuple[str, str]]
+    create_session: AsyncMock
+
+    def stop(self) -> None:
+        view = self.thread.send.await_args.kwargs["view"]
+        assert isinstance(view, CancelView)
+        view._cancel.set()  # pyright: ignore[reportPrivateUsage]  # the Stop click
+
+
+@contextlib.asynccontextmanager
+async def _over_cap_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    queued: bool = True,
+    max_wait_s: float = 300,
+    add_gate: asyncio.Event | None = None,
+    remove_gate: asyncio.Event | None = None,
+    add_fails: bool = False,
+) -> AsyncIterator[_OverCapTurn]:
+    """A channel mention behind the only (process-wide) slot, with a scriptable reaction transport."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+    await _setup_workspace_and_config(db_session, tenant.id)
+    bot = make_bot(_make_runtime(tenant.id, db_session_factory))
+    bot.turn_queue.global_cap = 1
+    bot.turn_queue.max_wait_s = max_wait_s
+    held = bot.turn_queue.claim(uuid.uuid4()) if queued else None
+    message = _make_channel_message()
+    thread = _give_thread(message, thread_id=8999, card_id=8242)
+    calls: list[tuple[str, str]] = []
+
+    async def add(emoji: str) -> None:
+        calls.append(("+", emoji))
+        if emoji == "⌛":
+            if add_gate is not None:
+                await add_gate.wait()
+            if add_fails:
+                raise RuntimeError("reaction failed")
+
+    async def remove(emoji: str, _user: object) -> None:
+        calls.append(("-", emoji))
+        if emoji == "⌛" and remove_gate is not None:
+            await remove_gate.wait()
+
+    message.add_reaction = AsyncMock(side_effect=add)  # pyright: ignore[reportAttributeAccessIssue]
+    message.remove_reaction = AsyncMock(side_effect=remove)  # pyright: ignore[reportAttributeAccessIssue]
+    create_session = AsyncMock(return_value=ma_session(id="sess-over-cap"))
+    with (
+        patch(
+            "daimon.core.turn.admission.resolve_config",
+            AsyncMock(return_value=_stub_resolved_config()),
+        ),
+        patch("daimon.core.turn.admission.resolve_agent", AsyncMock(return_value="ag_test")),
+        patch("daimon.core.turn.admission.resolve_environment", AsyncMock(return_value="env_test")),
+        patch("daimon.core.turn.prepare.create_session", create_session),
+        patch("daimon.core.turn.run.run_turn", AsyncMock(return_value=MagicMock())),
+    ):
+        turn = asyncio.create_task(bot.on_message(message))
+        try:
+            if queued:
+                await _until(lambda: ("+", "⌛") in calls)
+            else:
+                await asyncio.wait_for(asyncio.shield(turn), 5)
+            yield _OverCapTurn(
+                bot,
+                held,
+                thread,
+                cast("MagicMock", thread.send.return_value),
+                turn,
+                calls,
+                create_session,
+            )
+        finally:
+            for gate in (add_gate, remove_gate):
+                if gate is not None:
+                    gate.set()
+            if not turn.done():
+                turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(turn, 5)
+            await _settle_background(bot)
+            if held is not None:
+                held.release()
 
 
 class TestOwnCardIsNotContext:

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
     SkillListResponse,
@@ -36,12 +37,15 @@ from daimon.core.defaults.provisioning import (
     verify_tenant_defaults,
 )
 from daimon.core.defaults.report import Action, classify_verification
+from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _CREATED_AT = datetime(2026, 4, 21, 0, 0, 0, tzinfo=UTC)
@@ -1164,3 +1168,35 @@ async def test_provision_tenant_zero_signup_credit_seeds_no_ledger_row(
     assert balance == Decimal("0"), (
         "signup_credit=0 must seed no ledger row — zero-credit guilds start at Decimal('0')"
     )
+
+
+async def test_a_tenant_whose_id_shares_an_existing_tenants_first_8_chars_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Skill titles name a tenant by the first 8 hex chars of its id, so they are unique."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="guild-prefix")
+    earlier = uuid.UUID(f"{str(tenant_id)[:8]}-0000-4000-8000-000000000000")
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, id=earlier, workspace_id="guild-earlier")
+
+    with pytest.raises(StoreError, match="same 8 characters"):
+        await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-prefix")
+
+    async with db_session_factory() as session:
+        ids = set((await session.execute(select(Tenant.id))).scalars())
+    assert earlier in ids and tenant_id not in ids, "the earlier tenant is untouched"
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="guild-other")
+
+
+async def test_another_integrity_error_naming_the_prefix_index_in_its_values_is_re_raised(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a violation of the prefix index itself becomes the prefix refusal."""
+    workspace = "ws-uq_tenants_id_prefix"
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=workspace)
+    other = uuid.UUID(f"{'0' if str(tenant_id)[0] != '0' else '1'}{str(tenant_id)[1:]}")
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, id=other, workspace_id=workspace)
+
+    with pytest.raises(IntegrityError, match="uq_tenants_platform_external_id"):
+        await provision_tenant(db_session_factory, platform="discord", workspace_id=workspace)

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Literal
@@ -101,6 +101,7 @@ async def wait_for_slot(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     default_cap: int | None = None,
+    on_queued: Callable[[], None] | None = None,
 ) -> SlotResult:
     """Wait, after the card is up, until this turn holds a slot.
 
@@ -111,7 +112,9 @@ async def wait_for_slot(
     balance or capacity refusal on "balance_depleted" or "queue_full". Each
     records the turn's outcome. Adapters pass their configured `default_cap`
     so a follow-up reads the current tenant override (or its cleared default)
-    before taking a new ticket.
+    before taking a new ticket. `on_queued` is called once, synchronously, when
+    a live wait begins (`TurnTicket.wait`), so the adapter can start showing
+    its queued marker; it must not block, and the wait never awaits it.
     """
     holder = _current_holder.get()
     if holder is None:
@@ -132,7 +135,9 @@ async def wait_for_slot(
                 observation.finish(reason=_REASONS["queue_full"])
             return "queue_full"
     holder.current = ticket
-    result = await wait_for_ticket(ticket, cancel, sessionmaker=sessionmaker, tenant_id=tenant_id)
+    result = await wait_for_ticket(
+        ticket, cancel, sessionmaker=sessionmaker, tenant_id=tenant_id, on_queued=on_queued
+    )
     if result != "started":
         ticket.release()  # a Stop that raced the grant, or a refusal after it
         holder.current = None
@@ -145,9 +150,10 @@ async def wait_for_ticket(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
+    on_queued: Callable[[], None] | None = None,
 ) -> SlotResult:
     """`wait_for_slot` for a caller that holds its ticket directly."""
-    result: SlotResult = await ticket.wait(cancel)
+    result: SlotResult = await ticket.wait(cancel, on_wait=on_queued)
     if (
         result == "started"
         and ticket.waited

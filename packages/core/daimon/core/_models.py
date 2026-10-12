@@ -69,6 +69,11 @@ class AgentAvatar(Base):
     )
 
 
+# Skill titles name a tenant by the first 8 hex chars of its id, so no two
+# tenants may share them (migration 0091 creates this index).
+TENANT_ID_PREFIX_INDEX = "uq_tenants_id_prefix"
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
@@ -77,6 +82,7 @@ class Tenant(Base):
             "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
         ),
         CheckConstraint("turn_cap IS NULL OR turn_cap > 0", name="ck_tenants_turn_cap"),
+        Index(TENANT_ID_PREFIX_INDEX, text("left(CAST(id AS TEXT), 8)"), unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -3166,8 +3172,9 @@ class AgentPostedMessage(Base):
 
     Written at send time by `send_message` and `create_thread` (`source='tool'`),
     and by chat adapters for a turn's status cards, answers and notices
-    (`source='turn'`) and the thread it opens from a mention
-    (`source='auto_thread'`). The channel tidy tools edit or delete only what
+    (`source='turn'`), the thread it opens from a mention
+    (`source='auto_thread'`) and a routine's result (`source='routine'`).
+    The channel tidy tools edit or delete only what
     this table says the calling agent posted. Holds ids and a keyed HMAC of
     the text, never the text itself.
     `channel_id` is where the message lives (a Discord thread id for a
@@ -3187,7 +3194,8 @@ class AgentPostedMessage(Base):
         ),
         CheckConstraint("kind IN ('message', 'thread')", name="ck_agent_posted_messages_kind"),
         CheckConstraint(
-            "source IN ('tool', 'turn', 'auto_thread')", name="ck_agent_posted_messages_source"
+            "source IN ('tool', 'turn', 'auto_thread', 'routine')",
+            name="ck_agent_posted_messages_source",
         ),
         CheckConstraint(
             "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
@@ -3210,8 +3218,9 @@ class AgentPostedMessage(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     content_hmac: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'tool'"))
-    # The person whose message started the turn (`turn`) or whose mention
-    # opened the thread (`auto_thread`). NULL for tool posts.
+    # The person whose message started the turn (`turn`), whose mention
+    # opened the thread (`auto_thread`) or who made the routine (`routine`).
+    # NULL for tool posts.
     requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
     # The turn that posted a `turn` row; no FK, intents are pruned once retired.
     turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

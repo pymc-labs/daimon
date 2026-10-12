@@ -21,6 +21,9 @@ With agent identity on, the destination post goes through
 `DiscordPostTransport`, so it carries the agent's name and face (or, where
 webhooks are unavailable, the bot with the agent's name label) and drops the
 "from <agent>" wording. The fallback direct message stays Daimon's own notice.
+Each destination post is recorded as the agent's (`source='routine'`, the
+creator as requester), so a reply to it starts a turn like a reply to an
+answer, and only the creator or an admin can have the agent tidy it.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
+from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
@@ -238,6 +242,22 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
+
+        async def record(sent: discord.Message) -> None:
+            # A reply to the result starts a turn only for a recorded post (a
+            # webhook post cannot be pinged); the creator is who asked for it.
+            await record_turn_post(
+                sessionmaker,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                ma_agent_id=row.agent_id,
+                channel_id=str(channel.id),
+                message_id=str(sent.id),
+                requester_platform_user_id=creator,
+                source="routine",
+                parent_channel_id=parent_channel_id,
+            )
+
         identity = (
             await resolve_identity(row, tenant.external_id)
             if client is not None and resolve_identity is not None
@@ -247,7 +267,10 @@ def make_discord_routine_poster(
             for chunk in split_fenced(
                 render_fallback_post(row), _DISCORD_MAX_CHARS, word_boundary=True
             ):
-                await channel.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
+                sent = await channel.send(
+                    content=chunk, allowed_mentions=discord.AllowedMentions.none()
+                )
+                await record(sent)
             return DeliveryOutcome(status="delivered")
         # A bot fallback puts the name label on top, so leave room for it.
         limit = _DISCORD_MAX_CHARS - len(fallback_name_prefix(identity.name, ""))
@@ -262,11 +285,12 @@ def make_discord_routine_poster(
         for index, chunk in enumerate(
             split_fenced(render_fallback_post(row, as_agent=True), limit, word_boundary=True)
         ):
-            await transport.send(
+            sent = await transport.send(
                 content=chunk,
                 allowed_mentions=discord.AllowedMentions.none(),
                 _prefix_if_fallback=index == 0,
             )
+            await record(sent)
         return DeliveryOutcome(status="delivered")
 
     return _post

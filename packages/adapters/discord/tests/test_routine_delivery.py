@@ -13,8 +13,10 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_posts import list_posts_in
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, record_result
 from daimon.core.stores.scoped_config_write import set_fields
@@ -150,8 +152,9 @@ class _Transport:
     def __init__(self, client: object, channel: object, **kwargs: Any) -> None:
         _Transport.made.append({"channel": channel, **kwargs})
 
-    async def send(self, **kwargs: Any) -> None:
+    async def send(self, **kwargs: Any) -> Any:
         _Transport.sent.append(kwargs)
+        return SimpleNamespace(id=9000 + len(_Transport.sent))
 
 
 def _uncached_thread(
@@ -574,3 +577,60 @@ async def test_long_routine_delivers_every_word_to_channel_or_creator(
             call.kwargs["allowed_mentions"].everyone is False
             for call in channel.send.await_args_list
         )
+
+
+@pytest.mark.parametrize("as_agent", [False, True], ids=["as-bot", "as-agent-webhook"])
+async def test_each_delivered_chunk_is_recorded_as_the_routine_agents_post(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    as_agent: bool,
+) -> None:
+    """Every chunk is recorded, so a reply to any of them (unpingable as a
+    webhook) starts a turn, and only the creator or an admin can tidy it."""
+    monkeypatch.setattr(poster_mod, "DiscordPostTransport", _Transport)
+    _Transport.made, _Transport.sent = [], []
+    row = (await _routine(db_session)).model_copy(update={"delivery_payload": "x " * 1500})
+    channel = _text_channel()
+    channel.id = 555
+    channel.send = AsyncMock(side_effect=[SimpleNamespace(id=9001), SimpleNamespace(id=9002)])
+    identity = AgentIdentity(name="research", avatar_url=None, builtin=False) if as_agent else None
+
+    outcome = await _poster(db_session_factory, channel, identity=identity)(row)
+
+    assert outcome.status == "delivered"
+    async with db_session_factory() as session:
+        posts = await list_posts_in(
+            session,
+            tenant_id=row.tenant_id,
+            platform="discord",
+            channel_id="555",
+            message_ids=["9001", "9002"],
+        )
+    assert sorted(post.message_id for post in posts) == ["9001", "9002"], "every chunk is recorded"
+    agent = derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id="ag")
+    assert all(
+        (post.source, post.agent_id, post.requester_platform_user_id, post.kind)
+        == ("routine", agent, "1", "message")
+        for post in posts
+    ), "a routine post names the routine's agent and its creator"
+
+
+async def test_a_failed_record_does_not_fail_the_delivery(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core import channel_tidy
+
+    async def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(channel_tidy, "record_post", broken)
+    row = await _routine(db_session)
+    channel = _text_channel()
+
+    outcome = await _poster(db_session_factory, channel)(row)
+
+    assert outcome.status == "delivered", "the result is out; a lost record only loses tidying"
+    channel.send.assert_awaited_once()
