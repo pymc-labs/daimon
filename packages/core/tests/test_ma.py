@@ -120,6 +120,22 @@ async def test_replay_events_returns_all_events_in_order_when_paginator_yields_m
     )
 
 
+async def test_replay_events_requests_max_page_size() -> None:
+    """Reconnect replay asks MA for 100-event pages, not the SDK default."""
+    router = MARouter()
+    limits: list[str | None] = []
+
+    def handle_list(request: httpx.Request, match: Any) -> httpx.Response:
+        limits.append(request.url.params.get("limit"))
+        return list_response([_idle("sevt_1").model_dump(mode="json")])
+
+    router.add("GET", r"/v1/sessions/[^/]+/events", handle_list)
+
+    await replay_events(build_fake_anthropic(router.dispatch), session_id="sesn_test")
+
+    assert limits == ["100"], f"replay must request the maximum page size, got {limits}"
+
+
 async def test_replay_events_returns_empty_list_when_session_has_no_events() -> None:
     client = _make_list_client([])
 

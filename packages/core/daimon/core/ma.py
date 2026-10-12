@@ -59,6 +59,9 @@ SessionEvent = BetaManagedAgentsSessionEvent
 # Generous default: replay is a paginated GET walk, not a long-lived stream.
 # A stalled paginator would otherwise wedge a reconnecting turn forever.
 REPLAY_TIMEOUT_S: float = 60.0
+# Every reconnect walks the whole session log; the SDK default page size
+# would multiply the round trips on a long session fivefold.
+REPLAY_PAGE_SIZE = 100
 
 
 async def replay_events(
@@ -85,7 +88,9 @@ async def replay_events(
 
     async def _walk() -> list[SessionEvent]:
         events: list[SessionEvent] = []
-        async for event in anthropic.beta.sessions.events.list(session_id=session_id):
+        async for event in anthropic.beta.sessions.events.list(
+            session_id=session_id, limit=REPLAY_PAGE_SIZE
+        ):
             events.append(event)
         return events
 
