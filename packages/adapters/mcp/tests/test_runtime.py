@@ -26,8 +26,9 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
         "teams_client",
         "group_lookups",
         "slack_http",
+        "resolver_cache",
     }, (
-        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + group lookups"
+        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + group lookups + shared caches"
     )
     # Frozen: assignment raises FrozenInstanceError
     sf: async_sessionmaker[AsyncSession] = async_sessionmaker()  # type: ignore[call-arg]

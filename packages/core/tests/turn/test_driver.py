@@ -548,9 +548,9 @@ async def test_interrupt_during_replay_raises_interrupted_without_posting_user_i
     # plain `def` (not `async def`).
     original_list = fa.beta.sessions.events.list
 
-    def _list_triggering_cancel(*, session_id: str):
+    def _list_triggering_cancel(*, session_id: str, limit: int):
         cancel.set()
-        return original_list(session_id=session_id)
+        return original_list(session_id=session_id, limit=limit)
 
     fa.beta.sessions.events.list = _list_triggering_cancel  # type: ignore[assignment]
 

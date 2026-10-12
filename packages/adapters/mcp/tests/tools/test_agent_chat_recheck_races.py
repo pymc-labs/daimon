@@ -68,7 +68,8 @@ async def test_pin_changed_during_recheck_agent_lookup_prevents_send(
 
     async def changing(req):
         nonlocal lookups, changed
-        if req.method == "GET" and req.url.path == "/v1/agents":
+        # The first lookup lists the org; the recheck retrieves the now-known agent.
+        if req.method == "GET" and req.url.path in ("/v1/agents", f"/v1/agents/{AGENT_ID}"):
             lookups += 1
             if lookups == 2:
                 async with db_session_factory.begin() as session:
