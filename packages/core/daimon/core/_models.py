@@ -843,7 +843,13 @@ class UsageEvent(Base):
             "event_id",
             name="uq_usage_events_managed_session_event",
         ),
-        Index("usage_events_user_tenant_idx", "tenant_id", "platform_user_id"),
+        # The cap gate's per-member window sum is a range scan on this.
+        Index(
+            "usage_events_tenant_user_occurred_idx",
+            "tenant_id",
+            "platform_user_id",
+            "occurred_at",
+        ),
         Index("usage_events_occurred_idx", "occurred_at"),
         Index("usage_events_tenant_idx", "tenant_id"),
     )
@@ -968,7 +974,8 @@ class TenantLedger(Base):
 
     __tablename__ = "tenant_ledger"
     __table_args__ = (
-        Index("tenant_ledger_tenant_idx", "tenant_id"),
+        # INCLUDE lets the per-turn balance SUM(delta_usd) run index-only.
+        Index("tenant_ledger_tenant_delta_idx", "tenant_id", postgresql_include=["delta_usd"]),
         Index("tenant_ledger_idem_idx", "idempotency_key", unique=True),
         Index(
             "tenant_ledger_tenant_channel_idx",
