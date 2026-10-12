@@ -415,7 +415,7 @@ async def sync_agent_mcp_credentials(
     try:
         await mirror(cached)
     except anthropic.NotFoundError:
-        # The cached vault may have been deleted: resolve it again (outside the
+        # The cached vault may have been archived: resolve it again (outside the
         # lock, which ensure takes itself). The same id back means the 404 was
         # about something else, so it propagates as it would uncached.
         vault_ids.pop(key, None)
