@@ -5,8 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 import pytest_asyncio
 from daimon.core._models import UsageEvent
+from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.stores import usage_events
 from daimon.testing.factories import make_tenant, make_usage_event
 from daimon.testing.ma_models import ma_model_usage
@@ -706,3 +708,60 @@ async def test_costs_by_user_prices_each_haiku_5_5_request_at_its_own_tier(
     assert abs(out["u1"] - expected) < 1e-9, "each request is priced at its own tier"
     total = await usage_events.cost_for_tenant_since(db_session, tenant_id=tenant_id, since=past)
     assert abs(total - out["u1"]) < 1e-9, "per-user report agrees with the tenant total"
+
+
+async def test_cost_aggregates_equal_the_per_row_priced_sum(db_session: AsyncSession) -> None:
+    """The SQL-bucketed totals match pricing every row on its own, across models,
+    both long-context tiers, cache tokens, an unpriced model and a NULL user."""
+    tenant = await make_tenant(db_session)
+    rows = [
+        ("u1", "claude-haiku-5-5", 60_000, 900, 30_000, 5_000),
+        ("u1", "claude-haiku-5-5", 60_000, 100, 0, 0),
+        ("u1", "claude-haiku-5-5", 150_000, 2_000, 0, 40_000),
+        ("u1", "claude-opus-4-7", 1_000, 500, 200, 300),
+        ("u2", "claude-opus-4-7", 120_000, 7_000, 0, 0),
+        ("u2", "not-a-priced-model", 5_000, 5_000, 0, 0),
+        (None, "claude-opus-4-7", 9_000, 9_000, 0, 0),
+    ]
+    for user, model, inp, out, cache_write, cache_read in rows:
+        await make_usage_event(
+            db_session,
+            tenant=tenant,
+            platform_user_id=user,
+            model=model,
+            input_tokens=inp,
+            output_tokens=out,
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
+        )
+    past = datetime.now(UTC) - timedelta(days=1)
+
+    def per_row(user: str | None) -> float:
+        total = 0.0
+        for row in stored:
+            if row.platform_user_id is None or (user is not None and row.platform_user_id != user):
+                continue
+            usage = ma_model_usage(
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cache_creation_input_tokens=row.cache_creation_input_tokens,
+                cache_read_input_tokens=row.cache_read_input_tokens,
+            )
+            total += cost_of(usage, MODEL_PRICING.get(row.model)) or 0.0
+        return total
+
+    stored = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
+    tenant_total = await usage_events.cost_for_tenant_since(
+        db_session, tenant_id=tenant.id, since=past
+    )
+    u1_total = await usage_events.cost_for_user_in_tenant_since(
+        db_session, tenant_id=tenant.id, platform_user_id="u1", since=past
+    )
+
+    assert tenant_total == pytest.approx(per_row(None), rel=1e-12), (
+        "tenant aggregate must equal the per-row priced sum"
+    )
+    assert u1_total == pytest.approx(per_row("u1"), rel=1e-12), (
+        "user aggregate must equal that user's per-row priced sum"
+    )
+    assert u1_total > 0 and tenant_total > u1_total, "fixture must exercise real costs"

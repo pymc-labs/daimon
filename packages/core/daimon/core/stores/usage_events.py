@@ -23,11 +23,10 @@ from daimon.core._models import UsageEvent
 from daimon.core.pricing import (
     LONG_CONTEXT_PROMPT_TOKENS,
     MODEL_PRICING,
-    cost_of,
     cost_of_bucket,
 )
 from daimon.core.stores.domain import UsageEventRow
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import ColumnElement, Select, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -121,20 +120,50 @@ async def list_for_tenant(
     )
 
 
-def _sum_cost(rows: Sequence[UsageEventRow]) -> float:
-    """Reprice each row at query time against current MODEL_PRICING."""
-    total = 0.0
-    for row in rows:
-        rates = MODEL_PRICING.get(row.model)
-        usage = BetaManagedAgentsSpanModelUsage(
-            input_tokens=row.input_tokens,
-            output_tokens=row.output_tokens,
-            cache_creation_input_tokens=row.cache_creation_input_tokens,
-            cache_read_input_tokens=row.cache_read_input_tokens,
+def _long_prompt() -> ColumnElement[bool]:
+    """Whether one row's request crossed the long-context threshold."""
+    return (
+        UsageEvent.input_tokens
+        + UsageEvent.cache_creation_input_tokens
+        + UsageEvent.cache_read_input_tokens
+        > LONG_CONTEXT_PROMPT_TOKENS
+    ).label("long_prompt")
+
+
+async def _cost_since(session: AsyncSession, *where: ColumnElement[bool]) -> float:
+    """Sum of every matching row's cost, priced per (model, long-prompt tier) bucket.
+
+    Cost is linear in each token count within a bucket, so summing tokens in
+    SQL and pricing each bucket once equals pricing every row; it spares the
+    per-turn cap gate from loading a window's worth of rows. Buckets must not
+    merge tiers: summing first would push short requests into the long tier.
+    """
+    long_prompt = _long_prompt()
+    stmt = (
+        select(
+            UsageEvent.model,
+            long_prompt,
+            func.sum(UsageEvent.input_tokens).label("in_tok"),
+            func.sum(UsageEvent.output_tokens).label("out_tok"),
+            func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
+            func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
         )
-        c = cost_of(usage, rates)
-        if c is not None:
-            total += c
+        .where(*where)
+        .group_by(UsageEvent.model, long_prompt)
+    )
+    total = 0.0
+    for row in (await session.execute(stmt)).all():
+        usage = BetaManagedAgentsSpanModelUsage(
+            input_tokens=int(row.in_tok),
+            output_tokens=int(row.out_tok),
+            cache_creation_input_tokens=int(row.cw_tok),
+            cache_read_input_tokens=int(row.cr_tok),
+        )
+        cost = cost_of_bucket(
+            usage, MODEL_PRICING.get(row.model), long_prompt=bool(row.long_prompt)
+        )
+        if cost is not None:
+            total += cost
     return total
 
 
@@ -145,13 +174,12 @@ async def cost_for_user_in_tenant_since(
     platform_user_id: str,
     since: datetime,
 ) -> float:
-    rows = await _select_rows(
+    return await _cost_since(
         session,
-        tenant_id=tenant_id,
-        platform_user_id=platform_user_id,
-        since=since,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id == platform_user_id,
+        UsageEvent.occurred_at >= since,
     )
-    return _sum_cost(rows)
 
 
 async def turn_count_for_user_in_tenant_since(
@@ -185,14 +213,12 @@ async def cost_for_tenant_since(
     Excludes NULL-attributed rows so the tenant total equals the sum of
     per-member rows. Reprices in Python at read time.
     """
-    stmt = select(UsageEvent).where(
+    return await _cost_since(
+        session,
         UsageEvent.tenant_id == tenant_id,
         UsageEvent.platform_user_id.is_not(None),
         UsageEvent.occurred_at >= since,
     )
-    result = await session.execute(stmt)
-    rows = [UsageEventRow.model_validate(r, from_attributes=True) for r in result.scalars().all()]
-    return _sum_cost(rows)
 
 
 async def turn_count_for_tenant_since(
@@ -230,12 +256,7 @@ async def costs_by_user_in_tenant_since(
     turn counts cannot be derived from this aggregate without double-counting
     sessions that span multiple models.
     """
-    long_prompt = (
-        UsageEvent.input_tokens
-        + UsageEvent.cache_creation_input_tokens
-        + UsageEvent.cache_read_input_tokens
-        > LONG_CONTEXT_PROMPT_TOKENS
-    ).label("long_prompt")
+    long_prompt = _long_prompt()
     stmt = (
         select(
             UsageEvent.platform_user_id,
