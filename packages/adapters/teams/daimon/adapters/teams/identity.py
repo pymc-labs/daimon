@@ -23,6 +23,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Literal
 
 from daimon.adapters.teams.attachments import InboundFile, parse_attachments
@@ -143,13 +144,50 @@ def _bare_bot_id(value: str) -> str:
     return value.lower().removeprefix("28:")
 
 
+class _QuoteSenders(HTMLParser):
+    """Who each top-level HTML reply quote is from: `<strong itemprop="mri" itemid=…>`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.senders: list[str] = []
+        self._depth = 0  # blockquotes open inside a reply quote, itself included
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        reply = (values.get("itemtype") or "").lower().endswith("schema.skype.com/reply")
+        if tag == "blockquote" and (self._depth or reply):
+            self._depth += 1
+        elif self._depth == 1 and values.get("itemprop") == "mri":
+            self.senders.append(values.get("itemid") or "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "blockquote" and self._depth:
+            self._depth -= 1
+
+
+def _html_quote_senders(activity: MessageActivity) -> list[str]:
+    # Clients that send no quotedReply entity still send the older blockquote, in the
+    # text or the `text/html` body. Its sender is unverified, but a forged one only
+    # addresses the bot, which any mention does too.
+    bodies = [activity.text or ""] + [
+        a.content
+        for a in activity.attachments or []
+        if a.content_type == "text/html" and isinstance(a.content, str)
+    ]
+    senders: list[str] = []
+    for body in bodies:
+        parser = _QuoteSenders()
+        parser.feed(body)
+        parser.close()
+        senders += parser.senders
+    return senders
+
+
 def quotes_bot(activity: MessageActivity) -> bool:
     """Whether the message quotes one the bot sent: Teams' reply-to-the-bot, as on Discord."""
     bot = _bare_bot_id(activity.recipient.id)
-    return any(
-        _bare_bot_id(entity.quoted_reply.sender_id or "") == bot
-        for entity in activity.get_quoted_messages()
-    )
+    senders = [entity.quoted_reply.sender_id or "" for entity in activity.get_quoted_messages()]
+    return any(_bare_bot_id(s) == bot for s in senders + _html_quote_senders(activity))
 
 
 def render_quotes(text: str, quotes: Mapping[str, QuotedReplyData]) -> str:
