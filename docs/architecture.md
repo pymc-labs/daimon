@@ -232,10 +232,12 @@ reply can still be followed by files created during the turn. The output sweep s
 the same filename and size were already attached by Daimon in that turn.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
-application-owned webhook post in the same tenant and channel. With agent
-identity off, the reply must be to a turn post the bot itself sent (the card or
-any chunk of the answer), so a reply to the second message of a long answer
-counts like a reply to the first, pinged or not. The usual
+application-owned webhook post in the same tenant and channel. Recorded posts
+are the agent's tool posts, a turn's card and answer (a setup-wizard turn's
+included) and a routine's delivered result. With agent
+identity off, the reply must be to a turn post or routine result the bot itself
+sent (the card or any chunk of the answer), so a reply to the second message of
+a long answer counts like a reply to the first, pinged or not. The usual
 admission path follows either trigger. Agent turn posts use a pool of up to
 three application-owned webhooks per text or forum channel, with each thread
 assigned by its ID; built-in Daimon posts use the bot. If a webhook is
