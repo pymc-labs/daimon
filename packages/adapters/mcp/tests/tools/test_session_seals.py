@@ -139,8 +139,9 @@ class _World:
             id=_AGENT,
             name="acme-project",
             metadata={"daimon_tenant": str(self.tenant_id), "daimon_name": "acme-project"},
-        ).model_dump(mode="json")
-        router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent]))
+        )
+        router.add_agent(agent)
+        router.add_agent_list(agent)
         router.add(
             "GET",
             r"/v1/sessions",

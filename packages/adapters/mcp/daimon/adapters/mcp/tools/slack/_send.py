@@ -55,7 +55,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_customize_scope import (
     _NO_CUSTOMIZE_SCOPE as _NO_CUSTOMIZE_SCOPE,  # pyright: ignore[reportPrivateUsage]
@@ -231,8 +231,8 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
     if agent_id is None:
         return None
     try:
-        agent = await find_agent_by_derived_uuid(
-            runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
+        agent = await find_agent_by_derived_uuid_cached(
+            runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=agent_id
         )
         if agent is None:
             return None

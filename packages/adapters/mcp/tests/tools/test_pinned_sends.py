@@ -26,7 +26,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import MARouter, build_fake_anthropic
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,17 +59,18 @@ async def _runtime(
     )
     await db.commit()
     router = MARouter()
-    agent: dict[str, Any] = ma_agent(
+    agent = ma_agent(
         id=_AGENT,
         name="Acme Display",
         metadata={"daimon_tenant": str(tenant.id), "daimon_name": "acme-project"},
-    ).model_dump(mode="json")
-    other: dict[str, Any] = ma_agent(
+    )
+    other = ma_agent(
         id="ag_other",
         name="other",
         metadata={"daimon_tenant": str(tenant.id), "daimon_name": "other"},
-    ).model_dump(mode="json")
-    router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent, other]))
+    )
+    router.add_agent(agent)
+    router.add_agent_list(agent, other)
     settings = MagicMock()
     return (
         McpRuntime(

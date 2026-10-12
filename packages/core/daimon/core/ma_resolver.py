@@ -35,6 +35,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
 )
+from daimon.core.ma_identity import derive_agent_uuid
 
 _log = structlog.get_logger(__name__)
 
@@ -42,6 +43,7 @@ Kind = Literal["agent", "environment"]
 _CacheKey = tuple[uuid.UUID, Kind, str]
 _ResourceKey = tuple[uuid.UUID, str]
 _SkillsListing = tuple[list[SkillListResponse], bool]
+_DerivedAgents = dict[uuid.UUID, BetaManagedAgentsAgent]
 # The skills list is org-wide, so one entry covers every tenant.
 _SKILLS_KEY = "skills"
 
@@ -76,6 +78,13 @@ class ResolverCache(TTLCache[_CacheKey, str]):
             1, 30, timer=timer
         )
         self.skills_listing_inflight: dict[str, asyncio.Task[_SkillsListing]] = {}
+        # (tenant_id, derived agent uuid) -> MA agent id. The uuid is a fixed
+        # uuid5 of that pair, so an entry never goes stale; liveness and tenant
+        # are re-checked on every read, and the TTL only bounds memory.
+        self.derived_agent_ids: TTLCache[tuple[uuid.UUID, uuid.UUID], str] = TTLCache[
+            tuple[uuid.UUID, uuid.UUID], str
+        ](4096, 86400, timer=timer)
+        self.derived_agent_listings: dict[uuid.UUID, asyncio.Task[_DerivedAgents]] = {}
 
 
 async def _retrieve_shared[Resource: (BetaManagedAgentsAgent, BetaEnvironment)](
@@ -176,6 +185,64 @@ async def list_skills_lenient_cached(
 
         task.add_done_callback(clear)
     return await asyncio.shield(task)
+
+
+async def _list_derived_agents(
+    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID
+) -> _DerivedAgents:
+    """The tenant's live agents by derived uuid, one listing for concurrent callers."""
+    task = cache.derived_agent_listings.get(tenant_id)
+    if task is None:
+
+        async def load() -> _DerivedAgents:
+            agents = {
+                derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id): agent
+                for agent in await list_agents_by_tenant(client, tenant_id=tenant_id)
+            }
+            # Publish before the task completes, as `_retrieve_shared` does.
+            for derived, agent in agents.items():
+                cache.derived_agent_ids[(tenant_id, derived)] = agent.id
+            return agents
+
+        task = asyncio.create_task(load())
+        cache.derived_agent_listings[tenant_id] = task
+
+        def clear(done: asyncio.Task[_DerivedAgents]) -> None:
+            if cache.derived_agent_listings.get(tenant_id) is done:
+                del cache.derived_agent_listings[tenant_id]
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(clear)
+    return await asyncio.shield(task)
+
+
+async def find_agent_by_derived_uuid_cached(
+    client: AsyncAnthropic, cache: ResolverCache, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> BetaManagedAgentsAgent | None:
+    """`find_agent_by_derived_uuid` without listing every agent in the org per call.
+
+    Ordinary tool calls resolve their executing agent this way, and the
+    listing pages the whole org. A known uuid costs one `retrieve_agent_cached`;
+    only an unknown one lists. None exactly where the listing would find
+    nothing: an archived, deleted or re-tenanted agent.
+    """
+    key = (tenant_id, agent_id)
+    ma_agent_id = cache.derived_agent_ids.get(key)
+    if ma_agent_id is None:
+        return (await _list_derived_agents(client, cache, tenant_id)).get(agent_id)
+    try:
+        agent = await retrieve_agent_cached(client, cache, tenant_id, ma_agent_id)
+    except APIStatusError as err:
+        if err.status_code not in (400, 404):
+            raise
+        cache.derived_agent_ids.pop(key, None)
+        return None
+    if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
+        tenant_id
+    ):
+        return None
+    return agent
 
 
 def new_resolver_cache() -> ResolverCache:

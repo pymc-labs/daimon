@@ -49,7 +49,7 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import MARouter, build_fake_anthropic
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -136,15 +136,17 @@ async def _world(
         support=SupportSettings(slack_escalation_channel_id=escalation_channel_id),
     )
     router = MARouter()
-    agents: list[dict[str, Any]] = [
+    agents = [
         ma_agent(
             id=agent_id,
             name=agent_id,
             metadata={"daimon_tenant": str(tenant.id), "daimon_name": agent_id},
-        ).model_dump(mode="json")
+        )
         for agent_id in (_AGENT, _OTHER_AGENT)
     ]
-    router.add("GET", r"/v1/agents", lambda _r, _m: list_response(agents))
+    for agent in agents:
+        router.add_agent(agent)
+    router.add_agent_list(*agents)
     runtime = McpRuntime(
         session_factory=sessionmaker,
         client=build_fake_anthropic(router.dispatch),  # type: ignore[arg-type]

@@ -330,7 +330,7 @@ async def test_send_message_long_text_is_split_before_discord_post(
         raise RuntimeError("identity unavailable")
 
     monkeypatch.setattr(_send_mod, "identity_enabled_for", lambda *_args: True)
-    monkeypatch.setattr(_send_mod, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(_send_mod, "find_agent_by_derived_uuid_cached", find_agent)
     monkeypatch.setattr(_send_mod, "resolve_agent_identity", fail_identity)
     monkeypatch.setattr(_send_mod, "record_agent_posts", record)
 

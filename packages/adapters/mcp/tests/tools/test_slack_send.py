@@ -124,7 +124,7 @@ async def test_identity_off_or_excluded_skips_slack_agent_lookup(
         )
     )
     lookup = AsyncMock()
-    monkeypatch.setattr(_send, "find_agent_by_derived_uuid", lookup)
+    monkeypatch.setattr(_send, "find_agent_by_derived_uuid_cached", lookup)
     assert await _send._agent_identity_kwargs(runtime, _auth()) is None  # pyright: ignore[reportPrivateUsage,reportArgumentType]
     lookup.assert_not_awaited()
 

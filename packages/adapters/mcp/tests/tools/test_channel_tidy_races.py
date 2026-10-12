@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import dataclasses
 
+import httpx
 import pytest
 from aioresponses import CallbackResult, aioresponses
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadRefused, load_read_policy
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.channel_tidy import content_hash
+from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.stores.access_policy import (
     load_access_policy,
     policy_write_transaction,
@@ -54,14 +56,19 @@ async def late_ma_hook(world, agent, hook):
     async def dispatch(request):
         nonlocal lookups
         lookups += 1
-        assert request.url.path == "/v1/agents"
         # The audit is committed before run_action's final policy check.
         if not fired and armed[0] and lookups == 2:
             fired.append(True)
             await hook()
+        if request.url.path == f"/v1/agents/{agent}":
+            return httpx.Response(200, json=agent_payload(world, agent))
+        assert request.url.path == "/v1/agents"
         return list_response([agent_payload(world, agent)])
 
-    world.runtime = dataclasses.replace(world.runtime, client=build_fake_anthropic(dispatch))
+    # A fresh resolver cache, so each agent lookup in the action reaches MA again.
+    world.runtime = dataclasses.replace(
+        world.runtime, client=build_fake_anthropic(dispatch), resolver_cache=new_resolver_cache()
+    )
     return fired, armed
 
 

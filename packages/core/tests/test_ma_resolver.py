@@ -20,9 +20,11 @@ import pytest
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from cachetools import TTLCache
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     MAResolverMissError,
     ResolverCache,
+    find_agent_by_derived_uuid_cached,
     list_skills_lenient_cached,
     new_resolver_cache,
     resolve_agent,
@@ -34,6 +36,7 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
+    not_found_response,
     skill_response,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -1176,3 +1179,133 @@ async def test_skills_listing_is_single_flight_and_expires_after_its_ttl() -> No
     fail[0] = False
     await list_skills_lenient_cached(client, cache)
     assert len(calls) == 3, "an expired listing is refetched and a failed one is not cached"
+
+
+# ---------------------------------------------------------------------------
+# Derived-uuid lookup
+# ---------------------------------------------------------------------------
+
+
+class _AgentsState:
+    """Org agents served by list and retrieve; counts calls per path."""
+
+    def __init__(self, *agents: BetaManagedAgentsAgent) -> None:
+        self.agents = {agent.id: agent for agent in agents}
+        self.calls: dict[str, int] = {}
+
+    async def dispatch(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.calls[path] = self.calls.get(path, 0) + 1
+        if path == "/v1/agents":
+            await asyncio.sleep(0.01)
+            live = [a for a in self.agents.values() if a.archived_at is None]
+            return list_response([_agent_payload(a) for a in live])
+        agent = self.agents.get(path.removeprefix("/v1/agents/"))
+        if agent is None:
+            return not_found_response("missing")
+        return httpx.Response(200, json=_agent_payload(agent))
+
+
+def _state_client(state: _AgentsState) -> AsyncAnthropic:
+    return AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(state.dispatch)),
+    )
+
+
+async def test_derived_lookup_lists_once_then_retrieves_when_uuid_known(
+    tenant_id: uuid.UUID,
+) -> None:
+    """Concurrent misses share one org listing; later calls retrieve by MA id."""
+    clock = [0.0]
+    cache = ResolverCache(timer=lambda: clock[0])
+    agents = [ma_agent(id=f"ag_{n}", name=f"agent-{n}", tenant_id=tenant_id) for n in range(3)]
+    state = _AgentsState(*agents, ma_agent(id="ag_other", tenant_id=uuid.uuid4()))
+    derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_1")
+    client = _state_client(state)
+    try:
+        found = await asyncio.gather(
+            *(
+                find_agent_by_derived_uuid_cached(
+                    client, cache, tenant_id=tenant_id, agent_id=derived
+                )
+                for _ in range(10)
+            )
+        )
+        assert {a.id for a in found if a is not None} == {"ag_1"}, "every caller finds ag_1"
+        assert state.calls == {"/v1/agents": 1}, "concurrent misses share one listing"
+        clock[0] = 31.0
+        other = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_2")
+        hit = await find_agent_by_derived_uuid_cached(
+            client, cache, tenant_id=tenant_id, agent_id=other
+        )
+        assert hit is not None and hit.id == "ag_2", "the listing maps every tenant agent"
+        assert state.calls == {"/v1/agents": 1, "/v1/agents/ag_2": 1}, (
+            "a known uuid is retrieved, not listed"
+        )
+    finally:
+        await client.close()
+
+
+async def test_derived_lookup_returns_none_when_known_agent_archived_or_moved(
+    tenant_id: uuid.UUID,
+) -> None:
+    """A mapped agent that is archived or carries another tenant is not found."""
+    clock = [0.0]
+    cache = ResolverCache(timer=lambda: clock[0])
+    state = _AgentsState(ma_agent(id="ag_a", tenant_id=tenant_id))
+    derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_a")
+    client = _state_client(state)
+    try:
+        assert await find_agent_by_derived_uuid_cached(
+            client, cache, tenant_id=tenant_id, agent_id=derived
+        ), "the listing finds the live agent"
+        state.agents["ag_a"] = ma_agent(
+            id="ag_a", tenant_id=tenant_id, archived_at=datetime.now(UTC)
+        )
+        clock[0] = 31.0
+        assert (
+            await find_agent_by_derived_uuid_cached(
+                client, cache, tenant_id=tenant_id, agent_id=derived
+            )
+            is None
+        ), "an archived agent is not found"
+        state.agents["ag_a"] = ma_agent(id="ag_a", tenant_id=uuid.uuid4())
+        assert (
+            await find_agent_by_derived_uuid_cached(
+                client, cache, tenant_id=tenant_id, agent_id=derived
+            )
+            is None
+        ), "an agent tagged with another tenant is not found"
+        assert state.calls["/v1/agents"] == 1, "neither miss re-lists the org"
+    finally:
+        await client.close()
+
+
+async def test_derived_lookup_evicts_mapping_when_agent_deleted(
+    tenant_id: uuid.UUID,
+) -> None:
+    """A 404 on the mapped id is not found and the next call lists again."""
+    clock = [0.0]
+    cache = ResolverCache(timer=lambda: clock[0])
+    state = _AgentsState(ma_agent(id="ag_a", tenant_id=tenant_id))
+    derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_a")
+    client = _state_client(state)
+    try:
+        await find_agent_by_derived_uuid_cached(
+            client, cache, tenant_id=tenant_id, agent_id=derived
+        )
+        del state.agents["ag_a"]
+        clock[0] = 31.0
+        for _ in range(2):
+            assert (
+                await find_agent_by_derived_uuid_cached(
+                    client, cache, tenant_id=tenant_id, agent_id=derived
+                )
+                is None
+            ), "a deleted agent is not found"
+        assert state.calls == {"/v1/agents": 2, "/v1/agents/ag_a": 1}, (
+            "the 404 drops the mapping, so the next call lists instead of retrieving"
+        )
+    finally:
+        await client.close()

@@ -44,8 +44,8 @@ from daimon.core.authz import (
     build_agent_ref,
     home_hold,
 )
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -212,8 +212,8 @@ async def _executing_agent(
     executing = auth.chat_agent_id or auth.agent_id
     if executing is None or not (any_agent_rules(policy) or any_own_readers(policy)):
         return AgentRef.none()
-    agent = await find_agent_by_derived_uuid(
-        runtime.client, tenant_id=auth.tenant_id, agent_id=executing
+    agent = await find_agent_by_derived_uuid_cached(
+        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=executing
     )
     if agent is None:
         return AgentRef.unresolved()

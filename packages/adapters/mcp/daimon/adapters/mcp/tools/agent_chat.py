@@ -87,10 +87,11 @@ from daimon.core import bundle_handle
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -437,18 +438,18 @@ async def _resolve_ma_agent(
 ) -> BetaManagedAgentsAgent:
     """Resolve the MA agent for this caller from the verified claim.
 
-    Matches ``auth.agent_id`` (the derived per-agent UUID) against all
-    tenant agents by re-deriving the UUID for each. Raises ToolError if
-    no match — fails closed (never falls back to a broader scope).
+    Matches ``auth.agent_id`` (the derived per-agent UUID) against the
+    tenant's live agents. Raises ToolError if no match — fails closed (never
+    falls back to a broader scope).
     """
     if auth.agent_id is None:
         raise ToolError("agent not found")
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
-    for agent in agents:
-        derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
-        if derived == auth.agent_id:
-            return agent
-    raise ToolError("agent not found")
+    agent = await find_agent_by_derived_uuid_cached(
+        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=auth.agent_id
+    )
+    if agent is None:
+        raise ToolError("agent not found")
+    return agent
 
 
 def agent_pin_names(agent: BetaManagedAgentsAgent) -> tuple[str | None, ...]:

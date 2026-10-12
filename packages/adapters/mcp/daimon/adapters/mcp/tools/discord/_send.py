@@ -38,7 +38,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -170,8 +170,11 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                 if cached is not None and cached[1] > time.monotonic():
                     actor_name = cached[0]
                 else:
-                    actor = await find_agent_by_derived_uuid(
-                        runtime.client, tenant_id=auth.tenant_id, agent_id=actor_id
+                    actor = await find_agent_by_derived_uuid_cached(
+                        runtime.client,
+                        runtime.resolver_cache,
+                        tenant_id=auth.tenant_id,
+                        agent_id=actor_id,
                     )
                     actor_name = actor.name if actor is not None else None
                     if actor_name is not None:
