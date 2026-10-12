@@ -23,10 +23,12 @@ from typing import Literal
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta.skill_list_response import SkillListResponse
 from cachetools import TTLCache
 from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,
+    list_skills_lenient,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -39,6 +41,9 @@ _log = structlog.get_logger(__name__)
 Kind = Literal["agent", "environment"]
 _CacheKey = tuple[uuid.UUID, Kind, str]
 _ResourceKey = tuple[uuid.UUID, str]
+_SkillsListing = tuple[list[SkillListResponse], bool]
+# The skills list is org-wide, so one entry covers every tenant.
+_SKILLS_KEY = "skills"
 
 
 class ResolverCache(TTLCache[_CacheKey, str]):
@@ -65,6 +70,12 @@ class ResolverCache(TTLCache[_CacheKey, str]):
         self.mcp_vault_ids: TTLCache[tuple[uuid.UUID, uuid.UUID, str], str] = TTLCache[
             tuple[uuid.UUID, uuid.UUID, str], str
         ](1024, 600, timer=timer)
+        # `list_skills_lenient` for channel-skill turns. Short lived: it only
+        # screens mount-name clashes, and a new skill should show up quickly.
+        self.skills_listing: TTLCache[str, _SkillsListing] = TTLCache[str, _SkillsListing](
+            1, 30, timer=timer
+        )
+        self.skills_listing_inflight: dict[str, asyncio.Task[_SkillsListing]] = {}
 
 
 async def _retrieve_shared[Resource: (BetaManagedAgentsAgent, BetaEnvironment)](
@@ -131,6 +142,40 @@ async def retrieve_environment_cached(
         if err.status_code in (400, 404):
             cache.environments.pop(key, None)
         raise
+
+
+async def list_skills_lenient_cached(
+    client: AsyncAnthropic, cache: ResolverCache
+) -> _SkillsListing:
+    """`list_skills_lenient`, shared by concurrent callers and reused for 30 s.
+
+    Every turn in a channel with channel skills reads the whole org's skills
+    list; this keeps a busy channel to one listing per window. A failed
+    listing is not cached. Callers must not mutate the returned list.
+    """
+    hit = cache.skills_listing.get(_SKILLS_KEY)
+    if hit is not None:
+        return hit
+    task = cache.skills_listing_inflight.get(_SKILLS_KEY)
+    if task is None:
+
+        async def fetch() -> _SkillsListing:
+            listing = await list_skills_lenient(client)
+            # Publish before the task completes, as `_retrieve_shared` does.
+            cache.skills_listing[_SKILLS_KEY] = listing
+            return listing
+
+        task = asyncio.create_task(fetch())
+        cache.skills_listing_inflight[_SKILLS_KEY] = task
+
+        def clear(done: asyncio.Task[_SkillsListing]) -> None:
+            if cache.skills_listing_inflight.get(_SKILLS_KEY) is done:
+                del cache.skills_listing_inflight[_SKILLS_KEY]
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(clear)
+    return await asyncio.shield(task)
 
 
 def new_resolver_cache() -> ResolverCache:

@@ -575,6 +575,7 @@ async def admit_impl(
             agent=agent,
             agent_names=grant.agent.names,
             rows=channel_skill_rows,
+            cache=deps.resolver_cache,
         )
     )
 

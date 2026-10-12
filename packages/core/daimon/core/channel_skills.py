@@ -42,6 +42,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.ma_resolver import ResolverCache, list_skills_lenient_cached
 from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.skills.reference_lock import lock_skills_for_attach
@@ -271,11 +272,13 @@ async def turn_channel_skills(
     agent: BetaManagedAgentsAgent,
     agent_names: tuple[str | None, ...],
     rows: Sequence[ChannelSkillRow] | None = None,
+    cache: ResolverCache | None = None,
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
     """The extra skills a turn in `channel_id` runs with, decided once per turn.
 
     One DB read; the skills list is read only when the channel adds something,
-    to keep a clashing mount (which would fail the session) out.
+    to keep a clashing mount (which would fail the session) out. With `cache`
+    that list is shared across turns for a few seconds.
     """
     if rows is None:
         async with sessionmaker() as session:
@@ -286,7 +289,11 @@ async def turn_channel_skills(
         return ()
     bodies: dict[str, str] | None
     try:
-        listed, truncated = await list_skills_lenient(client)
+        listed, truncated = await (
+            list_skills_lenient(client)
+            if cache is None
+            else list_skills_lenient_cached(client, cache)
+        )
         bodies = None if truncated else _tenant_bodies(listed, tenant_id)
     except (anthropic.APIError, SkillsListTruncatedError):
         _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
