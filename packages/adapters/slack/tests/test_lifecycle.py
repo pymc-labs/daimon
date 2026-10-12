@@ -55,6 +55,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
+from unittest.mock import patch
 
 import aiohttp
 import daimon.adapters.slack.lifecycle as lifecycle_module
@@ -411,6 +412,31 @@ async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any
         "second render tick within debounce must not post a new message"
     )
     assert _update_count(fake_slack_web_client) == 0, "no chat.update within the 5s debounce window"
+
+
+async def test_render_tick_within_debounce_skips_building_the_card(
+    fake_slack_web_client: Any,
+) -> None:
+    """A tick that will not send must not pay for the Block Kit and mrkdwn render."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_render(TurnState())  # initial post
+
+    with (
+        patch(
+            "daimon.adapters.slack.lifecycle.to_blocks", wraps=lifecycle_module.to_blocks
+        ) as blocks,
+        patch(
+            "daimon.adapters.slack.lifecycle.to_fallback_text",
+            wraps=lifecycle_module.to_fallback_text,
+        ) as text,
+    ):
+        await lc.on_render(_running_tool_turn())  # within the debounce window
+        assert (blocks.call_count, text.call_count) == (0, 0), "a skipped tick renders nothing"
+        lc._last_flush = time.monotonic() - 6.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce
+        await lc.on_render(_running_tool_turn())
+
+    assert (blocks.call_count, text.call_count) == (1, 1), "the tick that sends renders once"
+    assert _update_count(fake_slack_web_client) == 1, "only the elapsed tick updates the card"
 
 
 async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) -> None:
