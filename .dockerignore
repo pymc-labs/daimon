@@ -4,6 +4,7 @@
 .claude
 docs/
 tests/
+packages/**/tests/
 **/__pycache__
 *.pyc
 .env*

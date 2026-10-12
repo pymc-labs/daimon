@@ -14,8 +14,12 @@ RUN awk '/^\[/ { keep = /^\[(project|dependency-groups|tool\.uv)[].]/ } keep' \
 # ---------------------------------------------------------------------------
 FROM mirror.gcr.io/library/python:3.12-slim AS builder
 
+# PYTHONDONTWRITEBYTECODE stops the runtime caching .pyc files, so the image
+# must ship them: without them every process start recompiles every module,
+# about doubling import time.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -75,7 +79,8 @@ USER daimon
 # uv.lock is mounted, not copied, so the image carries the same files as
 # before the dependency split.
 RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
-    UV_LINK_MODE=copy uv sync --frozen --no-dev --extra billing --no-cache
+    UV_LINK_MODE=copy uv sync --frozen --no-dev --extra billing --no-cache \
+    && python -m compileall -q -j 0 packages
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # No CMD — docker-compose services or fly.toml [processes] supply the command.
