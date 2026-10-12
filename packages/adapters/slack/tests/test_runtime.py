@@ -13,9 +13,12 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 from daimon.adapters.slack.runtime import SlackRuntime, build_runtime
 from daimon.core.channel_budget_notice import BudgetNotice, spawn_budget_notice
 from daimon.core.config import Settings
+from daimon.core.github_credentials import decrypt_token, encrypt_token
+from pydantic import SecretStr
 
 
 def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,6 +66,46 @@ class TestSlackRuntime:
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             rt.settings = MagicMock()  # type: ignore[misc]  # intentionally testing frozen
+
+
+def test_fernet_is_built_once_per_runtime() -> None:
+    """Events reuse one cipher; the keys never change in-process."""
+    key = Fernet.generate_key().decode()
+    settings = MagicMock()
+    settings.crypto.keys = (SecretStr(key),)
+    rt = SlackRuntime(
+        settings=settings,
+        anthropic=MagicMock(),  # pyright: ignore[reportArgumentType]
+        sessionmaker=MagicMock(),  # pyright: ignore[reportArgumentType]
+        billing_config=None,
+        http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
+        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+    )
+
+    assert rt.fernet is rt.fernet, "a second event must reuse the first event's cipher"
+    assert decrypt_token(rt.fernet, encrypt_token(Fernet(key.encode()), "xoxb-t")) == "xoxb-t", (
+        "the cipher decrypts tokens sealed with the configured key"
+    )
+
+
+def test_fernet_without_keys_raises_on_every_access() -> None:
+    """A missing key set stays a per-event failure, not a cached one."""
+    settings = MagicMock()
+    settings.crypto.keys = ()
+    rt = SlackRuntime(
+        settings=settings,
+        anthropic=MagicMock(),  # pyright: ignore[reportArgumentType]
+        sessionmaker=MagicMock(),  # pyright: ignore[reportArgumentType]
+        billing_config=None,
+        http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
+        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+    )
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="crypto.keys is empty"):
+            _ = rt.fernet
 
 
 async def test_build_runtime_yields_wired_runtime(

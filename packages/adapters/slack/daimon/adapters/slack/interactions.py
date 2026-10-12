@@ -10,7 +10,7 @@ handler can call one function instead of duplicating the decrypt dance.
 from __future__ import annotations
 
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.github_credentials import build_multifernet, decrypt_token
+from daimon.core.github_credentials import decrypt_token
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from slack_sdk.http_retry.async_handler import AsyncRetryHandler
 from slack_sdk.http_retry.builtin_async_handlers import (
@@ -55,8 +55,7 @@ async def resolve_web_client(runtime: SlackRuntime, *, team_id: str) -> AsyncWeb
         row = await get_slack_bot_token(s, team_id=team_id)
     if row is None:
         return None
-    fernet = build_multifernet(tuple(k.get_secret_value() for k in runtime.settings.crypto.keys))
-    token = decrypt_token(fernet, row.encrypted_token)
+    token = decrypt_token(runtime.fernet, row.encrypted_token)
     return AsyncWebClient(  # per-event only — never cache
         token=token, retry_handlers=build_retry_handlers(), session=runtime.slack_http
     )

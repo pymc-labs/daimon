@@ -89,7 +89,6 @@ async def test_transient_orphan_recovery_failure_retries_before_admission(
             "daimon.adapters.slack.app.get_slack_bot_token",
             new=AsyncMock(return_value=SimpleNamespace(encrypted_token="ciphertext")),
         ),
-        patch("daimon.adapters.slack.app.build_multifernet", return_value=object()),
         patch("daimon.adapters.slack.app.decrypt_token", return_value="xoxb-test"),
         patch("daimon.adapters.slack.app.AsyncWebClient", return_value=MagicMock()),
         patch("daimon.adapters.slack.app.is_slack_connect_external", return_value=False),

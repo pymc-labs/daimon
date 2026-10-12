@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
 
 import aiohttp
 import httpx
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
+from cryptography.fernet import MultiFernet
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembersCache
@@ -17,6 +19,7 @@ from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.scope import DeploymentDefault
@@ -50,6 +53,15 @@ class SlackRuntime:
     # One connection pool for every workspace's per-event AsyncWebClient; None
     # (tests) lets slack_sdk open a throwaway session per call.
     slack_http: aiohttp.ClientSession | None = None
+
+    @cached_property
+    def fernet(self) -> MultiFernet:
+        """Token cipher over `settings.crypto.keys`, built on first use.
+
+        The keys never change in-process, so events need not rebuild it; an
+        empty key set raises `ValueError` on every access, as building did.
+        """
+        return build_multifernet(tuple(k.get_secret_value() for k in self.settings.crypto.keys))
 
 
 def resolve_bot_display_name(settings: Settings) -> str:
