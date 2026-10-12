@@ -25,6 +25,12 @@ RUN uv sync --no-dev --extra ds --extra pymc
 RUN mkdir -p /data/notebooks
 ENV DAIMON_NOTEBOOK__DATA_DIR=/data/notebooks
 
+# No USER directive on purpose. The host runs as root so it can drop each
+# spawned marimo process into its own uid (see notebook_host/jail.py); the
+# lifespan gate in main.py refuses to boot when it cannot. Adding a non-root
+# USER here only forces DAIMON_NOTEBOOK__ALLOW_UNJAILED_SPAWN=true, which is
+# strictly weaker isolation.
+
 EXPOSE 8001
 
 CMD ["uv", "run", "python", "-m", "notebook_host"]
