@@ -441,6 +441,51 @@ async def test_delivery_caps_each_turn_and_embeds_at_most_three_images() -> None
     assert len(transport.downloaded_ids) == 4
 
 
+async def test_charts_download_together_and_keep_chart_order() -> None:
+    """Downloads overlap, and results follow chart order whichever finishes first."""
+    in_flight = 0
+    peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        index = int(request.url.path.split("/")[3].removeprefix("file-"))
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01 * (3 - index))  # the first chart finishes last
+        in_flight -= 1
+        return httpx.Response(200, content=_PNG)
+
+    client = AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    outputs = tuple(
+        _ChartOutput(file_id=f"file-{index}", filename=f"chart-{index}.png", size_bytes=len(_PNG))
+        for index in range(3)
+    )
+
+    with patch(
+        "daimon.adapters.mcp.hosted_artifacts._discover_chart_outputs",
+        new=AsyncMock(return_value=outputs),
+    ):
+        result = await deliver_hosted_charts(
+            client,
+            settings=_settings(),
+            tenant_id="tenant-1",
+            account_id="account-1",
+            session_id="session-1",
+            turn_started_at=_NOW,
+            message="Answer",
+            store=FakeStore(),
+        )
+
+    assert peak == 3, "every chart download is in flight at once"
+    assert [url.filename for url in result.chart_urls] == [
+        "chart-0.png",
+        "chart-1.png",
+        "chart-2.png",
+    ], "links keep chart order"
+
+
 async def test_oversized_pixel_raster_is_dropped_not_decoded() -> None:
     source = _png(width=200, height=100)
     client, _transport = _client(source)

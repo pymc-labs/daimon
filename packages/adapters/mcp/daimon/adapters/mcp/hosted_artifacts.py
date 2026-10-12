@@ -194,6 +194,23 @@ async def _discover_chart_outputs(
     return tuple(outputs)
 
 
+async def _download_chart(
+    anthropic: AsyncAnthropic, output: _ChartOutput
+) -> tuple[str, bytes, str]:
+    """One chart's safe filename, bytes and content type, within the byte limit."""
+    filename = _safe_filename(output.filename)
+    if output.size_bytes > _MAX_BYTES:
+        raise ValueError("artifact exceeds the per-chart byte limit")
+    response = await anthropic.beta.files.download(
+        output.file_id,
+        betas=["managed-agents-2026-04-01"],
+    )
+    content = await response.read()
+    if len(content) > _MAX_BYTES:
+        raise ValueError("artifact exceeds the per-chart byte limit")
+    return filename, content, _image_content_type(filename, content)
+
+
 async def _deliver_hosted_charts_impl(
     anthropic: AsyncAnthropic,
     *,
@@ -229,23 +246,21 @@ async def _deliver_hosted_charts_impl(
     embed_images = settings is None or settings.embed_images
     ttl_minutes = max(1, (settings.url_ttl_seconds + 59) // 60) if settings is not None else None
 
-    for output in outputs[:_MAX_CHARTS]:
+    charts = outputs[:_MAX_CHARTS]
+    # Download together (at most _MAX_CHARTS at once) rather than one after
+    # another at the end of a turn; results are handled in chart order.
+    downloads = await asyncio.gather(
+        *(_download_chart(anthropic, output) for output in charts), return_exceptions=True
+    )
+    for output, download in zip(charts, downloads, strict=True):
         key: str | None = None
-        try:
-            filename = _safe_filename(output.filename)
-            if output.size_bytes > _MAX_BYTES:
-                raise ValueError("artifact exceeds the per-chart byte limit")
-            response = await anthropic.beta.files.download(
-                output.file_id,
-                betas=["managed-agents-2026-04-01"],
-            )
-            content = await response.read()
-            if len(content) > _MAX_BYTES:
-                raise ValueError("artifact exceeds the per-chart byte limit")
-            content_type = _image_content_type(filename, content)
-        except Exception as exc:  # one chart cannot block the answer
-            record_failure(stage="download", key=None, exc=exc)
+        if isinstance(download, BaseException):
+            if not isinstance(download, Exception):
+                raise download
+            # one chart cannot block the answer
+            record_failure(stage="download", key=None, exc=download)
             continue
+        filename, content, content_type = download
 
         if embed_images and len(image_blocks) < _MAX_IMAGE_BLOCKS:
             try:
