@@ -54,6 +54,9 @@ class SkillVersionNotFoundError(DaimonError):
 # at limit=200 against production, verified live 2026-08-08 — so the ceiling was
 # ours, not the API's. The guard remains necessary if the API omits the cursor.
 _SKILLS_PAGE_LIMIT = 1000
+# MA's maximum for agents, environments and skill versions. These listings walk
+# every row in the org to filter client-side, and the SDK default is 20.
+_ORG_LIST_PAGE_LIMIT = 100
 
 
 async def find_agents_by_daimon_tag(
@@ -76,7 +79,9 @@ async def find_agents_by_daimon_tag(
     archived agents.
     """
     matches: list[BetaManagedAgentsAgent] = []
-    async for ag in client.beta.agents.list(include_archived=include_archived):
+    async for ag in client.beta.agents.list(
+        limit=_ORG_LIST_PAGE_LIMIT, include_archived=include_archived
+    ):
         if (
             ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
             and ag.metadata.get(MA_METADATA_KEY_NAME) == name
@@ -120,7 +125,9 @@ async def find_environments_by_daimon_tag(
 ) -> list[BetaEnvironment]:
     """Parity with `find_agents_by_daimon_tag` — canonical first, duplicates follow."""
     matches: list[BetaEnvironment] = []
-    async for env in client.beta.environments.list(include_archived=False):
+    async for env in client.beta.environments.list(
+        limit=_ORG_LIST_PAGE_LIMIT, include_archived=False
+    ):
         if (
             env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
             and env.metadata.get(MA_METADATA_KEY_NAME) == name
@@ -145,7 +152,7 @@ async def list_agents_by_tenant(
 ) -> list[BetaManagedAgentsAgent]:
     """Return all non-archived MA agents tagged with tenant_id."""
     results: list[BetaManagedAgentsAgent] = []
-    async for ag in client.beta.agents.list(include_archived=False):
+    async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False):
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
     return results
@@ -156,7 +163,7 @@ async def list_agents_for_privacy_deletion(
 ) -> list[BetaManagedAgentsAgent]:
     """Return the tenant's live and archived agents for transcript deletion."""
     results: list[BetaManagedAgentsAgent] = []
-    async for agent in client.beta.agents.list(include_archived=True):
+    async for agent in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=True):
         if agent.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(agent)
     return results
@@ -176,7 +183,7 @@ async def list_agents_by_tenants(
     results: dict[uuid.UUID, list[BetaManagedAgentsAgent]] = {t: [] for t in tenant_ids}
     if not wanted:
         return results
-    async for ag in client.beta.agents.list(include_archived=False):
+    async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False):
         tenant = wanted.get(ag.metadata.get(MA_METADATA_KEY_TENANT, ""))
         if tenant is not None:
             results[tenant].append(ag)
@@ -211,7 +218,7 @@ async def list_referenced_skill_ids(client: AsyncAnthropic) -> set[str]:
     from an agent in any tenant counts.
     """
     referenced: set[str] = set()
-    async for ag in client.beta.agents.list(include_archived=False):
+    async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False):
         for skill in ag.skills:
             referenced.add(skill.skill_id)
     return referenced
@@ -228,7 +235,7 @@ async def list_agents_referencing_skill(
     """
     return [
         ag
-        async for ag in client.beta.agents.list(include_archived=False)
+        async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False)
         if any(skill.skill_id == skill_id for skill in ag.skills)
     ]
 
@@ -238,7 +245,9 @@ async def list_environments_by_tenant(
 ) -> list[BetaEnvironment]:
     """Return all non-archived MA environments tagged with tenant_id."""
     results: list[BetaEnvironment] = []
-    async for env in client.beta.environments.list(include_archived=False):
+    async for env in client.beta.environments.list(
+        limit=_ORG_LIST_PAGE_LIMIT, include_archived=False
+    ):
         if env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(env)
     return results
@@ -282,7 +291,9 @@ async def download_skill_version(client: AsyncAnthropic, *, skill_id: str, versi
     version's id, not its epoch string (verified against production 2026-10-09).
     """
     version_id = None
-    async for row in client.beta.skills.versions.list(skill_id=skill_id):
+    async for row in client.beta.skills.versions.list(
+        skill_id=skill_id, limit=_ORG_LIST_PAGE_LIMIT
+    ):
         if row.version == version:
             version_id = row.id
             break

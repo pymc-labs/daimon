@@ -152,7 +152,10 @@ async def test_find_agent_by_daimon_tag_paginates_past_first_page() -> None:
             created_at=datetime(2026, 4, 21, tzinfo=UTC),
         ).model_dump(mode="json")
 
+    limits: list[str | None] = []
+
     def handle(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        limits.append(req.url.params.get("limit"))
         cursor = req.url.params.get("page")
         if cursor is None:
             return httpx.Response(
@@ -176,6 +179,7 @@ async def test_find_agent_by_daimon_tag_paginates_past_first_page() -> None:
     match = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="daimon")
     assert match is not None, "target on page 2 must be found after cursor follow"
     assert match.id == "ag_p2", "must adopt the match on page 2, not page 1"
+    assert limits == ["100", "100"], f"every page must request MA's maximum size, got {limits}"
 
 
 async def test_find_skill_by_display_title() -> None:
