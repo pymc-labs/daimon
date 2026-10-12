@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import Callable
@@ -207,6 +208,59 @@ async def test_read_channel_public_full_member_returns_oldest_first(
     assert result.trust == "untrusted" and result.trust_note == UNTRUSTED_NOTE, (
         "other people's messages come back marked as untrusted data"
     )
+
+
+@pytest.mark.asyncio
+async def test_read_channel_resolves_distinct_authors_concurrently(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A page by several people looks their names up side by side, not one by one."""
+    runtime = await _make_runtime(committing_sessionmaker)
+    names = {"U_A": "alice", "U_B": "bob", "U_C": "carol"}
+    in_flight = 0
+    peak = 0
+
+    async def users_info(url: URL, **_kwargs: Any) -> CallbackResult:
+        nonlocal in_flight, peak
+        user_id = url.query["user"]
+        if user_id == "U_CALLER":
+            return CallbackResult(payload=_FULL_MEMBER)
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return CallbackResult(
+            payload={
+                "ok": True,
+                "user": {"id": user_id, "profile": {"display_name": names[user_id]}},
+            }
+        )
+
+    with aioresponses() as m:
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_INFO,
+            payload={"ok": True, "channel": {"id": "C1", "name": "general", "is_private": False}},
+        )
+        m.get(_USERS_INFO, callback=users_info, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        m.get(  # pyright: ignore[reportUnknownMemberType]
+            _CONVERSATIONS_HISTORY,
+            payload={
+                "ok": True,
+                "messages": [
+                    {"ts": "3", "user": "U_C", "text": "third"},
+                    {"ts": "2", "user": "U_B", "text": "second"},
+                    {"ts": "1", "user": "U_A", "text": "first"},
+                ],
+            },
+        )
+        result = await _slack_read_channel_impl(runtime, _auth(), channel_id="C1", limit=50)
+
+    assert [(r.user_id, r.username) for r in result.messages] == [
+        ("U_A", "alice"),
+        ("U_B", "bob"),
+        ("U_C", "carol"),
+    ], "each message keeps its own author's display name"
+    assert peak > 1, "distinct authors' users.info calls should overlap"
 
 
 @pytest.mark.asyncio

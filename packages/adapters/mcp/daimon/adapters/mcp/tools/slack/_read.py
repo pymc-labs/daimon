@@ -15,6 +15,7 @@ yet.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -154,17 +155,27 @@ async def _channel_info(client: AsyncWebClient, *, channel_id: str) -> dict[str,
     return cast(dict[str, Any], resp["channel"])
 
 
+# users.info is Tier 4; a few lookups in flight cut a page's latency without
+# courting a 429.
+_USERS_INFO_CONCURRENCY = 5
+
+
 async def _resolve_usernames(client: AsyncWebClient, user_ids: set[str]) -> dict[str, str]:
     """Display-name lookup with one users.info call per distinct author."""
-    names: dict[str, str] = {}
-    for user_id in user_ids:
-        resp = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+    gate = asyncio.Semaphore(_USERS_INFO_CONCURRENCY)
+
+    async def display_name(user_id: str) -> str:
+        async with gate:
+            resp = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         user = cast(dict[str, Any], resp["user"])
         profile = cast(dict[str, Any], user.get("profile") or {})
-        names[user_id] = str(
+        return str(
             profile.get("display_name") or user.get("real_name") or user.get("name") or user_id
         )
-    return names
+
+    ordered = list(user_ids)
+    names = await asyncio.gather(*(display_name(user_id) for user_id in ordered))
+    return dict(zip(ordered, names, strict=True))
 
 
 def _to_message_rows(
