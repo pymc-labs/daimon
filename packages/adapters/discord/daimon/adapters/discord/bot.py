@@ -690,8 +690,8 @@ class DaimonBot(commands.Bot):
         self._startup_replay_started = False
         # The same re-fire must not redo the all-tenant defaults reconcile and
         # command syncs: a later on_ready covers only what earlier ones did not
-        # (a guild revived or unavailable meanwhile, a tenant still pending or
-        # failed, a sync that failed).
+        # (a guild revived or unavailable meanwhile, a reconcile that has not
+        # succeeded yet, a sync that failed). Tenants are added on success only.
         self._ready_reconciled_tenant_ids: set[uuid.UUID] = set()
         self._ready_reconciled_unjoined_tenant_ids: set[uuid.UUID] = set()
         self._ready_synced_guild_ids: set[int] = set()
@@ -1208,6 +1208,7 @@ class DaimonBot(commands.Bot):
                     status="ready",
                     clear_reason=True,
                 )
+                self._ready_reconciled_tenant_ids.add(tenant_id)
                 if not was_ready:
                     try:
                         async with self.runtime.sessionmaker() as session:
@@ -1296,6 +1297,8 @@ class DaimonBot(commands.Bot):
                     tenant_id=str(tenant_id),
                     reason=compose_failure_reason(report),
                 )
+            else:
+                self._ready_reconciled_unjoined_tenant_ids.add(tenant_id)
         except Exception:
             log.exception("unjoined_guild_reconcile_failed", tenant_id=str(tenant_id))
         finally:
@@ -1877,7 +1880,6 @@ class DaimonBot(commands.Bot):
             if guild is None:
                 log.warning("registered_guild_not_joined", external_id=tr.external_id)
                 if tr.archived_at is None and not reconciled:
-                    reconciled_ids.add(tr.id)
                     self._spawn(self._reconcile_unjoined_tenant_defaults(tr.id))
                 continue
             if tr.id not in recovered_tenant_ids and not reconciled:
@@ -1886,7 +1888,6 @@ class DaimonBot(commands.Bot):
                         tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
                     )
                 )
-            self._ready_reconciled_tenant_ids.add(tr.id)
             missing = check_missing_permissions(guild.me.guild_permissions)
             if missing:
                 log.warning(
