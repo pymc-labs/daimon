@@ -688,6 +688,14 @@ class DaimonBot(commands.Bot):
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
         self._startup_replay_started = False
+        # The same re-fire must not redo the all-tenant defaults reconcile and
+        # command syncs: a later on_ready covers only what earlier ones did not
+        # (a guild revived or unavailable meanwhile, a tenant still pending or
+        # failed, a sync that failed).
+        self._ready_reconciled_tenant_ids: set[uuid.UUID] = set()
+        self._ready_reconciled_unjoined_tenant_ids: set[uuid.UUID] = set()
+        self._ready_synced_guild_ids: set[int] = set()
+        self._global_tree_synced = False
         # Inputs already finished by their card-intent transaction need no
         # cleanup DB await while the completed turn still owns its thread.
         self._committed_message_ids: set[str] = set()
@@ -1858,17 +1866,27 @@ class DaimonBot(commands.Bot):
         # cap above. Per-guild permission check + tree sync for joined guilds.
         for tr in tenants:
             guild = self.get_guild(int(tr.external_id))
+            # Tracked per path: only the joined reconcile seeds guild-bound
+            # defaults, so a guild back since the last ready still gets them.
+            reconciled_ids = (
+                self._ready_reconciled_unjoined_tenant_ids
+                if guild is None
+                else self._ready_reconciled_tenant_ids
+            )
+            reconciled = tr.provision_status == "ready" and tr.id in reconciled_ids
             if guild is None:
                 log.warning("registered_guild_not_joined", external_id=tr.external_id)
-                if tr.archived_at is None:
+                if tr.archived_at is None and not reconciled:
+                    reconciled_ids.add(tr.id)
                     self._spawn(self._reconcile_unjoined_tenant_defaults(tr.id))
                 continue
-            if tr.id not in recovered_tenant_ids:
+            if tr.id not in recovered_tenant_ids and not reconciled:
                 self._spawn(
                     self._seed_tenant_defaults(
                         tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
                     )
                 )
+            self._ready_reconciled_tenant_ids.add(tr.id)
             missing = check_missing_permissions(guild.me.guild_permissions)
             if missing:
                 log.warning(
@@ -1879,6 +1897,8 @@ class DaimonBot(commands.Bot):
                 )
             else:
                 log.info("permissions_ok", guild_id=tr.external_id, guild_name=guild.name)
+            if guild.id in self._ready_synced_guild_ids:
+                continue
             try:
                 guild_obj = discord.Object(id=int(tr.external_id))
                 # Clear any guild-scoped command copies so commands live ONLY at
@@ -1887,6 +1907,7 @@ class DaimonBot(commands.Bot):
                 # guilds that accumulated copies from the old copy_global_to path.
                 self.tree.clear_commands(guild=guild_obj)
                 await self.tree.sync(guild=guild_obj)
+                self._ready_synced_guild_ids.add(guild.id)
                 log.info("tree_synced", guild_id=tr.external_id)
             except discord.HTTPException as exc:
                 log.warning("tree_sync_failed", guild_id=tr.external_id, error=str(exc))
@@ -1894,8 +1915,11 @@ class DaimonBot(commands.Bot):
         # DM-capable commands must be registered at the global scope. Note: global
         # sync has propagation latency (up to ~1h); operators triggering UAT in
         # the test guild should wait or use a guild copy if iterating rapidly.
+        if self._global_tree_synced:
+            return
         try:
             await self.tree.sync()
+            self._global_tree_synced = True
             log.info("tree_synced_global")
         except discord.HTTPException as exc:
             log.warning("tree_sync_global_failed", error=str(exc))

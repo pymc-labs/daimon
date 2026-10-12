@@ -1264,6 +1264,86 @@ class TestOnReadySweepWidenedReconcile:
                 await _asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
         mock_reconcile.assert_not_awaited()
 
+    async def test_a_repeated_on_ready_skips_the_reconcile_and_syncs_already_done(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """on_ready re-fires after a failed RESUME. A ready tenant is reconciled and
+        every scope synced once per process, while a tenant still pending retries."""
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.stores.tenants import set_provision_status
+
+        ready_id, pending_id = 900000020, 900000021
+        for guild_id in (ready_id, pending_id):
+            await provision_tenant(
+                db_session_factory,
+                platform="discord",
+                workspace_id=str(guild_id),
+                signup_credit=Decimal("0"),
+            )
+        pending_tenant = derive_tenant_uuid(platform="discord", workspace_id=str(pending_id))
+        await set_provision_status(db_session_factory, tenant_id=pending_tenant, status="pending")
+
+        bot = make_bot(_make_runtime(db_session_factory))
+        bot._connection._guilds = {  # pyright: ignore[reportPrivateUsage]
+            gid: _make_sweep_guild(gid) for gid in (ready_id, pending_id)
+        }
+        with (
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock) as seed,
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
+        ):
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+            first_seeds, first_syncs = seed.await_count, sync.await_count
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        assert (first_seeds, first_syncs) == (2, 3), (
+            "the first on_ready reconciles both tenants and syncs both guilds plus global"
+        )
+        reseeded = [c.kwargs["tenant_id"] for c in seed.await_args_list[first_seeds:]]
+        assert reseeded == [pending_tenant], "only the tenant still pending is seeded again"
+        assert sync.await_count == first_syncs, "no command scope is synced twice"
+
+    async def test_a_guild_back_at_a_later_on_ready_still_gets_its_joined_reconcile(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A ready tenant whose guild was unavailable at the first on_ready took the
+        unjoined reconcile; once the guild is back it still gets the guild-bound seed."""
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.ma_identity import derive_tenant_uuid
+
+        guild_id = 900000022
+        await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=str(guild_id),
+            signup_credit=Decimal("0"),
+        )
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+
+        bot = make_bot(_make_runtime(db_session_factory))
+        with (
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock) as seed,
+            patch.object(
+                bot, "_reconcile_unjoined_tenant_defaults", new_callable=AsyncMock
+            ) as unjoined,
+            patch.object(bot.tree, "sync", new_callable=AsyncMock),
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
+        ):
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+            bot._connection._guilds = {guild_id: _make_sweep_guild(guild_id)}  # pyright: ignore[reportPrivateUsage]
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        assert unjoined.await_count == 1, "the first on_ready reconciles the unjoined tenant"
+        seeded = [c.kwargs["tenant_id"] for c in seed.await_args_list]
+        assert seeded == [tenant_id], "the guild back at the second on_ready is seeded"
+
 
 class TestReadyEmbedSuppression:
     """The ready embed is suppressed on the boot sweep when a reconcile changes
