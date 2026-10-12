@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Notebooks now come out in PyMC Labs house style by default. The `pymc-artifact-style` default skill gains a "Marimo notebooks" section with a builder that wraps your content cells in a style cell (embedded Inter and JetBrains Mono, wordmark header, key-number cards, callouts, rules-only tables, palette charts), and `marimo_notebooks` tells the agent to use it. Folded in from Rocco De Rosa's `pymc-marimo-style` (pymc-labs/eap-agent#60). Tables now size to their columns, so the rules no longer run past a narrow table.
+
 ### Fixed
 
 - `daimon skills delete` and the `delete_skill` chat tool refuse to delete a skill an agent or channel still uses, saying where it is attached and how to detach it. Before, the delete succeeded and every later turn for that agent or channel failed. `daimon skills delete --force` detaches it from every agent and channel in every tenant first (its confirmation says how many, and how many are outside the selected tenant), then deletes it. A skill being attached while it is deleted is no longer left attached to a deleted skill: one waits for the other, and an attach that loses says the skill was just deleted. Syncing a skill repo no longer deletes a skill removed from the repo while another agent or a channel still uses it, and the startup cleanup of duplicate default skills keeps a duplicate that is still in use.
