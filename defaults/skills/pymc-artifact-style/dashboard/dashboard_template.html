@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<style>
+/* PyMC Labs dashboard — FROZEN style block. Palette hexes only (non-negotiable 2):
+   edit content, not these tokens. Lighten/darken via rgba() alpha, never a new hex. */
+:root{
+  --navy:#0C1F40; --navy-deep:#07142A; --navy-header:#071530;
+  --aqua:#B4E7DD; --periwinkle:#9FAAE2; --peach:#F6AE72; --violet:#C8B4E7;
+  --soft-white:#F7F7F7; --white:#FFFFFF;
+  --teal:#0C9E82; --indigo:#5462C4; --dark-orange:#C4720A;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Inter",sans-serif;font-weight:400;color:var(--navy);background:var(--soft-white);font-size:15px;line-height:1.55}
+header.pymc{background:var(--navy-header);color:var(--soft-white);padding:14px 28px;display:flex;align-items:center;gap:18px}
+header.pymc img{height:30px}
+header.pymc .htitle{font-weight:600;font-size:17px;letter-spacing:-.02em}
+header.pymc .hsub{font-size:12.5px;color:rgba(247,247,247,.72);margin-left:auto}
+nav.tabs{display:flex;gap:4px;background:var(--white);padding:0 28px;border-bottom:1px solid var(--aqua)}
+nav.tabs button{font-family:inherit;font-size:14px;font-weight:500;color:var(--navy);background:none;border:none;border-bottom:2.5px solid transparent;padding:12px 14px;cursor:pointer}
+nav.tabs button:hover{color:var(--indigo)}
+nav.tabs button.active{color:var(--teal);border-bottom-color:var(--teal)}
+main{max-width:1180px;margin:0 auto;padding:26px 28px 60px}
+section.tab{display:none}
+section.tab.active{display:block}
+h2{font-weight:600;font-size:21px;letter-spacing:-.02em;margin:6px 0 4px}
+h3{font-weight:500;font-size:16px;letter-spacing:-.015em;margin:22px 0 8px}
+p.lede{font-size:15px;max-width:72ch;margin-bottom:18px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:18px 0}
+.card{background:var(--white);border:1px solid rgba(180,231,221,.8);border-radius:8px;padding:16px 18px}
+.card .knum{font-weight:600;font-size:26px;letter-spacing:-.02em}
+.card .klabel{font-size:12.5px;color:rgba(12,31,64,.62);margin-top:2px}
+.card .kci{font-size:12px;color:rgba(12,31,64,.55);margin-top:4px}
+.card.pos .knum{color:var(--teal)}
+.card.warn .knum{color:var(--dark-orange)}
+.badge{display:inline-block;font-size:11.5px;font-weight:500;padding:2px 9px;border-radius:999px}
+.badge.teal{color:var(--teal);background:rgba(180,231,221,.35)}
+.badge.warm{color:var(--dark-orange);background:rgba(246,174,114,.35)}
+.panel{background:var(--white);border:1px solid rgba(180,231,221,.8);border-radius:8px;padding:14px;margin:14px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{font-weight:500;text-align:left;padding:7px 10px;border-bottom:1.5px solid var(--aqua)}
+td{padding:6px 10px;border-bottom:1px solid rgba(180,231,221,.45)}
+tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.note{font-size:12.5px;color:rgba(12,31,64,.6);max-width:78ch;margin-top:6px}
+code{font-family:"JetBrains Mono",monospace;font-size:12.5px;background:var(--soft-white);padding:1px 5px;border-radius:4px}
+footer{max-width:1180px;margin:0 auto;padding:18px 28px;font-size:12px;color:rgba(12,31,64,.55)}
+select,input[type=range]{accent-color:var(--teal);font-family:inherit}
+</style>
+</head>
+<body>
+<header class="pymc">
+  <img src="data:image/png;base64,{{LOGO_B64}}" alt="PyMC Labs">
+  <span class="htitle">{{TITLE}}</span>
+  <span class="hsub">{{SUBTITLE}}</span>
+</header>
+<nav class="tabs" id="tabs"><!-- one <button data-tab="…"> per section --></nav>
+<main id="main">
+{{CONTENT}}
+</main>
+<footer>{{FOOTER}}</footer>
+<script>
+const tabs=document.getElementById('tabs');
+document.querySelectorAll('section.tab').forEach((s,i)=>{
+  const b=document.createElement('button');
+  b.textContent=s.dataset.title;b.dataset.tab=s.id;
+  if(i===0){b.classList.add('active');s.classList.add('active');}
+  b.onclick=()=>{document.querySelectorAll('nav.tabs button').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('section.tab').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');s.classList.add('active');
+    window.dispatchEvent(new Event('resize'));};
+  tabs.appendChild(b);
+});
+/* Plotly house defaults — pass PYMC_LAYOUT/PYMC_CONFIG to every Plotly.newPlot */
+const C={navy:'#0C1F40',aqua:'#B4E7DD',periwinkle:'#9FAAE2',peach:'#F6AE72',violet:'#C8B4E7',
+teal:'#0C9E82',indigo:'#5462C4',darkOrange:'#C4720A',softWhite:'#F7F7F7',white:'#FFFFFF'};
+const PYMC_SERIES=[C.navy,C.teal,C.periwinkle,C.peach,C.violet,C.indigo];
+const PYMC_LAYOUT={font:{family:'Inter',color:C.navy,size:13},colorway:PYMC_SERIES,
+paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',
+xaxis:{gridcolor:'rgba(180,231,221,.45)',zerolinecolor:'#B4E7DD',linecolor:'#B4E7DD'},
+yaxis:{gridcolor:'rgba(180,231,221,.45)',zerolinecolor:'#B4E7DD',linecolor:'#B4E7DD'},
+margin:{t:36,r:18,b:42,l:56},hoverlabel:{font:{family:'Inter'}}};
+const PYMC_CONFIG={displayModeBar:false,responsive:true};
+</script>
+{{SCRIPTS}}
+</body>
+</html>

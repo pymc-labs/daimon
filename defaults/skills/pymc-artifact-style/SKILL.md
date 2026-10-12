@@ -260,6 +260,119 @@ do not recolor or regenerate them.
 The report defaults to the dark logo and a plain cover. The older logo files
 and cover artwork are no longer part of the style and are not bundled.
 
+## Marimo notebooks — build with the bundled style cell
+
+A notebook gets the same identity as a report, implemented for marimo:
+Inter and JetBrains Mono embedded as `@font-face`, navy text, aqua rules,
+the dark wordmark header, key-number cards, callouts, rules-only tables and
+charts in this palette. Marimo's theme variables (`--heading-font`,
+`--text-font`, `--monospace-font`, `--primary`) are overridden, so headings
+do not fall back to marimo's serif and sliders are teal. Follow
+`marimo_notebooks` for everything else: alignment, real data, cell dataflow,
+publishing and attachments.
+
+The style cell is ~200 KiB with fonts and logo embedded. **Never paste it or
+read it into the conversation.** Write only your content cells and let the
+build script assemble the notebook:
+
+```bash
+S=<this skill's directory>/notebook
+cp $S/example_content.py content.py                 # a working example to start from
+mkdir -p data && cp $S/mmm_example.csv data/        # only to run the example itself
+# edit content.py: keep the @app.cell structure, replace the content
+python $S/build_notebook.py content.py -o nb.py --title "Tab title"   # --width compact|medium|full, default medium
+marimo export html nb.py -o /tmp/check.html         # every cell must execute
+```
+
+Then publish `nb.py` with `marimo_notebooks`. The build needs only the
+standard library; the notebook needs marimo, matplotlib, numpy and pandas,
+which the notebook host ships, so the style needs no PEP 723 header. If the
+notebook needs a library outside that set, add the header to the top of the
+built `nb.py`, before `import marimo`, and list `marimo`, `matplotlib`,
+`numpy` and `pandas` with your extras: the isolated environment replaces the
+baked one.
+
+`content.py` holds `@app.cell` functions only (no `import marimo`, no
+`app = ...`, no `__main__` block; the build adds them). The style cell
+defines `mo np pd plt C CYCLE SEQ DIV badge callout figure header kpis table`:
+declare the ones a cell uses in its signature, e.g.
+`def _(mo, C, figure, plt, df):`, and never redefine them.
+
+Layout, top to bottom:
+
+1. `header(title, subtitle, badges=[...], accent="Word")` as the first cell.
+   It also injects the page CSS, so it must render first. `accent` sets one
+   word in the italic accent. Badges: teal for status, orange for caveats
+   such as "Example data", indigo for neutral tags.
+2. `callout(...)` for data provenance or the main caveat; `kind="warn"`
+   (peach) for anything the reader must not miss, such as example data.
+3. `kpis([(value, label), ...])`: 3 to 4 key numbers.
+4. Sections as `mo.md("## Heading\n\ntext")`, unnumbered: prose, then the
+   controls in an `mo.hstack`, then the chart they drive.
+5. Charts through `figure(fig, caption)`: an inline 200 dpi PNG with the
+   fonts baked in. The chart rules above apply unchanged; `CYCLE` is the
+   series order, `SEQ` and `DIV` the sequential and diverging colormaps.
+6. Tables through `table(df, fmt="{:,.2f}")`: heavy top and bottom rules, a
+   light header rule, no verticals, as wide as their columns.
+
+Keep it light: no dark theme and no `theme="dark"`. Example data is labelled
+in a warn callout and a badge, and never stated as a finding. If the build
+script is unavailable, apply the palette and type by hand and say the
+notebook is an unbranded fallback.
+
+Marimo widgets live in shadow DOM, so only CSS variables reach them; that is
+why the style sets variables rather than selectors. A headless browser
+rendering a check needs `locale="en-US"`.
+
+## Interactive dashboards — build with the bundled template
+
+A dashboard is a report the client keeps using, so it carries the full identity:
+wordmark header on the dark band, frozen palette tokens, Inter/JetBrains Mono
+actually loaded, tabs in the drill-down order **executive summary → channel deep
+dive → model inventory**. Build single-file HTML from the bundled skeleton:
+
+```bash
+python3 dashboard/build_dashboard.py content.html -o dashboard.html \
+    --title "..." --subtitle "..." --scripts charts.js
+# content.html: only <section class="tab" id="…" data-title="…"> blocks
+# charts.js:    Plotly calls — ALWAYS pass {...PYMC_LAYOUT} and PYMC_CONFIG
+```
+
+The template wires the tabs, inlines the wordmark, loads Plotly from the CDN,
+and defines `C` (palette constants), `PYMC_SERIES`, `PYMC_LAYOUT`, `PYMC_CONFIG`
+for every chart. The builder refuses any hex that is not a palette value
+(non-negotiable 2) — color via `var(--token)`, `C.*` or `rgba()` only.
+Interactivity is vanilla JS + Plotly: tabs, `<select>`/`<input type=range>`
+controls (they inherit the teal accent), hover. No frameworks, no build step.
+Proven patterns (all in the live example): a budget-simulator tab with per-channel
+sliders that recompute expected incremental revenue through the fitted saturation
+curves (plus one-click "apply optimizer plan" / reset), a period selector restyling
+the headline cards and waterfall in place, a weekly-trends tab (stacked
+contributions, Plotly rangeslider, channel chips to toggle series), metric sort
+toggles, and click-a-bar-to-highlight across charts and tables. Dashboards should
+default to this level of interactivity — a static page of charts is a report, not
+a dashboard.
+
+**What goes on an MMM dashboard is not a style question** — read
+[dashboard/CONTENT.md](dashboard/CONTENT.md): the client-validated view list
+(executive narrative first; CIs on the waterfall; spend share vs effect share
+PLUS the reallocation read; ROI and CPIK with 90% CIs; marginal next to average
+ROI; saturation position; min/max-rebalanced baseline; budget optimizer view).
+Original units everywhere; uncertainty on anything a decision hangs on.
+For a dashboard that must recompute live (sliders re-running a model), use a
+marimo notebook instead — this template is for serving results.
+
+**Scheduled data refresh** — a dashboard served as a daimon artifact can update
+itself without republishing: publish with `store: read`, have the page read its
+numbers from the artifact store on load (`const DB = await window.daimon.use('db')`,
+then `DB.collection('channels').get()` / `DB.doc('meta/latest').get()`), and keep
+the embedded numbers as the fallback when the store is absent. A scheduled daimon
+routine (daily or weekly) pulls the latest MMM run outputs and writes one
+`channels/<name>` document per channel plus `meta/latest` (refresh timestamp,
+period) — viewers get fresh numbers on next load, and the page shows the refresh
+stamp. The example wiring is in the dashboard template docs; keep the store schema
+flat (one doc per channel, plain numeric fields in original units).
+
 ## When the bundled template cannot be used
 
 Match the palette and typography by hand: navy body and headings, aqua rules,
@@ -278,3 +391,26 @@ PDF path is the one with a real template behind it.
 Honor an explicitly requested client or legacy sales template. Otherwise use
 this website-aligned identity for new artifacts, including sales collateral.
 Do not silently revert to the older Calibri/navy proposal style.
+
+## Non-negotiables (added 2026-10-12 after the conformance gate measured 4/8 drift)
+
+1. **Register the bundled fonts BEFORE any matplotlib figure** — the rc names Inter,
+   but without registration charts silently fall back to DejaVuSans:
+   ```python
+   from pathlib import Path
+   import matplotlib.font_manager as fm
+   for f in Path("<this skill>/fonts").glob("*.ttf"):
+       fm.fontManager.addfont(str(f))
+   ```
+2. **Palette hex values only — including every CSS colour literal.** Any hex in a
+   style block, inline style, gradient or hover state must be a palette value, white,
+   or one of the skill's greys. Never hand-mix a tint, shade or "darker navy";
+   lighten/darken with `rgba()` alpha on a palette colour, never with a new hex.
+3. **Every HTML or PDF report carries the wordmark header** (the bundled logo asset at
+   the top, as in the Typst template). A chart image alone does not need the logo; a
+   report does, always.
+4. **Naming a font is not loading it.** Every HTML page must actually LOAD Inter (and
+   JetBrains Mono when code appears): a Google Fonts `<link>` for pages that may go
+   online, or embedded `@font-face` (the bundled font files, base64) for anything that
+   must render offline. `font-family: "Inter", ...` without a load renders in a system
+   font and fails the conformance gate.
