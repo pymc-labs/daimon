@@ -223,8 +223,9 @@ async def find_agent_by_derived_uuid_cached(
     """`find_agent_by_derived_uuid` without listing every agent in the org per call.
 
     Ordinary tool calls resolve their executing agent this way, and the
-    listing pages the whole org. A known uuid costs one `retrieve_agent_cached`;
-    only an unknown one lists. None exactly where the listing would find
+    listing pages the whole org. A known uuid costs one uncached retrieve, so
+    callers deciding policy or isolation see the agent as fresh as the listing
+    did; only an unknown uuid lists. None exactly where the listing would find
     nothing: an archived, deleted or re-tenanted agent.
     """
     key = (tenant_id, agent_id)
@@ -232,7 +233,7 @@ async def find_agent_by_derived_uuid_cached(
     if ma_agent_id is None:
         return (await _list_derived_agents(client, cache, tenant_id)).get(agent_id)
     try:
-        agent = await retrieve_agent_cached(client, cache, tenant_id, ma_agent_id)
+        agent = await client.beta.agents.retrieve(ma_agent_id)
     except APIStatusError as err:
         if err.status_code not in (400, 404):
             raise

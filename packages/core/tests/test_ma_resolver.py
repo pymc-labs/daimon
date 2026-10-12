@@ -1250,9 +1250,9 @@ async def test_derived_lookup_lists_once_then_retrieves_when_uuid_known(
 async def test_derived_lookup_returns_none_when_known_agent_archived_or_moved(
     tenant_id: uuid.UUID,
 ) -> None:
-    """A mapped agent that is archived or carries another tenant is not found."""
-    clock = [0.0]
-    cache = ResolverCache(timer=lambda: clock[0])
+    """A mapped agent archived or re-tagged a moment ago is not found: a known
+    uuid is retrieved fresh, never from the 30 s agent cache."""
+    cache = ResolverCache()
     state = _AgentsState(ma_agent(id="ag_a", tenant_id=tenant_id))
     derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_a")
     client = _state_client(state)
@@ -1263,7 +1263,6 @@ async def test_derived_lookup_returns_none_when_known_agent_archived_or_moved(
         state.agents["ag_a"] = ma_agent(
             id="ag_a", tenant_id=tenant_id, archived_at=datetime.now(UTC)
         )
-        clock[0] = 31.0
         assert (
             await find_agent_by_derived_uuid_cached(
                 client, cache, tenant_id=tenant_id, agent_id=derived
