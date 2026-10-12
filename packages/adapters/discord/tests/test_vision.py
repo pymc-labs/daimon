@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from typing import Any, cast
@@ -499,3 +500,74 @@ def test_non_dimension_skip_keeps_the_plain_fetch_and_read_instruction() -> None
 
     assert "`read` tool to view it" in text
     assert "Do NOT `read`" not in text
+
+
+@dataclass
+class _FlakeResponse:
+    status: int = 503
+    reason: str = "CDN flake"
+
+
+@dataclass
+class _TrackedAttachment:
+    """An attachment whose read can fail and records how many reads overlap."""
+
+    filename: str
+    tracker: dict[str, int]
+    fails: bool = False
+    content_type: str = "image/png"
+    width: int = 100
+    height: int = 100
+    url: str = ""
+
+    @property
+    def payload(self) -> bytes:
+        return b"\x89PNG\r\n\x1a\n" + self.filename.encode()
+
+    @property
+    def size(self) -> int:
+        return len(self.payload)
+
+    async def read(self) -> bytes:
+        self.tracker["in_flight"] += 1
+        self.tracker["peak"] = max(self.tracker["peak"], self.tracker["in_flight"])
+        await asyncio.sleep(0.01)
+        self.tracker["in_flight"] -= 1
+        if self.fails:
+            raise discord.HTTPException(
+                response=cast(Any, _FlakeResponse()), message="Service Unavailable"
+            )
+        return self.payload
+
+
+async def test_downloads_overlap_and_keep_attachment_order() -> None:
+    """Several images download side by side, a few at a time, in message order."""
+    tracker = {"in_flight": 0, "peak": 0}
+    atts = [_TrackedAttachment(f"img{i}.png", tracker) for i in range(8)]
+
+    blocks, skipped = await download_as_image_blocks([_as_attachment(a) for a in atts])
+
+    decoded = [base64.standard_b64decode(b["source"]["data"]) for b in blocks]
+    assert decoded == [a.payload for a in atts], "blocks keep the attachments' order"
+    assert skipped == [], "every image fits under the cap"
+    assert 1 < tracker["peak"] <= 4, f"reads should overlap, at most four at once: {tracker}"
+
+
+async def test_a_failed_download_frees_its_slot_for_a_later_image() -> None:
+    """With more images than the cap, a failed fetch lets the next image in,
+    exactly as fetching one at a time did."""
+    tracker = {"in_flight": 0, "peak": 0}
+    atts = [
+        _TrackedAttachment(f"img{i}.png", tracker, fails=i == 1)
+        for i in range(MAX_VISION_IMAGES + 2)
+    ]
+
+    blocks, skipped = await download_as_image_blocks([_as_attachment(a) for a in atts])
+
+    kept = [a for a in atts if not a.fails][:MAX_VISION_IMAGES]
+    decoded = [base64.standard_b64decode(b["source"]["data"]) for b in blocks]
+    assert decoded == [a.payload for a in kept], "the cap fills in order past the failure"
+    assert [(a.filename, "fetch" in reason.lower()) for a, reason in skipped] == [
+        ("img1.png", True),
+        (f"img{MAX_VISION_IMAGES + 1}.png", False),
+    ], "the failed image and the one past the cap are skipped, in message order"

@@ -10,6 +10,8 @@ single routing predicate for that split.
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.media.vision import (
@@ -24,6 +26,9 @@ from daimon.core.media.vision import (
 import discord
 
 log = structlog.get_logger()
+
+# CDN reads in flight per message; a few cut latency without a burst per turn.
+_DOWNLOAD_CONCURRENCY = 4
 
 
 def _exceeds_dimension_cap(attachment: discord.Attachment) -> bool:
@@ -157,67 +162,90 @@ async def download_as_image_blocks(
     (``MAX_VISION_IMAGES``) can only be enforced over the whole batch — which is
     this function's job, not the per-attachment predicate's.
     """
-    blocks: list[BetaManagedAgentsImageBlockParam] = []
-    skipped: list[tuple[discord.Attachment, str]] = []
-    for attachment in attachments:
-        name = attachment.filename
-        media_type = attachment.content_type or ""
-        if media_type not in VISION_MEDIA_TYPES:
-            log.warning("image_attachment.skipped.media_type", name=name, media_type=media_type)
-            skipped.append((attachment, f"unsupported image media type: {media_type or 'unknown'}"))
-            continue
-        if attachment.size > MAX_VISION_IMAGE_BYTES:
-            log.warning("image_attachment.skipped.oversize", name=name, size=attachment.size)
-            skipped.append(
-                (
-                    attachment,
-                    f"exceeds vision size cap ({attachment.size} > {MAX_VISION_IMAGE_BYTES})",
-                )
-            )
-            continue
-        if _exceeds_dimension_cap(attachment):
-            log.warning(
-                "image_attachment.skipped.dimensions",
-                name=name,
-                width=attachment.width,
-                height=attachment.height,
-            )
-            skipped.append(
-                (attachment, f"image dimensions unknown or exceed {MAX_VISION_IMAGE_DIMENSION}px")
-            )
-            continue
-        if len(blocks) >= MAX_VISION_IMAGES:
-            log.warning("image_attachment.skipped.count_cap", name=name)
-            skipped.append((attachment, f"more than {MAX_VISION_IMAGES} images in one turn"))
-            continue
-        try:
-            data = await attachment.read()
-        except discord.HTTPException as err:
-            log.warning("image_attachment.skipped.fetch_error", name=name, error=str(err))
-            skipped.append((attachment, f"CDN fetch failed: {err}"))
-            continue
-        # Discord's content_type can mislabel the bytes (a PNG declared as
-        # image/webp). The API rejects declared-vs-actual mismatches, and MA
-        # replays image blocks on every later turn — so a mismatch is a
-        # terminal, session-killing error. The sniffed type wins; bytes that
-        # match no supported format are skipped rather than sent on trust.
-        sniffed_media_type = sniff_image_media_type(data)
-        if sniffed_media_type is None:
-            log.warning(
-                "image_attachment.skipped.unrecognized_bytes",
-                name=name,
-                declared_media_type=media_type,
-            )
-            skipped.append(
-                (attachment, f"bytes are not a supported image format (declared {media_type})")
-            )
-            continue
-        if sniffed_media_type != media_type:
-            log.info(
-                "image_attachment.media_type_corrected",
-                name=name,
-                declared_media_type=media_type,
-                sniffed_media_type=sniffed_media_type,
-            )
-        blocks.append(build_image_block(data, sniffed_media_type))
+    # Per attachment, in order: its block, or why it was skipped (None: not yet fetched).
+    outcomes: list[BetaManagedAgentsImageBlockParam | str | None] = [
+        _static_skip_reason(attachment) for attachment in attachments
+    ]
+    waiting = [i for i, outcome in enumerate(outcomes) if outcome is None]
+    gate = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
+
+    async def fetch(attachment: discord.Attachment) -> BetaManagedAgentsImageBlockParam | str:
+        async with gate:
+            return await _fetch_image_block(attachment)
+
+    # Fetch as many as there are free slots, side by side; a failed fetch frees
+    # its slot for the next attachment, as a one-at-a-time loop would.
+    inlined = 0
+    while waiting and inlined < MAX_VISION_IMAGES:
+        free = MAX_VISION_IMAGES - inlined
+        window, waiting = waiting[:free], waiting[free:]
+        fetched = await asyncio.gather(*(fetch(attachments[i]) for i in window))
+        for i, outcome in zip(window, fetched, strict=True):
+            outcomes[i] = outcome
+            inlined += not isinstance(outcome, str)
+    for i in waiting:
+        log.warning("image_attachment.skipped.count_cap", name=attachments[i].filename)
+        outcomes[i] = f"more than {MAX_VISION_IMAGES} images in one turn"
+
+    blocks = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+    skipped = [
+        (attachment, outcome)
+        for attachment, outcome in zip(attachments, outcomes, strict=True)
+        if isinstance(outcome, str)
+    ]
     return blocks, skipped
+
+
+def _static_skip_reason(attachment: discord.Attachment) -> str | None:
+    """Why the attachment's metadata alone rules it out; None when it may be fetched."""
+    name = attachment.filename
+    media_type = attachment.content_type or ""
+    if media_type not in VISION_MEDIA_TYPES:
+        log.warning("image_attachment.skipped.media_type", name=name, media_type=media_type)
+        return f"unsupported image media type: {media_type or 'unknown'}"
+    if attachment.size > MAX_VISION_IMAGE_BYTES:
+        log.warning("image_attachment.skipped.oversize", name=name, size=attachment.size)
+        return f"exceeds vision size cap ({attachment.size} > {MAX_VISION_IMAGE_BYTES})"
+    if _exceeds_dimension_cap(attachment):
+        log.warning(
+            "image_attachment.skipped.dimensions",
+            name=name,
+            width=attachment.width,
+            height=attachment.height,
+        )
+        return f"image dimensions unknown or exceed {MAX_VISION_IMAGE_DIMENSION}px"
+    return None
+
+
+async def _fetch_image_block(
+    attachment: discord.Attachment,
+) -> BetaManagedAgentsImageBlockParam | str:
+    """The attachment's vision block, or why it could not be built."""
+    name = attachment.filename
+    media_type = attachment.content_type or ""
+    try:
+        data = await attachment.read()
+    except discord.HTTPException as err:
+        log.warning("image_attachment.skipped.fetch_error", name=name, error=str(err))
+        return f"CDN fetch failed: {err}"
+    # Discord's content_type can mislabel the bytes (a PNG declared as
+    # image/webp). The API rejects declared-vs-actual mismatches, and MA
+    # replays image blocks on every later turn — so a mismatch is a
+    # terminal, session-killing error. The sniffed type wins; bytes that
+    # match no supported format are skipped rather than sent on trust.
+    sniffed_media_type = sniff_image_media_type(data)
+    if sniffed_media_type is None:
+        log.warning(
+            "image_attachment.skipped.unrecognized_bytes",
+            name=name,
+            declared_media_type=media_type,
+        )
+        return f"bytes are not a supported image format (declared {media_type})"
+    if sniffed_media_type != media_type:
+        log.info(
+            "image_attachment.media_type_corrected",
+            name=name,
+            declared_media_type=media_type,
+            sniffed_media_type=sniffed_media_type,
+        )
+    return build_image_block(data, sniffed_media_type)
