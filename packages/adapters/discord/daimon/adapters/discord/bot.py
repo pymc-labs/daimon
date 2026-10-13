@@ -1888,6 +1888,11 @@ class DaimonBot(commands.Bot):
                         tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
                     )
                 )
+            if guild.unavailable:
+                # Listed unavailable in READY (a Discord outage): it has no `me` to
+                # check and is not synced, so a later ready syncs it.
+                log.warning("registered_guild_unavailable", external_id=tr.external_id)
+                continue
             missing = check_missing_permissions(guild.me.guild_permissions)
             if missing:
                 log.warning(

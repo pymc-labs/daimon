@@ -845,6 +845,7 @@ def _make_sweep_guild(guild_id: int) -> MagicMock:
     guild = MagicMock(spec=discord.Guild)
     guild.id = guild_id
     guild.name = "Sweep Guild"
+    guild.unavailable = False
     me = MagicMock(spec=discord.Member)
     me.guild_permissions = MagicMock()
     me.guild_permissions.manage_guild = False
@@ -925,6 +926,7 @@ class TestOnReadySweepProvisioning:
         mock_guild = MagicMock(spec=discord.Guild)
         mock_guild.id = guild_id
         mock_guild.name = "Sweep Guild"
+        mock_guild.unavailable = False
         me = MagicMock(spec=discord.Member)
         perms = MagicMock()
         perms.send_messages = True
@@ -1361,6 +1363,42 @@ class TestOnReadySweepWidenedReconcile:
 
         seeded = [c.kwargs["tenant_id"] for c in seed.await_args_list]
         assert seeded == [tenant_id], "the guild back at the second on_ready is seeded"
+
+    async def test_an_unavailable_guild_is_skipped_not_fatal(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """discord.py keeps READY's unavailable guilds cached with no `me`; the sweep
+        skips one rather than raising before the global sync and later tenants."""
+        from daimon.core.defaults.provisioning import provision_tenant
+        from daimon.core.defaults.report import ApplyReport
+
+        guild_id = 900000030
+        await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=str(guild_id),
+            signup_credit=Decimal("0"),
+        )
+        bot = make_bot(_make_runtime(db_session_factory))
+        # The call parse_ready makes for each guild stub in the READY payload.
+        bot._connection._add_guild_from_data({"id": str(guild_id), "unavailable": True})  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+        with (
+            patch(
+                "daimon.adapters.discord.bot.reconcile_tenant_defaults",
+                new_callable=AsyncMock,
+                return_value=ApplyReport(),
+            ),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
+            patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
+        ):
+            await bot.on_ready()
+            await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
+
+        assert [c.kwargs for c in sync.await_args_list] == [{}], (
+            "only the global tree is synced; the unavailable guild waits for a later ready"
+        )
+        assert guild_id not in bot._ready_synced_guild_ids  # pyright: ignore[reportPrivateUsage]
 
 
 class TestReadyEmbedSuppression:
