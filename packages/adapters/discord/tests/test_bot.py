@@ -1397,6 +1397,8 @@ class TestOnReadySweepWidenedReconcile:
                 new_callable=AsyncMock,
                 return_value=ApplyReport(),
             ),
+            # Two seeds at once would share the test's one connection; only syncs matter here.
+            patch.object(bot, "_seed_tenant_defaults", new_callable=AsyncMock),
             patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync,
             patch.object(bot.tree, "clear_commands", new_callable=MagicMock),
         ):
