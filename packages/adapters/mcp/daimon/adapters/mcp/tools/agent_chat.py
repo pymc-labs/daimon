@@ -67,6 +67,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._ask_mirrors import mirror_ask
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
@@ -91,6 +92,7 @@ from daimon.core.defaults.ma_index import find_environment_by_daimon_tag, list_a
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mirror_events import EventSurface
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -230,6 +232,8 @@ class AskResult(BaseModel):
     handle: str
     message: str
     chart_urls: tuple[ChartUrl, ...] = ()
+    # Tell the asker: a mirror copies this question and answer to these places.
+    shared_to: tuple[str, ...] = ()
     # Excluded from dumps AND the JSON schema: image blocks travel as MCP
     # content, never inside structured content, and advertising the field
     # would point schema-reading clients at a value that never arrives.
@@ -244,8 +248,17 @@ def _ask_tool_result(result: AskResult) -> ToolResult:
     Built the same way with or without charts, so the caller sees one content
     shape: prose text first, image blocks after, structured payload throughout.
     """
+    shared = (
+        [
+            TextContent(
+                type="text", text=f"Shared by a workspace mirror to: {', '.join(result.shared_to)}"
+            )
+        ]
+        if result.shared_to
+        else []
+    )
     return ToolResult(
-        content=[TextContent(type="text", text=result.message), *result.image_blocks],
+        content=[TextContent(type="text", text=result.message), *shared, *result.image_blocks],
         structured_content=result.model_dump(mode="json"),
     )
 
@@ -1078,6 +1091,7 @@ async def _ask_impl(
     recheck: Callable[[], Awaitable[None]] | None = None,
     personal_memory: bool = False,
     on_read: OnRead | None = None,
+    surface: EventSurface = "agent_chat",
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
@@ -1102,9 +1116,20 @@ async def _ask_impl(
     turn_event_id = started["turn_event_id"]
     turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
+    stamped: frozenset[str] = frozenset()
+
+    async def read(session: BetaManagedAgentsSession) -> None:
+        nonlocal stamped
+        stamped = seal_ids(session.metadata)
+        if on_read is not None:
+            await on_read(session)
+
+    async def source_seal() -> frozenset[str]:
+        # A session stays under every seal it ran under, even once reopened.
+        return stamped | await _bound_seal(runtime, auth)
 
     while True:
-        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+        current = await _get_session_impl(runtime, auth, handle, on_read=read)
         # Only terminated is treated as terminal: the status value set is
         # upstream-controlled (see SessionInfo.status), so an unmodeled
         # transient status keeps polling until the deadline instead of
@@ -1153,10 +1178,23 @@ async def _ask_impl(
                 )
                 if (observation := current_outcome.get()) is not None:
                     observation.finish(reason=TerminationReason.COMPLETED)
+                # The agent's own text: hosted chart links are capabilities
+                # and never leave with a mirror copy.
+                shared_to = await mirror_ask(
+                    runtime,
+                    auth,
+                    handle=handle,
+                    question=message,
+                    answer=final_text,
+                    surface=surface,
+                    read_seal=source_seal,
+                    now=now(),
+                )
                 return AskResult(
                     handle=handle,
                     message=delivery.message,
                     chart_urls=delivery.chart_urls,
+                    shared_to=shared_to,
                     image_blocks=delivery.image_blocks,
                 )
 
@@ -1285,7 +1323,9 @@ def register_agent_chat_tools(
         returns the final text plus a resumable handle. Chart images are
         embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
-        continue that conversation instead of starting a new one.
+        continue that conversation instead of starting a new one. ``shared_to``
+        names the workspace mirrors that copy the question and answer to another
+        channel; tell the user when it is not empty.
         """
         auth = await _check_admission(
             ctx,

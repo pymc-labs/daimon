@@ -39,6 +39,7 @@ from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -96,6 +97,7 @@ class PurgePreview(BaseModel):
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mirror_deliveries: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -118,6 +120,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.channel_admins, "channel admin list"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
+        (preview.mirror_deliveries, "question shared to a channel"),
     )
     parts = [
         "saved settings"
@@ -327,6 +330,9 @@ async def collect_purge_preview(
             session, account_id=account_id
         )
         mcp_tokens = PurgePreviewRow(count=mcp_tokens_count, example=None)
+        mirror_deliveries_count = await mirrors_store.count_for_account(
+            session, account_id=account_id
+        )
 
         # 10. agent_github_binding — principal-scoped; sum a per-principal count
         # over both kinds, mirroring the user_skills loop.
@@ -515,4 +521,5 @@ async def collect_purge_preview(
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
+        mirror_deliveries=PurgePreviewRow(count=mirror_deliveries_count, example=None),
     )

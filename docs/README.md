@@ -23,6 +23,8 @@ pieces fit together.
   skills, billing.
 - [routines.md](routines.md) — scheduled routines: creating one, how the
   scheduler fires it, the timeouts, permissions and what a failure leaves.
+- [mirrors.md](mirrors.md) — copying an agent's agent-chat questions and
+  answers into a Discord channel: consent, channel rules and delivery.
 - [billing.md](billing.md) — the credit model: metering, pricing, the balance
   and cap gates, the signup credit, top-ups and the ledger tables.
 - [defaults.md](defaults.md) — authoring `defaults/`: agents, environments and

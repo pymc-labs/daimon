@@ -258,9 +258,10 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     assert out[0] == _tools()[0]
     assert out[1] == _tools()[1] | {
         "configs": [
-            {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
+            for name in ("add_skill", "create_mirror")
         ]
-    }, "daimon's own toolset stays trusted, except the one tool that confirms"
+    }, "daimon's own toolset stays trusted, except the tools that confirm"
     assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
     assert out[2]["configs"] == [
         {"name": "create_issue", "permission_policy": {"type": "always_ask"}}
@@ -343,8 +344,9 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
     out = session_tools_for_policy(_ON, stored, trusted_servers=frozenset({DAIMON_SERVER_NAME}))
     assert out is not None
     assert out[0]["configs"] == [
-        {"name": "add_skill", "enabled": False, "permission_policy": {"type": "always_ask"}}
-    ], "add_skill is not switched on"
+        {"name": name, "enabled": False, "permission_policy": {"type": "always_ask"}}
+        for name in ("add_skill", "create_mirror")
+    ], "no confirmed tool is switched on"
 
 
 def test_publish_tools_ask_only_in_a_session_that_asks_before_publishing() -> None:

@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+from daimon.core.mirror_events import ConversationEventV1
 from daimon.core.session_snapshot import SessionSnapshot
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1061,3 +1062,56 @@ class TurnOriginRow(BaseModel):
     role: Role
     created_at: datetime
     expires_at: datetime
+
+
+MirrorStatus = Literal["active", "paused"]
+MirrorDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
+
+
+class MirrorRow(BaseModel):
+    """A standing copy of one agent's agent-chat questions and answers into a
+    channel or thread of the same tenant."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    source_agent_id: uuid.UUID
+    source_agent_name: str
+    source_agent_names: tuple[str, ...]
+    format: Literal["qa"] = "qa"
+    dest_tenant_id: uuid.UUID
+    dest_platform: str
+    dest_kind: RoutineDestinationKind
+    dest_id: str
+    consent_basis: Literal["attested"] | None = None
+    consent_note: str | None = None
+    consent_by_account_id: uuid.UUID | None = None
+    consent_at: datetime | None = None
+    status: MirrorStatus
+    paused_reason: str | None = None
+    max_answer_chars: int | None = None
+    created_by_account_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MirrorDeliveryRow(BaseModel):
+    """One event waiting for, or done with, one mirror's post. `payload` is
+    dropped when the row settles."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    mirror_id: uuid.UUID
+    event_id: uuid.UUID
+    source_session_key: str
+    source_account_id: uuid.UUID | None = None
+    payload: ConversationEventV1 | None = None
+    status: MirrorDeliveryStatus
+    note: str | None = None
+    dest_thread_id: str | None = None
+    created_at: datetime
+    settled_at: datetime | None = None

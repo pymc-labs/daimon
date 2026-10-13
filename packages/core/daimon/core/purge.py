@@ -127,6 +127,7 @@ from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
@@ -175,6 +176,7 @@ class PurgeReport(BaseModel):
     channel_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
+    mirror_deliveries: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -206,6 +208,7 @@ class PurgeReport(BaseModel):
             channel_admins=self.channel_admins + other.channel_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
+            mirror_deliveries=self.mirror_deliveries + other.mirror_deliveries,
         )
 
 
@@ -535,6 +538,10 @@ async def purge_account(
         mcp_tokens_count = await mcp_tokens_store.delete_tokens_for_account(
             session, account_id=account_id
         )
+        # A question waiting to be mirrored carries the person's own words.
+        mirror_deliveries_count = await mirrors_store.delete_for_account(
+            session, account_id=account_id
+        )
         github_connect_requests_count = await github_connect_store.delete_requests_for_account(
             session, account_id=account_id
         )
@@ -589,6 +596,7 @@ async def purge_account(
         db_report = report.merge(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
+                mirror_deliveries=mirror_deliveries_count,
                 github_connect_requests=github_connect_requests_count,
                 github_connect_click_intents=github_connect_click_intents_count,
                 message_feedback=message_feedback_count,

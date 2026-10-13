@@ -69,6 +69,7 @@ channel's and its category's rule.
 | People from another organisation answered | no | yes | no | `answers_external` |
 | Agents listed there | all | own only | all | `listed_at` |
 | Default agent | any | own only; never cleared | any | `binding_refusal`, `clear_refusal` |
+| Mirrored into ([mirrors.md](mirrors.md)) | any agent's readable sessions | own agents' only | no | `mirror_refusal` |
 | Charged to its budget | its turns | its turns and its own agents' calls | its turns | `budget_channel` |
 
 **Content kept inside** means a call from a turn in the channel, whatever

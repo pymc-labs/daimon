@@ -23,13 +23,13 @@ Three questions, each a total function of its arguments:
   "Daimon's own" is verified, not a name match: see `trusted_servers_for`
   and `heal_reserved_server`.
   `session_tools_for_policy` applies it to a session's tool list, which
-  `create_session` sends as a per-session override. One daimon tool still
-  asks: `add_skill`, once its input names the reviewed `content_hash`
+  `create_session` sends as a per-session override. Two daimon tools still
+  ask: `add_skill`, once its input names the reviewed `content_hash`
   (`CONFIRMED_DAIMON_TOOLS`), since it puts new files in front of everyone
-  the agent answers. A run nobody watches never confirms one, whatever
-  `unattended_writes` allows. Daimon's `PUBLISH_TOOLS` ask too in a session
-  that asks before publishing (an agent with a rule, `AgentPermissions.publishes`),
-  tool safety on or off.
+  the agent answers; and `create_mirror` with a `consent_note`. A run
+  nobody watches never confirms one, whatever `unattended_writes` allows.
+  Daimon's `PUBLISH_TOOLS` ask too in a session that asks before publishing
+  (an agent with a rule, `AgentPermissions.publishes`), tool safety on or off.
 
 With `enabled=False` (the default) nothing else changes: every toolset stays
 `always_allow` and every call is allowed, which is the behaviour before this
@@ -104,7 +104,11 @@ ANY_KEY: Final[str] = "*"
 #: Daimon's own tools that wait for the card like a third-party write, keyed
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
-CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {"add_skill": "content_hash"}
+CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    "add_skill": "content_hash",
+    # Consent to copy people's own conversations is a person's word, never a model's.
+    "create_mirror": "consent_note",
+}
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.
 #: A session that asks before publishing waits for the card on each, and an

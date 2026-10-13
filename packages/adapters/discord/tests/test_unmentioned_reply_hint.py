@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -25,8 +26,10 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import DiscordSettings, McpSettings, ThreadParticipationSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.mirror_events import ActorRef, ConversationEventV1, SourceRef
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import mirrors as mirrors_store
 from daimon.core.stores import thread_participation as store
 from daimon.core.thread_participation import ParticipationMode, ParticipationScope
 from daimon.core.turn.protection import ProtectionState
@@ -262,4 +265,81 @@ async def test_no_hint_in_a_followed_thread(
 def test_hint_is_off_by_default() -> None:
     assert DiscordSettings.model_fields["unmentioned_reply_hint"].default is False, (
         "off until the per-thread cooldown survives a restart"
+    )
+
+
+async def _mirror_thread(sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
+    """A mirror posted a session's Q&A into THREAD_ID."""
+    now = datetime.now(UTC)
+    agent_id = uuid.uuid4()
+    async with sm() as session, session.begin():
+        mirror = await mirrors_store.upsert_mirror(
+            session,
+            tenant_id=tenant_id,
+            name="qa",
+            source_agent_id=agent_id,
+            source_agent_name="helper",
+            source_agent_names=("helper",),
+            dest_platform="discord",
+            dest_kind="channel",
+            dest_id=str(PARENT_ID),
+            consent_note=None,
+            max_answer_chars=None,
+            account_id=None,
+            now=now,
+        )
+        event = ConversationEventV1(
+            id=uuid.uuid4(),
+            surface="agent_chat",
+            occurred_at=now,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            source=SourceRef(channel_id="300", session_key="sesn_1"),
+            actor=ActorRef(),
+            question="q",
+            answer="a",
+        )
+        await mirrors_store.insert_deliveries(session, event=event, mirror_ids=[mirror.id], now=now)
+        [claimed] = await mirrors_store.claim_mirror_deliveries(
+            session,
+            platform="discord",
+            owner="w",
+            now=now,
+            lease=timedelta(minutes=1),
+            max_pending_age=timedelta(minutes=30),
+        )
+        await mirrors_store.settle_mirror_delivery(
+            session,
+            claimed.id,
+            owner="w",
+            status="delivered",
+            dest_thread_id=str(THREAD_ID),
+            now=now,
+        )
+
+
+@pytest.mark.parametrize("followed", [False, True])
+async def test_a_mirror_thread_is_never_followed_or_hinted(
+    db_session_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, followed: bool
+) -> None:
+    await _mirror_thread(db_session_factory, tenant_id)
+    if followed:
+        async with db_session_factory() as session, session.begin():
+            await store.set_participation_mode(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                scope=ParticipationScope.THREAD,
+                scope_id=str(THREAD_ID),
+                mode=ParticipationMode.ON,
+            )
+    bot = make_bot(_make_runtime(db_session_factory))
+    turns = _stub_turn(bot)
+
+    message = _reply(_make_thread())
+    await bot.on_message(message)
+
+    assert turns == [] and not _reacted(message), "a reply to a mirror post gets nothing"
+    assert THREAD_ID not in bot._participation_pending, (  # pyright: ignore[reportPrivateUsage]
+        "a mirror thread is never followed, even with participation on"
     )

@@ -348,7 +348,9 @@ def register_hub_tools(
         Runs as you, in that Daimon's workspace: it reads only what you can see
         and spends that workspace's credit. Pass ``handle`` from a previous
         result to continue the same conversation. On timeout the error carries
-        the handle; resume with it rather than asking again.
+        the handle; resume with it rather than asking again. ``shared_to`` names
+        the workspace mirrors that copy the question and answer to another
+        channel; tell the user when it is not empty.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "ask")
         with hub_session_access(subject, "continue"):
@@ -363,6 +365,7 @@ def register_hub_tools(
                     recheck=recheck,
                     # A hub caller is a person, verified by their platform login.
                     personal_memory=True,
+                    surface="hub",
                 )
             )
 

@@ -10,7 +10,9 @@
           Runs as you, in that Daimon's workspace: it reads only what you can see
           and spends that workspace's credit. Pass ``handle`` from a previous
           result to continue the same conversation. On timeout the error carries
-          the handle; resume with it rather than asking again.
+          the handle; resume with it rather than asking again. ``shared_to`` names
+          the workspace mirrors that copy the question and answer to another
+          channel; tell the user when it is not empty.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -531,7 +533,9 @@
         returns the final text plus a resumable handle. Chart images are
         embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
-        continue that conversation instead of starting a new one.
+        continue that conversation instead of starting a new one. ``shared_to``
+        names the workspace mirrors that copy the question and answer to another
+        channel; tell the user when it is not empty.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1773,6 +1777,88 @@
         'required': list([
           'title',
           'mime_type',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'create_mirror': dict({
+      'description': '''
+        Copy an agent's agent-chat questions and answers into a Discord channel or
+        thread of this server. Admin-only.
+        <blank line>
+        Every answered ``ask`` to ``agent_name`` (an agent key or the hub) is
+        posted by Daimon: in a channel, one thread per conversation; in a
+        thread, straight in. Turns run with ``start_turn``/``continue_turn``
+        are not copied. Only the question and the final answer are
+        copied, never tool calls. Conversations of an agent key minted in a
+        channel follow that channel's rules. A person's own conversations are
+        copied only with ``consent_note``: the admin's record of the askers'
+        agreement (who agreed, how). It is audited, and taken only from a chat
+        conversation where the admin approves it on a card: pass this turn's
+        ``origin_context_id``. A channel kept to its own
+        agents only takes its own agents' conversations. Calling it again with
+        the same ``name`` replaces that mirror and resumes it if paused.
+        ``name`` is shown to askers, so name it for where it posts.
+        ``max_answer_chars`` cuts long text.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'type': 'string',
+          }),
+          'consent_note': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'destination_id': dict({
+            'type': 'string',
+          }),
+          'destination_kind': dict({
+            'default': 'channel',
+            'enum': list([
+              'channel',
+              'thread',
+            ]),
+            'type': 'string',
+          }),
+          'max_answer_chars': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'name': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'name',
+          'agent_name',
+          'destination_id',
         ]),
         'type': 'object',
       }),
@@ -3444,6 +3530,18 @@
         'type': 'object',
       }),
     }),
+    'list_mirrors': dict({
+      'description': '''
+        List this workspace's mirrors: what each copies where, whether it is paused and
+        why, and its recorded consent. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_my_sessions': dict({
       'description': '''
         List the sessions you started with this agent (id, status, title, timestamps).
@@ -4260,6 +4358,24 @@
         'required': list([
           'channel_id',
           'skill',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'remove_mirror': dict({
+      'description': '''
+        Remove a mirror by name and drop its queued posts. Admin-only. Messages
+        already posted stay.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
         ]),
         'type': 'object',
       }),

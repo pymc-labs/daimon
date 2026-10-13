@@ -1189,8 +1189,9 @@ A pause shows one card per blocked call, and the driver sends one
 passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
 the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), except `add_skill`: its confirming call, the
-one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
+their `operation_policy` checks), except `add_skill` and `create_mirror`: the
+call naming a preview's `content_hash`, or a mirror's `consent_note`, is sent
+`always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
 `unattended_writes` allows. Each bind compares a reused session's tools with
 the gated ones a new session would get and updates them in place, so a
@@ -1641,7 +1642,10 @@ admission before any of this runs.
   own agent, a hub run by an admin or that channel's admin included, is
   gated by and charged to that channel's budget. The billed media tool
   runs the same gates, then the budget of the channel named by the calling
-  turn's `origin_context_id`, and charges its spend to that channel.
+  turn's `origin_context_id`, and charges its spend to that channel. An
+  answered `ask` is queued for the tenant's mirrors
+  (`daimon.core.mirror_delivery`), which the Discord bot's mirror poller
+  posts. See [mirrors.md](mirrors.md).
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.

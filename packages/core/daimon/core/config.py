@@ -1383,6 +1383,49 @@ class TurnQueueSettings(BaseModel):
     )
 
 
+class MirrorsSettings(BaseModel):
+    """Copies of agent-chat questions and answers into a channel (``DAIMON_MIRRORS__*``).
+
+    Each mirror is set up by an admin and stored in the database; these
+    settings switch the feature on and bound its outbox.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Record agent-chat questions and answers for the tenant's mirrors and run the "
+            "Discord poster that posts them. Off by default: nothing is recorded or posted."
+        ),
+    )
+    poll_interval_s: float = Field(
+        default=5.0, gt=0, description="Seconds between the chat adapter's outbox polls."
+    )
+    lease_s: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Seconds a poster holds a claimed post. A claim that outlives it is settled "
+            "skipped, never posted twice."
+        ),
+    )
+    max_pending_age_s: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "Seconds a post may wait in the outbox. Older ones are skipped, so an outage "
+            "does not end in a flood of old answers."
+        ),
+    )
+    max_answer_chars: int = Field(
+        default=3000,
+        ge=100,
+        description=(
+            "Most characters of a question or answer posted; longer text is cut with a "
+            "note of how much was left out. A mirror may set a lower limit."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1471,6 +1514,7 @@ class Settings(BaseSettings):
     support: SupportSettings = Field(default_factory=SupportSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
+    mirrors: MirrorsSettings = Field(default_factory=MirrorsSettings)
     tool_safety: ToolSafetyPolicy = Field(
         default_factory=ToolSafetyPolicy,
         description=(

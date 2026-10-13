@@ -42,6 +42,7 @@ typo is silent — check the spelling here.
 - [Support](#support)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
+- [Mirrors](#mirrors)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -1199,6 +1200,49 @@ refused with the plain capacity notice.
 
 Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
 queue and its card ends with the ordinary error.
+
+## Mirrors
+
+Read from `daimon.core.config.MirrorsSettings`. Prefix `DAIMON_MIRRORS__`.
+
+Copies of agent-chat questions and answers into a channel (``DAIMON_MIRRORS__*``).
+
+Each mirror is set up by an admin and stored in the database; these settings switch the
+feature on and bound its outbox.
+
+### `DAIMON_MIRRORS__ENABLED`
+
+`bool` · optional · default `False`
+
+Record agent-chat questions and answers for the tenant's mirrors and run the Discord
+poster that posts them. Off by default: nothing is recorded or posted.
+
+### `DAIMON_MIRRORS__POLL_INTERVAL_S`
+
+`float` · optional · default `5.0`
+
+Seconds between the chat adapter's outbox polls.
+
+### `DAIMON_MIRRORS__LEASE_S`
+
+`float` · optional · default `120.0`
+
+Seconds a poster holds a claimed post. A claim that outlives it is settled skipped,
+never posted twice.
+
+### `DAIMON_MIRRORS__MAX_PENDING_AGE_S`
+
+`float` · optional · default `1800.0`
+
+Seconds a post may wait in the outbox. Older ones are skipped, so an outage does not end
+in a flood of old answers.
+
+### `DAIMON_MIRRORS__MAX_ANSWER_CHARS`
+
+`int` · optional · default `3000`
+
+Most characters of a question or answer posted; longer text is cut with a note of how
+much was left out. A mirror may set a lower limit.
 
 ## Tool Safety
 

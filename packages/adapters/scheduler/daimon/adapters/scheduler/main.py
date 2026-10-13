@@ -49,7 +49,7 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.config import Settings, load_settings
+from daimon.core.config import MirrorsSettings, Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -76,6 +76,7 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.mirror_delivery import sweep_mirror_deliveries
 from daimon.core.observability import init_sentry
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
@@ -626,6 +627,16 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         await sweep_expired_hub_oauth_kv(sm, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
+
+
+async def _sweep_mirror_deliveries(
+    sm: async_sessionmaker[AsyncSession], settings: MirrorsSettings
+) -> None:
+    """Settle mirror posts that must not post; database errors retry next tick."""
+    try:
+        await sweep_mirror_deliveries(sm, settings=settings, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.mirror_delivery_sweep.failed")
 
 
 async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> None:
@@ -1210,6 +1221,7 @@ async def run(
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _sweep_mirror_deliveries(sm, settings.mirrors)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -1243,6 +1255,7 @@ async def run(
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _sweep_mirror_deliveries(sm, settings.mirrors)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(

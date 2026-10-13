@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 120 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 123 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -252,6 +252,16 @@ Media MCP tools: YouTube transcript and file upload.
 | --- | --- | --- |
 | `create_file_upload_url` | all callers | Post, send, or share a file to another channel, or from a routine — step 1 of 2. |
 | `fetch_youtube_transcript` | all callers | Fetch the transcript of a public YouTube video for summarization or Q&A. |
+
+## `mirrors`
+
+Mirror tools: create / list / remove (`daimon.core.mirrors`).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_mirror` | admin only | Copy an agent's agent-chat questions and answers into a Discord channel or thread of this server. |
+| `list_mirrors` | admin only | List this workspace's mirrors: what each copies where, whether it is paused and why, and its recorded consent. |
+| `remove_mirror` | admin only | Remove a mirror by name and drop its queued posts. |
 
 ## `notebook`
 

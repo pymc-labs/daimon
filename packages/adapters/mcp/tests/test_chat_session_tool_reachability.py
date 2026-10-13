@@ -337,5 +337,6 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
     assert {tool["name"] for tool in chat["result"]["tools"]} == {
         "call_tool",
         "search_tools",
-        *APPROVAL_TOOLS,
+        # create_mirror is admin-only, so a member never sees it.
+        *(APPROVAL_TOOLS - {"create_mirror"}),
     }

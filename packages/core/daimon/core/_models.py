@@ -3394,3 +3394,118 @@ class SessionSettleState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class Mirror(Base):
+    """A standing copy of one agent's agent-chat questions and answers into a
+    channel or thread (`daimon.core.mirrors`).
+
+    The destination tenant is the mirror's own until tenants can be linked;
+    the check constraint holds that. `consent_*` records an admin's attestation
+    that the askers agreed to share, which a person's own session needs.
+    """
+
+    __tablename__ = "mirrors"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_mirrors_tenant_name"),
+        CheckConstraint("dest_tenant_id = tenant_id", name="ck_mirrors_same_tenant"),
+        CheckConstraint("format IN ('qa')", name="ck_mirrors_format"),
+        CheckConstraint("dest_kind IN ('channel', 'thread')", name="ck_mirrors_dest_kind"),
+        CheckConstraint(
+            "consent_basis IS NULL OR consent_basis IN ('attested')",
+            name="ck_mirrors_consent_basis",
+        ),
+        CheckConstraint("status IN ('active', 'paused')", name="ck_mirrors_status"),
+        Index("ix_mirrors_active", "tenant_id", postgresql_where=text("status = 'active'")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_agent_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    format: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'qa'"))
+    dest_tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    dest_platform: Mapped[str] = mapped_column(Text, nullable=False)
+    dest_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    dest_id: Mapped[str] = mapped_column(Text, nullable=False)
+    consent_basis: Mapped[str | None] = mapped_column(Text)
+    consent_note: Mapped[str | None] = mapped_column(Text)
+    consent_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    paused_reason: Mapped[str | None] = mapped_column(Text)
+    max_answer_chars: Mapped[int | None] = mapped_column(Integer)
+    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class MirrorDelivery(Base):
+    """The mirror outbox: one row per (mirror, event), drained by the chat
+    adapter of the destination's platform.
+
+    `payload` holds the question and answer only until the row settles. The
+    thread a session's posts go to is the last delivered row's `dest_thread_id`.
+    """
+
+    __tablename__ = "mirror_deliveries"
+    __table_args__ = (
+        UniqueConstraint("mirror_id", "event_id", name="uq_mirror_deliveries_event"),
+        CheckConstraint(
+            "status IN ('pending', 'claimed', 'delivered', 'skipped')",
+            name="ck_mirror_deliveries_status",
+        ),
+        Index(
+            "ix_mirror_deliveries_pending",
+            "created_at",
+            postgresql_where=text("status IN ('pending', 'claimed')"),
+        ),
+        Index("ix_mirror_deliveries_session", "mirror_id", "source_session_key", "created_at"),
+        Index("ix_mirror_deliveries_account", "source_account_id"),
+        Index(
+            "ix_mirror_deliveries_thread",
+            "dest_thread_id",
+            postgresql_where=text("dest_thread_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    mirror_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mirrors.id", ondelete="CASCADE"), nullable=False
+    )
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_session_key: Mapped[str] = mapped_column(Text, nullable=False)
+    source_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    note: Mapped[str | None] = mapped_column(Text)
+    lease_owner: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dest_thread_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

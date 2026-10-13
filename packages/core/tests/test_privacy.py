@@ -902,6 +902,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "channel_admins": "channel_admins",
         "agent_post_requesters": "agent_post_requesters",
         "platform_user_names": "platform_user_names",
+        "mirror_deliveries": "mirror_deliveries",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -952,6 +953,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "direct_message_conversations": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
+        "mirror_deliveries": "source_account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -1037,6 +1039,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",
+            # A mirror is the tenant's; its creator and consent attester are
+            # SET NULL, so erasure severs who set it up and keeps the mirror.
+            "mirrors",
         }
     )
 
