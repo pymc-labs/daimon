@@ -371,7 +371,7 @@ async def sync_agent_mcp_credentials(
 
     ``vault_ids`` remembers the vault ``ensure_agent_mcp_vault`` returned, so
     later turns skip its walk over every vault in the workspace. A cached
-    vault that has since been deleted is resolved again on the mirror's 404.
+    vault that has since been deleted or archived is resolved again.
     """
     credentials = await resolve_agent_mcp_credentials(
         sessionmaker=sessionmaker,
@@ -407,22 +407,22 @@ async def sync_agent_mcp_credentials(
         await mirror(await ensure())
         return
     key = (account_id, agent_id, public_url)
-    cached = vault_ids.get(key)
-    if cached is None:
+    vault_id = vault_ids.get(key)
+    if vault_id is None or not await _vault_is_live(client, vault_id):
         vault_ids[key] = vault_id = await ensure()
-        await mirror(vault_id)
-        return
+    await mirror(vault_id)
+
+
+async def _vault_is_live(client: AsyncAnthropic, vault_id: str) -> bool:
+    """Whether a cached vault still takes credentials: neither deleted nor archived.
+
+    One retrieve, where `ensure_agent_mcp_vault` walks every vault in the workspace.
+    """
     try:
-        await mirror(cached)
+        vault = await client.beta.vaults.retrieve(vault_id)
     except anthropic.NotFoundError:
-        # The cached vault may have been archived: resolve it again (outside the
-        # lock, which ensure takes itself). The same id back means the 404 was
-        # about something else, so it propagates as it would uncached.
-        vault_ids.pop(key, None)
-        vault_ids[key] = vault_id = await ensure()
-        if vault_id == cached:
-            raise
-        await mirror(vault_id)
+        return False
+    return vault.archived_at is None
 
 
 async def resolve_hidden_mcp_server_names(

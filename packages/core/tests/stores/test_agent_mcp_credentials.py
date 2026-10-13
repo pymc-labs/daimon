@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
+import pytest
 from cryptography.fernet import Fernet
 from daimon.core.agent_mcp_credentials import (
     METADATA_VERSION_KEY,
@@ -581,20 +582,29 @@ _VaultKey = tuple[uuid.UUID, uuid.UUID, str]
 def _vault_cache_router(
     *, display: str, agent_id: uuid.UUID, public_url: str, gone: set[str], calls: list[str]
 ) -> MARouter:
-    """One live vault `vlt_me` holding the daimon credential; `gone` ids answer 404."""
+    """One live vault `vlt_me` holding the daimon credential; `gone` ids answer 404,
+    and any other id is an archived vault."""
     router = MARouter()
 
-    def list_vaults(request: httpx.Request, _m: Any) -> httpx.Response:
-        calls.append(f"GET {request.url.path}")
-        vault = {
-            "id": "vlt_me",
+    def vault(vault_id: str) -> dict[str, object]:
+        return {
+            "id": vault_id,
             "type": "vault",
             "display_name": display,
             "metadata": None,
-            "archived_at": None,
+            "archived_at": None if vault_id == "vlt_me" else "2026-09-10T00:00:00Z",
             "created_at": "2026-09-01T00:00:00Z",
         }
-        return list_response([vault])
+
+    def list_vaults(request: httpx.Request, _m: Any) -> httpx.Response:
+        calls.append(f"GET {request.url.path}")
+        return list_response([vault("vlt_me")])
+
+    def retrieve_vault(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        calls.append(f"GET {request.url.path}")
+        if match["vault"] in gone:
+            return not_found_response("vault not found")
+        return httpx.Response(200, json=vault(match["vault"]))
 
     def list_creds(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         calls.append(f"GET {request.url.path}")
@@ -622,6 +632,7 @@ def _vault_cache_router(
         return httpx.Response(200, json=created)
 
     router.add("GET", r"/v1/vaults", list_vaults)
+    router.add("GET", r"/v1/vaults/(?P<vault>[^/]+)", retrieve_vault)
     router.add("GET", r"/v1/vaults/(?P<vault>[^/]+)/credentials", list_creds)
     router.add("POST", r"/v1/vaults/(?P<vault>[^/]+)/credentials", create_cred)
     return router
@@ -684,22 +695,27 @@ async def test_sync_lists_vaults_once_then_reuses_the_cached_vault(
     )
 
     assert calls.count("GET /v1/vaults") == 1, f"only the first turn walks the vaults: {calls}"
+    assert calls.count("GET /v1/vaults/vlt_me") == 1, f"the hit checks the vault once: {calls}"
     assert vault_ids == {key: "vlt_me"}, "the miss must cache the resolved vault"
     assert calls.count("POST /v1/vaults/vlt_me/credentials") == 2, (
         f"both turns must still mirror into the vault: {calls}"
     )
 
 
-async def test_sync_resolves_again_when_the_cached_vault_was_deleted(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize("gone", [{"vlt_old"}, set()], ids=["deleted", "archived"])
+async def test_sync_resolves_again_when_the_cached_vault_is_deleted_or_archived(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    gone: set[str],
 ) -> None:
-    """A cached vault that now 404s is evicted, re-resolved once and mirrored into."""
+    """A cached vault that is gone or archived is replaced before anything is mirrored."""
     calls, vault_ids, key = await _sync_twice_with_vault_cache(
-        db_session, db_session_factory, cached_vault_id="vlt_gone", gone={"vlt_gone"}
+        db_session, db_session_factory, cached_vault_id="vlt_old", gone=gone
     )
 
-    assert calls.count("GET /v1/vaults/vlt_gone/credentials") == 1, (
-        f"the deleted vault is tried once, then never again: {calls}"
+    assert calls.count("GET /v1/vaults/vlt_old") == 1, f"the stale vault is checked once: {calls}"
+    assert not any("vlt_old/credentials" in call for call in calls), (
+        f"nothing is mirrored into the stale vault: {calls}"
     )
     assert calls.count("GET /v1/vaults") == 1, f"recovery walks the vaults exactly once: {calls}"
     assert vault_ids == {key: "vlt_me"}, "the cache must now hold the live vault"
