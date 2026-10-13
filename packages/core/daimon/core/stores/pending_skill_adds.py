@@ -26,17 +26,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 PENDING_SKILL_ADD_TTL: Final = timedelta(minutes=15)
 """How long a preview waits for its person's confirming message."""
 
-AFFIRMATIVES: Final = frozenset({"yes", "y", "confirm", "approve"})
-"""The whole replies that confirm a preview, once mentions and closing punctuation go."""
+AFFIRMATIVES: Final = frozenset(
+    {
+        "yes", "y", "yes please", "yes pls", "yep", "yeah",
+        "ok", "okay", "sure", "go ahead", "do it", "confirm", "approve",
+    }
+)  # fmt: skip
+"""The whole replies that confirm a preview, once mentions and closing `.`/`!` go
+and commas and runs of whitespace become one space."""
 
 # Discord <@123>/<@!123>/<@&123>, Slack <@U123>/<@U123|name>, Teams <at>name</at>.
 _MENTION = re.compile(r"<@[!&]?[\w|.-]+>|<at>.*?</at>", re.IGNORECASE)
 
 
 def is_affirmative(text: str) -> bool:
-    """Whether a person's message is an explicit yes and nothing else."""
-    reply = _MENTION.sub(" ", text).strip().rstrip(".!").strip().lower()
-    return reply in AFFIRMATIVES
+    """Whether a person's message is one of `AFFIRMATIVES` and nothing else.
+
+    The whole message must match: "yes, please!" confirms, but "yes but not
+    now", "ok?" and "sure, after lunch" do not. A `?` is never dropped.
+    """
+    reply = _MENTION.sub(" ", text).strip().rstrip(".!").lower()
+    return " ".join(reply.replace(",", " ").split()) in AFFIRMATIVES
 
 
 async def record_pending_skill_add(

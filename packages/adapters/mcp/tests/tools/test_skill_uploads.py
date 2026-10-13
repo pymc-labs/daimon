@@ -1233,7 +1233,17 @@ async def _add_from(
     )
 
 
-@pytest.mark.parametrize("text", ["yes", "<@1530628070405308456> Yes!", " CONFIRM ", "y."])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "yes",
+        "<@1530628070405308456> Yes!",
+        " CONFIRM ",
+        "y.",
+        "<@1530628070405308456> Yes,  please!",
+        "<at>Daimon</at> go ahead.",
+    ],
+)
 async def test_with_cards_off_a_yes_as_the_next_message_confirms_once(
     db_session_factory: async_sessionmaker[AsyncSession], text: str
 ) -> None:
@@ -1254,7 +1264,17 @@ async def test_with_cards_off_a_yes_as_the_next_message_confirms_once(
 
 
 @pytest.mark.parametrize(
-    "text", ["no", "what does it do?", "yes but change the name first", "sure", ""]
+    "text",
+    [
+        "no",
+        "what does it do?",
+        "yes but change the name first",
+        "yes but not now",
+        "ok?",
+        "sure, after lunch",
+        "yes please don't",
+        "",
+    ],
 )
 async def test_with_cards_off_any_other_next_message_cancels(
     db_session_factory: async_sessionmaker[AsyncSession], text: str

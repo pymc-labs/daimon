@@ -30,6 +30,10 @@ matrix §A/§D):
   ``.config``) that is ~100 MB before the task writes anything, so every dot
   entry directly under ``$HOME`` is excluded and only the non-hidden ones are
   carried.
+- The loose non-hidden files directly under ``/`` travel too: ``/`` is where
+  the shell starts, and no environment setting moves it, so a file written
+  "in your working directory" lands there (observed live). Only files, never
+  ``/``'s directories, which are the system itself.
 - ``/tmp/work`` is an archived root too, minus its own dot entries and this
   module's scratch file. It is not where daimon would choose to put working
   files, but it is where an agent asked to "create notes.md" reached for
@@ -166,7 +170,8 @@ def build_checkpoint_prompt(
         roots.append(_relative_to_root(repo_mount_path))
     roots_argument = " ".join(roots)
 
-    excludes = [f"--exclude-from={_EXCLUDE_LIST_PATH}"]
+    # The oversize list holds file names, not patterns: a name like `[e]tc` must not match.
+    excludes = [f"--no-wildcards --exclude-from={_EXCLUDE_LIST_PATH} --wildcards"]
     # Every dot entry directly under $HOME: .ssh, and the ~100 MB of toolchain
     # caches the base image ships (.bun/.cargo/.rustup/.gradle/.npm/.local/
     # .config). `*` matches `/` in a tar exclude pattern, so the subtree goes
@@ -184,9 +189,15 @@ def build_checkpoint_prompt(
     excludes += [f"--exclude='*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS]
     excludes.append("--exclude='*.env'")
     tar_command = "\n".join(
-        [f"  tar czf {archive_path} \\"]
+        # The loose files in /, where the shell starts, NUL-separated into tar's file list:
+        # never re-read by the shell, `./`-prefixed so no name is an option, and the
+        # oversize ones left out by find itself.
+        [
+            f"  find / -maxdepth 1 -type f ! -name '.*' ! -size +{max_bundle_mib}M "
+            f"-printf './%P\\0' | tar czf {archive_path} \\"
+        ]
         + [f"    {exclude} \\" for exclude in excludes]
-        + [f"    -C / {roots_argument}"]
+        + [f"    -C / {roots_argument} --null -T -"]
     )
 
     steps: list[str] = []
@@ -209,7 +220,8 @@ def build_checkpoint_prompt(
         f"{HANDOFF_FILENAME_PREFIX}. Do exactly the steps below, in order, and add no steps "
         "of your own. Do not open or read any image file.",
         "Only the task's own work travels: the non-hidden entries in "
-        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the outputs directory, and the working "
+        f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the files directly in / (where the shell "
+        "starts), the outputs directory, and the working "
         "repository if one is mounted. Credential mounts, hidden directories and language "
         "toolchains and their caches stay behind. The commands below already exclude every one "
         "of them; run them as written and add nothing.",

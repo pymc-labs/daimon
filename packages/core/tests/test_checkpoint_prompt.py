@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
+import pytest
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_EXCLUDED_GLOBS,
@@ -20,6 +24,7 @@ from daimon.core.checkpoint_prompt import (
     handoff_filename,
     is_handoff_filename,
 )
+from daimon.core.handoff_context import render_handoff_framing
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 
 TRANSFER_ID = uuid.UUID("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
@@ -245,7 +250,7 @@ def test_prompt_leaves_uncommitted_changes_behind_when_the_answer_is_leave() -> 
         "the person chose to leave the changes, so nothing captures them as a patch"
     )
     assert "ls-files --others" not in prompt, "nor lists the untracked files to carry"
-    assert "-C / root mnt/session/outputs tmp/work\n" in f"{prompt}\n", (
+    assert "-C / root mnt/session/outputs tmp/work --null -T -\n" in f"{prompt}\n", (
         "the checkout must not be tarred either, or the changes would come across anyway"
     )
     assert "-C / root mnt/session/outputs mnt/repo" not in prompt, "the repo is not a root here"
@@ -315,7 +320,8 @@ def test_prompt_names_what_travels_and_what_stays_behind_in_words() -> None:
     )
     assert (
         "Only the task's own work travels: the non-hidden entries in /root and /tmp/work, the "
-        "outputs directory, and the working repository if one is mounted." in prompt
+        "files directly in / (where the shell starts), the outputs directory, and the working repository if one is mounted."
+        in prompt
     ), "the prompt must name what travels, not only pass it to tar"
     assert (
         "Credential mounts, hidden directories and language toolchains and their caches "
@@ -363,8 +369,9 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
     archive = f"/mnt/session/outputs/{handoff_filename(TRANSFER_ID)}"
     expected = "\n".join(
         [
-            f"  tar czf {archive} \\",
-            "    --exclude-from=/tmp/daimon-handoff-excludes.txt \\",
+            "  find / -maxdepth 1 -type f ! -name '.*' ! -size +20M -printf './%P\\0' "
+            f"| tar czf {archive} \\",
+            "    --no-wildcards --exclude-from=/tmp/daimon-handoff-excludes.txt --wildcards \\",
             "    --exclude='root/.*' \\",
             "    --exclude='tmp/work/.*' \\",
             "    --exclude='tmp/daimon-handoff-excludes.txt' \\",
@@ -378,7 +385,7 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
             "    --exclude='*/__pycache__' \\",
             "    --exclude='*/.cache' \\",
             "    --exclude='*.env' \\",
-            "    -C / root mnt/session/outputs tmp/work mnt/repo/analytics",
+            "    -C / root mnt/session/outputs tmp/work mnt/repo/analytics --null -T -",
         ]
     )
     assert expected in prompt, "the generated tar command changed"
@@ -451,4 +458,80 @@ def test_prompt_archives_the_scratch_directory_minus_its_own_exclude_list() -> N
     )
     assert "find root mnt/session/outputs tmp/work -type f -size +20M" in prompt, (
         "and the oversize scan covers every root it will tar"
+    )
+
+
+# Names that the shell or tar would read as something else: separators, globs that
+# match a system directory or everything, and a tar option that follows symlinks.
+_HOSTILE_NAMES = ("my notes.txt", "new\nline.txt", "[e]tc", "*", "--dereference")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_a_file_written_in_the_shell_working_directory_travels_and_restores(
+    tmp_path: Path,
+) -> None:
+    """The sandbox shell starts in /, so `echo … > qa_keep.txt` "in your working
+    directory" writes /qa_keep.txt. Runs the archive step with real bash, find
+    and tar against a fake /, unpacks it with the command the successor is
+    given, and applies the restore rule to a fake successor /."""
+    old = tmp_path / "old"
+    uploads = old / "mnt" / "session" / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "credentials").write_text("SECRET\n")
+    (old / "root").mkdir()
+    (old / "root" / "HANDOFF.md").write_text("- Files: /qa_keep.txt\n")
+    (old / "root" / "creds").symlink_to(uploads / "credentials")
+    (old / "mnt" / "session" / "outputs").mkdir()
+    (old / "etc").mkdir()
+    (old / "etc" / "system-config").write_text("old system\n")
+    (old / ".dockerenv").write_text("")
+    (old / "qa_keep.txt").write_text("8e6287d4\n")
+    for name in _HOSTILE_NAMES:
+        (old / name).write_text(f"task file {name}\n")
+
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
+    )
+    archive_step = prompt[prompt.index("  cd /\n") : prompt.index("The find step lists")]
+    # Every absolute path in the step, re-rooted at the fake /.
+    script = re.sub(r"(?<=[\s=(])/", f"{old}/", archive_step).replace("\\\n", " ")
+    subprocess.run(["bash", "-euc", script], check=True, capture_output=True)
+
+    bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
+    handoff = tmp_path / "new" / "root" / "handoff"
+    handoff.mkdir(parents=True)
+    subprocess.run(["tar", "xzf", str(bundle), "-C", str(handoff)], check=True)
+    assert not (handoff / "etc").exists(), "a name that globs to /etc must not carry /etc"
+    assert not (handoff / ".dockerenv").exists(), "dotfiles in / stay behind"
+    assert (handoff / "root" / "creds").is_symlink(), (
+        "a symlink travels as a link, never as the excluded file it points at"
+    )
+    assert "SECRET" not in bundle.read_bytes().decode("latin-1")
+
+    framing = render_handoff_framing(
+        model_id="claude-sonnet-5",
+        transfer_kind="full",
+        bundle_mount_path=CHECKPOINT_BUNDLE_MOUNT_PATH,
+        from_agent_name="a",
+        to_agent_name="a",
+        requested_work=None,
+        previous_session=None,
+        not_carried=(),
+    )
+    assert framing.system is not None
+    assert "`handoff/<path>` goes back to `/<path>`" in framing.system.blocks[0]["text"]
+    new = tmp_path / "new"
+    (new / "etc").mkdir()
+    (new / "etc" / "system-config").write_text("new system\n")
+    for path in handoff.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            target = new / path.relative_to(handoff)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+
+    assert (new / "qa_keep.txt").read_text() == "8e6287d4\n", "the file is back at /qa_keep.txt"
+    for name in _HOSTILE_NAMES:
+        assert (new / name).read_text() == f"task file {name}\n", f"{name!r} travels as itself"
+    assert (new / "etc" / "system-config").read_text() == "new system\n", (
+        "and restoring it touches no system path"
     )

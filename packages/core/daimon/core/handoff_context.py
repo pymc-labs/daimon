@@ -219,9 +219,8 @@ def _framing_text(
             "`tmp/work/` (its scratch directory). Read "
             "`handoff/root/HANDOFF.md` first: it is the previous responder's own note on the "
             "task, the decisions taken and the working files. Put back what the task still "
-            "needs, in place: `handoff/root/...` under /root/, "
-            "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/, and "
-            "`handoff/tmp/work/...` under /tmp/work/. Anything restored "
+            "needs, in place: `handoff/<path>` goes back to `/<path>`, so a file directly in "
+            "`handoff/` goes in /, where its shell started. Anything restored "
             "into the outputs directory may be delivered to this thread a second time, which "
             "is expected and not a problem."
         )

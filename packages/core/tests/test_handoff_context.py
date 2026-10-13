@@ -445,9 +445,11 @@ def test_framing_tells_the_successor_where_each_half_of_the_archive_goes_back() 
 
     assert "paths inside start with `root/`" in full, "the home tree keeps its old prefix"
     assert "`mnt/session/outputs/`" in full, "and so does the tree the file tool wrote"
-    assert "`handoff/root/...` under /root/" in full, "home files go back to the home directory"
-    assert "`handoff/mnt/session/outputs/...` under /mnt/session/outputs/" in full, (
-        "and delivered files go back to the outputs directory"
+    assert "`handoff/<path>` goes back to `/<path>`" in full, (
+        "every tree goes back where it came from: home, outputs, scratch"
+    )
+    assert "a file directly in `handoff/` goes in /, where its shell started" in full, (
+        "and a file written in the shell's starting directory goes back there"
     )
     assert "delivered to this thread a second time, which is expected" in full, (
         "the output sweep will re-post a restored output; the successor must not "

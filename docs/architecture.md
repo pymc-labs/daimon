@@ -1011,17 +1011,30 @@ upload must take a new name. Its `user_skills` row has `source = "upload"`, an o
 origin is `owner/repo/path@branch`, never the URL as typed) and the adding
 account, so no repo sync replaces, deletes or re-attaches it, and removing the
 skill forgets it. `add_skill` previews first and adds only when called again
-with the preview's hash, which is bound to the target agent, and only after the
-person presses Approve on the confirmation card (below). The server checks the
-card can exist: the confirm needs a verified origin whose live session runs the
-origin's responder with `add_skill` on `always_ask` (`has_confirmation_gate`),
-as MA reports the session or, only when it reports the agent's own tools
-(leaving the per-session overrides out), as the bind recorded sending them. Without that, as with tool safety off, an
-`agent_chat` session or one whose tools have not caught up yet, a chat
-confirm adds nothing; the preview and the refusal say which case it was and
-point to Add skill in
-the setup panels' Details (Discord takes a paste or a file, Slack a paste),
-where the person's own submit is the approval. The `skill_add` and
+with the preview's hash, which is bound to the target agent; the model's word
+alone never adds it. With confirmation cards on, the person presses Approve on
+the card (below). The server checks the card can exist: the confirm needs a
+verified origin whose live session runs the origin's responder with
+`add_skill` on `always_ask` (`has_confirmation_gate`), as MA reports the
+session or, only when it reports the agent's own tools (leaving the
+per-session overrides out), as the bind recorded sending them. Where the
+deployment turned cards off (tool safety off), a chat preview is recorded
+instead, bound to the person, thread, target agent and previewed content. The
+person's next direct message in that thread settles it
+(`resolve_pending_skill_adds`): if the whole message, after mentions and a
+closing `.` and `!` are removed and commas and spaces collapsed, is one of
+`yes`, `y`, `yes please`, `yes pls`, `yep`, `yeah`, `ok`, `okay`, `sure`,
+`go ahead`, `do it`, `confirm` or `approve` (any case), it approves the add
+for the turn that message started, once, within 15 minutes; any other reply,
+including a question (`ok?`) or a condition (`yes but not now`,
+`sure, after lunch`), cancels it. A message queued behind a running turn
+leaves the preview open. Only Discord passes the person's message to the
+turn today; Slack and Teams do not, so there a reply never confirms. In an
+`agent_chat` session, or one whose tools have not caught up with tool safety
+yet, a chat confirm adds nothing; the preview and the refusal say which case
+it was and point to Add skill in the setup panels' Details (Discord takes a
+paste or a file, Slack a paste), where the person's own submit is the
+approval. The `skill_add` and
 `skill_remove` operations follow the shared-agent rule
 (`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
 admins on any other, channel admins on agents of theirs local to their channels, anyone

@@ -6,10 +6,13 @@ from datetime import UTC, datetime
 
 import pytest
 from daimon.core._models import PendingSkillAdd
+from daimon.core.stores import github_grant_proposals
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.pending_skill_adds import (
+    AFFIRMATIVES,
     consume_pending_skill_add,
+    is_affirmative,
     record_pending_skill_add,
 )
 from daimon.core.stores.turn_origins import get_active_origin, update_origin_target
@@ -103,6 +106,75 @@ async def test_queued_message_cannot_settle_preview_created_during_running_turn(
             content_hash="preview",
             now=datetime.now(UTC),
         ), "a fresh yes after the preview turn may approve the pending preview"
+
+
+CONSENT_PHRASES = [
+    "yes", "y", "yes please", "yes pls", "yep", "yeah",
+    "ok", "okay", "sure", "go ahead", "do it", "confirm", "approve",
+]  # fmt: skip
+
+
+def test_the_consent_vocabulary_changes_only_on_purpose() -> None:
+    assert frozenset(CONSENT_PHRASES) == AFFIRMATIVES
+
+
+@pytest.mark.parametrize("phrase", CONSENT_PHRASES)
+def test_a_consent_phrase_confirms_only_as_the_whole_message(phrase: str) -> None:
+    assert is_affirmative(f"<@123> {phrase.replace(' ', ',  ').upper()}!")
+    for reply in (f"{phrase}?", f"{phrase} but not now", f"{phrase}, after lunch"):
+        assert not is_affirmative(reply), reply
+
+
+@pytest.mark.parametrize("reply", ["yes please don't", "ok?", "sure if safe", "no", ""])
+def test_a_question_condition_or_refusal_does_not_confirm(reply: str) -> None:
+    assert not is_affirmative(reply)
+
+
+@pytest.mark.parametrize(("reply", "approved"), [("<@123> Yes, please!", True), ("yes but", False)])
+async def test_a_github_grant_proposal_is_approved_only_by_a_whole_message_yes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    reply: str,
+    approved: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    kwargs = dict(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="parent",
+        thread_id="thread",
+        responder_ma_agent_id="agent",
+        responder_name="Agent",
+        role=Role.USER,
+    )
+    grant = dict(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform_user_id="user",
+        platform="discord",
+        thread_id="thread",
+        agent_id=uuid.uuid4(),
+        repo_name="pymc-labs/daimon",
+        ability="read",
+    )
+    async with (
+        turn_origin(db_session_factory, **kwargs, message_text="grant it read") as first,
+        db_session_factory.begin() as session,
+    ):
+        await github_grant_proposals.propose(session, **grant, origin_id=first.id)
+    async with (
+        turn_origin(db_session_factory, **kwargs, message_text=reply) as second,
+        db_session_factory.begin() as session,
+    ):
+        assert (
+            await github_grant_proposals.consume(
+                session, **grant, origin_id=second.id, origin_created_at=second.created_at
+            )
+            is approved
+        )
 
 
 async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
