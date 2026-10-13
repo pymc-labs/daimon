@@ -67,8 +67,8 @@ class ResolverCache(TTLCache[_CacheKey, str]):
         self.agent_retrieves: dict[_ResourceKey, asyncio.Task[BetaManagedAgentsAgent]] = {}
         self.environment_retrieves: dict[_ResourceKey, asyncio.Task[BetaEnvironment]] = {}
         # (account_id, agent_id, public_url) -> MCP vault id. Finding a vault
-        # walks every vault in the workspace; a deleted one is caught by the
-        # caller's 404, so the TTL only bounds how long an orphan is written to.
+        # walks every vault in the workspace; a hit is checked live (one
+        # retrieve) before use, so a deleted or archived vault is replaced.
         self.mcp_vault_ids: TTLCache[tuple[uuid.UUID, uuid.UUID, str], str] = TTLCache[
             tuple[uuid.UUID, uuid.UUID, str], str
         ](1024, 600, timer=timer)
