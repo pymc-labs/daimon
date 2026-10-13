@@ -1323,8 +1323,8 @@ class TestOnReadySweepWidenedReconcile:
         self,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """A ready tenant whose guild was unavailable at the first on_ready took the
-        unjoined reconcile; once the guild is back it still gets the guild-bound seed."""
+        """A ready tenant whose guild was not joined at the first on_ready took the
+        unjoined reconcile; once the guild is back it still gets the joined one."""
         from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.ma_identity import derive_tenant_uuid

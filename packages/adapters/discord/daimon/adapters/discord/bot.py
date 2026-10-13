@@ -690,7 +690,7 @@ class DaimonBot(commands.Bot):
         self._startup_replay_started = False
         # The same re-fire must not redo the all-tenant defaults reconcile and
         # command syncs: a later on_ready covers only what earlier ones did not
-        # (a guild revived or unavailable meanwhile, a reconcile that has not
+        # (a guild joined or rejoined meanwhile, a reconcile that has not
         # succeeded yet, a sync that failed). Tenants are added on success only.
         self._ready_reconciled_tenant_ids: set[uuid.UUID] = set()
         self._ready_reconciled_unjoined_tenant_ids: set[uuid.UUID] = set()
@@ -1869,8 +1869,8 @@ class DaimonBot(commands.Bot):
         # cap above. Per-guild permission check + tree sync for joined guilds.
         for tr in tenants:
             guild = self.get_guild(int(tr.external_id))
-            # Tracked per path: only the joined reconcile seeds guild-bound
-            # defaults, so a guild back since the last ready still gets them.
+            # Tracked per path: the joined path adds the roster check and the
+            # ready flip, so a guild back since the last ready still gets them.
             reconciled_ids = (
                 self._ready_reconciled_unjoined_tenant_ids
                 if guild is None
