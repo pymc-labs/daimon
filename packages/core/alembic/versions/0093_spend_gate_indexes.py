@@ -8,14 +8,15 @@ index lets that sum run as an index-only scan. Each new index starts with
 the columns of the one it replaces, so every read that used the old one can
 use the new one. The indexes are built and dropped concurrently, outside the
 migration transaction, so turns keep writing both tables meanwhile. A run
-cut off mid-build leaves an invalid index behind, so each step first drops
-what it builds: a retried run rebuilds rather than failing on it.
+cut off mid-build leaves an invalid index behind; a retried run drops that
+and builds again, and keeps a new index that is already valid.
 
 downgrade: safe
 """
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0093_spend_gate_indexes"
@@ -28,9 +29,19 @@ def _replace(
     table: str, old: str, new: str, columns: Sequence[str], include: Sequence[str] = ()
 ) -> None:
     """Build `new` concurrently, then drop `old`; safe to re-run after a partial run."""
-    op.drop_index(new, table_name=table, if_exists=True, postgresql_concurrently=True)
+    invalid = op.get_bind().scalar(
+        sa.text("SELECT NOT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)"),
+        {"name": new},
+    )
+    if invalid:
+        op.drop_index(new, table_name=table, postgresql_concurrently=True)
     op.create_index(
-        new, table, list(columns), postgresql_include=list(include), postgresql_concurrently=True
+        new,
+        table,
+        list(columns),
+        postgresql_include=list(include),
+        postgresql_concurrently=True,
+        if_not_exists=True,
     )
     op.drop_index(old, table_name=table, if_exists=True, postgresql_concurrently=True)
 
