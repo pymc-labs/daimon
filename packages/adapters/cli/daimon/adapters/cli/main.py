@@ -28,6 +28,7 @@ from daimon.adapters.cli.commands.routines import routines_app
 from daimon.adapters.cli.commands.sessions import sessions_app
 from daimon.adapters.cli.commands.skills import skills_app
 from daimon.adapters.cli.commands.smoke import smoke_command
+from daimon.adapters.cli.commands.spaces import spaces_app
 from daimon.adapters.cli.commands.tenants import tenants_app
 from daimon.adapters.cli.commands.usage import usage_app
 from daimon.adapters.cli.logging import configure_bootstrap_logging
@@ -57,6 +58,7 @@ app.add_typer(promo_app, name="promo")
 app.add_typer(repo_bindings_app, name="repo-bindings")
 app.add_typer(github_app, name="github")
 app.add_typer(routines_app, name="routines")
+app.add_typer(spaces_app, name="spaces")
 app.command("run")(run_command)
 app.command("smoke")(smoke_command)
 

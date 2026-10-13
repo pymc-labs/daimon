@@ -78,6 +78,19 @@ class AccountIdentityRow(BaseModel):
     is_external: bool = False
 
 
+class SpaceRow(BaseModel):
+    """One Space: its owner tenant, name and rule (`daimon.core.space_rules`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    readers: Literal["inside", "own"]
+    writers: Literal["any", "own", "none"]
+    created_at: datetime
+
+
 class ChannelAdminsRow(BaseModel):
     """One channel's admins beyond the server admins: role ids and user ids."""
 

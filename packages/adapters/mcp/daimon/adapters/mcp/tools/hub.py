@@ -75,7 +75,7 @@ from daimon.core.channel_admins import confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import agent_permissions
+from daimon.core.permissions import agent_permissions, home_channel_ids
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -170,7 +170,11 @@ def _hub_sees(
 ) -> bool:
     names = agent_pin_names(agent)
     permissions = agent_permissions(policy, names)
-    if subject.is_admin or permissions.home in subject.administered_channel_ids:
+    home = permissions.home
+    # A Space home is seen by a channel admin of every member.
+    if subject.is_admin or (
+        home is not None and home_channel_ids(policy, home) <= subject.administered_channel_ids
+    ):
         return True
     # A member's hub is outside every channel: only its effective workspace
     # responder answers here, and channel-only agents cannot answer here.

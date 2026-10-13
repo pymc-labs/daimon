@@ -287,6 +287,60 @@ class TenantAccessPolicyRecord(Base):
     )
 
 
+_SPACE_RULE_CHECK = (
+    "(readers = 'own' AND writers IN ('own', 'none'))"
+    " OR (readers = 'inside' AND writers IN ('any', 'none'))"
+)
+
+
+class Space(Base):
+    """Channels of one tenant sharing one audience and one rule (`daimon.core.space_rules`).
+
+    `tenant_id` owns the Space; a member's own tenant is on `space_channels`,
+    so members from another tenant fit later without a schema change.
+    """
+
+    __tablename__ = "spaces"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_spaces_tenant_name"),
+        CheckConstraint(_SPACE_RULE_CHECK, name="ck_spaces_rule"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    readers: Mapped[str] = mapped_column(Text, nullable=False)
+    writers: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SpaceChannel(Base):
+    """One channel's Space; the primary key keeps a channel in at most one."""
+
+    __tablename__ = "space_channels"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", name="pk_space_channels"),
+        Index("ix_space_channels_space_id", "space_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    channel_id: Mapped[str] = mapped_column(Text)
+    space_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("spaces.id", ondelete="CASCADE"), nullable=False
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ChannelConfig(Base):
     __tablename__ = "channel_config"
     __table_args__ = (

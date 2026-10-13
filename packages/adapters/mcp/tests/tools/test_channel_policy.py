@@ -22,7 +22,7 @@ from aioresponses import aioresponses
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, SpaceRule, TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -35,6 +35,7 @@ from daimon.core.config import (
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.permissions import with_space
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -376,6 +377,19 @@ def test_read_policy_allows_a_sealed_channel_only_from_inside_it(
         policy=TenantAccessPolicy(sealed_channel_ids=("vault",)), origin_channel_ids=origin
     )
     assert read_policy.allows(channel_id, parent_channel_id) is expected
+
+
+@pytest.mark.parametrize(("origin", "expected"), [("a", True), ("c", False)])
+def test_read_policy_reads_a_space_member_from_another_member_only(
+    origin: str, expected: bool
+) -> None:
+    key = "space:00000000-0000-4000-8000-000000000003"
+    rule = ChannelRule(readers="inside")
+    space = SpaceRule(key=key, name="s", rule=rule, channel_ids=frozenset("ab"))
+    read_policy = ChannelReadPolicy(
+        policy=with_space(TenantAccessPolicy(), key, space), origin_channel_ids=frozenset(origin)
+    )
+    assert read_policy.allows("b", None) is expected
 
 
 @pytest.mark.asyncio

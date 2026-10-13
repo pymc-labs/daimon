@@ -42,6 +42,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import RuleRefused, runs_only_in, thread_rule_key
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.skills.ingest import bundle_from_markdown
+from daimon.core.space_rules import create_space
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -1087,3 +1088,36 @@ async def test_an_agent_rule_naming_an_own_readers_channel_names_it_alone(
     with pytest.raises(ChannelRuleRefused) as home:
         await _agent_rule(client, db_session_factory, tenant.id, "local", None)
     assert home.value.reason == "agent_has_home", "released only through the channel's readers"
+
+
+async def test_space_members_take_one_agent_rule_and_refuse_their_own_rules(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An agent rule may name every channel of an own Space; a member's own rule is the Space's."""
+    tenant = await make_tenant(db_session)
+    client, _ = _client(tenant.id, ("local", False))
+    await _bind(db_session, tenant.id, "c1", "local")
+    await _bind(db_session, tenant.id, "c2", "local")
+    await db_session.commit()
+    await create_space(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        name="client",
+        rule=OWN,
+        channel_ids=["c1", "c2"],
+        subject=ADMIN,
+        default=DEFAULT,
+    )
+
+    assert await _agent_rule(client, db_session_factory, tenant.id, "local", ("c1", "c2")) == (
+        "c1",
+        "c2",
+    ), "two members of one own Space are one home, so one rule names both"
+    with pytest.raises(ChannelRuleRefused, match="Space client.*daimon spaces remove") as refused:
+        await _set_rule(client, db_session_factory, tenant.id, "c1", readers="inside")
+    assert refused.value.reason == "in_space", "a member's rule is set on its Space"
+    with pytest.raises(ChannelRuleRefused, match="names only that Space's channels") as across:
+        await _agent_rule(client, db_session_factory, tenant.id, "local", ("c1", "c3"))
+    assert across.value.reason == "agent_has_home", "the Space's agent stays inside it"

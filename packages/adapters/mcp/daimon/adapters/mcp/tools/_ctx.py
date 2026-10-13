@@ -10,7 +10,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
-from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.channel_budget import first_over_channel_budget
 from daimon.core.permissions import agent_permissions, any_agent_rules, any_own_readers
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -85,13 +85,13 @@ async def _policy_gate(
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
     pin_exempt: bool,
-) -> str | None:
+) -> tuple[str, ...]:
     """The access-policy half of ``_admit``: the agent pin, then the invoker allowlist.
 
     Reads the policy fresh on every call, so ``_admission_recheck`` can run it
     again right before a turn's session is created or its message is sent.
-    Returns the agent's home, the channel it is one of the own agents of
-    (`AgentPermissions.home`), when ``agent_names`` is given, else None.
+    Returns the channels whose budgets gate the run
+    (`AgentPermissions.budget_gate_ids`, a key's bound channel as where it runs).
     """
 
     def refused(reason: TerminationReason) -> None:
@@ -183,7 +183,7 @@ async def _policy_gate(
             "those channels; a question about a shared report can't be answered here."
         )
 
-    owner = agent_permissions(policy, names).home if names else None
+    owner = agent_permissions(policy, names).budget_gate_ids(policy, token_channel_id(auth))
     if auth.platform_user_id is None:
         return owner
     is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
@@ -332,11 +332,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
         refused(TerminationReason.ADMISSION_CAP_EXCEEDED)
         raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', _REFUSAL_NOUNS)}")
 
-    if await is_over_channel_budget(
+    if await first_over_channel_budget(
         sessionmaker=sessionmaker,
         tenant_id=auth.tenant_id,
         platform=auth.platform or "",
-        channel_id=owner or token_channel_id(auth),
+        channel_ids=owner,
         now=datetime.now(UTC),
     ):
         log.info(

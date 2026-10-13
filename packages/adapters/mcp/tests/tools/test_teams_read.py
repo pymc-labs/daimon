@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,7 +11,11 @@ import httpx
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
+from daimon.adapters.mcp.tools._channel_policy import (
+    OPEN_READ_POLICY,
+    ChannelReadPolicy,
+    load_read_policy,
+)
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.tools.teams._read import (
     _teams_get_message_impl,  # pyright: ignore[reportPrivateUsage]
@@ -22,8 +27,9 @@ from daimon.adapters.mcp.tools.teams._read import (
     _teams_search_messages_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, ChannelRule, TenantAccessPolicy
-from daimon.core.authz import AgentRef
+from daimon.core.authz import AgentRef, Subject
 from daimon.core.scope import DeploymentDefault
+from daimon.core.space_rules import create_space
 from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.testing.factories import make_tenant
@@ -289,6 +295,42 @@ async def test_a_private_channel_is_read_only_from_inside_it(
     await _teams_read_channel_impl(
         runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=inside
     )
+
+
+async def test_a_private_channel_in_a_space_is_read_from_another_member(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A Space's channels share one audience, so a key bound to one member is
+    inside a private member too (`space_reach` widens the origin ids)."""
+    auth, fake = await _setup(db_session), _Fake()
+    runtime = _runtime(fake, sessionmaker)
+    bound = replace(auth, agent_id=uuid.uuid4(), bound_channel_id=_CHANNEL)
+    outside = await load_read_policy(runtime, bound, origin_context_id=None)
+    with pytest.raises(ToolError, match="private channel"):
+        await _teams_read_channel_impl(
+            runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=outside
+        )
+    await create_space(
+        runtime.client,
+        sessionmaker,
+        tenant_id=auth.tenant_id,
+        platform="teams",
+        name="client",
+        rule=ChannelRule(readers="inside"),
+        channel_ids=[_CHANNEL, _PRIVATE],
+        subject=Subject(is_admin=True),
+        default=runtime.deployment_default,
+    )
+
+    inside = await load_read_policy(runtime, bound, origin_context_id=None)
+    assert inside.origin_channel_ids == {_CHANNEL}, (
+        "ids stay raw, so a recheck under a later policy widens by that policy's Spaces"
+    )
+    assert _PRIVATE in inside.reach_ids, "the private-channel check sees the Space"
+    await _teams_read_channel_impl(
+        runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=inside
+    )
+    assert fake.graph(), "the private member was read"
 
 
 async def test_a_sealed_channel_is_refused_from_outside(

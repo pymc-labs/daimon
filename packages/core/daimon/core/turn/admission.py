@@ -499,9 +499,11 @@ async def admit_impl(
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
-    budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
-        dm_source_channel_id if is_dm else channel_id
-    )
+    run_channel_id = dm_source_channel_id if is_dm else channel_id
+    agent_limits = agent_permissions(policy, grant.agent.names)
+    # Charged to one channel; a Space agent run in none is charged nowhere but
+    # gated by every member's budget (`budget_gate_ids`).
+    budget_channel_id = agent_limits.budget_channel or run_channel_id
     # The three independent billing decisions still run in their original
     # order, under READ COMMITTED, but share one checked-out connection.
     async with deps.sessionmaker() as billing_session:
@@ -525,14 +527,19 @@ async def admit_impl(
         mark("user_cap")
 
         # --- Channel budget, including the source of a DM or isolated agent ---
-        budget_exceeded = await is_over_channel_budget(
-            sessionmaker=deps.sessionmaker,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=budget_channel_id,
-            now=now,
-            session=billing_session,
-        )
+        over_budget_channel_id: str | None = None
+        for gate_channel_id in agent_limits.budget_gate_ids(policy, run_channel_id):
+            if await is_over_channel_budget(
+                sessionmaker=deps.sessionmaker,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=gate_channel_id,
+                now=now,
+                session=billing_session,
+            ):
+                over_budget_channel_id = gate_channel_id
+                break
+        budget_exceeded = over_budget_channel_id is not None
         mark("channel_budget")
         channel_skill_rows = (
             []
@@ -548,7 +555,7 @@ async def admit_impl(
                 notifier=deps.budget_notifier,
                 tenant_id=tenant_id,
                 platform=platform,
-                channel_id=budget_channel_id,
+                channel_id=over_budget_channel_id,
                 now=now,
                 group_members=deps.group_members,
             )

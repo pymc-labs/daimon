@@ -1414,7 +1414,9 @@ One Discord guild, Slack workspace or Teams (Entra) organisation is one tenant. 
 derived, not allocated: `derive_tenant_uuid(platform, workspace_id)` in
 `packages/core/daimon/core/ma_identity.py` is a UUID5 under a frozen
 namespace, so the same workspace maps to the same tenant across database
-resets and processes.
+resets and processes. A Space (`spaces`, `space_channels`) groups channels of
+one tenant under one rule and never spans tenants
+([Spaces](permissions.md#spaces)).
 
 Isolation is enforced in two places at once.
 

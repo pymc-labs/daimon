@@ -17,13 +17,16 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._session_access import load_hub_subject
 from daimon.adapters.mcp.tools.hub import (  # pyright: ignore[reportPrivateUsage]
     _auth_for,
+    _hub_sees,
     _list_daimons_impl,
     _resolve_daimon,
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, SpaceRule, TenantAccessPolicy
+from daimon.core.authz import Subject
 from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import with_space
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_platform_role_ids, set_role
@@ -360,3 +363,22 @@ async def test_hub_member_lists_only_workspace_responder_while_admin_sees_drafts
     if not admin:
         with pytest.raises(ToolError, match="not found"):
             await _resolve_daimon(runtime, hub, hidden)
+
+
+def test_a_channel_admin_sees_a_space_agent_in_the_hub_only_with_every_member() -> None:
+    """The agent reads every member, so administering one of them is not enough."""
+    key = "space:00000000-0000-4000-8000-000000000004"
+    space = SpaceRule(
+        key=key,
+        name="client",
+        rule=ChannelRule(readers="own", writers="own"),
+        channel_ids=frozenset({"a", "b"}),
+    )
+    policy = with_space(
+        TenantAccessPolicy(agent_rules={"x": AgentRule(runs_in=("a",))}), key, space
+    )
+    agent = ma_agent(id="ag_x", name="x")
+    one = Subject(platform_user_id="u1", administered_channel_ids=frozenset({"a"}))
+    both = Subject(platform_user_id="u1", administered_channel_ids=frozenset({"a", "b"}))
+    assert not _hub_sees(policy, one, agent, None), "an admin of a alone doesn't see it"
+    assert _hub_sees(policy, both, agent, None), "an admin of every member does"

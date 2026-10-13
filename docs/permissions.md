@@ -113,7 +113,45 @@ allow.
 | Copied (fork) | by an admin | never | never |
 | Listed | outside `readers: own` channels | the same | inside its home only |
 | Memory writable | where `readers` is `any` | the same | also in its home |
-| Charged to | the channel it runs in | the same | its home |
+| Charged to | the channel it runs in | the same | its home (a Space agent: the member it runs in) |
+
+## Spaces
+
+A **Space** is channels of one workspace sharing one audience and one rule,
+`readers: own` or `readers: inside`. Each member takes the Space's rule, and
+a turn in any member counts as inside every other: it reads that channel and
+the sessions run there. An agent whose rule names only members of an own
+Space has the Space as its home, so it runs, posts and writes memory in the
+members its rule names and nowhere else. `/here` names a member's Space.
+
+A member's rule is changed through its Space, never by `set_channel_rule`
+or a panel. Spaces are a deployment operator's, from the CLI:
+
+- `daimon spaces create PLATFORM WORKSPACE_ID NAME --channel C ...`;
+- `daimon spaces add|remove PLATFORM WORKSPACE_ID NAME CHANNEL_ID`;
+- `daimon spaces delete PLATFORM WORKSPACE_ID NAME` and `daimon spaces list`.
+
+Daimon cannot see who reads a channel, so joining two channels needs
+`--confirm`; first it shows how many external accounts it has answered in
+each. Joining replaces a channel's rule, so one that would loosen it (say
+`readers: own` to `inside`, or drop `writers: none`) is refused unless
+`--loosen-rules` is given; the CLI prints each rule before and after. A join
+that would make an agent the Space's own is refused unless that agent passes
+the same checks as any own agent. `add --extend-agents` lets the Space's own agents answer in the new
+channel. A channel that leaves, or whose Space is deleted, keeps the rule on
+its own. On `remove`, the Space's agents naming other members too drop the
+channel from their rule; on `delete`, those naming several members run
+nowhere until their rule changes. An agent naming one channel alone would
+stay that channel's own agent with what it read across the Space in its
+memory, so `remove` and `delete` refuse unless `--keep-agents` is given.
+Daimon does not archive that memory. The rule is also stored
+on each member, so a process on a build without Spaces keeps every member
+contained, and `daimon tenants access-policy set --clear` is refused while a
+workspace has Spaces. Deploy every worker before creating the first Space:
+an older worker still lets a panel or chat change a member's rule. A
+channel admin holds a Space's agent only when they administer every member.
+A Space agent's run outside any channel, from the hub or agent chat, is
+charged nowhere and refused while any member is over its budget.
 
 ## Changing agent setup
 

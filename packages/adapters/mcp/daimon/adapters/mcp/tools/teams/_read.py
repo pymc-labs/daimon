@@ -401,7 +401,7 @@ async def _searchable(
         refs += [
             ref
             for ref in await channels_of(client, team)
-            if (ref.is_standard or ref.channel_id in read_policy.origin_channel_ids)
+            if (ref.is_standard or ref.channel_id in read_policy.reach_ids)
             and read_policy.allows(ref.channel_id)
         ]
     return refs

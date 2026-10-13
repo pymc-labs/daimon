@@ -9,7 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import daimon.core.here_card as here_card_module
 import pytest
-from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, SpaceRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, KeyEntry, McpServerEntry
 from daimon.core.here_card import (
     CredentialStatus,
@@ -18,6 +18,7 @@ from daimon.core.here_card import (
     load_here_card,
     render_here_card_text,
 )
+from daimon.core.permissions import with_space
 from daimon.core.roster import Roster, RosterAgent
 from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
@@ -628,3 +629,44 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
     teams_lookup.assert_awaited_with(ANY, account_id=SETTER)
     assert unnamed == "unknown", "someone never named to us reads unknown"
     assert entra_id not in named + unnamed, "the Entra object id never reaches the card"
+
+
+def test_a_space_member_card_names_the_space_and_its_reach() -> None:
+    key = "space:00000000-0000-4000-8000-000000000003"
+    space = SpaceRule(
+        key=key,
+        name="client",
+        rule=ChannelRule(readers="own", writers="own"),
+        channel_ids=frozenset({"one", "two"}),
+    )
+    policy = with_space(
+        TenantAccessPolicy(agent_rules={"helper": AgentRule(runs_in=("one", "two"))}), key, space
+    )
+    card = assemble_here_card(
+        channel_id="one",
+        agent_name="helper",
+        tier="channel",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=policy,
+        details=None,
+    )
+    assert card.agent_can_answer_here, "the Space's agent answers in each member"
+    assert (
+        "In Space client with 1 other channel: its own agents read and post across them only"
+        in card.text
+    ), "/here names the Space"
+    assert card.agent_home == "Space client", "the home reads by name, never its key"
+    alone = with_space(policy, key, space.model_copy(update={"channel_ids": frozenset({"one"})}))
+    lone = assemble_here_card(
+        channel_id="one",
+        agent_name="helper",
+        tier="channel",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=alone,
+        details=None,
+    )
+    assert "In Space client, with no other channels yet" in lone.text, "never '0 other channels'"

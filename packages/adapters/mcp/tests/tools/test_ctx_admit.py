@@ -14,7 +14,10 @@ from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _admit,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.authz import Subject
+from daimon.core.scope import DeploymentDefault
+from daimon.core.space_rules import create_space
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -23,6 +26,7 @@ from daimon.core.stores.turn_outcomes import list_for_tenant
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_account, make_channel_budget, make_tenant
+from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from fastmcp.exceptions import ToolError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -301,6 +305,43 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
         await admit("local")
     with _BALANCE_OK:
         assert await admit("daimon") is auth, "any other agent's hub run is not charged to room"
+
+
+async def test_a_hub_run_of_a_space_agent_is_held_to_every_members_budget(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A Space has no budget, so its agent's hub run stops while any member is over."""
+    policy = TenantAccessPolicy(agent_rules={"local": AgentRule(runs_in=("r1",))})
+    member = await _member(db_session, policy=policy, role=Role.ADMIN)
+    tenant = await get_tenant(db_session, member.tenant_id)
+    assert tenant is not None
+    await make_channel_budget(db_session, tenant=tenant, channel_id="r2", limit_usd=Decimal("0"))
+    await db_session.commit()
+    await create_space(
+        build_fake_anthropic(make_fake_ma_handler()),
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        name="client",
+        rule=ChannelRule(readers="own", writers="own"),
+        channel_ids=["r1", "r2"],
+        subject=Subject(is_admin=True),
+        default=DeploymentDefault(),
+    )
+    auth = dataclasses.replace(member, platform=tenant.platform)
+
+    async def names() -> tuple[str | None, ...]:
+        return ("local", None)
+
+    with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            tool_name="ask",
+            agent_names=names,
+            pin_exempt=True,
+        )
 
 
 @pytest.mark.parametrize(

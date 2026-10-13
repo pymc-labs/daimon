@@ -32,6 +32,7 @@ from daimon.core.permissions import (
     agent_permissions,
     any_own_readers,
     home_of,
+    is_space_key,
     ruled_agents,
 )
 from daimon.core.rule_views import (
@@ -203,6 +204,7 @@ async def _load_view(
         location_channel_id = None
         location_thread_id = None
     inside = home_of(policy, location_channel_id) or home_of(policy, token_channel_id(auth))
+    chat_location = inside
     if inside is None and auth.chat_agent_id is not None and any_own_readers(policy):
         agent = next(
             (
@@ -220,8 +222,13 @@ async def _load_view(
                 "this conversation's agent could not be found, so daimon can't tell "
                 "which channel it is held to. Nothing was done. Tell the caller."
             )
-        inside = agent_permissions(policy, agent_pin_names(agent.name, agent.metadata)).home
-    location = location_channel_id or token_channel_id(auth) or inside
+        held = agent_permissions(policy, agent_pin_names(agent.name, agent.metadata))
+        inside = chat_location = held.home
+        if inside is not None and is_space_key(inside):
+            # A Space key is no channel: the agent stands in one its every rule names.
+            first, *rest = held.runs_in
+            chat_location = min(first.intersection(*rest), default=None)
+    location = location_channel_id or token_channel_id(auth) or chat_location
     async with runtime.session_factory() as session:
         responders: frozenset[str] = (
             await load_location_responders(

@@ -111,6 +111,8 @@ async def test_api_messages_is_sdk_owned_and_authenticated(
     """A valid personal-chat activity reaches the SDK route, not a hand-rolled endpoint."""
     service = _service(db_session_factory, fake=teams_api_fake)
     async with asgi_lifespan(service.app):
+        # One shared test connection: let the boot sweep finish first.
+        await service.turns.start()
         response = await _request(service, "POST", "/api/messages", json=make_message_activity())
     assert response.status_code in (200, 201, 202), response.text
 
@@ -134,6 +136,7 @@ async def test_only_a_bot_framework_token_reaches_the_sdk(
     token = jwt.encode({"iss": issuer, "aud": "app-id"}, "k" * 32, algorithm="HS256")
     service = _service(db_session_factory)
     async with asgi_lifespan(service.app):
+        await service.turns.start()
         response = await _request(
             service,
             "POST",

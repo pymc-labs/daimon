@@ -122,7 +122,7 @@ async def require_readable(
         raise ToolError("could not confirm you are in that channel, so nothing was read") from err
     if not is_member:
         raise ToolError("you are not a member of that channel, so nothing was read")
-    if not ref.is_standard and ref.channel_id not in read_policy.origin_channel_ids:
+    if not ref.is_standard and ref.channel_id not in read_policy.reach_ids:
         raise ToolError(
             f"{ref.channel_name} is a {ref.channel_type} channel: daimon reads it only from a "
             "conversation inside it. Pass this turn's origin_context_id when you are in it."

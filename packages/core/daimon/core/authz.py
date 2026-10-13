@@ -161,6 +161,8 @@ from daimon.core.permissions import (
     channel_permissions,
     crosses_home,
     held_to,
+    home_channel_ids,
+    is_space_key,
     limited_under,
     outside_runs_in,
     post_refusal,
@@ -225,6 +227,8 @@ class Action(StrEnum):
     SET_CHANNEL_RULE = "set_channel_rule"
     # Set one agent's rule.
     SET_AGENT_RULE = "set_agent_rule"
+    # Create or delete a Space, or add or remove one of its channels.
+    SET_SPACE = "set_space"
     # Archive the copy a channel kept to its own agents was given, as it opens.
     ARCHIVE_CHANNEL_COPY = "archive_channel_copy"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
@@ -487,11 +491,24 @@ def _outside_rule(agent: AgentRef, place: Place) -> bool:
 def _rule_administered(
     policy: TenantAccessPolicy, agent: AgentRef, administered_channel_ids: frozenset[str]
 ) -> bool:
-    """Whether every channel the rules on any of the agent's names name is administered.
+    """Whether every channel the rules on any of the agent's names name is administered,
+    and every channel of its home: a Space home spans channels its rule may not name.
 
     False for an agent without a rule and for a rule naming no channel, which is nobody's.
     """
-    return agent_permissions(policy, agent.names).runs_within(administered_channel_ids)
+    permissions = agent_permissions(policy, agent.names)
+    return permissions.runs_within(administered_channel_ids) and _space_administered(
+        policy, permissions.home, administered_channel_ids
+    )
+
+
+def _space_administered(
+    policy: TenantAccessPolicy, home: str | None, administered_channel_ids: frozenset[str]
+) -> bool:
+    """False for an own Space's agent unless every member is administered."""
+    if home is None or not is_space_key(home):
+        return True
+    return home_channel_ids(policy, home) <= administered_channel_ids
 
 
 def _origin_permissions(req: Request) -> ChannelPermissions | None:
@@ -680,6 +697,9 @@ def agent_held_in(
     """`channel_admin_holds` for a channel admin of `channel_ids`, whoever they are."""
     if not channel_ids:
         return False
+    # An own Space's agent reads every member, so it is held only by an admin of all of them.
+    if not _space_administered(policy, agent_permissions(policy, agent.names).home, channel_ids):
+        return False
     if standing.created_for_channel_id in channel_ids:
         return True
     if _rule_administered(policy, agent, channel_ids):
@@ -785,6 +805,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         Action.ARCHIVE_CHANNEL_COPY,
         Action.SET_CHANNEL_RULE,
         Action.SET_AGENT_RULE,
+        Action.SET_SPACE,
     ):
         # The rules guard what a server admin owns, so a channel admin changes
         # none, even on their own channel.

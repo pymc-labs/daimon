@@ -22,6 +22,7 @@ from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import spaces
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import FundingMode, Role, TenantRow
@@ -2140,3 +2141,34 @@ async def test_an_external_participant_is_never_a_channel_admin(
     async with db_session_factory() as session:
         row = await get_account_with_tenant(session, account_id=admission.account_id)
     assert row is not None and row.platform_role_ids == (), "no team is stored for MCP calls"
+
+
+async def test_a_space_agent_is_admitted_in_every_member_and_nowhere_else(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    own = ChannelRule(readers="own", writers="own")
+    tenant = await _seed_admittable_tenant(
+        db_session,
+        policy=TenantAccessPolicy(
+            channel_rules={"a": own, "b": own},
+            agent_rules={"own": AgentRule(runs_in=("a", "b"))},
+        ),
+    )
+    space = await spaces.create_space(db_session, tenant_id=tenant.id, name="s", rule=own)
+    for member in "ab":
+        await spaces.add_space_channel(
+            db_session, space=space, tenant_id=tenant.id, channel_id=member
+        )
+    for channel in "abc":
+        await _answer_in(db_session, tenant, channel, "own")
+
+    for member in "ab":
+        admission = await _admit_as(
+            db_session_factory, tmp_path, tenant, channel_id=member, is_external=True
+        )
+        assert admission.budget_channel_id == member, "an external is answered, charged here"
+    with pytest.raises(AdmissionDenied) as exc_info:
+        await _admit_as(db_session_factory, tmp_path, tenant, channel_id="c", is_external=False)
+    assert exc_info.value.reason == "runs_elsewhere", "the Space's agent runs nowhere else"

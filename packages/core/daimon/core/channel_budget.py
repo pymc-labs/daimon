@@ -14,6 +14,7 @@ The period and validation helpers are pure; `get_channel_budget_status` and
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -229,6 +230,29 @@ async def get_channel_budget_status(
     if budget is None:
         return None
     return await load_budget_status(session, budget, now=now)
+
+
+async def first_over_channel_budget(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_ids: Sequence[str],
+    now: datetime,
+    session: AsyncSession | None = None,
+) -> str | None:
+    """The first of `channel_ids` over its budget (`is_over_channel_budget`), or None."""
+    for channel_id in channel_ids:
+        if await is_over_channel_budget(
+            sessionmaker=sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            now=now,
+            session=session,
+        ):
+            return channel_id
+    return None
 
 
 async def is_over_channel_budget(

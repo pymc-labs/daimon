@@ -66,7 +66,7 @@ from daimon.core.channel_rules import (
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
-from daimon.core.permissions import channel_rule, own_reader_channels
+from daimon.core.permissions import channel_rule, own_reader_channels, space_channel_ids
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_admins import (
@@ -170,7 +170,11 @@ class ChannelSettingsDialog:
                     session, tenant_id=actor.tenant_id, platform="teams"
                 )
             # Channels already set up stay reachable when their team can't be listed.
-            extra = [*own_reader_channels(policy), *(grant.channel_id for grant in grants)]
+            extra = [
+                *own_reader_channels(policy),
+                *sorted(space_channel_ids(policy)),
+                *(grant.channel_id for grant in grants),
+            ]
             channels = cards.visible_channels(listed, extra)
         else:
             mine = sorted(subject.administered_channel_ids)

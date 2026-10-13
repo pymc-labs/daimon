@@ -15,6 +15,7 @@ ownership: who has their own copy, and who shares one.
 | --- | --- | --- |
 | Tenant | one Discord guild, Slack workspace or Microsoft 365 organisation | `derive_tenant_uuid` (`packages/core/daimon/core/ma_identity.py:49`) |
 | Channel | a channel in a tenant | the platform channel id |
+| Space | channels of one tenant sharing one audience and rule ([Spaces](permissions.md#spaces)) | `space:` and the Space id |
 | Thread | a Discord thread, Slack thread or Teams reply chain | the platform thread id |
 | Caller | the person whose message started the turn | their `accounts` row (`account_id`) and platform user id |
 | Agent | one Managed Agents (MA) agent in a tenant | `derive_agent_uuid` (`packages/core/daimon/core/ma_identity.py:34`) |
@@ -419,3 +420,7 @@ These are places where the code and its own description disagree today.
   skill id" (`packages/core/daimon/core/agent_fork.py:6-8`). Only the source's
   own skills get new ids; library and built-in skills stay shared
   (`packages/core/daimon/core/agent_fork.py:126`).
+- A channel leaving a Space keeps no boundary over what was already shared:
+  its history read from other members and its agents' memory written there
+  stay where they are. Egress (posting to the web, publishing) is unchanged
+  by Spaces.

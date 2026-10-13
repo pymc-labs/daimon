@@ -14,13 +14,14 @@ from daimon.adapters.mcp.tools.agent_removal import _list_agent_keys_impl
 from daimon.adapters.mcp.tools.agents import _get_agent_impl, _list_agents_impl
 from daimon.adapters.mcp.tools.propagation import _explain_agent_resolution_impl
 from daimon.adapters.mcp.tools.skills import _get_impl, _list_impl
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.spaces import add_space_channel, create_space
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing import ma_agent
@@ -274,3 +275,48 @@ async def test_routing_explanation_hides_draft_targets_and_other_threads_from_me
     )
     if not admin:
         assert "draft" not in explanation.explanation
+
+
+async def test_a_space_agents_chat_turn_with_no_location_still_sees_itself(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Its home is a Space key, never a channel: discovery stands it in a member instead."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="slack")
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_channel_pins={"local": ("C1", "C2")}),
+        )
+        space = await create_space(
+            session,
+            tenant_id=tenant.id,
+            name="client",
+            rule=ChannelRule(readers="own", writers="own"),
+        )
+        for channel_id in ("C1", "C2"):
+            await add_space_channel(
+                session, space=space, tenant_id=tenant.id, channel_id=channel_id
+            )
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(id="ag_local", name="local", tenant_id=tenant.id),
+        ma_agent(id="ag_shared", name="shared", tenant_id=tenant.id),
+    )
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=build_fake_anthropic(router.dispatch),
+        settings=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="shared"),
+    )
+    auth = AuthIdentity(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role=Role.USER,
+        platform="slack",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_local"),
+    )
+
+    result = await _list_agents_impl(runtime, auth, None, None)
+    assert {agent.name for agent in result} == {"local"}, "it sees itself, and nothing outside"

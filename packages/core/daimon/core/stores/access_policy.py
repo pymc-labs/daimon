@@ -18,6 +18,7 @@ from daimon.core._models import Tenant, TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
+from daimon.core.stores.spaces import list_space_rules
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -134,7 +135,16 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one()
 
 
+def _without_spaces(stored: object) -> object:
+    # Spaces come only from their tables: a `spaces` key edited into the row
+    # must not add one.
+    if isinstance(stored, dict):
+        return {k: v for k, v in cast("dict[str, object]", stored).items() if k != "spaces"}
+    return stored
+
+
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
+    """The tenant's policy with its Spaces; a Space's rule is its channels' rule."""
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
     record = (
@@ -142,13 +152,24 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
             select(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
         )
     ).scalar_one_or_none()
-    if record is None:
-        return OPEN_ACCESS_POLICY
-    try:
-        # JSON null, an array or a string fail validation like a bad field does.
-        return TenantAccessPolicy.model_validate(record.policy)
-    except ValidationError as exc:
-        raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
+    policy = OPEN_ACCESS_POLICY
+    if record is not None:
+        try:
+            # JSON null, an array or a string fail validation like a bad field does.
+            policy = TenantAccessPolicy.model_validate(_without_spaces(record.policy))
+        except ValidationError as exc:
+            raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
+    spaces = await list_space_rules(session, tenant_id=tenant_id)
+    if not spaces:
+        return policy
+    # The member rules are stored too (`daimon.core.space_rules`); the Space's
+    # wins here in case one drifted, as when `--clear` dropped them.
+    rules = dict(policy.channel_rules)
+    for space in spaces.values():
+        rules |= dict.fromkeys(space.channel_ids, space.rule)
+    return TenantAccessPolicy.model_validate(
+        {**policy.model_dump(), "channel_rules": rules, "spaces": spaces}
+    )
 
 
 async def set_access_policy(

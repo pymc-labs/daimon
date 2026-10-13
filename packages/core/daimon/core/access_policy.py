@@ -43,6 +43,23 @@ class ChannelRule(BaseModel):
 
 OPEN_RULE = ChannelRule()
 
+SPACE_KEY_PREFIX = "space:"
+"""A Space's key (`space:<uuid>`) stands where a channel id would as a home."""
+
+
+class SpaceRule(BaseModel):
+    """One Space: channels sharing one audience and one rule, readers inside or own.
+
+    Inside an own Space, its channels count as one home (`daimon.core.permissions`).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    key: str
+    name: str
+    rule: ChannelRule
+    channel_ids: frozenset[str]
+
 
 class AgentRule(BaseModel):
     """Where one agent may run."""
@@ -123,6 +140,9 @@ class TenantAccessPolicy(BaseModel):
     # organisation; any other guest is answered as from another organisation.
     # Only read while `teams.restrict_guests` is on.
     member_guest_ids: tuple[str, ...] = ()
+    # Space key -> its Space, loaded from the Space tables and never stored in
+    # the row: an older build would refuse a row with a key it doesn't know.
+    spaces: dict[str, SpaceRule] = Field(default_factory=dict, exclude=True)
 
     @model_validator(mode="before")
     @classmethod

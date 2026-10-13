@@ -56,6 +56,19 @@ async def test_unreadable_row_raises_instead_of_falling_open(
         await load_access_policy(db_session, tenant_id=tenant.id)
 
 
+async def test_a_spaces_key_in_the_row_adds_no_space(db_session: AsyncSession) -> None:
+    """Spaces come only from their tables, never from an edited policy row."""
+    tenant = await make_tenant(db_session)
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": '{"spaces": {"space:x": {"key": "space:x", "name": "x"}}}'},
+    )
+
+    assert (await load_access_policy(db_session, tenant_id=tenant.id)).spaces == {}
+
+
 async def test_clear_removes_the_row_and_reports_whether_one_existed(
     db_session: AsyncSession,
 ) -> None:

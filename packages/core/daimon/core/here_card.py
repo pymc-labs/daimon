@@ -22,7 +22,9 @@ from daimon.core.permissions import (
     agent_permissions,
     channel_permissions,
     channel_rule,
+    describe_home,
     memory_writable,
+    space_of,
 )
 from daimon.core.roster import load_roster
 from daimon.core.rule_views import load_rule_viewer
@@ -72,6 +74,7 @@ class HereCard(BaseModel):
     effective_writers: str
     agent_runs_in: tuple[str, ...] | None = None
     agent_home: str | None = None
+    space_line: str | None = None
     who_may_answer: str
     agent_can_answer_here: bool | None = None
     reads_kept_inside: bool
@@ -148,6 +151,7 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
     extras = (
         *(("Only own agents answer here",) if card.effective_writers == "own" else ()),
         *(("No access to earlier messages",) if card.bot_can_read_history is False else ()),
+        *((card.space_line,) if card.space_line is not None else ()),
     )
     return HereCardPresentation(
         state=state,
@@ -158,6 +162,17 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         publishing=publishing,
         extras=extras,
     )
+
+
+def _space_line(name: str, channels: int, readers: str) -> str:
+    # Other channels are counted, not named: naming them would take a
+    # platform lookup per channel, and Teams can't always make one.
+    if channels < 2:
+        return f"In Space {name}, with no other channels yet"
+    others = f"{channels - 1} other channel{'s' if channels != 2 else ''}"
+    if readers == "own":
+        return f"In Space {name} with {others}: its own agents read and post across them only"
+    return f"In Space {name} with {others}: conversations in any of them read the others"
 
 
 def render_here_card_text(card: HereCard) -> str:
@@ -234,6 +249,7 @@ def assemble_here_card(
     )
     names = tuple(agent_rule_names) if agent_rule_names is not None else (agent_name,)
     permissions = agent_permissions(policy, names)
+    space = space_of(policy, channel_id)
     running: set[str] | None = None
     for rule in permissions.runs_in:
         running = set(rule) if running is None else running.intersection(rule)
@@ -358,7 +374,10 @@ def assemble_here_card(
         effective_readers=here.readers,
         effective_writers=here.writers,
         agent_runs_in=shown_runs_in,
-        agent_home=permissions.home,
+        agent_home=describe_home(policy, permissions.home) if permissions.home else None,
+        space_line=_space_line(space.name, len(space.channel_ids), space.rule.readers)
+        if space is not None
+        else None,
         who_may_answer=who_may_answer,
         agent_can_answer_here=can_answer,
         reads_kept_inside=here.readers != "any",

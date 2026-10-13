@@ -22,6 +22,7 @@ from daimon.core.permissions import (
     ChannelRule,
     ChannelWriters,
     agent_permissions,
+    describe_home,
 )
 from daimon.core.stores import tenant_ledger, tenant_user_caps
 from daimon.core.stores.access_policy import (
@@ -34,6 +35,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.spaces import list_spaces_for_tenant
 from daimon.core.stores.tenants import (
     delete_tenant,
     get_tenant,
@@ -437,6 +439,10 @@ class PermissionRuleRow(BaseModel):
     """For an agent: the channel kept to its own agents it is one of."""
 
 
+def _home(policy: TenantAccessPolicy, home: str | None) -> str | None:
+    return describe_home(policy, home) if home is not None else None
+
+
 def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
     """The policy's rules, channels first (`daimon.core.permissions`)."""
     places: list[tuple[Literal["channel", "category"], dict[str, ChannelRule]]] = [
@@ -462,7 +468,7 @@ def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
             readers=None,
             writers=None,
             runs_in=None if rule.runs_in is None else list(rule.runs_in),
-            home=agent_permissions(policy, (name,)).home,
+            home=_home(policy, agent_permissions(policy, (name,)).home),
         )
         for name, rule in sorted(policy.agent_rules.items())
     ]
@@ -664,6 +670,14 @@ async def tenants_access_policy_set(
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
+            # Without the stored member rules, workers of an older build would
+            # leave every member of a Space open.
+            if spaces := await list_spaces_for_tenant(session, tenant_id=tenant_id):
+                raise typer.BadParameter(
+                    f"--clear would drop the rules of the members of Space "
+                    f"{', '.join(s.name for s in spaces)}; delete the Spaces first "
+                    "(`daimon spaces delete`). Nothing was changed."
+                )
             try:
                 dropped = sorted(
                     (await load_access_policy(session, tenant_id=tenant_id)).agent_rules
