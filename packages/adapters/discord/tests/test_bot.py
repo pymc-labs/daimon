@@ -1380,9 +1380,17 @@ class TestOnReadySweepWidenedReconcile:
             workspace_id=str(guild_id),
             signup_credit=Decimal("0"),
         )
+        later_id = guild_id + 1  # swept after the stub: tenants go in external_id order
+        await provision_tenant(
+            db_session_factory,
+            platform="discord",
+            workspace_id=str(later_id),
+            signup_credit=Decimal("0"),
+        )
         bot = make_bot(_make_runtime(db_session_factory))
         # The call parse_ready makes for each guild stub in the READY payload.
         bot._connection._add_guild_from_data({"id": str(guild_id), "unavailable": True})  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+        bot._connection._guilds[later_id] = _make_sweep_guild(later_id)  # pyright: ignore[reportPrivateUsage]
         with (
             patch(
                 "daimon.adapters.discord.bot.reconcile_tenant_defaults",
@@ -1395,9 +1403,11 @@ class TestOnReadySweepWidenedReconcile:
             await bot.on_ready()
             await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
 
-        assert [c.kwargs for c in sync.await_args_list] == [{}], (
-            "only the global tree is synced; the unavailable guild waits for a later ready"
+        synced = [c.kwargs.get("guild") for c in sync.await_args_list]
+        assert [g.id for g in synced if g is not None] == [later_id], (
+            "the guild after the stub is still synced; the stub waits for a later ready"
         )
+        assert synced[-1] is None, "the global tree is synced"
         assert guild_id not in bot._ready_synced_guild_ids  # pyright: ignore[reportPrivateUsage]
 
 

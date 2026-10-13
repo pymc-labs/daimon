@@ -690,8 +690,9 @@ class DaimonBot(commands.Bot):
         self._startup_replay_started = False
         # The same re-fire must not redo the all-tenant defaults reconcile and
         # command syncs: a later on_ready covers only what earlier ones did not
-        # (a guild joined or rejoined meanwhile, a reconcile that has not
-        # succeeded yet, a sync that failed). Tenants are added on success only.
+        # (a guild joined, rejoined or unavailable at the last ready, a
+        # reconcile that has not succeeded yet, a sync that failed). Tenants
+        # are added on success only.
         self._ready_reconciled_tenant_ids: set[uuid.UUID] = set()
         self._ready_reconciled_unjoined_tenant_ids: set[uuid.UUID] = set()
         self._ready_synced_guild_ids: set[int] = set()
