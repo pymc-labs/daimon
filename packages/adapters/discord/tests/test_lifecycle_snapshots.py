@@ -56,6 +56,7 @@ def _make_lifecycle(
     lc = DiscordTurnLifecycle(
         send=fake_send,
         edit=fake_edit,
+        requester_is_admin=True,
         agent_name="Atlas",
         model_id="claude-sonnet-4-6",
         clock=clock,

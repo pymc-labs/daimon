@@ -324,6 +324,7 @@ class DiscordTurnLifecycle:
         markup: Decimal = Decimal(1),
         cancel_view: discord.ui.View | None = None,
         requester_id: int | None = None,
+        requester_is_admin: bool = False,
         trigger_message: discord.Message | None = None,
         in_dm: bool | None = None,
         notify_on_completion: bool = False,
@@ -347,6 +348,8 @@ class DiscordTurnLifecycle:
         # no progress edit, no terminal card, no replacement for a missing card.
         self._thread_stopped = thread_stopped or (lambda: False)
         self._requester_id = requester_id
+        # Only an admin sees the request ref on a stop or failure notice.
+        self._requester_is_admin = requester_is_admin
         self._turn_id = turn_id
         self._trigger_message = trigger_message
         if in_dm is None:
@@ -1348,7 +1351,7 @@ class DiscordTurnLifecycle:
             notice = render_termination_notice(
                 reason,
                 state=state,
-                request_id=request_id,
+                request_id=request_id if self._requester_is_admin else None,
                 error=err,
                 in_dm=self._in_dm,
                 agent_name=self._agent_name,

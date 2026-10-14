@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
 
+### Changed
+
+- **On Discord and Slack, the `Ref` line on a stop or failure notice is now shown only to admins.** It is the last six characters of the request id. Before, everyone saw it; now it appears only when the person whose turn it is holds the admin role there, and it is left out whenever that is not known. Support can still find the failure from the logs, which keep the full request id. Teams is unchanged.
+
 ### Fixed
 
 - **Anyone in a Discord thread can now use its Connect GitHub button**, not only the person who asked. Before, anyone else got "Only @name can use this". Now the link opens privately for whoever clicks; what they can give the agent is capped by their own GitHub permission on each repo, and the person who asked must still manage the agent. The link stays single-use and is not tied to the clicker's own Daimon account.

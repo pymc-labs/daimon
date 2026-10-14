@@ -598,6 +598,7 @@ def _make_lifecycle(
     budget_channel_id: str | None = None,
     in_dm: bool | None = None,
     clock: Callable[[], float] = time.monotonic,
+    requester_is_admin: bool = True,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -619,6 +620,7 @@ def _make_lifecycle(
         send=fake_send,
         notify_on_completion=notify_on_completion,
         requester_id=123,
+        requester_is_admin=requester_is_admin,
         render_tables=render_tables,
         edit=fake_edit,
         agent_name=agent_name,
@@ -1227,6 +1229,43 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert "\n\n-# Ref " in embed.description
     assert "fit\\_model" in embed.description
     assert "xxx" not in str(embed.to_dict()), "raw error stays in the logs"
+
+
+@pytest.mark.parametrize(
+    "reason", [TerminationReason.INTERRUPTED, TerminationReason.UPSTREAM], ids=str
+)
+async def test_terminal_notice_shows_the_ref_to_admins_only(reason: TerminationReason) -> None:
+    """A stop or failure notice names the request ref for an admin, never for anyone else."""
+    descriptions: dict[bool, str] = {}
+    for admin in (True, False):
+        lc, _, edits = _make_lifecycle(requester_is_admin=admin)
+        await lc.on_render(TurnState())
+        with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+            await lc.on_terminal_failure(TurnState(termination=reason), Exception("x"))
+        descriptions[admin] = edits[-1][1]["embeds"][0].description
+
+    assert "-# Ref UNDRID" in descriptions[True]
+    assert "Ref" not in descriptions[False]
+    assert "01BOUNDRID" not in descriptions[False]
+
+
+async def test_a_lifecycle_defaults_to_no_ref_when_admin_status_is_unknown() -> None:
+    edits: list[dict[str, Any]] = []
+
+    async def fake_send(**kwargs: Any) -> object:
+        return _SENTINEL_REF
+
+    async def fake_edit(ref: Any, **kwargs: Any) -> None:
+        edits.append(kwargs)
+
+    lc = DiscordTurnLifecycle(
+        send=fake_send, edit=fake_edit, agent_name="test-agent", model_id="claude-sonnet-4-6"
+    )
+    await lc.on_render(TurnState())
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), Exception("x"))
+
+    assert "Ref" not in edits[-1]["embeds"][0].description
 
 
 async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names() -> None:

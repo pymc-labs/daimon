@@ -1231,8 +1231,10 @@ string.
 
 `packages/core/daimon/core/turn/notices.py` turns a reason into a
 `TerminationNotice`: a short headline, the cause, the tool work still running
-and how much had finished, what survived, the next step, and a request id. The
-copy lives in core; Discord and Slack draw it in `on_terminal_failure` as the
+and how much had finished, what survived, the next step, and a request id. Discord
+and Slack pass the request id only when the person whose turn it is holds the
+admin role there, so everyone else sees no `Ref` line. The copy lives in
+core; Discord and Slack draw it in `on_terminal_failure` as the
 body of the red card, with the headline as the footer reason, and log the
 request id with the underlying error so it is the handle for the detail;
 Teams draws it as plain text on the ❌ card. No

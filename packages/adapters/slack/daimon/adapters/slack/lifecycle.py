@@ -164,6 +164,7 @@ class SlackTurnLifecycle:
         thread_ts: str,
         cancel: asyncio.Event,
         author_id: str,
+        requester_is_admin: bool = False,
         agent_name: str,
         model_id: str,
         markup: Decimal = Decimal(1),
@@ -208,6 +209,8 @@ class SlackTurnLifecycle:
         self._thread_ts = thread_ts
         self._cancel = cancel
         self._author_id = author_id
+        # Only an admin sees the request ref on a stop or failure notice.
+        self._requester_is_admin = requester_is_admin
         self._model_id = model_id
         self._markup = markup
         self._register = register
@@ -826,7 +829,7 @@ class SlackTurnLifecycle:
                 notice = render_termination_notice(
                     reason,
                     state=state,
-                    request_id=request_id,
+                    request_id=request_id if self._requester_is_admin else None,
                     error=err,
                     in_dm=self._channel.startswith("D"),
                     agent_name=self._agent_name,

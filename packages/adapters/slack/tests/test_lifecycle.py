@@ -220,6 +220,7 @@ def _make_lifecycle(
     identity: AgentIdentity | None = None,
     ma_agent_id: str | None = None,
     intent_id: uuid.UUID | None = None,
+    requester_is_admin: bool = True,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -248,6 +249,7 @@ def _make_lifecycle(
         thread_ts="1700000000.000000",
         cancel=cancel,
         author_id="U_AUTHOR",
+        requester_is_admin=requester_is_admin,
         agent_name=agent_name,
         model_id=model_id,
         register=register,
@@ -1189,6 +1191,50 @@ async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client:
         await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
 
     assert "Ref UNDRID" in _block_text(_last_update_blocks(fake_slack_web_client))
+
+
+@pytest.mark.parametrize("admin", [True, False], ids=["admin", "not-admin"])
+@pytest.mark.parametrize(
+    "reason", [TerminationReason.INTERRUPTED, TerminationReason.UPSTREAM], ids=str
+)
+async def test_terminal_notice_shows_the_ref_to_admins_only(
+    fake_slack_web_client: Any, reason: TerminationReason, admin: bool
+) -> None:
+    """A stop or failure notice names the request ref for an admin, never for anyone else."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, requester_is_admin=admin)
+    await lc.post_initial()
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(termination=reason), RuntimeError("x"))
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    fallback = fake_slack_web_client.mock.requests[("POST", _UPDATE_URL)][-1].kwargs["json"]["text"]
+    assert ("Ref UNDRID" in rendered) is admin
+    assert ("Ref UNDRID" in fallback) is admin
+    if not admin:
+        assert "Ref" not in rendered + fallback
+
+
+async def test_a_lifecycle_defaults_to_no_ref_when_admin_status_is_unknown(
+    fake_slack_web_client: Any,
+) -> None:
+    lc = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=asyncio.Event(),
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=lambda ts, ev, author_id: None,
+        deregister=lambda ts: None,
+    )
+    await lc.post_initial()
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
+
+    assert "Ref" not in _block_text(_last_update_blocks(fake_slack_web_client))
 
 
 async def test_dm_terminal_notice_asks_for_a_message(fake_slack_web_client: Any) -> None:

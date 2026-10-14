@@ -51,6 +51,7 @@ def _make_lifecycle(fake: Any, clock: Any) -> SlackTurnLifecycle:
         thread_ts="1700000000.000000",
         cancel=asyncio.Event(),
         author_id="U_AUTHOR",
+        requester_is_admin=True,
         agent_name="Atlas",
         model_id="claude-sonnet-4-6",
         register=lambda ts, ev, author_id: None,

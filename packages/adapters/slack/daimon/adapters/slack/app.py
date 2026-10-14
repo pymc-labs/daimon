@@ -2209,6 +2209,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=cancel_event,
             author_id=str(event.get("user") or ""),
+            requester_is_admin=is_admin,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             trigger_ts=str(event.get("ts") or "") or None,
@@ -2692,6 +2693,7 @@ class SlackApp:
                     thread_ts=thread_id,
                     cancel=cancel,
                     author_id=str(event.get("user") or ""),
+                    requester_is_admin=is_admin,
                     notify_on_completion=self.runtime.settings.completion_pings.get(
                         tenant_id, False
                     )
@@ -3147,6 +3149,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=follow_cancel,
             author_id=row.requester_external_user_id,
+            requester_is_admin=role is Role.ADMIN,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             agent_name=follow_admission.agent.name,
@@ -3244,6 +3247,7 @@ class SlackApp:
                 thread_ts=thread_id,
                 cancel=cancel,
                 author_id=row.requester_external_user_id,
+                requester_is_admin=role is Role.ADMIN,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 agent_name=follow_admission.agent.name,

@@ -3460,6 +3460,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
+                requester_is_admin=role is Role.ADMIN,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -3589,6 +3590,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
+                requester_is_admin=role is Role.ADMIN,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4186,6 +4188,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=message.author.id,
+                requester_is_admin=is_admin,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
@@ -4701,6 +4704,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=message.author.id,
+                requester_is_admin=is_admin,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 trigger_message=message,
