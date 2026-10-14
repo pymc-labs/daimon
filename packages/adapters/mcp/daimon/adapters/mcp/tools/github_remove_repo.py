@@ -43,8 +43,12 @@ async def remove_repo_impl(
     expected_ma_agent_id: str | None = None,
     confirmed: bool = False,
 ) -> RemoveRepoResult:
-    if auth.is_external or auth.platform not in ("discord", "slack") or not auth.platform_user_id:
-        raise ToolError("GitHub setup needs a Discord or Slack workspace member.")
+    if (
+        auth.is_external
+        or auth.platform not in ("discord", "slack", "teams")
+        or not auth.platform_user_id
+    ):
+        raise ToolError("GitHub setup needs a member of this Discord, Slack or Teams workspace.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_id = expected_ma_agent_id
@@ -116,7 +120,7 @@ async def remove_repo_impl(
 
 
 def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def remove_repo(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         repo_name: str,

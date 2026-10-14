@@ -233,3 +233,67 @@ async def test_working_repo_real_manager_and_foreign_scope(
             origin_context_id=str(uuid.uuid4()),
             repo_name="owner/foreign",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+async def test_teams_admin_sets_working_repo_and_external_caller_is_refused(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub setup runs on Teams too; a guest from outside the workspace still cannot."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, workspace_id=f"teams-working-{uuid.uuid4().hex[:8]}")
+        account = await make_account(session, tenant=tenant)
+        await set_role(session, account.id, Role.ADMIN)
+    origin = SimpleNamespace(
+        configuration_target_name="Agent",
+        configuration_target_ma_agent_id="ma_agent",
+        responder_name="Daimon",
+        responder_ma_agent_id="ma_daimon",
+        parent_channel_id="19:c@thread.tacv2",
+    )
+    runtime = SimpleNamespace(
+        session_factory=committing_sessionmaker,
+        deployment_default=DeploymentDefault(),
+        group_lookups=None,
+    )
+    monkeypatch.setattr(working_tool, "require_turn_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(
+        working_tool,
+        "resolve_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(id="ma_agent", name="Agent", metadata={})),
+    )
+    admin = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="teams",
+        external_id="entra-tenant",
+        platform_user_id="aad-admin",
+        is_admin=True,
+    )
+    result = await working_tool.set_working_repo_impl(
+        runtime,  # type: ignore[arg-type]
+        admin,
+        origin_context_id=str(uuid.uuid4()),
+        repo_name="none",
+    )
+    assert result.message == "Agent has no working repo now. To set one, ask me for a repo.", (
+        "a Teams admin should change the working repo like a Discord one"
+    )
+    guest = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="teams",
+        external_id="entra-tenant",
+        platform_user_id="aad-guest",
+        is_external=True,
+    )
+    with pytest.raises(ToolError, match="member of this Discord, Slack or Teams workspace"):
+        await working_tool.set_working_repo_impl(
+            runtime,  # type: ignore[arg-type]
+            guest,
+            origin_context_id=str(uuid.uuid4()),
+            repo_name="none",
+        )

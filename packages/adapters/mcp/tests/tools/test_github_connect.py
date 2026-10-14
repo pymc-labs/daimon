@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import github_connect as connect_tool
+from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
@@ -30,6 +33,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_connect import digest, get_invitation
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -521,3 +525,115 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
     )
     assert managed.status == "ask_admin"
     delivery.assert_not_awaited()
+
+
+class _FakeTeams:
+    """Bot Framework for one requester: a roster lookup, a 1:1 chat and its posts."""
+
+    def __init__(self, *, chat_status: int = 201) -> None:
+        self.chat_status = chat_status
+        self.posts: list[tuple[str, dict[str, object]]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/members/" in request.url.path:
+            aad = request.url.path.rsplit("/", 1)[1]
+            return httpx.Response(200, json={"id": f"29:{aad}", "aadObjectId": aad})
+        body = json.loads(request.content)
+        self.posts.append((request.url.path.split("/v3/", 1)[1], body))
+        if request.url.path.endswith("/v3/conversations"):
+            return httpx.Response(self.chat_status, json={"id": "a:dm-1"})
+        return httpx.Response(200, json={"id": "m-1"})
+
+
+@pytest.mark.asyncio
+async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The link is a bearer link: Teams gets it in a 1:1 card, never in the channel."""
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, workspace_id=f"teams-{uuid.uuid4().hex[:8]}")
+        account = await make_account(session, tenant=tenant)
+        await set_role(session, account.id, Role.ADMIN)
+    fake = _FakeTeams()
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=AsyncMock(),  # type: ignore[arg-type]
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        teams_client=TeamsBotClient(
+            httpx.AsyncClient(transport=httpx.MockTransport(fake)),
+            client_id="app",
+            client_secret="secret",
+            tenant_id="t",
+        ),
+    )
+    origin = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_at=datetime.now(UTC),
+        configuration_target_name="Agent",
+        configuration_target_ma_agent_id="ma_agent",
+        responder_name="Daimon",
+        responder_ma_agent_id="ma_daimon",
+        parent_channel_id="19:c@thread.tacv2",
+        thread_id="19:c@thread.tacv2;messageid=1",
+    )
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="teams",
+        external_id="entra-tenant",
+        platform_user_id="aad-admin",
+        is_admin=True,
+    )
+    sent = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4())
+    )
+    assert sent.status == "sent", "an admin's Teams connect should deliver"
+    assert "1:1 chat" in sent.message and "http" not in sent.message, (
+        "the channel reply says where the link went, never the link"
+    )
+    assert [path for path, _ in fake.posts] == [
+        "conversations",
+        "conversations/a:dm-1/activities",
+    ], "the card should go to a freshly opened 1:1 chat, not the channel"
+    card = fake.posts[1][1]["attachments"][0]["content"]  # type: ignore[index]
+    [action] = card["actions"]
+    assert action["type"] == "Action.OpenUrl", "the link should be a button"
+    token = action["url"].removeprefix("https://mcp.test/oauth/github/connect/")
+    async with committing_sessionmaker() as session:
+        invitation = await get_invitation(session, digest(token))
+    assert invitation is not None and invitation.origin_platform == "teams", (
+        "the button should carry a live Teams invitation"
+    )
+
+    fake.chat_status = 403
+    failed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4())
+    )
+    assert failed.status == "delivery_failed", "a refused 1:1 chat should fail the delivery"
+    assert "1:1 chat" in failed.message, "the error should say the 1:1 chat failed"
+    async with committing_sessionmaker() as session:
+        live = await session.scalar(
+            text("SELECT count(*) FROM github_connect_invitations WHERE tenant_id = :tenant"),
+            {"tenant": tenant.id},
+        )
+    assert live == 1, "the undelivered invitation should be revoked"

@@ -371,6 +371,12 @@ registration:
   (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and Daimon, named by Entra object ID.
+- **GitHub setup.** `github_connect` sends the Connect GitHub card to the
+  requester's 1:1 chat, never the channel, since its link is single-use and
+  private; if that chat cannot be opened, the link is withdrawn and the agent
+  says so. Work that waited on the repo resumes once it is connected.
+  `set_working_repo` and `remove_repo` work as on Discord and Slack. Access
+  requests to admins (`request_github_access`) are not on Teams yet.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -61,3 +63,17 @@ async def teams_direct_message(
             f"Teams DM failed after {len(ids)} message(s): {type(exc).__name__}"
         ) from exc
     return chat, ids
+
+
+async def send_card_to_caller(
+    runtime: McpRuntime, auth: AuthIdentity, *, conversation_id: str, card: Mapping[str, object]
+) -> None:
+    """Send a card to the caller's 1:1 chat, found through a conversation they are in.
+
+    Raises `httpx.HTTPError` or `ValueError` when Teams refuses.
+    """
+    client, caller = require_client(runtime, auth)
+    member = await client.get_member(conversation_id, caller)
+    if member is None or not member.id:
+        raise ValueError("caller is not on the conversation's roster")
+    await client.send_card(await client.open_personal_chat(member.id), card)

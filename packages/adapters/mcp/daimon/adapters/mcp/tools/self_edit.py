@@ -399,7 +399,7 @@ async def _set_repo_binding_impl(
         )
         raise ToolError(
             f"No GitHub token is available to bind {repo_url}. Tell the user to ask "
-            "Daimon in Discord or Slack chat to connect this agent to that repository; "
+            "Daimon in Discord, Slack or Teams chat to connect this agent to that repository; "
             "that chat posts the Connect GitHub link. "
             "This agent-scoped session cannot call that tool. Do not retry here."
         ) from e

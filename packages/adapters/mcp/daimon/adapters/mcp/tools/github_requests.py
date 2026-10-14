@@ -127,7 +127,10 @@ async def request_github_access_impl(
     if origin.platform == "teams":
         return GitHubRequestResult(
             status="unavailable",
-            message="GitHub setup isn't in Teams yet. Set it up from Discord or Slack.",
+            message=(
+                "GitHub access requests aren't in Teams yet. "
+                "An admin for this agent can ask me to connect GitHub here."
+            ),
         )
     if origin.platform not in ("discord", "slack") or auth.platform_user_id is None:
         raise ToolError("GitHub requests need a Discord or Slack conversation.")
