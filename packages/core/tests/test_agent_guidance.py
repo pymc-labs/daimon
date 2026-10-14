@@ -339,9 +339,12 @@ def test_setup_details_are_admin_only_and_capabilities_open() -> None:
 def test_channel_admin_gets_setup_details_only_about_agents_in_their_channel() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     rule = block[block.index("WHAT YOU DISCLOSE DEPENDS ON WHO ASKS") : block.index("OUTSIDE TEXT")]
-    assert 'current_role "channel_admin" also gets them' in rule
-    assert "only about agents that answer in channel_admin_scope.channel_id" in rule
-    assert "never other agents or the workspace default" in rule
+    # Channel administration alone doesn't prove the agent stays in their
+    # channels; the verified get_agent result decides.
+    assert 'current_role "channel_admin" gets them' in rule
+    assert "only about an agent for which get_agent" in rule
+    assert "returns its mcp_servers (not null)" in rule
+    assert "If it returns null, they get the short line." in rule
     assert 'Give any other is_admin="false" requester one short line' in rule
     assert '"An admin can see setup details"' in rule, "the non-admin line is unchanged"
     inspecting = block[block.index("INSPECTING CONFIG") : block.index("WHAT YOU DISCLOSE")]
