@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from secrets import randbits
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -21,7 +22,9 @@ from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,29 @@ class TeamsRuntime:
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # Finds a channel's senders from another organisation; None trusts the activity alone.
     externals: ExternalParticipants | None = None
+    # This process's message admissions; `hold_owner_key` makes it read as alive.
+    owner_key: int = field(default_factory=lambda: randbits(63))
+
+
+@asynccontextmanager
+async def hold_owner_key(engine: AsyncEngine, owner_key: int) -> AsyncIterator[None]:
+    """Hold `owner_key` as a session advisory lock on its own connection, for life.
+
+    Single process, so no heartbeat as Discord has: a lost connection frees the
+    key, and a later boot may then reclaim this process's unhandled messages.
+    The `finish_teams_messages` fence still keeps any turn from running twice.
+    """
+    async with engine.connect() as connection:
+        await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
+        await connection.commit()
+        try:
+            yield
+        finally:
+            with suppress(SQLAlchemyError, OSError):
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key}
+                )
+                await connection.commit()
 
 
 @asynccontextmanager
@@ -67,7 +93,9 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
     deployment_default = parse_deployment_default(settings.defaults_root)
     resolver_cache = new_resolver_cache()
     billing_config = load_billing_config()
+    owner_key = randbits(63)
     async with (
+        hold_owner_key(engine, owner_key),
         AsyncAnthropic(
             api_key=settings.anthropic.api_key.get_secret_value(),
             base_url=str(settings.anthropic.base_url),
@@ -94,6 +122,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
                 turn_deps=turn_deps,
                 deployment_default=deployment_default,
                 mcp_token_probe=probe_bearer_token,
+                owner_key=owner_key,
             )
         finally:
             await drain_outcomes()

@@ -13,7 +13,8 @@ github_oauth_states (both kinds where the table permits) -> credential_requests
 (both kinds, platform-user-scoped like credential_requests) -> message_feedback
 (platform only, platform-user-scoped) -> routines (platform only) ->
 principal_links -> principal row -> platform_user_names (platform only,
-platform-user-scoped, after the principal row on purpose: see the call).
+platform-user-scoped, after the principal row on purpose: see the call) ->
+teams_messages (Teams principals only, keyed by (tenant, Entra user)).
 Account-level deletes (mcp_tokens, GitHub connect requests and click intents,
 message_feedback, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
@@ -134,6 +135,7 @@ from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
+from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -175,6 +177,7 @@ class PurgeReport(BaseModel):
     channel_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
+    teams_messages: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -206,6 +209,7 @@ class PurgeReport(BaseModel):
             channel_admins=self.channel_admins + other.channel_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
+            teams_messages=self.teams_messages + other.teams_messages,
         )
 
 
@@ -231,6 +235,7 @@ async def _purge_principal_in_session(
     """
     agent_post_requesters_count = 0
     platform_user_names_count = 0
+    teams_messages_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         routines_count = await routines_store.delete_for_principal(
             session,
@@ -405,6 +410,11 @@ async def _purge_principal_in_session(
             platform=principal.platform,
             platform_user_id=principal.external_id,
         )
+        if principal.platform == "teams":
+            # Their message receipts, and the words of any not yet handled.
+            teams_messages_count = await teams_admissions_store.delete_teams_messages_for_user(
+                session, tenant_id=principal.tenant_id, user_id=principal.external_id
+            )
 
     return PurgeReport(
         routines=routines_count,
@@ -423,6 +433,7 @@ async def _purge_principal_in_session(
         channel_admins=channel_admins_count,
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
+        teams_messages=teams_messages_count,
     )
 
 

@@ -44,6 +44,7 @@ from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
+from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import wizard_session as wizard_session_store
@@ -96,6 +97,7 @@ class PurgePreview(BaseModel):
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -118,6 +120,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.channel_admins, "channel admin list"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
+        (preview.teams_messages, "Teams message record"),
     )
     parts = [
         "saved settings"
@@ -477,6 +480,13 @@ async def collect_purge_preview(
                     platform_user_id=pp.external_id,
                 )
             )
+        # 19. teams_messages — Teams message receipts, with any unhandled words.
+        teams_messages_total = 0
+        for pp in pp_list:
+            if pp.platform == "teams":
+                teams_messages_total += await teams_admissions_store.count_teams_messages_for_user(
+                    session, tenant_id=pp.tenant_id, user_id=pp.external_id
+                )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
@@ -515,4 +525,5 @@ async def collect_purge_preview(
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
+        teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
     )

@@ -64,7 +64,8 @@ def canonical_uuid(value: object) -> str | None:
 
 @dataclass(frozen=True)
 class TeamsInbound:
-    """Verified facts about one message. Content is never persisted by the adapter.
+    """Verified facts about one message. Content is persisted only while a restart
+    may replay it (`admissions`).
 
     `conversation_id` is where replies go: a channel thread's id
     (`19:…;messageid=<root>`) or a personal chat's. `thread_id` is the session

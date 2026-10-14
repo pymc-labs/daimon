@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast, get_args
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,7 @@ import httpx
 import pytest
 import structlog
 from daimon.adapters.teams import app as app_module
+from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
 from daimon.adapters.teams.context import HistoryBlock
@@ -149,11 +151,12 @@ async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs
     cancel.assert_called_once_with(THREAD_ID)
 
 
+@pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize("draining", [True, False])
 async def test_messages_still_queued_when_the_turn_ends_early_are_told_why(
     db_session_factory: async_sessionmaker[AsyncSession], draining: bool
 ) -> None:
-    """A drain for a restart is not a failure: the queued message gets the restart notice."""
+    """A drain for a restart is not a failure: the queued message is held for the next boot."""
     sender = FakeSender()
     teams = _app(db_session_factory, sender)
     started = asyncio.Event()
@@ -165,14 +168,16 @@ async def test_messages_still_queued_when_the_turn_ends_early_are_told_why(
     with patch.object(TeamsApp, "_run_turn", _turn):
         first = teams.spawn(teams._orchestrate(make_inbound("one"), TENANT), name="turn")
         await started.wait()
-        await teams._orchestrate(make_inbound("two"), TENANT)
+        two = make_inbound("two")
+        assert await teams._admissions.claim(two, now=datetime.now(UTC)), "admitted on arrival"
+        await teams._orchestrate(two, TENANT)
         if draining:
             await teams.drain(timeout=0.0)
         else:
             first.cancel()
             await asyncio.gather(first, return_exceptions=True)
 
-    expected = app_module._RESTARTED if draining else app_module._FAILED
+    expected = HOLDING if draining else app_module._FAILED
     assert [a.text for a in sender.activities] == [expected], (
         "the queued message is answered once, with the notice that matches the cause"
     )

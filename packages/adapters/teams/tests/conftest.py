@@ -554,6 +554,13 @@ def no_delivery_poller() -> Iterator[AsyncMock]:
         yield poller
 
 
+@pytest.fixture(autouse=True)
+def no_admission_reclaimer() -> Iterator[AsyncMock]:
+    """The periodic reclaim would share the test connection too; boot's pass still runs."""
+    with patch("daimon.adapters.teams.app.TeamsApp._reclaim_loop", new_callable=AsyncMock) as loop:
+        yield loop
+
+
 @pytest.fixture
 def teams_api_fake() -> TeamsApiFake:
     return TeamsApiFake()
