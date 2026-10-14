@@ -451,13 +451,13 @@ class TeamsApp:
         tasks = set(self._tasks)
         if self._recovery is not None and not self._recovery.done():
             tasks.add(self._recovery)
-        if not tasks:
-            return
-        _done, pending = await asyncio.wait(tasks, timeout=timeout)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        self.outputs.close()
 
     def _role(self, inbound: TeamsInbound) -> Role:
         # Someone from another organisation is never an admin, whatever ids are configured.

@@ -31,9 +31,9 @@ import asyncio
 import contextlib
 import functools
 import secrets
-import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -156,22 +156,25 @@ class TeamsOutputDelivery:
         # repeats only the card. Per process, so a restart previews once more.
         self._previewed: set[str] = set()
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
-        # A decode can take hundreds of MB: at most two at once across all sweeps. Held
-        # by the worker thread, which a cancelled sweep cannot stop.
-        self._preview_slots = threading.BoundedSemaphore(2)
+        # A decode can take hundreds of MB: at most two at once across all sweeps. Its own
+        # pool, so queued decodes never fill the loop's default executor (to_thread, DNS).
+        self._decoder = ThreadPoolExecutor(max_workers=2, thread_name_prefix="teams-preview")
 
     async def _say(self, conversation_id: str, service_url: str | None, text: str) -> None:
         await self._sender.send(
             conversation_id, MessageActivityInput(text=text), service_url=service_url
         )
 
+    def close(self) -> None:
+        """Drop queued decodes; one already running finishes on its thread."""
+        self._decoder.shutdown(wait=False, cancel_futures=True)
+
     async def _preview(self, name: str, file: DeliverableFile) -> Attachment | None:
         # Off the event loop: decoding and re-encoding a large image would stall other turns.
-        return await asyncio.to_thread(self._decode_preview, name, file)
-
-    def _decode_preview(self, name: str, file: DeliverableFile) -> Attachment | None:
-        with self._preview_slots:
-            return preview_attachment(name, file.content, file.mime_type)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._decoder, preview_attachment, name, file.content, file.mime_type
+        )
 
     async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
         # An extra, never the file itself: a failure is logged and the delivery stands.
