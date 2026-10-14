@@ -68,6 +68,17 @@ async def get_turn_cap(
     return override if override is not None else default
 
 
+async def get_plain_text_mentions(
+    session_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID
+) -> bool:
+    """Whether a plain-text "@<bot name>" starts a turn; False for an unknown tenant."""
+    async with session_factory() as session:
+        enabled = (
+            await session.execute(select(Tenant.plain_text_mentions).where(Tenant.id == tenant_id))
+        ).scalar_one_or_none()
+    return bool(enabled)
+
+
 _LAST_RECONCILE_ERROR_MAX_LENGTH = 2000
 _LAST_RECONCILE_ERROR_TRUNCATION_MARKER = "... [truncated]"
 
@@ -276,6 +287,25 @@ async def set_turn_cap(
             update(Tenant)
             .where(Tenant.id == tenant_id)
             .values(turn_cap=cap)
+            .returning(Tenant)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise StoreError(f"tenant {tenant_id} not found")
+    await session.flush()
+    return TenantRow.model_validate(row)
+
+
+async def set_plain_text_mentions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, enabled: bool
+) -> TenantRow:
+    """Turn the tenant's plain-text "@<bot name>" trigger on or off."""
+    row = (
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(plain_text_mentions=enabled)
             .returning(Tenant)
             .execution_options(populate_existing=True)
         )

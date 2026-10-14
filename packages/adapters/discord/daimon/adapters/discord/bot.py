@@ -40,6 +40,7 @@ from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
     HintCooldown,
     is_participation_candidate,
+    is_plain_text_mention_candidate,
     is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
@@ -163,6 +164,7 @@ from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenants import (
+    get_plain_text_mentions,
     get_tenant_liveness,
     get_turn_cap,
     list_tenants_by_platform,
@@ -2440,6 +2442,37 @@ class DaimonBot(commands.Bot):
                 await self._release_and_clear(thread_id, tenant_id, clear_reactions=False)
                 self._pending.pop(thread_id, None)
 
+    def _plain_text_names(self, guild: discord.Guild | None) -> tuple[str, ...]:
+        """The names a typed "@<name>" may use: configured, account and server nickname."""
+        me = guild.me if guild is not None else None
+        candidates: tuple[object, ...] = (
+            _resolve_bot_display_name(self.runtime.settings),
+            self.user.name if self.user is not None else None,
+            me.display_name if me is not None else None,
+        )
+        # Every message with an "@" reaches this; anything that is not a real
+        # name string (a member missing from the cache, a test double) is
+        # skipped rather than failing on_message.
+        return tuple(name for name in candidates if isinstance(name, str))
+
+    async def _plain_text_mentions_on(self, message: discord.Message) -> bool:
+        """Read the tenant's switch for a message that already names the bot as text."""
+        assert message.guild is not None
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+        try:
+            enabled = await get_plain_text_mentions(self.runtime.sessionmaker, tenant_id=tenant_id)
+        except SQLAlchemyError as exc:
+            # A failed read leaves the message unaddressed, as with the switch off.
+            log.warning("plain_text_mention.lookup_failed", error_type=type(exc).__name__)
+            return False
+        if enabled:
+            log.info(
+                "plain_text_mention.accepted",
+                guild_id=str(message.guild.id),
+                channel_id=str(message.channel.id),
+            )
+        return enabled
+
     async def _maybe_hint_unmentioned_reply(
         self, message: discord.Message, *, bot_mentioned: bool
     ) -> None:
@@ -2690,6 +2723,17 @@ class DaimonBot(commands.Bot):
         if self.draining:
             return
         is_webhook_post = isinstance(message.webhook_id, int)
+        if not bot_mentioned and is_plain_text_mention_candidate(
+            author_is_bot=message.author.bot,
+            author_is_webhook=is_webhook_post,
+            bot_mentioned=bot_mentioned,
+            guild_id=str(message.guild.id) if message.guild else None,
+            content=message.content,
+            bot_names=self._plain_text_names(message.guild),
+        ):
+            # From here on it is a mention: the same gates, the same turn, and
+            # no participation screening or unmentioned-reply hint for it.
+            bot_mentioned = await self._plain_text_mentions_on(message)
         reply_to_recorded_post = False
         reference = message.reference
         resolved = reference.resolved if isinstance(reference, discord.MessageReference) else None
@@ -4504,13 +4548,16 @@ class DaimonBot(commands.Bot):
                 # The fallback title quotes the message, never the agent's
                 # internal name (a slug means nothing to the reader).
                 naming = self.runtime.settings.thread_naming
-                message_text = strip_mentions(message.content)
+                bot_names = self._plain_text_names(message.guild)
+                message_text = strip_mentions(message.content, bot_names)
                 attachment_names = [a.filename for a in message.attachments]
                 opening_text = naming_text(message_text, attachment_names)
                 # Line breaks kept: the fallback takes only the first line,
                 # while the naming model reads the whole collapsed message.
                 thread_name = fallback_thread_name(
-                    "\n".join(strip_mentions(line) for line in message.content.splitlines()),
+                    "\n".join(
+                        strip_mentions(line, bot_names) for line in message.content.splitlines()
+                    ),
                     default=attachment_names[0][:THREAD_NAME_MAX_CHARS]
                     if attachment_names
                     else f"Chat with {_resolve_bot_display_name(self.runtime.settings)}",

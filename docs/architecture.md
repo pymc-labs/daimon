@@ -258,9 +258,9 @@ A Slack `app_mention` runs a turn only when its text contains the bot's own
 event fires only on a direct mention, but installs have reported it arriving
 for thread replies that never mentioned the bot, so `_handle_app_mention`
 checks the text itself, as Discord checks `message.mentions`. The bot's user
-id comes from `auth.test`, cached per workspace. The check runs after dedup and
-the token read and before the Slack Connect rejection, so an external sender
-who never addressed the bot gets no notice. A dropped event is logged as
+id comes from `auth.test`, cached per workspace. The check runs after the
+token read and before dedup and the Slack Connect rejection, so an external
+sender who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
@@ -452,6 +452,27 @@ it still carries that turn's pending button. Answered cards without that button
 stay intact. An isolated transient API failure and shutdown cancellation keep
 the intent active for another recovery attempt. An unprompted turn likewise retains its
 intent when its card delete fails, including an unknown-webhook error.
+
+Plain-text mentions are a per-tenant switch (`tenants.plain_text_mentions`,
+off by default, set with the admin-only `set_plain_text_mentions`). Each
+adapter first runs the pure matcher in `daimon.core.name_mentions` on a
+person's channel or thread message: "@" plus a bot name, case-insensitive,
+any whitespace between its words, not after a word character, "@" or "/"
+and not running on into a word character, hyphen, dotted domain or "(";
+"Name (Suffix)" also matches "@Name". The price is that "@Name (urgent)" and
+"@Name.Thanks" are ignored. A following word does not stop it, so bots whose
+names share a prefix all answer the longer one. Bots, webhooks, DMs, messages
+that already carry a real mention, Slack `<...>` links and `>` quote lines,
+and Teams reply quotes never match. Only a match pays one read of the switch,
+and a failed read counts as off. With it on, Discord continues down the
+mention path (configured name, account name and server nickname), Slack runs
+the `app_mention` handler for the `message` event with the switch, read
+first, in place of the mention check; both events claim the dedup slot only
+after the mention check, so a message with a real mention runs once, through
+its own `app_mention`. Teams (`parse_inbound` marks the message `by_name`; the
+name is `recipient.name`) takes the ordinary `_handle` path with the typed
+name stripped, or gets the too-long notice a mention would. Off, nothing
+changes: a Teams thread reply still goes to participation.
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer

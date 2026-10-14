@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Hashable
+from collections.abc import Collection, Hashable, Iterable
 
+from daimon.core.name_mentions import mentions_by_name
 from daimon.core.thread_participation import ParticipationMode
 
 
@@ -58,6 +59,27 @@ def _is_allowed_bot_author(
     if self_user_id is not None and author_id == self_user_id:
         return False
     return author_id in qa_bot_user_ids
+
+
+def is_plain_text_mention_candidate(
+    *,
+    author_is_bot: bool,
+    author_is_webhook: bool,
+    bot_mentioned: bool,
+    guild_id: str | None,
+    content: str,
+    bot_names: Iterable[str | None],
+) -> bool:
+    """Pre-DB gate: may a typed "@<bot name>" stand in for a real mention?
+
+    Only a person's guild message that names the bot as text and does not
+    already mention it qualifies; the caller then reads the tenant's switch.
+    Bots never qualify, allow-listed QA bots included, so no bot (daimon's
+    own answers among them) can start a turn by writing the name.
+    """
+    if bot_mentioned or author_is_bot or author_is_webhook or guild_id is None:
+        return False
+    return mentions_by_name(content, bot_names)
 
 
 def is_participation_candidate(

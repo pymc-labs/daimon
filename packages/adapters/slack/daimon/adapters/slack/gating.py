@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any, cast
+
+from daimon.core.name_mentions import mentions_by_name
 
 
 def mentions_bot(event: dict[str, Any], *, bot_user_id: str) -> bool:
@@ -23,6 +26,35 @@ def mentions_bot(event: dict[str, Any], *, bot_user_id: str) -> bool:
     text = str(event.get("text") or "")
     pattern = rf"<@{re.escape(bot_user_id)}(?:\|[^>]*)?>"
     return re.search(pattern, text) is not None
+
+
+# A plain post, one with files attached, or a thread reply also sent to the
+# channel; edits, joins and every other subtype are not a request.
+_PLAIN_TEXT_MENTION_SUBTYPES = frozenset({"", "file_share", "thread_broadcast"})
+# Slack wraps links and real mentions in <...>; a name inside one is not typed.
+_SLACK_TOKEN = re.compile(r"<[^<>]*>")
+# A quoted line ("> ...", sent as "&gt; ..."): someone else's words, as Teams reply quotes.
+_QUOTE_LINE = re.compile(r"^(?:&gt;|>).*$", re.MULTILINE)
+# A ">>>" block quote runs from its line to the end of the message.
+_BLOCK_QUOTE = re.compile(r"^(?:&gt;|>){3}[\s\S]*", re.MULTILINE)
+
+
+def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[str | None]) -> bool:
+    """Return True for a person's channel or thread message that types "@<bot name>".
+
+    Only ``message`` events from a user (no ``bot_id``) in a public or private
+    channel qualify; DMs already start a turn without a mention. The caller
+    still checks the tenant switch, and that the text has no real
+    ``<@bot_user_id>`` (that one arrives as ``app_mention`` too). Pure: no I/O.
+    """
+    if event.get("type") != "message" or event.get("bot_id") or not event.get("user"):
+        return False
+    if str(event.get("subtype") or "") not in _PLAIN_TEXT_MENTION_SUBTYPES:
+        return False
+    if event.get("channel_type") not in ("channel", "group"):
+        return False
+    text = _QUOTE_LINE.sub("", _BLOCK_QUOTE.sub("", str(event.get("text") or "")))
+    return mentions_by_name(_SLACK_TOKEN.sub(" ", text), bot_names)
 
 
 def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 120 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 122 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -263,6 +263,15 @@ Notebook MCP tools.
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
 | `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
+
+## `plain_text_mentions`
+
+Plain-text mention tools: let a typed "@<bot name>" start a turn, workspace-wide.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_plain_text_mentions` | all callers | Report whether a typed "@<your name>" in a channel or thread starts a reply here. |
+| `set_plain_text_mentions` | admin only | Let a typed "@<your name>" in a channel or thread start a reply. |
 
 ## `promo_codes`
 

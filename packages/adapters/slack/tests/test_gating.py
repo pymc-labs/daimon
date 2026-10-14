@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
 from daimon.adapters.slack.gating import (
     is_external_interactive,
+    is_plain_text_mention_event,
     is_slack_connect_external,
     mentions_bot,
 )
@@ -112,3 +116,59 @@ class TestMentionsBot:
         assert mentions_bot(event, bot_user_id="U_BOT") is False, (
             "a mention of a user whose id merely starts with the bot's id must not pass the gate"
         )
+
+
+def _channel_message(**overrides: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": "message",
+        "channel_type": "channel",
+        "user": "U_PERSON",
+        "text": "@Daimon what changed?",
+    }
+    event.update(overrides)
+    return event
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"channel_type": "group"},
+        {"subtype": "file_share"},
+        {"thread_ts": "1.0"},
+        {"text": "&gt; ship it\n@daimon agreed?"},
+        {"text": "@daimon agreed?\n&gt;&gt;&gt; ship it"},
+    ],
+)
+def test_plain_text_mention_event_admits_a_person_naming_the_bot(
+    overrides: dict[str, Any],
+) -> None:
+    """Channel, private channel, file post and thread reply all qualify."""
+    assert is_plain_text_mention_event(_channel_message(**overrides), bot_names=("daimon",)), (
+        f"a person's message typing the name must qualify ({overrides})"
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "why"),
+    [
+        ({"type": "app_mention"}, "an app_mention, which has its own path"),
+        ({"channel_type": "im"}, "a DM, which needs no mention"),
+        ({"channel_type": "mpim"}, "a group DM"),
+        ({"bot_id": "B1"}, "a bot's message"),
+        ({"user": None}, "a message without a user"),
+        ({"subtype": "message_changed"}, "an edit"),
+        ({"text": "Daimon, what changed?"}, "the name without an @"),
+        ({"text": "see <https://example.com/u?name=@daimon>"}, "a name inside a link"),
+        ({"text": "see <https://example.com|@daimon docs>"}, "a name in a link label"),
+        ({"text": "&gt; @daimon ship it\nagreed"}, "a name in a quoted line"),
+        ({"text": "> @daimon ship it\nagreed"}, "a name in an unescaped quoted line"),
+        ({"text": "agreed\n&gt;&gt;&gt; ship it\n@daimon too"}, "a name in a block quote"),
+        ({"text": ">>> ship it\n@daimon too"}, "a name in an unescaped block quote"),
+    ],
+)
+def test_plain_text_mention_event_rejects(overrides: dict[str, Any], why: str) -> None:
+    """Everything but a person's channel message naming the bot is left alone."""
+    assert not is_plain_text_mention_event(_channel_message(**overrides), bot_names=("daimon",)), (
+        f"{why} must not qualify"
+    )

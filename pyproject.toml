@@ -224,6 +224,7 @@ source_modules = [
     "daimon.core.message_feedback",
     "daimon.core.message_split",
     "daimon.core.models_catalog",
+    "daimon.core.name_mentions",
     "daimon.core.notebooks",
     "daimon.core.observability",
     "daimon.core.ops_alerts",

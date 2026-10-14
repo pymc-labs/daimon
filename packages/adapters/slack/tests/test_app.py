@@ -54,7 +54,7 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
-from daimon.core.stores.tenants import get_tenant, set_turn_cap
+from daimon.core.stores.tenants import get_tenant, set_plain_text_mentions, set_turn_cap
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -6985,9 +6985,9 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
 ) -> None:
     """A failing auth.test on cold-cache resolution drops the event: nothing
     raises, no turn runs, and no error reply is posted, since whether the event
-    addressed the bot is unknown. (Dedup has already recorded the event, so a
-    Slack retry will not re-deliver it — the mention is lost for this process;
-    acceptable once per workspace lifetime.)"""
+    addressed the bot is unknown. The handler acks first, so Slack does not
+    retry; a second delivery of the same event still runs the turn, which shows
+    the failed attempt claimed no dedup slot."""
     team_id = "T_APP_AUTH_FAIL"
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
@@ -7044,6 +7044,13 @@ async def test_handle_app_mention_auth_test_failure_drops_without_raising(
     assert posted == [], (
         "a failed auth.test must not post an error reply into a thread that may "
         "never have mentioned the bot"
+    )
+
+    with aioresponses() as mock:
+        mock.post("https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"})
+        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
+    assert orchestrate_calls == [{"event_ts": event["event_ts"]}], (
+        "the same event must still run: the failed attempt claimed no dedup slot"
     )
 
 
@@ -7185,4 +7192,183 @@ async def test_orchestrate_with_a_stale_setup_posts_the_out_of_date_notice(
     ]
     assert posts[-1].kwargs["json"]["text"] == (
         "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plain-text "@<bot name>" (the per-tenant switch)
+# ---------------------------------------------------------------------------
+
+
+def _named_message(event_ts: str, text: str = "@Daimon summarise this thread") -> dict[str, Any]:
+    return {
+        "type": "message",
+        "channel_type": "channel",
+        "channel": "C_TEST",
+        "event_ts": event_ts,
+        "ts": event_ts,
+        "user": "U_TEST",
+        "text": text,
+    }
+
+
+async def _plain_text_app(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    team_id: str,
+    enabled: bool,
+) -> tuple[SlackApp, list[str]]:
+    """A ready workspace with a token, a cached bot id and the switch set; spies on turns."""
+    fernet_key = Fernet.generate_key().decode()
+    result = await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    await upsert_slack_bot_token(
+        db_session,
+        team_id=team_id,
+        encrypted_token=encrypt_token(build_multifernet((fernet_key,)), "xoxb-plain-text"),
+    )
+    await set_plain_text_mentions(db_session, tenant_id=result.tenant_id, enabled=enabled)
+    await db_session.flush()
+    app = _make_app(db_session_factory, crypto_key=fernet_key)
+    app._bot_user_ids[team_id] = "U_BOT"  # pyright: ignore[reportPrivateUsage]
+    turns: list[str] = []
+
+    async def _spy_orchestrate(event: dict[str, Any], **kwargs: Any) -> None:
+        turns.append(str(event["type"]))
+
+    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
+    return app, turns
+
+
+async def test_on_request_dispatches_a_typed_bot_name_as_a_by_name_mention() -> None:
+    """A channel message typing the name reaches the mention handler, counted for drain."""
+    fake_client = _FakeSocketClient()
+    app = _make_app()
+    app.runtime.settings.slack.bot_display_name = "daimon"
+    calls: list[dict[str, Any]] = []
+
+    async def _record(event: dict[str, Any], **kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    app._handle_app_mention = _record  # type: ignore[method-assign]
+    named = _make_events_api_request(
+        event_type="message",
+        extra_event={"channel_type": "channel", "text": "@DAIMON help"},
+    )
+    await app.on_request(fake_client, named)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert calls == [{"team_id": "T_TEST", "received_before_drain": True, "by_name": True}], (
+        "the typed name must run the mention handler in by-name mode, admitted before drain"
+    )
+
+    calls.clear()
+    plain = _make_events_api_request(
+        event_type="message", extra_event={"channel_type": "channel", "text": "no name here"}
+    )
+    await app.on_request(fake_client, plain)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    assert calls == [], "an ordinary channel message must not reach the mention handler"
+
+
+async def test_typed_bot_name_runs_one_turn_when_the_switch_is_on(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """With the switch on the message runs a turn; a Slack retry of it is deduplicated."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_ON", enabled=True
+    )
+    event = _named_message("1000000500.000001")
+
+    await app._handle_app_mention(event, team_id="T_PLAIN_ON", by_name=True)  # pyright: ignore[reportPrivateUsage]
+    await app._handle_app_mention(event, team_id="T_PLAIN_ON", by_name=True)  # pyright: ignore[reportPrivateUsage]
+
+    assert turns == ["message"], "exactly one turn must run for the typed name"
+
+
+async def test_typed_bot_name_is_dropped_without_claiming_the_event_when_off(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Off drops the message before dedup, so a real mention of the same ts still runs."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_OFF", enabled=False
+    )
+    ts = "1000000501.000001"
+
+    await app._handle_app_mention(_named_message(ts), team_id="T_PLAIN_OFF", by_name=True)  # pyright: ignore[reportPrivateUsage]
+    assert turns == [], "with the switch off the typed name must run nothing"
+
+    mention = {**_named_message(ts, "<@U_BOT> @Daimon go"), "type": "app_mention"}
+    await app._handle_app_mention(mention, team_id="T_PLAIN_OFF")  # pyright: ignore[reportPrivateUsage]
+    assert turns == ["app_mention"], "the dropped message must not have consumed the dedup slot"
+
+
+async def test_real_mention_and_typed_name_together_run_one_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Both events for one message (message + app_mention) start a single turn."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_BOTH", enabled=True
+    )
+    message = _named_message("1000000502.000001", "<@U_BOT> and @Daimon, look")
+    mention = {**message, "type": "app_mention"}
+
+    await app._handle_app_mention(message, team_id="T_PLAIN_BOTH", by_name=True)  # pyright: ignore[reportPrivateUsage]
+    await app._handle_app_mention(mention, team_id="T_PLAIN_BOTH")  # pyright: ignore[reportPrivateUsage]
+
+    assert turns == ["app_mention"], "the real mention's event runs the only turn"
+
+
+async def test_an_app_mention_without_the_bot_token_leaves_the_typed_name_its_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An app_mention lacking <@bot> is dropped before dedup, so its by-name twin still runs."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_STRAY", enabled=True
+    )
+    message = _named_message("1000000503.000001")
+    stray = {**message, "type": "app_mention"}
+
+    await app._handle_app_mention(stray, team_id="T_PLAIN_STRAY")  # pyright: ignore[reportPrivateUsage]
+    await app._handle_app_mention(message, team_id="T_PLAIN_STRAY", by_name=True)  # pyright: ignore[reportPrivateUsage]
+
+    assert turns == ["message"], "the stray app_mention must not take the message's dedup slot"
+
+
+async def test_typed_bot_name_with_the_switch_off_reads_nothing_else(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Off, the switch is the only read: no protection lookup for an ordinary message."""
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_CHEAP", enabled=False
+    )
+    protection = AsyncMock()
+    with patch("daimon.adapters.slack.app.protection_state", protection):
+        await app._handle_app_mention(  # pyright: ignore[reportPrivateUsage]
+            _named_message("1000000504.000001"), team_id="T_PLAIN_CHEAP", by_name=True
+        )
+    protection.assert_not_awaited()
+    assert turns == [], "nothing must run with the switch off"
+
+
+async def test_a_failed_switch_read_drops_the_typed_bot_name_quietly(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A failed read is logged and treated as off, never as the boundary's error post."""
+    from sqlalchemy.exc import OperationalError
+
+    app, turns = await _plain_text_app(
+        db_session, db_session_factory, team_id="T_PLAIN_FAIL", enabled=True
+    )
+    failing = AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("pool gone")))
+    with (
+        patch("daimon.adapters.slack.app.get_plain_text_mentions", failing),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await app._handle_app_mention(  # pyright: ignore[reportPrivateUsage]
+            _named_message("1000000505.000001"), team_id="T_PLAIN_FAIL", by_name=True
+        )
+    assert turns == [], "an unreadable switch must run nothing"
+    assert "plain_text_mention.lookup_failed" in [entry["event"] for entry in logs], (
+        "the failure must be logged"
     )

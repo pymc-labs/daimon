@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any, cast
 
@@ -18,6 +19,7 @@ from daimon.adapters.teams.identity import (
     foreign_tenant,
     live_tenant_id,
     parse_inbound,
+    strip_typed_name,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -121,6 +123,64 @@ def test_an_unmentioned_thread_reply_is_an_unprompted_candidate() -> None:
 def test_a_mentioned_thread_reply_is_not_unprompted() -> None:
     inbound = _parse(make_channel_activity(text="any update?"))
     assert isinstance(inbound, TeamsInbound) and not inbound.unprompted
+
+
+def _to_named_bot(payload: dict[str, object]) -> dict[str, object]:
+    """Teams names the bot on `recipient`; the typed-name match reads it there."""
+    return payload | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon"}}
+
+
+def test_a_root_post_typing_the_bot_name_is_marked_by_name() -> None:
+    """A typed "@daimon" on a new post is no longer silent: the handler reads the switch."""
+    root = make_channel_activity(
+        mention_bot=False, conversation_id=CHANNEL_ID, text="@daimon summarise the week"
+    )
+    inbound = _parse(_to_named_bot(root))
+    assert isinstance(inbound, TeamsInbound), "a root post naming the bot must be parsed"
+    assert inbound.by_name and not inbound.unprompted, (
+        "by name only: a root post is never a participation candidate"
+    )
+    assert inbound.text == "@daimon summarise the week", (
+        "the name stays until the switch is known, so 'off' changes nothing"
+    )
+
+
+def test_a_thread_reply_typing_the_bot_name_is_by_name_and_unprompted() -> None:
+    """Off, the reply is screened as before; on, it is a mention."""
+    reply = make_channel_activity(mention_bot=False, text="thanks @DAIMON, and now?")
+    inbound = _parse(_to_named_bot(reply))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.by_name and inbound.unprompted, "both outcomes stay open for the handler"
+
+
+def test_a_real_mention_with_the_typed_name_is_an_ordinary_mention() -> None:
+    """A message with both forms is addressed already; the typed name adds nothing."""
+    inbound = _parse(_to_named_bot(make_channel_activity(text="@daimon please look")))
+    assert isinstance(inbound, TeamsInbound)
+    assert not inbound.by_name and not inbound.unprompted, "one ordinary mention"
+
+
+def test_a_personal_chat_typing_the_bot_name_is_unchanged() -> None:
+    """1:1 chats need no mention, so the typed name marks nothing."""
+    inbound = _parse(_to_named_bot(make_message_activity(text="@daimon hi")))
+    assert isinstance(inbound, TeamsInbound) and not inbound.by_name, "DMs are unchanged"
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        {"id": BOT_ACCOUNT_ID},
+        {"id": "28:another-bot", "aadObjectId": AAD_OBJECT_ID},
+        {"id": "29:someone", "aadObjectId": AAD_OBJECT_ID, "role": "bot"},
+    ],
+)
+def test_bots_typing_the_bot_name_are_ignored(sender: dict[str, object]) -> None:
+    """The bot's own answers and other bots never start a turn by name."""
+    payload = _to_named_bot(
+        make_channel_activity(mention_bot=False, conversation_id=CHANNEL_ID, text="@daimon loop")
+    )
+    payload["from"] = sender
+    assert _parse(payload) == Refusal(None), "a bot naming the bot must stay silent"
 
 
 @pytest.mark.parametrize(
@@ -379,3 +439,52 @@ def test_an_internal_channel_sender_is_not_external() -> None:
     inbound = _parse(make_channel_activity())
     assert isinstance(inbound, TeamsInbound)
     assert (inbound.is_external, inbound.home_tenant_id) == (False, None)
+
+
+def test_an_oversize_typed_bot_name_is_refused_once_the_switch_is_known() -> None:
+    """Too long, it still carries `by_name`, so the handler can send the notice when on."""
+    text = "@daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
+    root = make_channel_activity(mention_bot=False, conversation_id=CHANNEL_ID, text=text)
+    assert _parse(_to_named_bot(root)) == Refusal(INPUT_TOO_LONG, by_name=True), (
+        "an oversize typed name must get the notice a real mention gets, behind the switch"
+    )
+
+
+def test_a_quoted_bot_name_is_not_a_typed_mention() -> None:
+    """A blockquote reply puts the quoted message in `text`; its "@daimon" is not the sender's."""
+    quote = (
+        '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1">'
+        '<strong itemprop="mri" itemid="8:orgid:someone">Ada</strong>'
+        '<p itemprop="preview">@daimon ship it</p></blockquote>'
+    )
+    reply = make_channel_activity(mention_bot=False, text=f"{quote}<p>agreed</p>")
+    inbound = _parse(_to_named_bot(reply))
+    assert isinstance(inbound, TeamsInbound) and not inbound.by_name, (
+        "a name inside someone else's quote must not address the bot"
+    )
+
+
+def test_a_typed_multi_word_name_with_an_html_no_break_space_is_by_name() -> None:
+    """Teams may send the space between typed words as `&nbsp;`."""
+    reply = make_channel_activity(mention_bot=False, text="<p>@Daimon&nbsp;Bot hi</p>")
+    payload = reply | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon Bot"}}
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound) and inbound.by_name, "the entity must read as a space"
+    assert strip_typed_name(inbound.text, inbound.bot_name) == "<p>hi</p>", (
+        "the name the match read must also leave the turn text"
+    )
+
+
+def test_strip_typed_name_keeps_markup_entities_encoded() -> None:
+    """Decoding `&lt;` would turn escaped text into markup."""
+    assert strip_typed_name("@Daimon &lt;b&gt; &amp; x", "Daimon") == "&lt;b&gt; &amp; x", (
+        "only non-markup entities may decode"
+    )
+
+
+def test_many_unclosed_blockquote_tags_parse_in_linear_time() -> None:
+    """`[^>]*` in the tag pattern made 60 KB of unclosed "<blockquote" take seconds."""
+    text = "@daimon " + "<blockquote " * (100_000 // 12)
+    started = time.perf_counter()
+    _parse(_to_named_bot(make_channel_activity(mention_bot=False, text=text)))
+    assert time.perf_counter() - started < 1.0, "the typed-text scan must stay linear"

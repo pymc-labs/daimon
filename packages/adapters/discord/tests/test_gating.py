@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 from daimon.adapters.discord.gating import (
     HintCooldown,
     is_participation_candidate,
+    is_plain_text_mention_candidate,
     is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
@@ -291,3 +293,44 @@ def test_hint_cooldown_release_gives_the_claim_back() -> None:
     cooldown.release(1)
 
     assert cooldown.claim(1, now=1.0), "a released claim can be taken again"
+
+
+def _plain_text_candidate(
+    *,
+    content: str = "@Daimon what changed?",
+    author_is_bot: bool = False,
+    author_is_webhook: bool = False,
+    bot_mentioned: bool = False,
+    guild_id: str | None = "g1",
+) -> bool:
+    return is_plain_text_mention_candidate(
+        author_is_bot=author_is_bot,
+        author_is_webhook=author_is_webhook,
+        bot_mentioned=bot_mentioned,
+        guild_id=guild_id,
+        content=content,
+        bot_names=("daimon", "Daimon Bot"),
+    )
+
+
+def test_plain_text_candidate_admits_a_person_naming_the_bot_in_a_guild() -> None:
+    """A person's typed "@Daimon" in a server is worth the read of the tenant switch."""
+    assert _plain_text_candidate(), "a person naming the bot as text must be a candidate"
+    assert _plain_text_candidate(content="ping @daimon bot please"), (
+        "any of the bot's names matches, in any case"
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "why"),
+    [
+        ({"author_is_bot": True}, "a bot (daimon itself or an allow-listed QA bot)"),
+        ({"author_is_webhook": True}, "a webhook post"),
+        ({"bot_mentioned": True}, "a real mention, which is already a turn"),
+        ({"guild_id": None}, "a DM, which needs no mention at all"),
+        ({"content": "Daimon, what changed?"}, "the name without an @"),
+    ],
+)
+def test_plain_text_candidate_rejects(overrides: dict[str, object], why: str) -> None:
+    """Only a person's unmentioned guild message that names the bot qualifies."""
+    assert not _plain_text_candidate(**overrides), f"{why} must not be a candidate"  # type: ignore[arg-type]

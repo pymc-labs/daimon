@@ -75,6 +75,7 @@ from daimon.adapters.mcp.tools.github_working_repo import register_github_workin
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
+from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
@@ -562,6 +563,7 @@ def create_mcp_app(
     register_channel_copy_tools(mcp, runtime)  # archive a closing channel's copy
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
+    register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read

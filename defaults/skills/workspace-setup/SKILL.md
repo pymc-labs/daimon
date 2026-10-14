@@ -315,6 +315,16 @@ except that a `disabled` tier beats every tier below it. Any member may set a
 thread; channel and workspace scopes require a workspace admin (Manage
 Server), and a non-admin caller is refused with no write. Discord only for now.
 
+## Answering to your name typed as text
+
+Off by default, a server or workspace admin can let a person's message in a
+channel or thread that contains "@" followed by your name as plain text (any
+case) start a reply, as a real mention does: useful on phones and for pasted
+prompts. `set_plain_text_mentions(enabled)` changes it for the whole server or
+workspace (admin only); `get_plain_text_mentions()` reads it. Read the returned
+`note` back. Direct messages, bots and webhooks are unaffected. A name followed
+by "(" or by a dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks").
+
 ## Scheduled routines
 
 Use `create_routine` after confirming the agent, schedule, timezone, and task.

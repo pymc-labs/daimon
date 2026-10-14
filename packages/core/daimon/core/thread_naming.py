@@ -16,11 +16,12 @@ and runs after the balance and cap gates.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
 from anthropic.types import TextBlock
+from daimon.core.name_mentions import strip_name_mentions
 
 # Priced in AGENT_MODEL_PRICING; a title must never run on an unmetered model.
 THREAD_NAMING_MODEL = "claude-haiku-4-5"
@@ -87,14 +88,16 @@ class ThreadNameSuggestion:
     usage: ThreadNamingUsage
 
 
-def strip_mentions(text: str) -> str:
+def strip_mentions(text: str, bot_names: Iterable[str | None] = ()) -> str:
     """Drop ``<@user>``, ``<@&role>`` and ``<#channel>`` tokens and collapse whitespace.
 
     An @-mention of the bot is always present in ``message.content``, so
     without this a bare mention would still look like text and pay
-    for a call with nothing to title.
+    for a call with nothing to title. ``bot_names`` also drops a plain-text
+    "@<bot name>" (``daimon.core.name_mentions``), which starts a turn the
+    same way when the tenant turned that on.
     """
-    return " ".join(_MENTION_RE.sub(" ", text).split())
+    return " ".join(strip_name_mentions(_MENTION_RE.sub(" ", text), bot_names).split())
 
 
 def naming_text(text: str, attachment_names: Sequence[str]) -> str:

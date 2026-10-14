@@ -17,7 +17,7 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
 from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.externals import Membership
-from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -26,7 +26,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_external
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.tenants import set_turn_cap
+from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
@@ -39,10 +39,12 @@ from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import MessageActivity
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    BOT_ACCOUNT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
@@ -808,3 +810,109 @@ def test_a_stale_setup_says_it_is_out_of_date() -> None:
     assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
         "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
     )
+
+
+def _named_post(text: str, **kwargs: Any) -> dict[str, object]:
+    """A person's unmentioned channel message; Teams names the bot on `recipient`."""
+    payload = make_channel_activity(mention_bot=False, text=text, **kwargs)
+    return payload | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon"}}
+
+
+async def _route(teams: TeamsApp, payload: dict[str, object]) -> list[tuple[str, TeamsInbound]]:
+    """Run `handle_message` with the turn and participation paths recorded, not run."""
+    routed: list[tuple[str, TeamsInbound]] = []
+
+    async def _handle(self: TeamsApp, inbound: TeamsInbound) -> None:
+        routed.append(("turn", inbound))
+
+    async def _observe(self: TeamsApp, inbound: TeamsInbound) -> None:
+        routed.append(("participation", inbound))
+
+    with patch.object(TeamsApp, "_handle", _handle), patch.object(TeamsApp, "_observe", _observe):
+        await teams.handle_message(_message(payload, AsyncMock()))
+        await asyncio.gather(*teams._tasks)
+    return routed
+
+
+async def _switch(sessionmaker: async_sessionmaker[AsyncSession], *, on: bool) -> None:
+    async with sessionmaker.begin() as session:
+        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=on)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_typed_bot_name_is_a_mention_when_the_switch_is_on(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Root post and thread reply both take the mention path, with the name stripped."""
+    await _switch(db_session_factory, on=True)
+    teams = _app(db_session_factory, FakeSender())
+    root = _named_post("@Daimon summarise the week", conversation_id=CHANNEL_ID)
+
+    with structlog.testing.capture_logs() as logs:
+        [(path, inbound)] = await _route(teams, root)
+    assert path == "turn" and inbound.text == "summarise the week", (
+        "the root post must run a turn without the typed name in its text"
+    )
+    assert "plain_text_mention.accepted" in [entry["event"] for entry in logs], (
+        "a typed name that starts a turn is logged as accepted"
+    )
+    assert not inbound.unprompted and not inbound.by_name, "it is an ordinary mention now"
+    [(path, inbound)] = await _route(teams, _named_post("@daimon", activity_id="activity-2"))
+    assert (path, inbound.text, inbound.unprompted) == ("turn", "", False), (
+        "a bare typed name in a thread is a bare mention over the thread, never participation"
+    )
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_typed_bot_name_behaves_as_before_when_the_switch_is_off(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Off: a root post is ignored and a thread reply is screened by participation."""
+    teams = _app(db_session_factory, FakeSender())
+    root = _named_post("@Daimon summarise the week", conversation_id=CHANNEL_ID)
+
+    assert await _route(teams, root) == [], "with the switch off a root post stays unanswered"
+    reply = _named_post("@daimon thoughts?", activity_id="activity-2")
+    [(path, inbound)] = await _route(teams, reply)
+    assert (path, inbound.unprompted, inbound.text) == (
+        "participation",
+        True,
+        "@daimon thoughts?",
+    ), "with the switch off a thread reply is screened exactly as before, text untouched"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("on", [True, False])
+async def test_an_oversize_typed_bot_name_gets_the_notice_only_when_the_switch_is_on(
+    db_session_factory: async_sessionmaker[AsyncSession], on: bool
+) -> None:
+    """On, it is a mention and owed the too-long notice; off, nobody asked."""
+    await _switch(db_session_factory, on=on)
+    teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    text = "@Daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
+    with structlog.testing.capture_logs() as logs:
+        await teams.handle_message(_message(_named_post(text, conversation_id=CHANNEL_ID), reply))
+    if on:
+        reply.assert_awaited_once_with(INPUT_TOO_LONG)
+    else:
+        reply.assert_not_awaited()
+    events = [entry["event"] for entry in logs]
+    assert "plain_text_mention.accepted" not in events, "a refusal starts no turn"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_failed_switch_read_leaves_a_typed_bot_name_unaddressed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The read failing is logged and the reply is screened as if the switch were off."""
+    teams = _app(db_session_factory, FakeSender())
+    failing = AsyncMock(side_effect=SQLAlchemyError("down"))
+    with (
+        patch.object(app_module, "get_plain_text_mentions", failing),
+        structlog.testing.capture_logs() as logs,
+    ):
+        routed = await _route(teams, _named_post("@daimon thoughts?"))
+    assert [path for path, _ in routed] == ["participation"], "it must fall back to screening"
+    events = [entry["event"] for entry in logs]
+    assert "plain_text_mention.lookup_failed" in events, "the failure must be logged"
+    assert "teams.task_failed" not in events, "the failure must not escape the task"

@@ -45,6 +45,16 @@ def test_strip_mentions_leaves_only_empty_for_attachment_only_mention() -> None:
     )
 
 
+def test_strip_mentions_drops_a_plain_text_bot_name_when_names_are_given() -> None:
+    """A turn started by a typed "@Daimon" must not carry the name into the title."""
+    assert strip_mentions("@Daimon summarise the Q3 report", ["Daimon"]) == (
+        "summarise the Q3 report"
+    ), "the plain-text name must go so the fallback title starts with the request"
+    assert strip_mentions("@Daimon summarise", []) == "@Daimon summarise", (
+        "without names the text is left alone"
+    )
+
+
 def test_naming_text_puts_file_names_before_the_text() -> None:
     assert naming_text("shorten this", ["brief.pdf", "notes.md"]) == (
         "Attached: brief.pdf, notes.md\nshorten this"

@@ -3,9 +3,11 @@
 Discord and Teams share one gate shell (`daimon.core.participation_gates`):
 the same cascade, hourly cap, billing gates, classifier and batch bounds, and
 the tool accepts callers from both. Slack message subscriptions track deletion
-of setup roots. They do not grant permission to respond to unmentioned
-messages; the participation tool keeps refusing Slack callers before any
-database operation.
+of setup roots, and carry a typed "@<bot name>" when the workspace turned
+plain-text mentions on (``test_plain_text_mentions_platforms.py``); that is a
+mention, not participation. Unaddressed Slack messages are never screened,
+and the participation tool keeps refusing Slack callers before any database
+operation.
 """
 
 from __future__ import annotations

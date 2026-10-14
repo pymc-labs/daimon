@@ -99,6 +99,11 @@ class Tenant(Base):
         Text, nullable=False, server_default=text("'prepaid'")
     )
     turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A plain-text "@<bot name>" in a channel or thread starts a turn like a
+    # real mention (daimon.core.name_mentions). Off until an admin opts in.
+    plain_text_mentions: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(
