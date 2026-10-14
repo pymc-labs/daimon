@@ -67,8 +67,6 @@ class _Model(BaseModel):
 class GraphIdentity(_Model):
     id: str | None = None
     display_name: str | None = None
-    #: A user's home tenant: another organisation's for a shared channel's external member.
-    tenant_id: str | None = None
 
 
 class GraphSender(_Model):
