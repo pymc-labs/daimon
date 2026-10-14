@@ -33,6 +33,22 @@ def test_privacy_delete_flag_defaults_on_and_reads_nested_env(
     assert load_settings(_env_file=None).privacy.delete_enabled is False
 
 
+def test_private_channel_messages_is_a_top_level_switch_that_needs_a_teams_public_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    for name in ("CLIENT_ID", "CLIENT_SECRET", "TENANT_ID"):
+        monkeypatch.setenv(f"DAIMON_TEAMS__{name}", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.delenv("DAIMON_TEAMS__PUBLIC_URL", raising=False)
+    assert not load_settings(_env_file=None).private_channel_messages.enabled, "off by default"
+    monkeypatch.setenv("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED", "true")
+    with pytest.raises(ValidationError, match="DAIMON_TEAMS__PUBLIC_URL"):
+        load_settings(_env_file=None)
+    monkeypatch.setenv("DAIMON_TEAMS__PUBLIC_URL", "https://bot.example")
+    assert load_settings(_env_file=None).private_channel_messages.enabled, "on with a URL"
+
+
 def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:
     from daimon.core.turn.ceiling import TURN_CEILING_S
 

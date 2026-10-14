@@ -44,6 +44,7 @@ typo is silent — check the spelling here.
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Fleet](#fleet)
+- [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -789,17 +790,6 @@ direct connect) are answered only in a channel kept to its own agents, with a fe
 conversation tools and no commands or admin role. When False, they are treated as team
 members.
 
-### `DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES`
-
-`bool` · optional · default `False`
-
-When True, Daimon subscribes to Microsoft Graph change notifications for each private or
-shared channel it is in, where Teams sends the bot only the posts that @mention it.
-Replies in followed threads, Replies to Daimon's messages and typed @&lt;bot name&gt;
-mentions then work there too, usually within seconds. Needs public_url (Graph posts to
-&lt;public_url&gt;/api/graph/notifications and /api/graph/lifecycle) and the application
-permission ChannelMessage.Read.All with tenant admin consent.
-
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.
@@ -1329,6 +1319,28 @@ Most worker turns one process runs at once, across all tenants.
 
 Most times in total a worker is started when it keeps being lost before its turn is
 sent. A worker whose turn was sent is reconciled, never resent.
+
+## Private Channel Messages
+
+Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__`.
+
+Every message in Teams private and shared channels, through Microsoft Graph.
+
+Teams sends a bot only the posts there that @mention it. Top-level, not under
+`TeamsSettings`, as every feature setting is; only Teams reads it.
+
+### `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED`
+
+`bool` · optional · default `False`
+
+When True, Daimon subscribes to Microsoft Graph change notifications for each Teams
+private or shared channel it is in, where Teams sends the bot only the posts that
+@mention it. Replies in followed threads, Replies to Daimon's messages and typed
+@&lt;bot name&gt; mentions then work there too, usually within seconds. Needs
+DAIMON_TEAMS__PUBLIC_URL (Graph posts to &lt;public_url&gt;/api/graph/notifications and
+/api/graph/lifecycle) and the application permission ChannelMessage.Read.All with tenant
+admin consent.
 
 ## Tool Safety
 
