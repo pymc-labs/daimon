@@ -1807,6 +1807,48 @@ class TeamsChannelSite(Base):
     )
 
 
+class TeamsChannelSubscription(Base):
+    """A Graph change-notification subscription to one private or shared channel.
+
+    Teams sends the bot only the @mentions there, so the adapter subscribes to
+    the channel's messages instead. `client_state_sha256` is the hash of the
+    secret Graph echoes on every notification; the secret itself is not kept.
+    `last_message_*` is the newest message handled, where a `missed` catch-up
+    starts. The `team_*`, `channel_*`, `bot_name` and `service_url` columns are
+    what the subscribing activity said, which a Graph message does not carry.
+    """
+
+    __tablename__ = "teams_channel_subscriptions"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", name="pk_teams_channel_subscriptions"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_teams_channel_subscriptions_tenants",
+        ),
+        UniqueConstraint("subscription_id", name="uq_teams_channel_subscriptions_subscription_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text)
+    team_id: Mapped[str] = mapped_column(Text, nullable=False)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_type: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bot_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    service_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subscription_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_state_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SlackUserToken(Base):
     """Encrypted per-(workspace, user) Slack xoxp token (user-token hybrid model).
 

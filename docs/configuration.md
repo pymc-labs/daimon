@@ -789,6 +789,17 @@ direct connect) are answered only in a channel kept to its own agents, with a fe
 conversation tools and no commands or admin role. When False, they are treated as team
 members.
 
+### `DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES`
+
+`bool` · optional · default `False`
+
+When True, Daimon subscribes to Microsoft Graph change notifications for each private or
+shared channel it is in, where Teams sends the bot only the posts that @mention it.
+Replies in followed threads, Replies to Daimon's messages and typed @&lt;bot name&gt;
+mentions then work there too, usually within seconds. Needs public_url (Graph posts to
+&lt;public_url&gt;/api/graph/notifications and /api/graph/lifecycle) and the application
+permission ChannelMessage.Read.All with tenant admin consent.
+
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.

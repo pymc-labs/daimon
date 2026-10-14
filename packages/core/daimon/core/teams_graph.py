@@ -9,7 +9,11 @@ message reads here, `TeamMember.Read.Group` the owner list
 (`list_team_owner_ids`, for channel admin grants) and `ChannelMember.Read.Group`
 a channel's members (`list_channel_members`, for who is from another
 organisation); `teams_sharepoint` sends its file calls through
-`send`. Each read is one page; `next_page` follows a page's `next_link`. Any
+`send`. The subscription calls (`create_subscription` and its renewal and
+delete) watch a private or shared channel, where the resource-specific
+consent does not reach: they need the application permission
+`ChannelMessage.Read.All`, which a tenant admin consents to. Writes are never
+retried. Each read is one page; `next_page` follows a page's `next_link`. Any
 failure (no consent, throttling, a timeout, an odd body) raises
 `GraphUnavailable`, whose fields carry no message content.
 """
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from urllib.parse import quote
 
@@ -62,6 +67,8 @@ class _Model(BaseModel):
 class GraphIdentity(_Model):
     id: str | None = None
     display_name: str | None = None
+    #: A user's home tenant: another organisation's for a shared channel's external member.
+    tenant_id: str | None = None
 
 
 class GraphSender(_Model):
@@ -74,6 +81,10 @@ class GraphBody(_Model):
     content: str | None = None
 
 
+class GraphMention(_Model):
+    mentioned: GraphSender | None = None
+
+
 class GraphAttachment(_Model):
     id: str | None = None
     content_type: str | None = None
@@ -81,6 +92,17 @@ class GraphAttachment(_Model):
     content_url: str | None = None
     #: A card's JSON, as a string.
     content: str | None = None
+
+
+MESSAGE_REFERENCE_TYPE = "messageReference"
+
+
+class GraphMessageReference(_Model):
+    """The quoted message of a Reply, from a `messageReference` attachment's content."""
+
+    message_id: str | None = None
+    message_preview: str | None = None
+    message_sender: GraphSender | None = None
 
 
 class GraphMessage(_Model):
@@ -96,6 +118,7 @@ class GraphMessage(_Model):
     sender: GraphSender | None = Field(default=None, alias="from")
     body: GraphBody = Field(default_factory=GraphBody)
     attachments: list[GraphAttachment] = Field(default_factory=list[GraphAttachment])
+    mentions: list[GraphMention] = Field(default_factory=list[GraphMention])
     #: Set only by `list_channel_messages(expand_replies=True)`, in Graph's order.
     replies: list[GraphMessage] = Field(default_factory=list["GraphMessage"])
     replies_next_link: str | None = Field(default=None, alias="replies@odata.nextLink")
@@ -122,6 +145,31 @@ class GraphMember(_Model):
 class GraphMemberPage(_Model):
     value: list[GraphMember] = Field(default_factory=list[GraphMember])
     next_link: str | None = Field(default=None, alias="@odata.nextLink")
+
+
+class GraphSubscription(_Model):
+    """A change-notification subscription as Graph returns it."""
+
+    id: str
+    expiration_date_time: datetime
+
+
+class ChangeNotification(_Model):
+    """One entry of a notification or lifecycle POST's `value`.
+
+    `change_type` and `resource` are set on a change, `lifecycle_event` on a
+    lifecycle notice (`reauthorizationRequired`, `subscriptionRemoved`, `missed`).
+    """
+
+    subscription_id: str
+    client_state: str | None = None
+    change_type: str | None = None
+    resource: str | None = None
+    lifecycle_event: str | None = None
+
+
+class ChangeNotificationBatch(_Model):
+    value: list[ChangeNotification] = Field(default_factory=list[ChangeNotification])
 
 
 MAX_OWNER_PAGES = 5
@@ -265,6 +313,44 @@ class GraphClient:
             url = page.next_link
         return members
 
+    async def create_subscription(
+        self,
+        *,
+        resource: str,
+        notification_url: str,
+        lifecycle_url: str,
+        client_state: str,
+        expires_at: datetime,
+    ) -> GraphSubscription:
+        """Subscribe to new messages under `resource`, without their content.
+
+        Graph validates both URLs before it answers, so they must already serve.
+        """
+        body = {
+            "changeType": "created",
+            "notificationUrl": notification_url,
+            "lifecycleNotificationUrl": lifecycle_url,
+            "resource": resource,
+            "includeResourceData": False,
+            "expirationDateTime": _graph_time(expires_at),
+            "clientState": client_state,
+        }
+        return _parse(
+            GraphSubscription, await self.send("POST", f"{GRAPH_ROOT}/subscriptions", body=body)
+        )
+
+    async def renew_subscription(
+        self, subscription_id: str, *, expires_at: datetime
+    ) -> GraphSubscription:
+        """Extend a subscription; this also answers a `reauthorizationRequired`."""
+        url = f"{GRAPH_ROOT}/subscriptions/{path_segment(subscription_id)}"
+        body = {"expirationDateTime": _graph_time(expires_at)}
+        return _parse(GraphSubscription, await self.send("PATCH", url, body=body))
+
+    async def delete_subscription(self, subscription_id: str) -> None:
+        url = f"{GRAPH_ROOT}/subscriptions/{path_segment(subscription_id)}"
+        await self.send("DELETE", url)
+
     async def next_page(self, next_link: str) -> GraphPage:
         """The page a `next_link` names; refused unless it is a Graph URL."""
         return _parse(GraphPage, await self.send("GET", next_link))
@@ -285,7 +371,7 @@ class GraphClient:
         content: bytes | None = None,
         timeout: float = GRAPH_TIMEOUT_S,
     ) -> object:
-        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply."""
+        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply (None on 204)."""
         # `params=None` would drop a query already in `url`, such as a next link's.
         target = httpx.URL(url, params=params) if params else httpx.URL(url)
         if not is_graph_url(target):
@@ -311,6 +397,8 @@ class GraphClient:
             )
         except httpx.HTTPError as err:
             raise GraphUnavailable(type(err).__name__) from err
+        if response.status_code == 204:
+            return None
         if response.status_code not in (200, 201):
             raise GraphUnavailable("http error", status=response.status_code)
         try:
@@ -383,10 +471,26 @@ def image_sources(html: str) -> list[str]:
     return _parse_html(html).images
 
 
+def message_references(message: GraphMessage) -> list[GraphMessageReference]:
+    """The messages `message` quotes; a malformed reference is skipped."""
+    found: list[GraphMessageReference] = []
+    for attachment in message.attachments:
+        if attachment.content_type == MESSAGE_REFERENCE_TYPE and attachment.content:
+            try:
+                found.append(GraphMessageReference.model_validate_json(attachment.content))
+            except ValidationError:
+                continue
+    return found
+
+
 def message_text(message: GraphMessage) -> str:
     """A message's body as readable text."""
     content = message.body.content or ""
     return html_to_text(content) if message.body.content_type == "html" else content.strip()
+
+
+def _graph_time(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
 
 def _parse[T: BaseModel](model: type[T], data: object) -> T:

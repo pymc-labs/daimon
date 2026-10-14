@@ -18,7 +18,16 @@ from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PostgresDsn,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -741,6 +750,28 @@ class TeamsSettings(BaseModel):
             "admin role. When False, they are treated as team members."
         ),
     )
+
+    private_channel_messages: bool = Field(
+        default=False,
+        description=(
+            "When True, Daimon subscribes to Microsoft Graph change notifications "
+            "for each private or shared channel it is in, where Teams sends the "
+            "bot only the posts that @mention it. Replies in followed threads, "
+            "Replies to Daimon's messages and typed @<bot name> mentions then "
+            "work there too, usually within seconds. Needs public_url (Graph "
+            "posts to <public_url>/api/graph/notifications and "
+            "/api/graph/lifecycle) and the application permission "
+            "ChannelMessage.Read.All with tenant admin consent."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _private_channel_messages_need_a_public_url(self) -> TeamsSettings:
+        if self.private_channel_messages and self.public_url is None:
+            raise ValueError(
+                "DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES needs DAIMON_TEAMS__PUBLIC_URL"
+            )
+        return self
 
     @field_validator("admin_user_ids")
     @classmethod

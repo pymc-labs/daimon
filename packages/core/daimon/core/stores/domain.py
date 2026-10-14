@@ -428,6 +428,25 @@ class TeamsChannelSiteRow(BaseModel):
     folder_id: str
 
 
+class TeamsChannelSubscriptionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    team_id: str
+    group_id: str
+    channel_type: str
+    channel_name: str | None
+    team_name: str | None
+    bot_name: str | None
+    service_url: str | None
+    subscription_id: str
+    client_state_sha256: bytes
+    expires_at: datetime
+    last_message_id: str | None
+    last_message_at: datetime | None
+
+
 class SlackUserTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

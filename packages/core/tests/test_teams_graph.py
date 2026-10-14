@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import httpx
 import pytest
-from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups, skiptoken_of
+from daimon.core.teams_graph import (
+    GraphClient,
+    GraphMessage,
+    GraphUnavailable,
+    TeamGroups,
+    message_references,
+    skiptoken_of,
+)
 
 GROUP = "11111111-1111-1111-1111-111111111111"
 CHANNEL = "19:channel-1@thread.tacv2"
@@ -219,3 +228,76 @@ async def test_channel_members_stop_after_the_page_limit() -> None:
 
     members = await _client(handler, seen).list_channel_members(GROUP, CHANNEL)
     assert len(seen) == len(members) == MAX_MEMBER_PAGES, "a long list is cut short, not refused"
+
+
+async def test_create_subscription_asks_for_new_messages_without_their_content() -> None:
+    """One POST, not retried; Graph's id and expiry come back parsed."""
+    seen: list[httpx.Request] = []
+    expiry = "2026-01-03T23:00:00.0000000Z"
+    client = _client(
+        lambda _: httpx.Response(201, json={"id": "sub-1", "expirationDateTime": expiry}), seen
+    )
+    created = await client.create_subscription(
+        resource=f"/teams/{GROUP}/channels/{CHANNEL}/messages",
+        notification_url="https://bot.example/api/graph/notifications",
+        lifecycle_url="https://bot.example/api/graph/lifecycle",
+        client_state="secret",
+        expires_at=datetime(2026, 1, 3, 23, tzinfo=UTC),
+    )
+    [request] = seen
+    body = json.loads(request.content)
+    assert (request.method, request.url.path) == ("POST", "/v1.0/subscriptions")
+    assert body["changeType"] == "created", "edits and deletions never notify"
+    assert body["includeResourceData"] is False, "no content in notifications, so no certificate"
+    assert body["expirationDateTime"] == expiry, "Graph's own time format, in UTC"
+    assert body["lifecycleNotificationUrl"].endswith("/lifecycle"), "required past one hour"
+    assert created.id == "sub-1" and created.expiration_date_time.tzinfo is not None
+
+
+async def test_renew_patches_the_expiry_and_delete_accepts_no_content() -> None:
+    """A 204 is success; a failed write raises once, with its status."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(
+            200, json={"id": "sub-1", "expirationDateTime": "2026-01-04T00:00:00Z"}
+        )
+
+    client = _client(handler, seen)
+    renewed = await client.renew_subscription("sub-1", expires_at=datetime(2026, 1, 4, tzinfo=UTC))
+    await client.delete_subscription("sub-1")
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("PATCH", "/v1.0/subscriptions/sub-1"),
+        ("DELETE", "/v1.0/subscriptions/sub-1"),
+    ]
+    assert renewed.expiration_date_time == datetime(2026, 1, 4, tzinfo=UTC)
+    with pytest.raises(GraphUnavailable) as caught:
+        await _client(lambda _: httpx.Response(404), seen).delete_subscription("gone")
+    assert caught.value.status == 404, "the caller tells a gone subscription from a failure"
+    assert len(seen) == 3, "a failed write is not retried"
+
+
+def test_message_references_read_the_quoted_sender_and_skip_bad_json() -> None:
+    reference = {
+        "messageId": "100",
+        "messagePreview": "the answer",
+        "messageSender": {"application": {"id": "bot-app", "displayName": "Daimon"}},
+    }
+    message = GraphMessage.model_validate(
+        {
+            "id": "101",
+            "attachments": [
+                {"contentType": "messageReference", "content": json.dumps(reference)},
+                {"contentType": "messageReference", "content": "{not json"},
+                {"contentType": "reference", "name": "a.pdf"},
+            ],
+        }
+    )
+    [quoted] = message_references(message)
+    assert quoted.message_sender is not None and quoted.message_sender.application is not None
+    assert (quoted.message_sender.application.id, quoted.message_preview) == (
+        "bot-app",
+        "the answer",
+    ), "the quote names the bot's app id and keeps its preview"
