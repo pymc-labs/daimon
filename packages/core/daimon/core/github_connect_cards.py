@@ -87,7 +87,7 @@ async def resolve_connect_card(
     settings: Settings,
     *,
     tenant_id: uuid.UUID,
-    platform: Literal["discord", "slack"],
+    platform: Literal["discord", "slack", "teams"],
     workspace_id: str,
     agent_name: str | None,
     requested_repo: str | None = None,
@@ -178,6 +178,53 @@ def connect_attachment(url: str, *, card: ConnectCard) -> dict[str, Any]:
         "color": CONNECT_CARD_COLOUR,
         "fallback": card.title,
         "blocks": connect_button_blocks(url, card=card),
+    }
+
+
+def teams_connect_card(url: str, *, card: ConnectCard) -> dict[str, object]:
+    """The shared card as a Teams Adaptive Card, with the link only in the button."""
+    body: list[dict[str, object]] = [
+        {
+            "type": "ColumnSet",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "auto",
+                    "items": [
+                        {
+                            "type": "Image",
+                            "url": card.author_icon_url,
+                            "size": "Small",
+                            "style": "Person",
+                            "altText": card.author_name,
+                        }
+                    ],
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "verticalContentAlignment": "Center",
+                    "items": [{"type": "TextBlock", "text": card.author_name, "wrap": True}],
+                },
+            ],
+        },
+        {"type": "TextBlock", "text": card.title, "size": "Large", "weight": "Bolder"},
+        {"type": "TextBlock", "text": card.description, "wrap": True},
+    ]
+    if card.footer:
+        body.append({"type": "TextBlock", "text": card.footer, "isSubtle": True, "wrap": True})
+    return {
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "fallbackText": card.title,
+        "body": body,
+        "actions": [
+            {
+                "type": "Action.OpenUrl",
+                "title": f"{CONNECT_GITHUB_EMOJI} Connect GitHub",
+                "url": url,
+            }
+        ],
     }
 
 
