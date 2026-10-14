@@ -601,15 +601,18 @@ def test_an_over_cap_archive_is_rebuilt_without_its_largest_files(tmp_path: Path
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
 def test_the_rebuild_never_drops_a_file_tar_would_keep_under_another_name(tmp_path: Path) -> None:
-    """tar trims trailing whitespace from an exclude name, and a hard-linked
-    file left out under one name travels under the other. Dropping either
-    would leave the archive over the cap and lose the whole workspace, so
-    both stay in, counted once, and the next largest file is dropped."""
+    """tar trims trailing whitespace from an exclude name, so that file stays
+    in. A hard-linked file's bytes are stored once however many of its names
+    travel, and it would travel under any name kept, so it counts its full
+    size once, even with a name outside the archive, and its names go
+    together. Either mistake leaves the archive over the cap."""
     old = _fake_root(tmp_path)
     work = old / "root" / "work"
     _noise(work / "trailing.bin ", 500_000)
     _noise(work / "linked.bin", 400_000)
     (work / "linked-too.bin").hardlink_to(work / "linked.bin")
+    (old / "root" / ".stash").mkdir()
+    (old / "root" / ".stash" / "linked.bin").hardlink_to(work / "linked.bin")
     _noise(work / "model.pkl", 200_000)
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
@@ -617,14 +620,18 @@ def test_the_rebuild_never_drops_a_file_tar_would_keep_under_another_name(tmp_pa
 
     output = _run_archive_step(prompt, old)
 
-    assert checkpoint_left_out(output) == ((f"{old}/root/work/model.pkl",), 0), (
-        "only a file tar can really leave out is dropped"
+    paths, more = checkpoint_left_out(output)
+    assert (set(paths), more) == ({f"{work}/linked.bin", f"{work}/linked-too.bin"}, 0), (
+        "both archived names of the linked file go, and only they"
     )
     bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
     assert bundle.stat().st_size <= 1024 * 1024, "the rebuilt archive fits the cap"
     members = _members(bundle)
-    assert {"root/work/trailing.bin ", "root/work/linked.bin", "root/HANDOFF.md"} <= members, (
+    assert {"root/work/trailing.bin ", "root/work/model.pkl", "root/HANDOFF.md"} <= members, (
         "the kept names and the small working files travel"
+    )
+    assert not {"root/work/linked.bin", "root/work/linked-too.bin"} & members, (
+        "the linked file travels under neither name"
     )
 
 

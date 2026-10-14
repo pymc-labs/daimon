@@ -231,25 +231,27 @@ def build_checkpoint_prompt(
     # and padding, fits 5% under the cap; the margin covers directory headers
     # and gzip's worst case, so small working files always travel. The size
     # check after the rebuild still guards the cap.
-    # A name tar cannot be told is never dropped: one with a newline would be
-    # split, and one ending in whitespace is trimmed. Nor is a hard-linked
-    # file, which would come back under its other name: each of its names
-    # counts `size/links` (tar stores the bytes once) and ends in a newline.
+    # Sizes are counted per inode (`w`), since tar stores a hard-linked file's
+    # bytes once however many of its names are archived, and an inode's names
+    # (`n`) are dropped together or it would travel under the one kept. A name
+    # tar cannot be told keeps its inode (`k`): a newline would split it, and
+    # trailing whitespace is trimmed.
     budget = max_bundle_bytes - max_bundle_bytes // 20
     listed = _LEFT_OUT_LISTED
     size_check = [
         f'  size=$(stat -c %s {scratch_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
-        "    members ! -type d \\( -links 1 -printf '%s %p\\0' -o -printf '%s/%n %p\\n\\0' \\) "
-        f"> {_MEMBER_SIZES_PATH}",
-        "    total=0; while IFS= read -r -d '' e; do total=$((total + ${e%% *} + 1024)); "
-        f"done < {_MEMBER_SIZES_PATH}",
-        f"    while [ \"$total\" -gt {budget} ] && IFS= read -r -d '' e; do",
-        "      n=${e#* }; [[ $n == *$'\\n'* || $n == *[[:space:]] ]] || "
-        "{ total=$((total - ${e%% *} - 1024)); printf '%s\\n' \"$n\"; }",
-        f"    done < <(sort -z -rn {_MEMBER_SIZES_PATH}) > {_LEFT_OUT_LIST_PATH}",
+        f"    members ! -type d -printf '%D:%i %s %p\\0' > {_MEMBER_SIZES_PATH}",
+        "    declare -A w n k; total=0; while IFS= read -r -d '' e; do i=${e%% *}; e=${e#* }; "
+        "p=${e#* }; w[$i]=$((${w[$i]-${e%% *}} + 1024)); n[$i]+=$p$'\\n'",
+        f"      [[ $p == *$'\\n'* || $p == *[[:space:]] ]] && k[$i]=1; done < {_MEMBER_SIZES_PATH}",
+        '    for i in "${!w[@]}"; do total=$((total + ${w[$i]})); echo "${w[$i]} $i"; '
+        f"done > {_MEMBER_SIZES_PATH}",
+        f'    while [ "$total" -gt {budget} ] && read -r z i; do [ -n "${{k[$i]-}}" ] || '
+        '{ total=$((total - z)); printf %s "${n[$i]}"; }',
+        f"    done < <(sort -rn {_MEMBER_SIZES_PATH}) > {_LEFT_OUT_LIST_PATH}",
         f"    sed 's|^\\./||; s|^|{HANDOFF_LEFT_OUT_MARKER} /|; {listed}q' {_LEFT_OUT_LIST_PATH}",
-        f'    n=$(wc -l < {_LEFT_OUT_LIST_PATH}); if [ "$n" -gt {listed} ]; then '
-        f'echo "{HANDOFF_LEFT_OUT_MORE_MARKER} $((n - {listed}))"; fi',
+        f'    c=$(wc -l < {_LEFT_OUT_LIST_PATH}); if [ "$c" -gt {listed} ]; then '
+        f'echo "{HANDOFF_LEFT_OUT_MORE_MARKER} $((c - {listed}))"; fi',
         f"    pack; size=$(stat -c %s {scratch_path})",
         "  fi",
         f'  if [ "$size" -gt {max_bundle_bytes} ]; then echo "{HANDOFF_TOO_LARGE_MARKER} $size"; '
