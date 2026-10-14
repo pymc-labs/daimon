@@ -396,7 +396,8 @@ teams.example.com {
 ```
 
 Only those four paths need to be public. The last one is used only by the
-optional channel files. Check it from outside your network:
+optional channel files; the optional private channel messages (below) add
+`/api/graph/notifications` and `/api/graph/lifecycle`. Check it from outside your network:
 `curl https://teams.example.com/healthz` should return `{"status":"live"}`.
 
 ### 4. Point the bot at Daimon
@@ -565,6 +566,16 @@ private or shared channel is turned on from inside it. Open a new channel's
 Files tab once first. A shared channel hosted by another organisation keeps
 its files there, out of reach. [`teams.md`](teams.md#channel-files-optional)
 also shows how to grant a team's site by hand.
+
+### Private and shared channels (optional)
+
+Teams sends the bot only the private and shared channel posts that @mention
+it. To let followed threads, Replies to the bot and typed `@Daimon` work there
+too, grant the Graph application permission `ChannelMessage.Read.All` with
+admin consent (as in step 1 above), set `DAIMON_TEAMS__PUBLIC_URL` and
+`DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true`, and add
+`/api/graph/notifications /api/graph/lifecycle` to the proxy's path list.
+Details are in [`teams.md`](teams.md#private-and-shared-channels-optional).
 
 ### If the bot doesn't answer
 

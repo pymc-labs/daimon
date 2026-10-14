@@ -18,7 +18,10 @@ Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
 before Daimon code runs; tokens from any other issuer (such as Entra ID) are
 refused with 401 first. The same listener serves `/healthz` and `/readyz`,
 and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
-(below); a reverse proxy in front must pass that path too.
+(below); a reverse proxy in front must pass that path too. With
+`DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true` it also serves
+`POST /api/graph/notifications` and `/api/graph/lifecycle` for Microsoft Graph
+(see [Private and shared channels](#private-and-shared-channels-optional)).
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
 64 KiB are refused before parsing. The `teams` compose service (opt-in `teams`
 profile) publishes the port; the messaging endpoint must reach it.
@@ -50,11 +53,14 @@ is supported; government and China clouds use other Bot Framework hosts.
   followed by "(" or by a dot and a letter is ignored ("@Daimon (urgent)",
   "@Daimon.Thanks"), as are names inside a reply quote.
 - **Private and shared channels** work like standard ones once the app is in
-  them, except that Teams sends the bot only the private channel posts that
-  @mention it: there a Reply on a bot message needs a mention too, a typed
-  name is never seen, and a followed thread gets no unprompted replies. The package declares `supportsChannelFeatures: tier1` (manifest
-  1.25), but adding the app to a team does not add it to these channels: each
-  one's owner adds it from the channel.
+  them, except that Teams sends the bot only the posts that @mention it. Out
+  of the box a Reply on a bot message needs a mention too, a typed name is
+  not seen, and a followed thread gets no unprompted replies; an operator can
+  turn all three on (see
+  [Private and shared channels](#private-and-shared-channels-optional)). The
+  package declares `supportsChannelFeatures: tier1` (manifest 1.25), but
+  adding the app to a team does not add it to these channels: each one's
+  owner adds it from the channel.
 - **Group chats** get a short refusal.
 - **Channels with `writers: none`** (ids look like `19:…@thread.tacv2`) and
   their threads get no reply, notice or tool post. One thread is named by
@@ -227,6 +233,7 @@ Anyone in a channel can follow its threads; a whole channel or the
 organisation needs a listed admin. The deployment default is
 `DAIMON_THREAD_PARTICIPATION__MODE`; `disabled` turns it off for Teams and
 Discord alike.
+In private and shared channels this needs the Graph notifications below.
 
 A burst of replies is judged once, after the thread has been quiet for
 `QUIET_SECONDS`, over the thread read through Graph, and capped per thread
@@ -238,6 +245,43 @@ Slack and Discord: what the person must hear rides on the answer, and only
 cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
 are ignored, and channels with `writers: none` are skipped. Without Graph history (the
 consent above) a followed thread stays mention-only.
+
+### Private and shared channels (optional)
+
+Teams sends a bot only the private or shared channel posts that @mention it,
+whatever the app's resource-specific consent says, and that consent cannot
+subscribe to those channels' messages. With
+`DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true` Daimon subscribes to Microsoft
+Graph change notifications for each private or shared channel it is in, so
+replies in followed threads, Replies quoting the bot and typed `@<bot name>`
+mentions (when plain-text mentions are on) work there as in a standard
+channel. Graph's notification carries no content: Daimon reads the new
+message once and routes it exactly as a Bot Framework message. @mentions
+still arrive through Bot Framework and are ignored here. Expect a few seconds
+of extra latency.
+
+Setup:
+
+1. Entra → App registrations → the bot's app → API permissions → Add a
+   permission → Microsoft Graph → Application permissions →
+   `ChannelMessage.Read.All` → Grant admin consent. The permission is
+   tenant-wide; Daimon subscribes only to channels it has been added to.
+2. Set `DAIMON_TEAMS__PUBLIC_URL` and
+   `DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true`, and let the reverse proxy
+   pass `/api/graph/notifications` and `/api/graph/lifecycle`.
+3. Restart the service. A channel is subscribed when the bot is added to it
+   or first sees a message there; in a channel that already had the bot, one
+   @mention is enough.
+
+Subscriptions live about three days and are renewed half a day before they
+expire; removing the bot or deleting the channel deletes its subscription.
+Each notification must carry the channel's secret, compared in constant time,
+or it is refused with 401. When Graph reports missed notifications, Daimon
+reads the channel once for messages after the last one it handled. Edits never
+start a turn, and a message seen through both Bot Framework and Graph, or
+notified twice, runs once (in memory, so not across a restart). A shared
+channel hosted by another organisation cannot be subscribed. With the
+setting off the routes answer 404 and nothing is subscribed.
 
 ### Files
 
