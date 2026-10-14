@@ -15,6 +15,9 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
+Image outputs also travel as inline previews (`image_preview`): in a channel,
+up to MAX_PREVIEWS in delivery order in one message after the links; in a 1:1
+chat, each just before its consent card. A failed preview is only logged.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -40,6 +43,7 @@ from daimon.adapters.teams.attachments import FetchRefused
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
@@ -84,6 +88,11 @@ async def _log_channel_skip(file: SkippedFile) -> None:
 
 async def _log_skip(file: SkippedFile) -> None:
     log.info("teams.output.oversize", file_id=file.file_id, size_bytes=file.size_bytes)
+
+
+async def _preview(name: str, file: DeliverableFile) -> Attachment | None:
+    # Decoding and re-encoding a large image takes long enough to stall other turns.
+    return await asyncio.to_thread(preview_attachment, name, file.content, file.mime_type)
 
 
 class Spawn(Protocol):
@@ -154,6 +163,19 @@ class TeamsOutputDelivery:
             conversation_id, MessageActivityInput(text=text), service_url=service_url
         )
 
+    async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
+        if not previews:
+            return
+        try:
+            await self._sender.send(
+                inbound.conversation_id,
+                MessageActivityInput().add_attachments(*previews),
+                service_url=inbound.service_url,
+            )
+        except TEAMS_SEND_ERRORS:
+            # An extra, never the file itself: the delivery and its ledger stand.
+            log.warning("teams.output_preview.send_failed", count=len(previews), exc_info=True)
+
     async def sweep(
         self, inbound: TeamsInbound, session_id: str, *, append: AppendToAnswer | None = None
     ) -> None:
@@ -191,6 +213,8 @@ class TeamsOutputDelivery:
             # Zero sends every file down the skip path: a log line, then a
             # delete for a file that fits the cap. A file over it is kept,
             # as on every other path: no channel could take it either.
+            # No preview here: the skip path never downloads the bytes, and
+            # the agent's reply already says the files could not be saved.
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
@@ -202,9 +226,14 @@ class TeamsOutputDelivery:
             )
             return
         links: list[str] = []
+        previews: list[Attachment] = []
 
         async def upload(file: DeliverableFile) -> None:
             name = display_filename_for(file.filename, file.mime_type)
+            preview = None
+            if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
+                # Before the upload: a preview error must never re-upload a saved file.
+                preview = await _preview(name, file)
             try:
                 item = await files.upload(inbound, name, file.content)
             except GraphUnavailable as err:
@@ -222,6 +251,8 @@ class TeamsOutputDelivery:
                     raise
                 return
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
+            if preview is not None:
+                previews.append(preview)
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -230,8 +261,13 @@ class TeamsOutputDelivery:
             on_skip=_log_skip,
             sleep=self._sleep,
         )
-        if not links:
-            return
+        if links:
+            await self._post_links(inbound, links, append)
+        await self._send_previews(inbound, previews)
+
+    async def _post_links(
+        self, inbound: TeamsInbound, links: list[str], append: AppendToAnswer | None
+    ) -> None:
         text = "\n".join([_SAVED, *links])
         if append is not None and await append(text):
             return
@@ -255,8 +291,10 @@ class TeamsOutputDelivery:
         pending = {offer.file_id for offer in self._offers.values()} | self._claimed
         if file.file_id in pending:
             raise OutputDeliveryDeferred(file.file_id)  # Still waiting on the last card.
-        token = secrets.token_urlsafe(24)
         name = display_filename_for(file.filename, file.mime_type)
+        if (preview := await _preview(name, file)) is not None:
+            await self._send_previews(inbound, [preview])
+        token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(
             file_id=file.file_id,
             filename=name,
