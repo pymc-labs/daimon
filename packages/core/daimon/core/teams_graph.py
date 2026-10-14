@@ -9,13 +9,15 @@ message reads here, `TeamMember.Read.Group` the owner list
 (`list_team_owner_ids`, for channel admin grants) and `ChannelMember.Read.Group`
 a channel's members (`list_channel_members`, for who is from another
 organisation); `teams_sharepoint` sends its file calls through
-`send`. Each read is one page; `next_page` follows a page's `next_link`. Any
-failure (no consent, throttling, a timeout, an odd body) raises
+`send`. Each read is one page; `next_page` follows a page's `next_link`. A GET
+is retried once on a transport error (a timeout, a dropped connection). Any
+failure (no consent, throttling, a second timeout, an odd body) raises
 `GraphUnavailable`, whose fields carry no message content.
 """
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from html.parser import HTMLParser
@@ -296,19 +298,27 @@ class GraphClient:
             raise GraphUnavailable(f"token: {type(err).__name__}") from err
         if not token:
             raise GraphUnavailable("no token")
+        headers = {"Authorization": f"Bearer {token}"}
+        if content is not None:
+            headers["Content-Type"] = "application/octet-stream"
+        request = functools.partial(
+            self._http.request,
+            method,
+            target,
+            headers=headers,
+            json=body,
+            content=content,
+            follow_redirects=False,
+            timeout=timeout,
+        )
         try:
-            headers = {"Authorization": f"Bearer {token}"}
-            if content is not None:
-                headers["Content-Type"] = "application/octet-stream"
-            response = await self._http.request(
-                method,
-                target,
-                headers=headers,
-                json=body,
-                content=content,
-                follow_redirects=False,
-                timeout=timeout,
-            )
+            try:
+                response = await request()
+            except httpx.TransportError:
+                # A read retries once past a transient Graph stall; a write may have landed.
+                if method != "GET":
+                    raise
+                response = await request()
         except httpx.HTTPError as err:
             raise GraphUnavailable(type(err).__name__) from err
         if response.status_code not in (200, 201):
