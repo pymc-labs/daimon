@@ -373,7 +373,7 @@ def build_teams_client(fake: TeamsApiFake) -> Client:
 @dataclasses.dataclass
 class FakeSender:
     """A `TeamsSender` recording every send. Indices in `fail_on` raise; in
-    `refuse_on` they answer 413; in `timeout_on` they time out after landing
+    `refuse_on` they answer `refuse_status`; in `timeout_on` they time out after landing
     (odd: httpx, even: asyncio). An edit Teams would refuse answers 400, as
     Teams does."""
 
@@ -383,6 +383,7 @@ class FakeSender:
     fail_on: set[int] = dataclasses.field(default_factory=set[int])
     timeout_on: set[int] = dataclasses.field(default_factory=set[int])
     refuse_on: set[int] = dataclasses.field(default_factory=set[int])
+    refuse_status: int = 413
 
     async def send(
         self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
@@ -395,8 +396,8 @@ class FakeSender:
             raise httpx.ReadTimeout("slow") if index % 2 else TimeoutError()
         if index in self.refuse_on:
             request = httpx.Request("POST", f"https://teams.test/conversations/{conversation_id}")
-            response = httpx.Response(413, request=request)
-            raise httpx.HTTPStatusError("too large", request=request, response=response)
+            response = httpx.Response(self.refuse_status, request=request)
+            raise httpx.HTTPStatusError("refused", request=request, response=response)
         body = activity.model_dump(mode="json", by_alias=True, exclude_none=True)
         if activity.id is not None and (refused := teams_update_error(body)) is not None:
             request = httpx.Request("PUT", f"https://teams.test/activities/{activity.id}")

@@ -182,10 +182,10 @@ class TeamsOutputDelivery:
             return
         except httpx.HTTPStatusError as err:
             # Bot Framework's message size cap is undocumented: several previews together
-            # may be refused (413, 400) where each alone fits. Only a refusal is retried
-            # one by one; 429 is throttling, not size.
+            # may be refused (413, 400) where each alone fits. Only those are retried
+            # one by one; any other status is not about size.
             status = err.response.status_code
-            if len(previews) == 1 or not 400 <= status < 500 or status == 429:
+            if len(previews) == 1 or status not in (400, 413):
                 log.warning("teams.output_preview.send_failed", count=len(previews), status=status)
                 return
         except TEAMS_SEND_ERRORS:

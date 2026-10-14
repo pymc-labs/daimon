@@ -649,8 +649,9 @@ async def test_failed_channel_preview_leaves_the_delivery_alone(
     assert harness.deletes == ["file_png"], "the saved file still leaves the listing"
 
 
+@pytest.mark.parametrize("status", [400, 413])
 async def test_refused_channel_previews_are_retried_one_per_message(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
 ) -> None:
     """Several previews may be too big together: each is retried alone, failures only logged."""
     images = [_png(f"file_{n}", f"chart{n}.png") for n in range(3)]
@@ -659,6 +660,7 @@ async def test_refused_channel_previews_are_retried_one_per_message(
         db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
     )
     harness.sender.refuse_on.add(0)
+    harness.sender.refuse_status = status
     harness.sender.fail_on.add(2)
 
     async def append(_: str) -> bool:
@@ -677,6 +679,28 @@ async def test_refused_channel_previews_are_retried_one_per_message(
     failures = [e for e in logs if e["event"] == "teams.output_preview.send_failed"]
     assert len(failures) == 1, "only the preview refused on its own is logged"
     assert len(harness.deletes) == 3, "the files are delivered whatever the previews do"
+
+
+@pytest.mark.parametrize("status", [403, 429])
+async def test_channel_previews_refused_for_another_reason_are_not_resent(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
+) -> None:
+    """Only 400 and 413 can mean the combined message was too large."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(2)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(
+        db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
+    )
+    harness.sender.refuse_on.add(0)
+    harness.sender.refuse_status = status
+
+    async def append(_: str) -> bool:
+        return True
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    previews = [a for a in harness.sender.activities if a.attachments]
+    assert len(previews) == 1, "the combined preview message is sent once, never split"
 
 
 @pytest.mark.parametrize("timeout_index", [0, 1], ids=["asyncio", "httpx"])
