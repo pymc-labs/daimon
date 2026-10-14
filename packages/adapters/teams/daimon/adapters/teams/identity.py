@@ -4,7 +4,9 @@ The only place inbound activity fields are trusted. `parse_inbound` checks an
 authenticated activity is a channel @mention (or a quote of one of the bot's
 messages), an unmentioned human reply in a channel thread (a participation
 candidate, `unprompted`), or a personal-chat message from the configured Entra
-tenant, and reduces it to `TeamsInbound`. `live_tenant_id`
+tenant, and reduces it to `TeamsInbound`. `parse_graph_message` does the
+same for a message Graph reported from a subscribed private or shared channel,
+where Teams sends the bot only @mentions. `live_tenant_id`
 then maps it to the organisation's live daimon tenant; a 1:1 chat names its
 organisation, so it needs no DM workspace choice. Group chats are refused for now.
 
@@ -27,10 +29,22 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
 
-from daimon.adapters.teams.attachments import InboundFile, parse_attachments
+from daimon.adapters.teams.attachments import (
+    InboundFile,
+    parse_attachments,
+    parse_graph_attachments,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.name_mentions import mentions_by_name, strip_name_mentions
+from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.teams_graph import (
+    GraphMessage,
+    GraphSender,
+    html_to_text,
+    message_references,
+    message_text,
+)
 from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.activities.utils import StripMentionsTextOptions, strip_mentions_text
 from microsoft_teams.api.models.channel_data import ChannelData
@@ -148,6 +162,15 @@ def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: s
     return None
 
 
+def delivery_key(conversation_id: str, message_id: str) -> tuple[str, str]:
+    """What a message is claimed under so it runs once, from Bot Framework or Graph alike.
+
+    Whether a thread id names its root differs by source, so the key is the
+    channel (or chat) and the message id, which Teams keeps unique within it.
+    """
+    return conversation_id.split(";", 1)[0], message_id
+
+
 def channel_thread_id(conversation_id: str, activity_id: str) -> str:
     # Teams puts the thread root in the id; a root post without it is its own root.
     if ";messageid=" in conversation_id:
@@ -190,13 +213,14 @@ def _html_quote_senders(activity: MessageActivity) -> list[str]:
         for a in activity.attachments or []
         if a.content_type == "text/html" and isinstance(a.content, str)
     ]
-    senders: list[str] = []
-    for body in bodies:
-        parser = _QuoteSenders()
-        parser.feed(body)
-        parser.close()
-        senders += parser.senders
-    return senders
+    return [sender for body in bodies for sender in _quote_senders(body)]
+
+
+def _quote_senders(body: str) -> list[str]:
+    parser = _QuoteSenders()
+    parser.feed(body)
+    parser.close()
+    return parser.senders
 
 
 def quotes_bot(activity: MessageActivity) -> bool:
@@ -206,6 +230,10 @@ def quotes_bot(activity: MessageActivity) -> bool:
     return any(_bare_bot_id(s) == bot for s in senders + _html_quote_senders(activity))
 
 
+def describe_quote(sender_name: str | None, preview: str | None) -> str:
+    return f'[quoting {sender_name or "unknown"}: "{preview or ""}"]\n'
+
+
 def render_quotes(text: str, quotes: Mapping[str, QuotedReplyData]) -> str:
     """Each `<quoted messageId=…/>` placeholder, in place, as the quote it stands for."""
 
@@ -213,7 +241,7 @@ def render_quotes(text: str, quotes: Mapping[str, QuotedReplyData]) -> str:
         quote = quotes.get(match.group(1))
         if quote is None or quote.is_reply_deleted:
             return "[quoted message unavailable]\n"
-        return f'[quoting {quote.sender_name or "unknown"}: "{quote.preview or ""}"]\n'
+        return describe_quote(quote.sender_name, quote.preview)
 
     return _QUOTED.sub(describe, text)
 
@@ -226,6 +254,10 @@ def _typed_text(text: str) -> str:
     """
     if "@" not in text and "&" not in text:
         return text  # no "@", typed or as an entity: nothing to match
+    return html.unescape(_without_reply_quotes(text))
+
+
+def _without_reply_quotes(text: str) -> str:
     kept: list[str] = []
     start = depth = 0
     for tag in _BLOCKQUOTE_TAG.finditer(text):
@@ -239,7 +271,7 @@ def _typed_text(text: str) -> str:
                 start = tag.end()
     if not depth:
         kept.append(text[start:])
-    return html.unescape("".join(kept))
+    return "".join(kept)
 
 
 def strip_typed_name(text: str, name: str | None) -> str:
@@ -331,14 +363,6 @@ def parse_inbound(
     quotes = {e.quoted_reply.message_id: e.quoted_reply for e in activity.get_quoted_messages()}
     text = render_quotes(text, quotes).strip()
     files = parse_attachments(activity.attachments or [], personal=kind == "personal")
-    if not addressed and not text and not files:
-        return Refusal(None)
-    # A bare channel mention asks about the thread, which the turn replays.
-    if not text and not files and kind == "personal":
-        return Refusal(TEXT_ONLY)
-    if len(text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
-        return Refusal(INPUT_TOO_LONG if addressed or by_name else None, by_name=by_name)
-
     team = channel_data.team if channel_data is not None else None
     channel = channel_data.channel if channel_data is not None else None
     if kind == "personal":
@@ -347,10 +371,8 @@ def parse_inbound(
     else:
         conversation_id = channel_thread_id(conversation.id, activity.id)
         channel_id = conversation_id.split(";", 1)[0]
-    channel_name = channel.name if channel is not None else None
-    if team is not None and channel_id == team.id:
-        channel_name = channel_name or GENERAL_CHANNEL  # Teams names General nowhere
-    return TeamsInbound(
+    team_id = team.id if team is not None else None
+    inbound = TeamsInbound(
         kind="dm" if kind == "personal" else "channel",
         entra_tenant_id=tenant,
         user_id=user_id,
@@ -361,19 +383,126 @@ def parse_inbound(
         service_url=service_url,
         bot_name=activity.recipient.name,
         files=files,
-        team_id=team.id if team is not None else None,
+        team_id=team_id,
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
         unprompted=thread_reply,
         by_name=by_name,
         user_name=activity.from_.name,
         timestamp=activity.timestamp.isoformat() if activity.timestamp else None,
-        channel_name=channel_name,
+        channel_name=_channel_name(channel_id, team_id, channel.name if channel else None),
         channel_type=channel.type if channel is not None else None,
         team_name=team.name if team is not None else None,
         is_external=home is not None,
         is_external_known=home is not None,
         home_tenant_id=home,
     )
+    return _admitted(inbound, addressed=addressed)
+
+
+def _channel_name(channel_id: str, team_id: str | None, name: str | None) -> str | None:
+    if team_id is not None and channel_id == team_id:
+        return name or GENERAL_CHANNEL  # Teams names General nowhere
+    return name
+
+
+def _admitted(inbound: TeamsInbound, *, addressed: bool) -> TeamsInbound | Refusal:
+    """The checks every source shares once a message is read: empty, text-only, too long."""
+    if not addressed and not inbound.text and not inbound.files:
+        return Refusal(None)
+    # A bare channel mention asks about the thread, which the turn replays.
+    if not inbound.text and not inbound.files and inbound.kind == "dm":
+        return Refusal(TEXT_ONLY)
+    if len(inbound.text.encode("utf-8")) > MAX_INBOUND_MESSAGE_BYTES:
+        by_name = inbound.by_name
+        return Refusal(INPUT_TOO_LONG if addressed or by_name else None, by_name=by_name)
+    return inbound
+
+
+def _is_app(identity: GraphSender | None, app_id: str) -> bool:
+    application = identity.application if identity is not None else None
+    return application is not None and (application.id or "").lower() == app_id
+
+
+def _display_name(identity: GraphSender | None) -> str | None:
+    who = identity and (identity.application or identity.user)
+    return who.display_name if who else None
+
+
+def parse_graph_message(
+    message: GraphMessage,
+    channel: TeamsChannelSubscriptionRow,
+    *,
+    configured_tenant: str,
+    bot_app_id: str,
+) -> TeamsInbound | Refusal:
+    """`parse_inbound` for a message Graph reported from a subscribed channel.
+
+    Only a person's new message counts. One that @mentions the bot is refused
+    silently too: Bot Framework delivers it. A Reply on one of the bot's
+    messages (a `messageReference` naming the bot's app id) is addressed, as a
+    quote is there; the rest is screened as an unmentioned channel message.
+    """
+    sender = message.sender
+    user = sender.user if sender is not None else None
+    bot = bot_app_id.lower()
+    if (
+        message.message_type != "message"
+        or message.deleted_date_time is not None
+        or user is None
+        or (sender is not None and sender.application is not None)
+        or any(_is_app(mention.mentioned, bot) for mention in message.mentions)
+    ):
+        return Refusal(None)
+    is_html = message.body.content_type == "html"
+    body = message.body.content or ""
+    references = message_references(message)
+    addressed = any(_is_app(ref.message_sender, bot) for ref in references) or (
+        is_html and any(_bare_bot_id(s) == bot for s in _quote_senders(body))
+    )
+    root = message.reply_to_id or message.id
+    thread_reply = not addressed and root != message.id
+    typed = html_to_text(_without_reply_quotes(body)) if is_html else body
+    by_name = not addressed and mentions_by_name(typed, (channel.bot_name,))
+    if not addressed and not thread_reply and not by_name:
+        return Refusal(None)
+
+    tenant = canonical_uuid(configured_tenant)
+    user_id = canonical_uuid(user.id)
+    if tenant is None or user_id is None or not message.id.strip():
+        return Refusal(DENIED if addressed else None)
+    # A shared channel's external member keeps their home tenant on Graph's sender.
+    home_tenant = (user.tenant_id or "").strip()
+    home = None
+    if home_tenant and canonical_uuid(home_tenant) != tenant:
+        home = canonical_uuid(home_tenant) or home_tenant
+    quoted = "".join(
+        describe_quote(_display_name(ref.message_sender), ref.message_preview) for ref in references
+    )
+    inbound = TeamsInbound(
+        kind="channel",
+        entra_tenant_id=tenant,
+        user_id=user_id,
+        conversation_id=f"{channel.channel_id};messageid={root}",
+        channel_id=channel.channel_id,
+        activity_id=message.id,
+        text=(quoted + message_text(message)).strip(),
+        service_url=channel.service_url,
+        bot_name=channel.bot_name,
+        files=parse_graph_attachments(message),
+        team_id=channel.team_id,
+        team_group_id=channel.group_id,
+        unprompted=thread_reply,
+        by_name=by_name,
+        user_name=user.display_name,
+        timestamp=message.created_date_time,
+        channel_name=_channel_name(channel.channel_id, channel.team_id, channel.channel_name),
+        channel_type=channel.channel_type,
+        team_name=channel.team_name,
+        is_external=home is not None,
+        is_external_known=home is not None,
+        home_tenant_id=home,
+    )
+    return _admitted(inbound, addressed=addressed)
 
 
 async def live_tenant_id(

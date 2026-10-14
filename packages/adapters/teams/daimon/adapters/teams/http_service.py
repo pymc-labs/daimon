@@ -31,6 +31,12 @@ from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_settings import ChannelSettingsDialog
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
+from daimon.adapters.teams.channel_subscriptions import (
+    LIFECYCLE_PATH,
+    NOTIFICATIONS_PATH,
+    ChannelSubscriptions,
+    notification_route,
+)
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
@@ -62,18 +68,19 @@ from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import TeamsChannelSiteRow
+from daimon.core.stores.domain import TeamsChannelSiteRow, TeamsChannelSubscriptionRow
 from daimon.core.stores.teams_channel_sites import (
     get_teams_channel_site,
     upsert_teams_channel_site,
 )
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
-from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, TeamGroups
+from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from microsoft_teams.api import UninstalledActivity
 from microsoft_teams.api.auth.cloud_environment import PUBLIC
-from microsoft_teams.apps import App, FastAPIAdapter
+from microsoft_teams.apps import ActivityContext, App, FastAPIAdapter
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http import MiddlewareContext, MiddlewareNext
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -356,6 +363,22 @@ def create_teams_http_service(
     support = (
         SupportCommand(runtime, direct, spawn=spawn) if support_enabled(runtime.settings) else None
     )
+    subscriptions = None
+    if settings.private_channel_messages and settings.public_url is not None:
+
+        async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> None:
+            await turns.handle_graph_message(message, channel)  # Built below.
+
+        subscriptions = ChannelSubscriptions(
+            sessionmaker=runtime.sessionmaker,
+            graph=graph,
+            groups=groups,
+            channel_type=channel_type,
+            deliver=deliver,
+            spawn=spawn,
+            tenant_id=teams_tenant,
+            public_url=str(settings.public_url),
+        )
     if support is not None:
         commands["support"] = support.command
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
@@ -369,6 +392,7 @@ def create_teams_http_service(
         installs=installs,
         direct=direct,
         ask_human=support is not None,
+        subscriptions=subscriptions,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,
@@ -380,6 +404,21 @@ def create_teams_http_service(
     feedback = TeamsFeedback(runtime, direct, spawn=spawn)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
+    if subscriptions is not None:
+        watched = subscriptions
+
+        async def uninstalled(ctx: ActivityContext[UninstalledActivity]) -> None:
+            team = ctx.activity.channel_data.team if ctx.activity.channel_data else None
+            if team is not None and team.id and installs.is_ours(ctx.activity):
+                await watched.forget(team_id=team.id)
+            await ctx.next()
+
+        # First, so the installs handler (which ends the chain) still runs after it.
+        teams_app.on_install_remove(uninstalled)
+        teams_app.on_conversation_update(watched.on_conversation_update)
+        for path, lifecycle in ((NOTIFICATIONS_PATH, False), (LIFECYCLE_PATH, True)):
+            route = notification_route(watched, lifecycle=lifecycle)
+            fastapi_app.add_api_route(path, route, methods=["POST"])
     teams_app.on_install_remove(installs.on_uninstall)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)

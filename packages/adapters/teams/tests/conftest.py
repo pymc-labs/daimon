@@ -97,7 +97,11 @@ MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 
 
 def teams_settings(
-    *, enabled: bool = True, admins: tuple[str, ...] = (), public_url: str | None = None
+    *,
+    enabled: bool = True,
+    admins: tuple[str, ...] = (),
+    public_url: str | None = None,
+    private_channel_messages: bool = False,
 ) -> TeamsSettings:
     return TeamsSettings.model_validate(
         {
@@ -107,6 +111,7 @@ def teams_settings(
             "enabled": enabled,
             "admin_user_ids": admins,
             "public_url": public_url,
+            "private_channel_messages": private_channel_messages,
         }
     )
 

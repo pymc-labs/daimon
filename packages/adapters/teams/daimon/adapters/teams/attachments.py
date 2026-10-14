@@ -39,7 +39,13 @@ from daimon.core.media.vision import (
     build_image_block,
     sniff_image_media_type,
 )
-from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
+from daimon.core.teams_graph import (
+    FILE_ATTACHMENT_TYPES,
+    GraphMessage,
+    image_sources,
+    is_graph_url,
+    is_sharepoint_host,
+)
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 
@@ -166,6 +172,21 @@ def parse_attachments(
         found += [InboundFile("embedded_file", "file")] * max(0, embedded.files - listed_files)
     if len(found) > MAX_ATTACHMENTS:
         log.warning("teams.attachments.truncated", count=len(found))
+    return tuple(found[:MAX_ATTACHMENTS])
+
+
+def parse_graph_attachments(message: GraphMessage) -> tuple[InboundFile, ...]:
+    """A Graph channel message's images and files, listed as a channel activity's are.
+
+    Both stay unread here: the turn reads the message's media through Graph.
+    """
+    html = (message.body.content or "") if message.body.content_type == "html" else ""
+    found = [InboundFile("embedded_image", "image") for _ in image_sources(html)]
+    found += [
+        InboundFile("unreachable", sanitize_title(attachment.name or "file"))
+        for attachment in message.attachments
+        if attachment.content_type in FILE_ATTACHMENT_TYPES
+    ]
     return tuple(found[:MAX_ATTACHMENTS])
 
 
