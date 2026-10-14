@@ -21,8 +21,10 @@ from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
+    BotIdentity,
     PermissionProfile,
     build_app_jwt,
+    get_bot_identity,
     group_repository_access,
     mint_installation_token,
 )
@@ -83,6 +85,34 @@ class AppSessionAccess:
 
 
 REQUESTER_CACHE = PermissionCache()
+
+#: Bot identity per App slug. The numeric bot id never changes for a slug, so a
+#: process asks GitHub once; a failed lookup is not cached and is retried by the
+#: next session.
+_BOT_IDENTITIES: dict[str, BotIdentity] = {}
+
+
+async def resolve_bot_identity(
+    client: httpx.AsyncClient, *, slug: str | None
+) -> BotIdentity | None:
+    """The App's bot commit identity, or None when it cannot be resolved.
+
+    Best-effort: a missing slug, an unknown bot user or a GitHub failure leaves
+    the session without a preset identity rather than failing it.
+    """
+    if slug is None:
+        return None
+    cached = _BOT_IDENTITIES.get(slug)
+    if cached is not None:
+        return cached
+    try:
+        identity = await get_bot_identity(client, slug=slug)
+    except (httpx.HTTPError, ValueError):
+        _log.warning("Could not resolve the GitHub App bot identity for %s", slug, exc_info=True)
+        return None
+    if identity is not None:
+        _BOT_IDENTITIES[slug] = identity
+    return identity
 
 
 async def effective_repo_urls(

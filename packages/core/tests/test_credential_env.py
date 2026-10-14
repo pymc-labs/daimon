@@ -10,7 +10,13 @@ import pytest
 import structlog.testing
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
-from daimon.core.credential_env import assemble_env_bytes, upload_env_and_mount
+from daimon.core.credential_env import (
+    assemble_env_bytes,
+    render_git_identity_script,
+    upload_env_and_mount,
+    upload_git_identity_and_mount,
+)
+from daimon.core.github_app_auth import BotIdentity
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
@@ -308,3 +314,54 @@ async def test_upload_env_and_mount_never_logs_secret_values(
     mounted = [e for e in logs if e.get("event") == "credential_env.mounted"][0]
     assert mounted.get("file_id") == "file_log", "log should carry file_id"
     assert mounted.get("key_count") == 1, "log should carry key_count"
+
+
+_BOT = BotIdentity(
+    name="daimon-pymc[bot]", email="987654+daimon-pymc[bot]@users.noreply.github.com"
+)
+
+
+def test_render_git_identity_script_sets_name_and_email_quoted() -> None:
+    assert render_git_identity_script(_BOT) == (
+        b"git config --global user.name 'daimon-pymc[bot]'\n"
+        b"git config --global user.email '987654+daimon-pymc[bot]@users.noreply.github.com'\n"
+    ), "the script is two quoted git config lines, so the shell never globs the [bot] suffix"
+
+
+@pytest.mark.asyncio
+async def test_upload_git_identity_and_mount_mounts_a_non_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[tuple[str, dt.datetime]] = []
+
+    async def enqueue(_session: object, *, file_id: str, delete_after: dt.datetime) -> None:
+        queued.append((file_id, delete_after))
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        def begin(self) -> _Session:
+            return self
+
+    monkeypatch.setattr("daimon.core.credential_env.enqueue_pending_file_delete", enqueue)
+    capture = _UploadCapture(file_id="file_identity")
+
+    result = await upload_git_identity_and_mount(
+        _client_for(capture),
+        lambda: _Session(),  # pyright: ignore[reportArgumentType]
+        identity=_BOT,
+    )
+
+    assert result == {
+        "type": "file",
+        "file_id": "file_identity",
+        "mount_path": "git-identity.sh",
+    }, "the identity script must not end in .env or the snapshot would read it as the secrets"
+    assert b"git config --global user.name" in capture.uploaded_bodies[0]
+    assert [file_id for file_id, _ in queued] == ["file_identity"], (
+        "the uploaded object is queued for the same TTL delete as the .env"
+    )

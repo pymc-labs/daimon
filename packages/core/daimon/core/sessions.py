@@ -42,7 +42,7 @@ from daimon.core.agent_mcp_credentials import (
     resolve_hidden_mcp_server_names,
 )
 from daimon.core.config import GithubAppSettings, McpSettings
-from daimon.core.credential_env import upload_env_and_mount
+from daimon.core.credential_env import upload_env_and_mount, upload_git_identity_and_mount
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -59,6 +59,7 @@ from daimon.core.github_app_session import (
     create_session_vault,
     finish_app_delivery,
     prepare_app_access,
+    resolve_bot_identity,
     revoke_app_access,
 )
 from daimon.core.github_credentials import get_pat
@@ -671,6 +672,22 @@ async def create_session(
                         cache=REQUESTER_CACHE,
                     )
                 resources.extend(app_access.resources)
+                if app_access.tokens:
+                    # Degrade-not-block: without it, commits just carry no preset author.
+                    try:
+                        async with httpx.AsyncClient() as identity_client:
+                            bot_identity = await resolve_bot_identity(
+                                identity_client,
+                                slug=(agent_github_app or GithubAppSettings()).app_slug,
+                            )
+                        if bot_identity is not None:
+                            resources.append(
+                                await upload_git_identity_and_mount(
+                                    anthropic, session_factory, identity=bot_identity
+                                )
+                            )
+                    except anthropic_pkg.APIError as exc:
+                        _log.warning("git_identity.mount_failed", error=str(exc))
                 if vault_id is not None:
                     await add_app_credentials(anthropic, vault_id=vault_id, access=app_access)
             if before_create is not None:

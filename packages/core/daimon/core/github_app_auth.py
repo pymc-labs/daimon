@@ -14,6 +14,8 @@ Pure functions:
 Shell functions (injected httpx):
   mint_installation_token — POST to GitHub to exchange an App JWT for an
     installation access token; raises on non-2xx (never swallows).
+  get_bot_identity — GET the App's bot user (``<slug>[bot]``) and build the git
+    commit identity GitHub links to it; returns None on 404.
   get_installation_id_for_repo — GET the App installation id for a repo;
     returns None on 404 (App not installed — a routing signal), raises on
     any other non-2xx (never swallows a real error).
@@ -117,6 +119,37 @@ async def get_app_installation_details(
         suspended_at=body.suspended_at,
         permissions=body.permissions,
     )
+
+
+@dataclass(frozen=True)
+class BotIdentity:
+    """The git commit identity of a GitHub App's bot user."""
+
+    name: str
+    email: str
+
+
+async def get_bot_identity(http_client: httpx.AsyncClient, *, slug: str) -> BotIdentity | None:
+    """Build the commit identity of the App's bot user, or None when GitHub has no such user.
+
+    GitHub attributes a commit to the bot only when its email is
+    ``<bot-user-id>+<slug>[bot]@users.noreply.github.com``, so the numeric id
+    is read from the public ``GET /users/<slug>[bot]`` (no credential needed).
+    The slug is validated at settings load, so it is safe to put in a URL.
+    """
+    login = f"{slug}[bot]"
+    response = await http_client.get(
+        f"https://api.github.com/users/{slug}%5Bbot%5D",
+        headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    body: object = response.json()
+    bot_id = cast(dict[str, object], body).get("id") if isinstance(body, dict) else None
+    if not isinstance(bot_id, int) or isinstance(bot_id, bool) or bot_id <= 0:
+        raise ValueError(f"GitHub bot-user response has no numeric id ({login})")
+    return BotIdentity(name=login, email=f"{bot_id}+{login}@users.noreply.github.com")
 
 
 def group_repository_access(

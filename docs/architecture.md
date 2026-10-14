@@ -1075,7 +1075,19 @@ only the selected working repository, if there is one, and uses its own vault
 for `GH_TOKEN` and Copilot. Other granted repos are available through tokens
 for cloning by name. A change to the working mount or the token repository
 set replaces the session on its next turn; unchanged sets receive refreshed
-tokens through resource updates. Legacy sessions continue to
+tokens through resource updates. A session holding an App token also mounts
+`/mnt/session/uploads/git-identity.sh`, two `git config --global` lines that
+make sandbox commits author as the App's bot (`<app-slug>[bot]`, with the
+noreply email `<bot-user-id>+<app-slug>[bot]@users.noreply.github.com`); the
+bot id is read once per process from GitHub and cached, and a failed lookup
+just leaves the file off. It is a separate file because an agent with no secrets
+has no `.env` and the `.env` bytes feed the session fingerprint. A member-set
+`GIT_AUTHOR_*` or `GIT_COMMITTER_*` key in the `.env` still wins over it, as
+git's environment variables outrank its config. The agent guidance tells agents
+to commit with git and open pull requests with `gh pr create` on `GH_TOKEN`,
+ending the body with "Requested by <name>", instead of the GitHub MCP, where a
+person's own sign-in would outrank the agent's credential and author the work.
+A stored per-agent token is not read in App mode. Legacy sessions continue to
 use their existing binding and credential path.
 
 **Stage three, `run_prepared_turn()` —

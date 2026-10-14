@@ -17,8 +17,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.github_app_auth import (
+    BotIdentity,
     build_app_install_url,
     build_app_jwt,
+    get_bot_identity,
     get_installation_id_for_repo,
     mint_installation_token,
     verify_signature,
@@ -286,3 +288,50 @@ async def test_get_installation_id_for_repo_raises_on_500() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         await get_installation_id_for_repo(client, jwt="test-jwt", owner="acme", repo="widgets")
+
+
+@pytest.mark.asyncio
+async def test_get_bot_identity_builds_the_noreply_identity_from_the_bot_user_id() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"id": 987654, "login": "daimon-pymc[bot]"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    identity = await get_bot_identity(client, slug="daimon-pymc")
+
+    assert identity == BotIdentity(
+        name="daimon-pymc[bot]", email="987654+daimon-pymc[bot]@users.noreply.github.com"
+    ), "GitHub links a commit to the bot only through <id>+<slug>[bot]@users.noreply.github.com"
+    assert str(captured[0].url) == "https://api.github.com/users/daimon-pymc%5Bbot%5D", (
+        "the bot user is looked up by its percent-encoded [bot] login"
+    )
+    assert "Authorization" not in captured[0].headers, "the lookup is public and needs no token"
+
+
+@pytest.mark.asyncio
+async def test_get_bot_identity_returns_none_when_github_has_no_such_bot() -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(404)))
+
+    assert await get_bot_identity(client, slug="nobody") is None, "404 means no bot user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{"login": "x[bot]"}, {"id": "12"}, {"id": 0}, ["id"]])
+async def test_get_bot_identity_rejects_a_response_without_a_numeric_id(body: object) -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    )
+
+    with pytest.raises(ValueError, match="numeric id"):
+        await get_bot_identity(client, slug="daimon-pymc")
+
+
+@pytest.mark.asyncio
+async def test_get_bot_identity_raises_on_a_server_error() -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await get_bot_identity(client, slug="daimon-pymc")

@@ -29,6 +29,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
 )
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.github_app_auth import BotIdentity
+from daimon.core.github_app_session import AppSessionAccess, AppToken
 from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.memory_resource import (
     MEMORY_INSTRUCTIONS,
@@ -1557,6 +1559,69 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
     assert not any(r["type"] == "github_repository" for r in bodies[0].get("resources", []))
     assert credentials.await_args.kwargs["access"].tokens == ()
     assert credentials.await_args.kwargs["access"].working_token is None
+
+
+@pytest.mark.parametrize("identity_resolves", [True, False])
+async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_token_exists(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    identity_resolves: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
+    await db_session.commit()
+    identity = BotIdentity(name="daimon[bot]", email="7+daimon[bot]@users.noreply.github.com")
+    token = AppToken(uuid.uuid4(), "ghs_x", 1, (1,), "write", "GH_TOKEN_ACME_WRITE")
+    monkeypatch.setattr("daimon.core.sessions.create_session_vault", AsyncMock(return_value="v"))
+    monkeypatch.setattr(
+        "daimon.core.sessions.prepare_app_access",
+        AsyncMock(return_value=AppSessionAccess((), (token,), "ghs_x")),
+    )
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
+    monkeypatch.setattr("daimon.core.sessions.finish_app_delivery", AsyncMock())
+    resolve = AsyncMock(return_value=identity if identity_resolves else None)
+    monkeypatch.setattr("daimon.core.sessions.resolve_bot_identity", resolve)
+    mount = AsyncMock(
+        return_value={"type": "file", "file_id": "file_id", "mount_path": "git-identity.sh"}
+    )
+    monkeypatch.setattr("daimon.core.sessions.upload_git_identity_and_mount", mount)
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST" and request.url.path == "/v1/sessions"
+        body = json_body(request)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_identity",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_identity"),
+        environment=_make_env(anthropic_id="env_identity"),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        agent_github_app=GithubAppSettings(app_slug="daimon"),
+    )
+
+    resolve.assert_awaited_once()
+    assert resolve.await_args is not None and resolve.await_args.kwargs["slug"] == "daimon"
+    mounted = [r for r in bodies[0].get("resources", []) if r["type"] == "file"]
+    if identity_resolves:
+        assert mounted == [
+            {"type": "file", "file_id": "file_id", "mount_path": "git-identity.sh"}
+        ], "a session holding an App token carries the bot's commit identity"
+    else:
+        assert mounted == [], "an unresolved identity leaves the session without one"
+        mount.assert_not_awaited()
 
 
 async def test_app_session_attaches_caller_and_session_vaults(
