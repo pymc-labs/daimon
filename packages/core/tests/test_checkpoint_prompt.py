@@ -6,6 +6,7 @@ import random
 import re
 import subprocess
 import sys
+import tarfile
 import uuid
 from pathlib import Path
 
@@ -668,6 +669,59 @@ def test_an_archive_under_the_cap_is_built_once_and_leaves_nothing_out(tmp_path:
     assert checkpoint_left_out(output) == ((), 0), "nothing is left out under the cap"
     bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
     assert "root/work/model.pkl" in _members(bundle), "every file travels"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_the_archive_step_carries_only_the_task_files_and_cleans_up(tmp_path: Path) -> None:
+    """One real run over a fake / with every kind of entry the find prunes."""
+    old = _fake_root(tmp_path)
+    work = old / "root" / "work"
+    outputs = old / "mnt" / "session" / "outputs"
+    for path in (
+        old / "root" / ".config" / "tool.json",
+        old / "tmp" / "work" / ".lock",
+        work / "app" / "node_modules" / "pkg" / "index.js",
+        work / "app" / ".env",
+        work / "repo" / ".git" / "objects" / "ab" / "cdef",
+        work / "repo" / ".git" / "HEAD",
+        old / "tmp" / "work" / "notes.md",
+        outputs / "report.csv",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{path.name}\n")
+    (outputs / f"{HANDOFF_FILENAME_PREFIX}earlier.tar.gz").write_text("old bundle\n")
+    (work / "huge.bin").write_bytes(bytes(2 * 1024 * 1024 + 1))
+    (work / "latest.csv").symlink_to("table0.csv")
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    _run_archive_step(prompt, old)
+
+    with tarfile.open(outputs / handoff_filename(TRANSFER_ID)) as bundle:
+        members = {member.name: member for member in bundle.getmembers()}
+    assert {
+        "root/HANDOFF.md",
+        "root/work/repo/.git/HEAD",
+        "tmp/work/notes.md",
+        "mnt/session/outputs/report.csv",
+    } <= members.keys(), "the task's own files travel"
+    left_behind = {
+        "root/.config/tool.json",
+        "tmp/work/.lock",
+        "root/work/app/node_modules/pkg/index.js",
+        "root/work/app/.env",
+        "root/work/repo/.git/objects/ab/cdef",
+        "root/work/huge.bin",
+    }
+    assert not left_behind & members.keys(), "dot dirs, caches, secrets and oversize files stay"
+    assert not [name for name in members if HANDOFF_FILENAME_PREFIX in name], (
+        "neither an earlier bundle nor the archive itself is packed"
+    )
+    assert members["root/work/latest.csv"].issym(), "a symlink travels as a link"
+    assert [path.name for path in (old / "tmp").iterdir()] == ["work"], (
+        "no scratch file is left behind"
+    )
 
 
 def test_checkpoint_left_out_reads_whole_lines_and_the_overflow_count() -> None:
