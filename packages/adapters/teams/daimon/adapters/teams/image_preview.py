@@ -45,8 +45,6 @@ def _on_white(image: Image.Image) -> Image.Image:
 
 def _fit(source: Image.Image) -> tuple[str, bytes] | None:
     lossy = source.format == "JPEG"
-    if lossy:
-        source.draft("RGB", (MAX_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION))
     image = source.copy()
     if image.mode in ("1", "P") and max(image.size) > MAX_PREVIEW_DIMENSION:
         image = image.convert("RGBA")  # Palette images only downscale by nearest neighbour.
@@ -70,6 +68,9 @@ def preview_image(content: bytes, mime_type: str) -> tuple[str, bytes] | None:
         return None
     try:
         with Image.open(io.BytesIO(content), formats=_FORMATS) as source:
+            if source.format == "JPEG":
+                # Decodes at up to 1/8 scale, so the cap applies to that size.
+                source.draft("RGB", (MAX_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION))
             if source.width * source.height > MAX_PREVIEW_PIXELS:
                 return None
             if getattr(source, "n_frames", 1) != 1:

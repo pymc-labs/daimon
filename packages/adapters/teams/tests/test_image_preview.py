@@ -93,6 +93,17 @@ def test_preview_skips_an_image_over_the_pixel_cap(monkeypatch: pytest.MonkeyPat
     )
 
 
+def test_preview_caps_a_jpeg_at_its_reduced_decode_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A phone JPEG decodes at 1/8 scale, so the cap applies to that size, not the header's."""
+    monkeypatch.setattr(image_preview, "MAX_PREVIEW_PIXELS", 1024 * 1024)
+    photo = _image_bytes((4096, 4096), "JPEG", mode="RGB")
+
+    preview = preview_image(photo, "image/jpeg")
+
+    assert preview is not None, "16M pixels on disk, 1M once drafted: still previewed"
+    assert _opened(preview[1]).size == (1024, 1024), "and downscaled as usual"
+
+
 def test_preview_skips_an_animated_gif() -> None:
     """Teams does not render animated GIFs inline."""
     frames = [Image.new("RGB", (32, 32), color) for color in ("red", "blue")]
