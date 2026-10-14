@@ -77,9 +77,21 @@ CHECKPOINT_EXCLUDED_PATHS: tuple[str, ...] = (
 CHECKPOINT_OUTPUTS_DIR = "/mnt/session/outputs"
 
 #: Printed by the checkpoint turn instead of a listing when the finished
-#: archive is over the cap. The archive is deleted first, so a rejected
-#: transfer leaves nothing behind in the old session's outputs.
+#: archive is over the cap even after the partial rebuild. The archive is
+#: deleted first, so a rejected transfer leaves nothing behind in the old
+#: session's outputs.
 HANDOFF_TOO_LARGE_MARKER = "HANDOFF_TOO_LARGE"
+
+#: Printed once per file the partial rebuild left out, as ``<marker> /<path>``
+#: on a line of its own, so the successor is told exactly what to regenerate.
+HANDOFF_LEFT_OUT_MARKER = "HANDOFF_LEFT_OUT"
+
+#: Printed with a count when more files were left out than are listed one by one.
+HANDOFF_LEFT_OUT_MORE_MARKER = "HANDOFF_LEFT_OUT_MORE"
+
+# A long list costs reply tokens on a billed turn and the successor's prompt;
+# the largest files come first, and they are the ones worth naming.
+_LEFT_OUT_LISTED = 50
 
 #: Where the host mounts the finished bundle in the SUCCESSOR workspace. The
 #: prompt names it so the session it asks can see what the archive is for.
@@ -100,6 +112,10 @@ CHECKPOINT_EXCLUDED_GLOBS: tuple[str, ...] = (
 # not archived — only ``/tmp/work`` is), so the list of oversized files never
 # ends up inside the archive it filters.
 _EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
+# The partial rebuild's scratch files, outside every archived root for the
+# same reason: the archive's members with sizes, and the files it drops.
+_MEMBER_SIZES_PATH = "/tmp/daimon-handoff-sizes"
+_LEFT_OUT_LIST_PATH = "/tmp/daimon-handoff-left-out.txt"
 
 #: The third archived root, after ``$HOME`` and the outputs directory. Only this
 #: subdirectory of ``/tmp``: the base image ships ~60 MB of non-hidden browser
@@ -110,6 +126,10 @@ CHECKPOINT_SCRATCH_DIR = "/tmp/work"
 _SHA1_LINE = re.compile(r"^\s*([0-9a-f]{40})\s*$", re.MULTILINE)
 
 _TOO_LARGE_LINE = re.compile(rf"^\s*{HANDOFF_TOO_LARGE_MARKER}\s+(\d+)\s*$", re.MULTILINE)
+
+_LEFT_OUT_LINE = re.compile(rf"^\s*{HANDOFF_LEFT_OUT_MARKER} (/.*?)\s*$", re.MULTILINE)
+
+_LEFT_OUT_MORE_LINE = re.compile(rf"^\s*{HANDOFF_LEFT_OUT_MORE_MARKER}\s+(\d+)\s*$", re.MULTILINE)
 
 
 def handoff_filename(transfer_id: uuid.UUID) -> str:
@@ -188,17 +208,49 @@ def build_checkpoint_prompt(
     excludes += [f"--exclude='{_relative_to_root(path)}'" for path in CHECKPOINT_EXCLUDED_PATHS]
     excludes += [f"--exclude='*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS]
     excludes.append("--exclude='*.env'")
-    tar_command = "\n".join(
+    # Over the cap, the archive is rebuilt once without its largest members
+    # until the rest, counted uncompressed with 1 KiB each for the tar header
+    # and padding, fits 5% under the cap; the margin covers directory headers
+    # and gzip's worst case, so small working files always travel. The size
+    # check after the rebuild still guards the cap.
+    # Member names and sizes come from tar itself (`--to-command` passes them
+    # in the environment and writes nothing to disk), so the drop list is
+    # exactly what was archived. It goes back to tar as anchored literal names,
+    # one per line, so a name with a newline is skipped rather than split.
+    excludes.append(
+        f"--anchored --no-wildcards --exclude-from={_LEFT_OUT_LIST_PATH} --no-anchored --wildcards"
+    )
+    pack_function = "\n".join(
         # The loose files in /, where the shell starts, NUL-separated into tar's file list:
         # never re-read by the shell, `./`-prefixed so no name is an option, and the
         # oversize ones left out by find itself.
         [
-            f"  find / -maxdepth 1 -type f ! -name '.*' ! -size +{max_bundle_mib}M "
+            f"  pack() {{ find / -maxdepth 1 -type f ! -name '.*' ! -size +{max_bundle_mib}M "
             f"-printf './%P\\0' | tar czf {archive_path} \\"
         ]
         + [f"    {exclude} \\" for exclude in excludes]
-        + [f"    -C / {roots_argument} --null -T -"]
+        + [f"    -C / {roots_argument} --null -T -; }}"]
     )
+    budget = max_bundle_bytes - max_bundle_bytes // 20
+    listed = _LEFT_OUT_LISTED
+    size_check = [
+        f'  size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
+        f'    tar xzf {archive_path} --to-command=\'printf "%s %s\\0" "$TAR_SIZE" '
+        f'"$TAR_FILENAME"; cat >/dev/null\' > {_MEMBER_SIZES_PATH}',
+        "    total=0; while IFS= read -r -d '' e; do total=$((total + ${e%% *} + 1024)); "
+        f"done < {_MEMBER_SIZES_PATH}",
+        f"    while [ \"$total\" -gt {budget} ] && IFS= read -r -d '' e; do",
+        "      n=${e#* }; [[ $n == *$'\\n'* ]] || "
+        "{ total=$((total - ${e%% *} - 1024)); printf '%s\\n' \"$n\"; }",
+        f"    done < <(sort -z -rn {_MEMBER_SIZES_PATH}) > {_LEFT_OUT_LIST_PATH}",
+        f"    sed 's|^\\./||; s|^|{HANDOFF_LEFT_OUT_MARKER} /|; {listed}q' {_LEFT_OUT_LIST_PATH}",
+        f'    n=$(wc -l < {_LEFT_OUT_LIST_PATH}); if [ "$n" -gt {listed} ]; then '
+        f'echo "{HANDOFF_LEFT_OUT_MORE_MARKER} $((n - {listed}))"; fi',
+        f"    pack; size=$(stat -c %s {archive_path})",
+        "  fi",
+        f'  if [ "$size" -gt {max_bundle_bytes} ]; then rm -f {archive_path}; '
+        f'echo "{HANDOFF_TOO_LARGE_MARKER} $size"; else ls -l {archive_path}; fi',
+    ]
 
     steps: list[str] = []
 
@@ -272,40 +324,33 @@ def build_checkpoint_prompt(
             )
         )
 
-    steps.append(
-        "\n".join(
-            [
-                f"{step('build the archive.')} The shell starts in /, and the archive must be "
-                "written flat into the outputs directory. Run these three commands, in order, "
-                "exactly as written:",
-                "  cd /",
-                f"  mkdir -p {home_dir}/work {CHECKPOINT_SCRATCH_DIR}",
-                f"  find {roots_argument} -type f -size +{max_bundle_mib}M > {_EXCLUDE_LIST_PATH}",
-                tar_command,
-                "The find step lists files too large to carry so tar skips them; do not edit "
-                "either command.",
-            ]
-        )
-    )
-
-    show: list[str] = [
-        f"{step('check the size, then show the result.')} Run:",
-        f'  size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; '
-        f'then rm -f {archive_path}; echo "{HANDOFF_TOO_LARGE_MARKER} $size"; '
-        f"else ls -l {archive_path}; fi",
+    archive_commands = [
+        f"{step('build the archive and check its size.')} The shell starts in /, and the "
+        "archive must be written flat into the outputs directory. Run these commands in one "
+        "shell, in order, exactly as written:",
+        "  cd /",
+        f"  mkdir -p {home_dir}/work {CHECKPOINT_SCRATCH_DIR}",
+        f"  find {roots_argument} -type f -size +{max_bundle_mib}M > {_EXCLUDE_LIST_PATH}",
+        f"  : > {_LEFT_OUT_LIST_PATH}",
+        pack_function,
+        "  pack",
+        *size_check,
     ]
     if repo_mount_path is not None:
-        show.append(f"  git -C {repo_mount_path} rev-parse HEAD")
-    show.append(
-        f"The archive cannot be carried above {max_bundle_mib} MiB, so that command deletes it "
-        f"and prints {HANDOFF_TOO_LARGE_MARKER} instead. That is a complete answer: do not "
-        "retry, shrink or rebuild it."
+        archive_commands.append(f"  git -C {repo_mount_path} rev-parse HEAD")
+    archive_commands.append(
+        "The first find lists files too large to carry so tar skips them. The archive cannot "
+        f"be carried above {max_bundle_mib} MiB: then the commands rebuild it once without the "
+        f"largest files, printing {HANDOFF_LEFT_OUT_MARKER} for each, and if it is still too "
+        f"large delete it and print {HANDOFF_TOO_LARGE_MARKER}. That is a complete answer: do "
+        "not edit the commands, and do not retry, shrink or rebuild the archive yourself."
     )
-    steps.append("\n".join(show))
+    steps.append("\n".join(archive_commands))
 
     steps.append(
-        f"{step('reply')} with the output of the commands above. A short note alongside it is "
-        "fine; daimon reads the output, not the prose."
+        f"{step('reply')} with the output of the commands above, every "
+        f"{HANDOFF_LEFT_OUT_MARKER} line as printed. A short note alongside it is fine; daimon "
+        "reads the output, not the prose."
     )
     return "\n\n".join(sections + steps)
 
@@ -339,3 +384,16 @@ def checkpoint_too_large_bytes(reply: str) -> int | None:
 
     match = _TOO_LARGE_LINE.search(reply)
     return None if match is None else int(match.group(1))
+
+
+def checkpoint_left_out(reply: str) -> tuple[tuple[str, ...], int]:
+    """The files the partial rebuild left out: absolute paths, then how many more.
+
+    Whole lines only, as for :func:`checkpoint_too_large_bytes`: the command
+    that prints the marker never starts a line with it, so an echo of the
+    prompt reads as nothing left out.
+    """
+
+    paths = tuple(dict.fromkeys(_LEFT_OUT_LINE.findall(reply)))
+    more = _LEFT_OUT_MORE_LINE.search(reply)
+    return paths, 0 if more is None else int(more.group(1))
