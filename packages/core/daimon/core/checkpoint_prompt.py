@@ -241,7 +241,7 @@ def build_checkpoint_prompt(
     size_check = [
         f'  size=$(stat -c %s {scratch_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
         f"    members ! -type d -printf '%D:%i %s %p\\0' > {_MEMBER_SIZES_PATH}",
-        "    declare -A w n k; total=0; "
+        "    unset w n k; declare -A w n k; total=0; "
         "while IFS= read -r -d '' e; do i=${e%% *}; e=${e#* }; "
         "p=${e#* }; w[$i]=$((${w[$i]-${e%% *}} + 1024)); n[$i]+=$p$'\\n'",
         f"      [[ $p == *$'\\n'* || $p == *[[:space:]] ]] && k[$i]=1; done < {_MEMBER_SIZES_PATH}",
