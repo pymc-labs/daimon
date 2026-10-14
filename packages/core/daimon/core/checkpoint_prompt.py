@@ -234,16 +234,20 @@ def build_checkpoint_prompt(
     # and padding, fits 5% under the cap; the margin covers directory headers
     # and gzip's worst case, so small working files always travel. The size
     # check after the rebuild still guards the cap.
-    # A name with a newline is never dropped: tar would split it.
+    # A name tar cannot be told is never dropped: one with a newline would be
+    # split, and one ending in whitespace is trimmed. Nor is a hard-linked
+    # file, which would come back under its other name: each of its names
+    # counts `size/links` (tar stores the bytes once) and ends in a newline.
     budget = max_bundle_bytes - max_bundle_bytes // 20
     listed = _LEFT_OUT_LISTED
     size_check = [
         f'  size=$(stat -c %s {partial_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
-        f"    members ! -type d -printf '%s %p\\0' > {_MEMBER_SIZES_PATH}",
+        "    members ! -type d \\( -links 1 -printf '%s %p\\0' -o -printf '%s/%n %p\\n\\0' \\) "
+        f"> {_MEMBER_SIZES_PATH}",
         "    total=0; while IFS= read -r -d '' e; do total=$((total + ${e%% *} + 1024)); "
         f"done < {_MEMBER_SIZES_PATH}",
         f"    while [ \"$total\" -gt {budget} ] && IFS= read -r -d '' e; do",
-        "      n=${e#* }; [[ $n == *$'\\n'* ]] || "
+        "      n=${e#* }; [[ $n == *$'\\n'* || $n == *[[:space:]] ]] || "
         "{ total=$((total - ${e%% *} - 1024)); printf '%s\\n' \"$n\"; }",
         f"    done < <(sort -z -rn {_MEMBER_SIZES_PATH}) > {_LEFT_OUT_LIST_PATH}",
         f"    sed 's|^\\./||; s|^|{HANDOFF_LEFT_OUT_MARKER} /|; {listed}q' {_LEFT_OUT_LIST_PATH}",

@@ -601,6 +601,35 @@ def test_an_over_cap_archive_is_rebuilt_without_its_largest_files(tmp_path: Path
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_the_rebuild_never_drops_a_file_tar_would_keep_under_another_name(tmp_path: Path) -> None:
+    """tar trims trailing whitespace from an exclude name, and a hard-linked
+    file left out under one name travels under the other. Dropping either
+    would leave the archive over the cap and lose the whole workspace, so
+    both stay in, counted once, and the next largest file is dropped."""
+    old = _fake_root(tmp_path)
+    work = old / "root" / "work"
+    _noise(work / "trailing.bin ", 500_000)
+    _noise(work / "linked.bin", 400_000)
+    (work / "linked-too.bin").hardlink_to(work / "linked.bin")
+    _noise(work / "model.pkl", 200_000)
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    output = _run_archive_step(prompt, old)
+
+    assert checkpoint_left_out(output) == ((f"{old}/root/work/model.pkl",), 0), (
+        "only a file tar can really leave out is dropped"
+    )
+    bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
+    assert bundle.stat().st_size <= 1024 * 1024, "the rebuilt archive fits the cap"
+    members = _members(bundle)
+    assert {"root/work/trailing.bin ", "root/work/linked.bin", "root/HANDOFF.md"} <= members, (
+        "the kept names and the small working files travel"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
 def test_an_archive_still_over_the_cap_after_the_rebuild_is_deleted(tmp_path: Path) -> None:
     """Files the rebuild cannot leave out keep it over the cap: the legacy
     rejection still applies, and nothing is left in the outputs directory."""
