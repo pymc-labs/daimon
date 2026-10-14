@@ -164,17 +164,30 @@ class TeamsOutputDelivery:
         )
 
     async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
+        # An extra, never the file itself: a failure is logged and the delivery stands.
         if not previews:
             return
         try:
-            await self._sender.send(
-                inbound.conversation_id,
-                MessageActivityInput().add_attachments(*previews),
-                service_url=inbound.service_url,
-            )
+            await self._send_attachments(inbound, previews)
+            return
         except TEAMS_SEND_ERRORS:
-            # An extra, never the file itself: the delivery and its ledger stand.
-            log.warning("teams.output_preview.send_failed", count=len(previews), exc_info=True)
+            if len(previews) == 1:
+                log.warning("teams.output_preview.send_failed", count=1, exc_info=True)
+                return
+        # Bot Framework's message size cap is undocumented: several previews together
+        # may be refused (413) where each alone fits, so retry them one by one.
+        for preview in previews:
+            try:
+                await self._send_attachments(inbound, [preview])
+            except TEAMS_SEND_ERRORS:
+                log.warning("teams.output_preview.send_failed", count=1, exc_info=True)
+
+    async def _send_attachments(self, inbound: TeamsInbound, attachments: list[Attachment]) -> None:
+        await self._sender.send(
+            inbound.conversation_id,
+            MessageActivityInput().add_attachments(*attachments),
+            service_url=inbound.service_url,
+        )
 
     async def sweep(
         self, inbound: TeamsInbound, session_id: str, *, append: AppendToAnswer | None = None

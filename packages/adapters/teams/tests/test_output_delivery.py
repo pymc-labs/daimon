@@ -622,6 +622,35 @@ async def test_failed_channel_preview_leaves_the_delivery_alone(
     assert harness.deletes == ["file_png"], "the saved file still leaves the listing"
 
 
+async def test_refused_channel_previews_are_retried_one_per_message(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Several previews may be too big together: each is retried alone, failures only logged."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(3)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(
+        db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
+    )
+    harness.sender.fail_on.update({0, 2})
+
+    async def append(_: str) -> bool:
+        return True
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    names = [[a.name for a in activity.attachments or []] for activity in harness.sender.activities]
+    assert names == [
+        ["chart0.png", "chart1.png", "chart2.png"],
+        ["chart0.png"],
+        ["chart1.png"],
+        ["chart2.png"],
+    ], "the refused combined message is retried one preview at a time, in order"
+    failures = [e for e in logs if e["event"] == "teams.output_preview.send_failed"]
+    assert len(failures) == 1, "only the preview refused on its own is logged"
+    assert len(harness.deletes) == 3, "the files are delivered whatever the previews do"
+
+
 async def test_an_unprompted_channel_turn_posts_no_previews(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
