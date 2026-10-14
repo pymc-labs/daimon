@@ -484,7 +484,9 @@ claims it under the Bot Framework delivery key before the shared dispatch, so
 a message seen by both sources runs once. Graph @mentions are left to Bot
 Framework, and Graph's sender tenant is not used: guests and external
 members are classified by the same roster lookup. The permission is
-tenant-wide, so each renewal first checks the bot is still in the channel.
+tenant-wide and no read tells whether the bot is in a channel, so a channel is
+dropped on the bot's removal event, an app removal (the whole team), or a send
+there refused with 403 `BotNotInConversationRoster` (`_RemovalWatch`).
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer

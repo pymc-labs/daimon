@@ -267,7 +267,7 @@ Setup:
    permission → Microsoft Graph → Application permissions →
    `ChannelMessage.Read.All` → Grant admin consent. The permission is
    tenant-wide, so Graph would serve any channel; Daimon subscribes only to
-   channels it is in, and checks it still is before each renewal.
+   channels it is added to or sees a message in.
 2. Set `DAIMON_TEAMS__PUBLIC_URL` and
    `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true`, and let the reverse proxy
    pass `/api/graph/notifications` and `/api/graph/lifecycle`.
@@ -276,14 +276,22 @@ Setup:
    @mention is enough.
 
 Subscriptions live about three days and are renewed half a day before they
-expire; removing the bot or deleting the channel deletes its subscription.
-If that removal event is lost, the membership check at the next renewal, or
-a send to the channel refused with 403 or 404, deletes it instead. Each
+expire; one Graph removed and could not recreate is retried after ten
+minutes. Removing the bot or the app, or deleting the channel, deletes its
+subscription (an app removal, all of the team's). No read tells whether the
+bot is still in a channel, so if that removal event is lost the subscription
+lives on until a post there is refused with 403
+`BotNotInConversationRoster`; another 403 or a 404 keeps it. A typed
+`@<bot name>` posts its card before any model call, so it stops there. An
+unprompted reply posts nothing before its answer: until one answer is
+refused, replies in followed threads still reach the metered classifier,
+and that one turn is spent. Each
 notification must carry the channel's secret, compared in constant time; one
 that does not is ignored, and a request with no valid entry and a wrong
 secret gets 401. While the service shuts down it answers 503 and reads
 nothing, so Graph retries the batch (for up to four hours) against the next
-instance. When Graph reports missed notifications, Daimon
+instance; a batch accepted just before shutdown began is not read again.
+When Graph reports missed notifications, Daimon
 reads the channel once for messages after the last one it handled. Edits never
 start a turn, and a message seen through both Bot Framework and Graph, or
 notified twice, runs once (in memory, so not across a restart). A shared
