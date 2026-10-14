@@ -192,6 +192,15 @@ class TestBuildContextXml:
         assert "first\n\nsecond &lt;item&gt;" in result
 
     @pytest.mark.asyncio
+    async def test_user_query_carries_the_authors_display_name_escaped(self) -> None:
+        trigger = _make_message(msg_id=10, content="hi", author_name='Al "A" <b>', author_id=200)
+        thread = _make_thread([trigger])
+
+        result, _ = await build_context_xml(thread, trigger)
+
+        assert 'author_name=\'Al "A" &lt;b&gt;\' user_id="200"' in result
+
+    @pytest.mark.asyncio
     async def test_build_context_xml_empty_thread_returns_user_query_only(self) -> None:
         trigger = _make_message(msg_id=10, content="what's up?", author_name="Bob", author_id=200)
         thread = _make_thread([trigger])  # only the trigger in history

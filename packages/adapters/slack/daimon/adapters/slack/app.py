@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_admin_status
+from daimon.adapters.slack.admin import resolve_admin_status, resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -2025,21 +2025,22 @@ class SlackApp:
         # call.
         account = responder_account(await self._bot_user_id(team_id, web_client))
         # --- Live admin lookup: one users.info per turn, before admit().
-        # admin_status distinguishes "not an admin" (False) from "lookup failed"
-        # (None) so the role write below can skip on failure rather than
-        # demoting a real admin on a transient Slack error. is_admin is the
-        # single local value the context builders also consume — a second lookup
+        # requester is None on "lookup failed", distinct from "not an admin",
+        # so the role write below can skip on failure rather than demoting a
+        # real admin on a transient Slack error. is_admin and author_name are
+        # the local values the context builders also consume — a second lookup
         # would violate the one-call-per-turn constraint.
         author_id = str(event.get("user") or "")
-        admin_status = await resolve_admin_status(web_client, user_id=author_id)
-        if admin_status is None:
+        requester = await resolve_requester(web_client, user_id=author_id)
+        if requester is None:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
                 text="I couldn't verify your workspace role. Please retry; no turn was started.",
             )
             return
-        is_admin = admin_status
+        is_admin = requester.is_admin
+        author_name = requester.display_name
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
@@ -2565,6 +2566,7 @@ class SlackApp:
                         ),
                         author_id=author_id,
                         is_admin=is_admin,
+                        author_name=author_name,
                         proxy=proxy_ctx,
                         key_names=key_names,
                     )
@@ -2575,6 +2577,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     is_admin=is_admin,
+                    author_name=author_name,
                     proxy=proxy_ctx,
                     key_names=key_names,
                     page_limit=self._history_page_limit(),
@@ -2593,6 +2596,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     is_admin=is_admin,
+                    author_name=author_name,
                     proxy=proxy_ctx,
                     key_names=key_names,
                     page_limit=self._history_page_limit(),

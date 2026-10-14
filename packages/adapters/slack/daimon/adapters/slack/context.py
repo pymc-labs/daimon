@@ -116,8 +116,12 @@ def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> li
     return lines
 
 
-def _user_query_open_tag(author_id: str, is_admin: bool) -> str:
+def _user_query_open_tag(author_id: str, is_admin: bool, author_name: str | None = None) -> str:
     """Opening <user_query> tag, with quoted author_id/is_admin attributes when present.
+
+    ``author_name`` is the requester's display name; it is rendered, quoted and
+    escaped, only when non-empty and ``author_id`` is set. It is user-controlled
+    text: the model treats it as data, like the rest of the tag.
 
     ``is_admin`` is rendered as the lowercase literal ``"true"``/``"false"``
     (``is_admin="true|false"``, matching Discord's rendering
@@ -127,9 +131,10 @@ def _user_query_open_tag(author_id: str, is_admin: bool) -> str:
     """
     if not author_id:
         return "<user_query>"
+    name_attr = f" author_name={quoteattr(author_name)}" if author_name else ""
     return (
         f"<user_query author_id={quoteattr(author_id)}"
-        f" is_admin={quoteattr('true' if is_admin else 'false')}>"
+        f" is_admin={quoteattr('true' if is_admin else 'false')}{name_attr}>"
     )
 
 
@@ -141,6 +146,7 @@ async def build_context_xml(
     user_query: str,
     author_id: str = "",
     is_admin: bool = False,
+    author_name: str | None = None,
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
     page_limit: int = DEFAULT_PAGE_LIMIT,
@@ -184,7 +190,9 @@ async def build_context_xml(
     lines.extend(untrusted_block("thread_history", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
+    lines.append(
+        f"{_user_query_open_tag(author_id, is_admin, author_name)}{escape(user_query)}</user_query>"
+    )
 
     return "\n".join(lines)
 
@@ -198,6 +206,7 @@ async def build_delta_xml(
     user_query: str,
     author_id: str = "",
     is_admin: bool = False,
+    author_name: str | None = None,
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
     page_limit: int = DEFAULT_PAGE_LIMIT,
@@ -242,7 +251,9 @@ async def build_delta_xml(
     lines.extend(untrusted_block("thread_delta", body, _history_attrs(truncated=truncated)))
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
+    lines.append(
+        f"{_user_query_open_tag(author_id, is_admin, author_name)}{escape(user_query)}</user_query>"
+    )
 
     return "\n".join(lines)
 
@@ -299,6 +310,7 @@ async def build_channel_context_xml(
     read_policy: ChannelReadPolicy | None,
     author_id: str = "",
     is_admin: bool = False,
+    author_name: str | None = None,
     proxy: ProxyUrlContext | None = None,
     key_names: Sequence[str] = (),
     limit: int = CHANNEL_BACKFILL_LIMIT,
@@ -351,6 +363,8 @@ async def build_channel_context_xml(
         lines.extend(untrusted_block("channel_context", body, attrs))
     lines.append("</context>")
     lines.append("")
-    lines.append(f"{_user_query_open_tag(author_id, is_admin)}{escape(user_query)}</user_query>")
+    lines.append(
+        f"{_user_query_open_tag(author_id, is_admin, author_name)}{escape(user_query)}</user_query>"
+    )
 
     return "\n".join(lines)

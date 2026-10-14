@@ -17,7 +17,12 @@ import re
 
 import pytest
 from aioresponses import aioresponses as AioResponsesMock
-from daimon.adapters.slack.admin import _is_admin_signal, resolve_is_admin
+from daimon.adapters.slack.admin import (
+    SlackRequester,
+    _is_admin_signal,  # pyright: ignore[reportPrivateUsage]
+    resolve_is_admin,
+    resolve_requester,
+)
 
 _USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
 
@@ -174,3 +179,55 @@ async def test_resolve_is_admin_returns_false_and_does_not_raise_on_transport_er
     assert result is False, (
         "resolve_is_admin should return False (fail-closed) on a transport error"
     )
+
+
+async def _requester_for(user: dict[str, object]) -> SlackRequester | None:
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    with AioResponsesMock() as mock:
+        mock.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO_PATTERN, payload={"ok": True, "user": user}
+        )
+        client = AsyncWebClient(token="xoxb-test")
+        result = await resolve_requester(client, user_id="U_TEST")
+        requests = sum(len(r) for r in mock.requests.values())  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+    assert requests == 1, "resolve_requester must make exactly one users.info call"
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user", "expected"),
+    [
+        (
+            {"name": "tester", "profile": {"display_name": "Dee", "real_name": "Dee Real"}},
+            "Dee",
+        ),
+        (
+            {"name": "tester", "profile": {"display_name": "  ", "real_name": "Dee Real"}},
+            "Dee Real",
+        ),
+        ({"name": "tester", "profile": {"display_name": "", "real_name": ""}}, "tester"),
+        ({"name": "tester"}, "tester"),
+        ({"profile": {}}, None),
+        ({}, None),
+        ({"profile": {"display_name": "x" * 200}}, "x" * 80),
+    ],
+)
+async def test_resolve_requester_picks_display_name_then_real_name_then_name(
+    user: dict[str, object], expected: str | None
+) -> None:
+    result = await _requester_for({**user, "is_admin": True})
+    assert result == SlackRequester(is_admin=True, display_name=expected)
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_returns_none_when_the_lookup_fails() -> None:
+    from slack_sdk.web.async_client import AsyncWebClient
+
+    with AioResponsesMock() as mock:
+        mock.get(  # pyright: ignore[reportUnknownMemberType]
+            _USERS_INFO_PATTERN, payload={"ok": False, "error": "ratelimited"}
+        )
+        result = await resolve_requester(AsyncWebClient(token="xoxb-test"), user_id="U_TEST")
+    assert result is None

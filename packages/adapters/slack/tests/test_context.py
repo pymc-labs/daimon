@@ -589,3 +589,36 @@ async def test_status_ts_keeps_a_human_message_at_the_same_ts() -> None:
         )
 
     assert "root</message>" in xml, "only a bot post at the card's ts is treated as the card"
+
+
+def test_user_query_open_tag_renders_author_name_escaped() -> None:
+    tag = _user_query_open_tag("U1", False, 'Al "A" <b> & co')
+    assert tag == (
+        """<user_query author_id="U1" is_admin="false" author_name='Al "A" &lt;b&gt; &amp; co'>"""
+    )
+    assert _user_query_open_tag("U1", False, 'O\'Neil "x"').endswith(
+        'author_name="O\'Neil &quot;x&quot;">'
+    )
+
+
+@pytest.mark.parametrize("name", [None, ""])
+def test_user_query_open_tag_omits_author_name_when_there_is_none(name: str | None) -> None:
+    assert _user_query_open_tag("U1", True, name) == '<user_query author_id="U1" is_admin="true">'
+
+
+def test_user_query_open_tag_without_author_id_stays_bare_even_with_a_name() -> None:
+    assert _user_query_open_tag("", False, "Dee") == "<user_query>"
+
+
+async def test_build_context_xml_renders_author_name_on_user_query() -> None:
+    with AioResponsesMock() as mock:
+        mock.get(
+            _REPLIES_PATTERN,
+            payload={"ok": True, "messages": [], "has_more": False},
+        )
+        xml = await build_context_xml(
+            _make_client(), channel="C1", thread_ts="100.0", user_query="hi",
+            author_id="U1", author_name="Dee",
+        )  # fmt: skip
+
+    assert '<user_query author_id="U1" is_admin="false" author_name="Dee">hi</user_query>' in xml

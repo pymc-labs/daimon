@@ -32,6 +32,7 @@ from aioresponses import CallbackResult, aioresponses
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -1294,9 +1295,9 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         pytest.raises(SlackApiError),
@@ -1343,9 +1344,9 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -1424,9 +1425,9 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -1501,9 +1502,9 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
     ):

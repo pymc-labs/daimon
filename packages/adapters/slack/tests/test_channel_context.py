@@ -13,7 +13,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +22,7 @@ import aiohttp
 import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
+from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import _is_top_level  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.slack.attachments import ProxyUrlContext
 from daimon.adapters.slack.channel_reads import (
@@ -381,6 +382,9 @@ class _TurnStopped(Exception):
     """Ends the turn once its message is built; the run itself is not under test."""
 
 
+_MEMBER = SlackRequester(is_admin=False, display_name=None)
+
+
 async def _first_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
     web_client: AsyncWebClient,
@@ -388,10 +392,14 @@ async def _first_turn(
     team_id: str,
     thread_id: str,
     on_turn: Callable[..., Awaitable[None]],
+    requester: SlackRequester | None = _MEMBER,
 ) -> uuid.UUID:
     """Run one Slack turn body for a mention at ``_TRIGGER`` with admission and
     session binding stubbed; ``on_turn`` stands in for `run_prepared_turn`
-    and must raise `_TurnStopped`. Returns the tenant id."""
+    and must raise `_TurnStopped`. Returns the tenant id.
+
+    ``requester`` stubs the users.info lookup; ``None`` leaves the real lookup
+    in place, so it goes through the web client."""
     tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
     app, _ = make_orchestrate_app(db_session_factory)
     event: dict[str, Any] = {
@@ -427,10 +435,14 @@ async def _first_turn(
         yield SimpleNamespace(id=uuid.uuid4())
 
     with (
-        patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
-            new_callable=AsyncMock,
-            return_value=False,
+        (
+            patch(
+                "daimon.adapters.slack.app.resolve_requester",
+                new_callable=AsyncMock,
+                return_value=requester,
+            )
+            if requester is not None
+            else nullcontext()
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -489,6 +501,76 @@ async def test_first_turn_context_follows_where_the_mention_was_posted(
         assert "<channel_context " in user_message and "<thread_history" not in user_message
         assert 'status="unavailable"' in user_message, "a failed fetch is reported, not hidden"
         assert "/api/conversations.replies" not in requested
+
+
+@pytest.mark.parametrize("in_thread", [False, True])
+async def test_user_query_carries_the_requesters_display_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    in_thread: bool,
+) -> None:
+    """The first turn's <user_query> names the requester, escaped, with one
+    users.info call for the whole turn."""
+    page = [{"user": "U_ASKER", "text": "go", "ts": _TRIGGER}]
+    fake_slack_web_client.mock.get(
+        _HISTORY, payload={"ok": True, "messages": page, "has_more": False}, repeat=True
+    )
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack\.com/api/conversations\.replies.*"),
+        payload={"ok": True, "messages": page, "has_more": False},
+        repeat=True,
+    )
+    sent: list[str] = []
+
+    async def capture(*_args: Any, user_message: str, **_kwargs: Any) -> None:
+        sent.append(user_message)
+        raise _TurnStopped
+
+    await _first_turn(
+        db_session_factory,
+        fake_slack_web_client.client,
+        team_id=f"T_NAME_{int(in_thread)}",
+        thread_id="1700000000.000100" if in_thread else _TRIGGER,
+        on_turn=capture,
+        requester=SlackRequester(is_admin=False, display_name='Al "A" <b>'),
+    )
+
+    (user_message,) = sent
+    assert (
+        """<user_query author_id="U_ASKER" is_admin="false" author_name='Al "A" &lt;b&gt;'>"""
+        in user_message
+    )
+
+
+async def test_real_lookup_puts_one_users_info_call_and_the_name_on_the_user_query(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Without stubbing the lookup, the conftest users.info payload (name only,
+    no profile) yields the fallback name, from exactly one call."""
+    sent: list[str] = []
+
+    async def capture(*_args: Any, user_message: str, **_kwargs: Any) -> None:
+        sent.append(user_message)
+        raise _TurnStopped
+
+    await _first_turn(
+        db_session_factory,
+        fake_slack_web_client.client,
+        team_id="T_NAME_REAL",
+        thread_id="1700000000.000100",
+        on_turn=capture,
+        requester=None,
+    )
+
+    (user_message,) = sent
+    assert 'author_name="tester"' in user_message
+    calls = sum(
+        len(reqs)
+        for (method, url), reqs in fake_slack_web_client.mock.requests.items()
+        if method == "GET" and url.path == "/api/users.info"
+    )
+    assert calls == 1, "one users.info call per turn"
 
 
 async def test_a_recovery_reseed_rereads_the_policy(

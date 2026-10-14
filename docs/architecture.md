@@ -1089,8 +1089,16 @@ has no `.env` and the `.env` bytes feed the session fingerprint. A member-set
 `GIT_AUTHOR_*` or `GIT_COMMITTER_*` key in the `.env` still wins over it, as
 git's environment variables outrank its config. The agent guidance tells agents
 to commit with git and open pull requests with `gh pr create` on `GH_TOKEN`,
-ending the body with "Requested by <name>", instead of the GitHub MCP, where a
+ending the body with "Requested by <author_name>" (or "Requested in chat" when
+the `<user_query>` has no `author_name`), instead of the GitHub MCP, where a
 person's own sign-in would outrank the agent's credential and author the work.
+In the Managed Agents sandbox `GH_TOKEN` is a placeholder swapped in only on
+outbound requests, so the guidance has agents push with the explicit
+`https://x-access-token:${GH_TOKEN}@github.com/<owner>/<repo>.git` URL and never
+run plain `git push` or `git fetch` against origin, which hang. Slack renders
+`author_name` (the requester's profile display name, else real name, else
+username, from the turn's one `users.info` call) on the `<user_query>` as Discord
+already does; Teams does not.
 A stored per-agent token is not read in App mode. Legacy sessions continue to
 use their existing binding and credential path. Switching a legacy agent to
 App mode keeps its working repo: when the agent has a repo binding and no
