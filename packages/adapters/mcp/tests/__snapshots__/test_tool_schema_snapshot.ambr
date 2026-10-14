@@ -2653,6 +2653,7 @@
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
+        Non-admin callers get null ``mcp_servers`` and ``created_at``.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
         Pass this turn's ``origin_context_id`` so its channel counts.
@@ -3219,8 +3220,10 @@
       'description': '''
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
         <blank line>
-        Members see the channel/thread responders and agents explicitly allowed
-        to run here; unrouted agents and other channels' agents are hidden.
+        ``mcp_servers`` and ``created_at`` are null for a non-admin caller: setup
+        details are admin-only, capabilities (name, description, model, skills)
+        are not. Members see the channel/thread responders and agents explicitly
+        allowed to run here; unrouted agents and other channels' agents are hidden.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.

@@ -158,6 +158,81 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             )
 
 
+@pytest.mark.parametrize("admin", [False, True])
+async def test_agent_reads_withhold_setup_details_from_non_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], admin: bool
+) -> None:
+    """A non-admin learns what an agent can do, not how it was set up."""
+    now = dt.datetime.now(dt.UTC)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="slack",
+            parent_channel_id="CLOCAL",
+            thread_id="123.456",
+            responder_ma_agent_id="ag_shared",
+            responder_name="shared",
+            configuration_target_ma_agent_id="ag_shared",
+            configuration_target_name="shared",
+            role=Role.USER,
+            now=now,
+            expires_at=now + dt.timedelta(minutes=10),
+        )
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(
+            id="ag_shared",
+            name="shared",
+            description="Answers questions",
+            tenant_id=tenant.id,
+            mcp_servers=[{"name": "docs", "type": "url", "url": "https://docs.example/mcp"}],
+            skills=[{"type": "anthropic", "skill_id": "xlsx", "version": "2"}],
+        )
+    )
+    router.add("GET", r"/v1/skills", lambda _r, _m: list_response([]))
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=build_fake_anthropic(router.dispatch),
+        settings=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="shared"),
+    )
+    auth = AuthIdentity(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role=Role.ADMIN if admin else Role.USER,
+        platform="slack",
+        is_admin=admin,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+    )
+    origin_id = str(origin.id)
+
+    listed = await _list_agents_impl(runtime, auth, None, origin_id)
+    fetched = await _get_agent_impl(runtime, auth, "shared", origin_context_id=origin_id)
+
+    assert [info.name for info in listed] == ["shared"], "should list the local responder"
+    for info in (listed[0], fetched):
+        assert info.name == "shared", "should show the agent name"
+        assert info.description == "Answers questions", "should show the description"
+        assert info.model, "should show the model"
+        assert info.id == "ag_shared", "should keep the id passed back as expected_ma_agent_id"
+        assert [s.skill_id for s in info.skills] == ["xlsx"], "should show skills"
+        if admin:
+            assert info.created_at is not None, "admin should see the creation date"
+            assert info.mcp_servers is not None
+            assert [(s.name, s.url) for s in info.mcp_servers] == [
+                ("docs", "https://docs.example/mcp")
+            ], "admin should see MCP servers"
+        else:
+            assert info.created_at is None, "should withhold the creation date"
+            assert info.mcp_servers is None, "should withhold MCP servers"
+            assert info.sync_warnings is None, "should withhold sync warnings"
+            assert "docs.example" not in info.model_dump_json(), "should not leak the server URL"
+
+
 @pytest.mark.parametrize("platform", ["slack", "discord", "teams"])
 @pytest.mark.parametrize("admin", [False, True])
 @pytest.mark.parametrize("deleted", [False, True])

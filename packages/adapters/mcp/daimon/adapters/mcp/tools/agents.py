@@ -119,8 +119,11 @@ class AgentInfo(BaseModel):
     id: str
     description: str | None
     model: str
-    created_at: datetime.datetime
-    mcp_servers: list[AgentMcpServerInfo]
+    created_at: datetime.datetime | None
+    """``None`` means withheld from a non-admin caller (setup detail)."""
+    mcp_servers: list[AgentMcpServerInfo] | None
+    """Attached server names and URLs. ``None`` means withheld from a non-admin
+    caller; ``[]`` means the agent has none."""
     skills: list[AgentSkillInfo]
     sync_warnings: list[SyncRepoFailure] | None = None
     system: str | None = None
@@ -170,6 +173,18 @@ class AgentInfo(BaseModel):
                 for sk in agent.skills
             ],
             sync_warnings=sync_warnings,
+        )
+
+    def for_member(self) -> AgentInfo:
+        """Capabilities only: drop the setup details a non-admin must not see.
+
+        Name, description, model, skills and the agent id stay. The id is the
+        identity chat callers pass back as ``expected_ma_agent_id``; the rest
+        (attached MCP servers and their URLs, creation date, sync warnings) is
+        how the agent was set up, which is for admins.
+        """
+        return self.model_copy(
+            update={"created_at": None, "mcp_servers": None, "sync_warnings": None}
         )
 
 
@@ -362,7 +377,8 @@ async def _list_agents_impl(
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
     )
-    return [AgentInfo.from_ma(a, skill_titles=skill_titles) for a in rows]
+    infos = [AgentInfo.from_ma(a, skill_titles=skill_titles) for a in rows]
+    return infos if auth.is_admin else [info.for_member() for info in infos]
 
 
 async def _get_agent_impl(
@@ -390,6 +406,8 @@ async def _get_agent_impl(
     # and the fork's own prompt is then readable.
     if auth.is_admin and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
+    if not auth.is_admin:
+        info = info.for_member()
     return info
 
 
@@ -986,8 +1004,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> list[AgentInfo]:
         """List agents visible here, including their attached ``mcp_servers`` and ``skills``.
 
-        Members see the channel/thread responders and agents explicitly allowed
-        to run here; unrouted agents and other channels' agents are hidden.
+        ``mcp_servers`` and ``created_at`` are null for a non-admin caller: setup
+        details are admin-only, capabilities (name, description, model, skills)
+        are not. Members see the channel/thread responders and agents explicitly
+        allowed to run here; unrouted agents and other channels' agents are hidden.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.
@@ -1006,6 +1026,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Use ``list_agent_keys`` for stored key names. Configuration does not prove
         the answering session's access. Returns server names/URLs and skills; custom
         skills have a display name (null if deleted), Anthropic skills have a readable id.
+        Non-admin callers get null ``mcp_servers`` and ``created_at``.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
         Pass this turn's ``origin_context_id`` so its channel counts."""
