@@ -364,16 +364,29 @@ def create_teams_http_service(
         SupportCommand(runtime, direct, spawn=spawn) if support_enabled(runtime.settings) else None
     )
     subscriptions = None
-    if settings.private_channel_messages and settings.public_url is not None:
+    if runtime.settings.private_channel_messages.enabled and settings.public_url is not None:
 
-        async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> None:
-            await turns.handle_graph_message(message, channel)  # Built below.
+        async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> bool:
+            return await turns.handle_graph_message(message, channel)  # Built below.
+
+        async def bot_in_channel(channel_id: str) -> bool:
+            # No API names the channels an app is in; Bot Framework refuses a members read
+            # in a conversation the bot is not part of.
+            conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
+            try:
+                await conversations.get_paged_members(channel_id)
+            except httpx.HTTPStatusError as err:
+                if err.response.status_code in (403, 404):
+                    return False
+                raise
+            return True
 
         subscriptions = ChannelSubscriptions(
             sessionmaker=runtime.sessionmaker,
             graph=graph,
             groups=groups,
             channel_type=channel_type,
+            is_member=bot_in_channel,
             deliver=deliver,
             spawn=spawn,
             tenant_id=teams_tenant,
@@ -408,16 +421,15 @@ def create_teams_http_service(
         watched = subscriptions
 
         async def uninstalled(ctx: ActivityContext[UninstalledActivity]) -> None:
-            team = ctx.activity.channel_data.team if ctx.activity.channel_data else None
-            if team is not None and team.id and installs.is_ours(ctx.activity):
-                await watched.forget(team_id=team.id)
-            await ctx.next()
+            await watched.on_uninstall(ctx, ours=installs.is_ours(ctx.activity))
 
         # First, so the installs handler (which ends the chain) still runs after it.
         teams_app.on_install_remove(uninstalled)
         teams_app.on_conversation_update(watched.on_conversation_update)
         for path, lifecycle in ((NOTIFICATIONS_PATH, False), (LIFECYCLE_PATH, True)):
-            route = notification_route(watched, lifecycle=lifecycle)
+            route = notification_route(
+                watched, lifecycle=lifecycle, draining=lambda: turns.draining
+            )
             fastapi_app.add_api_route(path, route, methods=["POST"])
     teams_app.on_install_remove(installs.on_uninstall)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)

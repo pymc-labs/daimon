@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -46,6 +46,12 @@ from daimon.core.teams_graph import (
     GraphUnavailable,
     TeamGroups,
 )
+from microsoft_teams.api import (
+    ConversationUpdateActivity,
+    MessageActivityInput,
+    UninstalledActivity,
+)
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -53,7 +59,9 @@ from .conftest import (
     BOT_ACCOUNT_ID,
     ENTRA_TENANT_ID,
     TEAM_GROUP_ID,
+    FakeSender,
     TeamsApiFake,
+    bot_token,
     build_teams_client,
     build_teams_runtime,
     make_channel_activity,
@@ -145,8 +153,34 @@ async def _no_group(_team_id: str) -> str | None:
     return None
 
 
+class FlakyDatabase:
+    """The test sessionmaker, refusing reads or writes while told to, as a lost database would."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
+        self.fail_reads = False
+        self.fail_writes = False
+
+    def __call__(self) -> AsyncSession:
+        if self.fail_reads:
+            raise OperationalError("SELECT", None, ConnectionError("database down"))
+        return self._factory()
+
+    def begin(self) -> Any:
+        if self.fail_writes:
+            raise OperationalError("UPDATE", None, ConnectionError("database down"))
+        return self._factory.begin()
+
+
+Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
+
+
 class Harness:
-    """`ChannelSubscriptions` over the test DB and `FakeGraph`, with what it delivered."""
+    """`ChannelSubscriptions` over the test DB and `FakeGraph`, with what it delivered.
+
+    `member` is what the membership check answers, or the error it raises;
+    `taking` is what delivery answers (False while the app drains).
+    """
 
     def __init__(
         self,
@@ -154,16 +188,29 @@ class Harness:
         graph: FakeGraph,
         *,
         channel_type: str | None = "private",
+        deliver: Deliver | None = None,
     ) -> None:
         self.delivered: list[GraphMessage] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.now = NOW
+        self.member: bool | Exception = True
+        self.membership_checks: list[str] = []
+        self.taking = True
+        self.database = FlakyDatabase(factory)
 
         async def lookup(_team: str, _channel: str) -> str | None:
             return channel_type
 
-        async def deliver(message: GraphMessage, _row: TeamsChannelSubscriptionRow) -> None:
-            self.delivered.append(message)
+        async def is_member(channel_id: str) -> bool:
+            self.membership_checks.append(channel_id)
+            if isinstance(self.member, Exception):
+                raise self.member
+            return self.member
+
+        async def record(message: GraphMessage, _row: TeamsChannelSubscriptionRow) -> bool:
+            if self.taking:
+                self.delivered.append(message)
+            return self.taking
 
         def spawn(coro: Any, *, name: str) -> asyncio.Task[None]:
             task = asyncio.create_task(coro, name=name)
@@ -171,35 +218,44 @@ class Harness:
             return task
 
         self.subscriptions = ChannelSubscriptions(
-            sessionmaker=factory,
+            sessionmaker=self.database,  # pyright: ignore[reportArgumentType]
             graph=GraphClient(graph.http(), _graph_token),
             groups=TeamGroups(_no_group),
             channel_type=lookup,
-            deliver=deliver,
+            is_member=is_member,
+            deliver=deliver or record,
             spawn=spawn,
             tenant_id=TENANT,
             public_url=PUBLIC_URL,
             now=lambda: self.now,
+            clock=lambda: 1000.0,
+            new_secret=lambda: SECRET,
         )
         self._factory = factory
 
     async def settle(self) -> None:
         await asyncio.gather(*self.tasks)
 
-    async def row(self) -> TeamsChannelSubscriptionRow | None:
+    async def row(self, channel_id: str = PRIVATE) -> TeamsChannelSubscriptionRow | None:
         async with self._factory() as session:
             return await get_teams_channel_subscription(
-                session, tenant_id=TENANT, channel_id=PRIVATE
+                session, tenant_id=TENANT, channel_id=channel_id
             )
 
 
-async def _stored(factory: async_sessionmaker[AsyncSession], *, expires_at: datetime) -> None:
-    """A subscription of `PRIVATE` whose client state is `SECRET`."""
+async def _stored(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    expires_at: datetime,
+    channel_id: str = PRIVATE,
+    subscription_id: str = "sub-0",
+) -> None:
+    """A subscription of `channel_id` in `TEAM` whose client state is `SECRET`."""
     async with factory.begin() as session:
         await upsert_teams_channel_subscription(
             session,
             tenant_id=TENANT,
-            channel_id=PRIVATE,
+            channel_id=channel_id,
             team_id=TEAM,
             group_id=TEAM_GROUP_ID,
             channel_type="private",
@@ -207,7 +263,7 @@ async def _stored(factory: async_sessionmaker[AsyncSession], *, expires_at: date
             team_name=None,
             bot_name="Daimon",
             service_url=None,
-            subscription_id="sub-0",
+            subscription_id=subscription_id,
             client_state_sha256=client_state_hash(SECRET),
             expires_at=expires_at,
         )
@@ -313,8 +369,6 @@ async def test_a_refused_subscription_is_logged_and_not_retried_at_once(
 async def test_removing_the_bot_deletes_the_row_and_the_graph_subscription(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from microsoft_teams.api import ConversationUpdateActivity
-
     graph = FakeGraph()
     harness = Harness(db_session_factory, graph)
     await harness.subscriptions.ensure(CHANNEL)
@@ -428,6 +482,276 @@ async def test_the_renewal_task_renews_what_is_due_then_sleeps(
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_a_stale_row_is_not_renewed_or_recreated_after_forget(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A row read before `forget` took the lock must not bring the channel back."""
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
+    stale = await harness.row()
+    assert stale is not None
+    await harness.subscriptions.forget(channel_id=PRIVATE)
+
+    await harness.subscriptions.on_lifecycle(
+        _notice(lifecycleEvent="reauthorizationRequired"), stale
+    )
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="subscriptionRemoved"), stale)
+    assert graph.calls("PATCH") == [] and graph.calls("POST") == [], "nothing renewed or created"
+    assert await harness.row() is None, "the forgotten channel stays forgotten"
+
+
+async def test_a_repeated_subscription_removed_notice_recreates_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The second notice names the replaced subscription: acting on it would orphan one."""
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None
+    removed = _notice(lifecycleEvent="subscriptionRemoved")
+    await asyncio.gather(
+        harness.subscriptions.on_lifecycle(removed, row),
+        harness.subscriptions.on_lifecycle(removed, row),
+    )
+    assert len(graph.calls("POST")) == 1, "one replacement, no orphan"
+    current = await harness.row()
+    assert current is not None and current.subscription_id == "sub-1"
+
+
+@pytest.mark.parametrize("event", ["reauthorizationRequired", "subscriptionRemoved"])
+async def test_a_channel_the_bot_left_loses_its_subscription_on_refresh(
+    db_session_factory: async_sessionmaker[AsyncSession], event: str
+) -> None:
+    """The removal event was lost: the membership check on refresh catches it."""
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    harness.member = False
+    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
+    row = await harness.row()
+    assert row is not None
+
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent=event), row)
+    assert graph.calls("PATCH") == [] and graph.calls("POST") == [], "neither renewed nor recreated"
+    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-0"]
+    assert await harness.row() is None, "the row is dropped"
+
+
+async def test_a_failed_membership_lookup_keeps_and_renews_the_subscription(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    harness.member = httpx.ConnectError("unreachable")
+    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
+    row = await harness.row()
+    assert row is not None
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="reauthorizationRequired"), row)
+    assert len(graph.calls("PATCH")) == 1, "an unknown answer never drops a channel"
+    assert await harness.row() is not None
+
+
+async def test_a_channel_send_refused_with_403_drops_a_channel_the_bot_left(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    harness.member = False
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+
+    class Refusing:
+        async def send(self, conversation_id: str, activity: Any, *, service_url: Any) -> Any:
+            request = httpx.Request("POST", "https://smba.example/v3/conversations")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError(
+                "BotNotInConversationRoster", request=request, response=response
+            )
+
+    sender = harness.subscriptions.watch(Refusing())
+    with pytest.raises(httpx.HTTPStatusError):
+        await sender.send(
+            f"{PRIVATE};messageid=1", MessageActivityInput(text="hi"), service_url=None
+        )
+    await harness.settle()
+    assert harness.membership_checks == [PRIVATE], "the refusal asks whether the bot left"
+    assert await harness.row() is None and len(graph.calls("DELETE")) == 1, "it had: dropped"
+
+
+async def test_catch_up_overlapping_a_live_notification_runs_each_message_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Both routes hand the same message to the app; its delivery claim runs it once."""
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    observed: list[str] = []
+
+    async def observe(_self: TeamsApp, inbound: Any) -> None:
+        observed.append(inbound.activity_id)
+
+    graph = FakeGraph()
+    graph.messages["102"] = _message("102", NOW + timedelta(minutes=2), reply_to="100")
+    graph.page = [_message("103", NOW + timedelta(minutes=3), reply_to="100")]
+    graph.page[0]["replies"] = []
+    root = _message("100", NOW - timedelta(minutes=5))
+    root["replies"] = [graph.messages["102"]]
+    graph.page.append(root)
+    harness = Harness(db_session_factory, graph, deliver=teams.handle_graph_message)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    async with db_session_factory.begin() as session:
+        await record_teams_channel_watermark(
+            session, tenant_id=TENANT, channel_id=PRIVATE, message_id="101", at=NOW
+        )
+    row = await harness.row()
+    assert row is not None
+    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('102')"
+
+    with patch.object(TeamsApp, "_observe", observe):
+        # The live read lands first; the catch-up, from the watermark it read before, sees it too.
+        await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
+        await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="missed"), row)
+        await asyncio.gather(*teams._tasks)  # pyright: ignore[reportPrivateUsage]
+    assert sorted(observed) == ["102", "103"], "each message runs once"
+
+
+async def test_a_message_not_taken_while_draining_leaves_the_watermark(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    graph.messages["102"] = _message("102", NOW + timedelta(minutes=2), reply_to="100")
+    harness = Harness(db_session_factory, graph)
+    harness.taking = False
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None
+    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('102')"
+    await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
+    stored = await harness.row()
+    assert stored is not None and stored.last_message_id is None, (
+        "a catch-up after the restart still reads it"
+    )
+
+
+async def test_a_failed_watermark_write_does_not_stop_the_batch(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    graph.page = [
+        _message("103", NOW + timedelta(minutes=3)),
+        _message("102", NOW + timedelta(minutes=2)),
+    ]
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    async with db_session_factory.begin() as session:
+        await record_teams_channel_watermark(
+            session, tenant_id=TENANT, channel_id=PRIVATE, message_id="101", at=NOW
+        )
+    row = await harness.row()
+    assert row is not None
+    harness.database.fail_writes = True
+    with structlog.testing.capture_logs() as logs:
+        await harness.subscriptions.catch_up(row)
+    assert [m.id for m in harness.delivered] == ["102", "103"], "every message is still handled"
+    assert [e for e in logs if e["event"] == "teams.channel_watermark.write_failed"], "logged"
+
+
+async def test_a_failed_read_in_ensure_lets_the_next_sight_try_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    harness.database.fail_reads = True
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    assert graph.calls("POST") == [], "nothing created without the read"
+    harness.database.fail_reads = False
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    assert len(graph.calls("POST")) == 1 and await harness.row() is not None, "subscribed now"
+
+
+async def test_a_subscription_that_cannot_be_recorded_is_deleted_and_retried(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    harness.database.fail_writes = True
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-1"], (
+        "the unrecorded subscription is not left to run unrenewed"
+    )
+    harness.database.fail_writes = False
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    row = await harness.row()
+    assert row is not None and row.subscription_id == "sub-2", "the next sight subscribes"
+
+
+def _removal(kind: str, channel_id: str) -> AsyncMock:
+    """A handler context for the bot's removal: a conversation update or an uninstall."""
+    payload: dict[str, Any] = {
+        "id": "u-1",
+        "channelId": "msteams",
+        "serviceUrl": "https://smba.example/",
+        "from": {"id": f"29:{AAD_OBJECT_ID}"},
+        "recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon"},
+        "conversation": {"id": channel_id, "conversationType": "channel"},
+        "channelData": {"channel": {"id": channel_id}, "team": {"id": TEAM}},
+    }
+    ctx = AsyncMock()
+    if kind == "update":
+        payload |= {"type": "conversationUpdate", "membersRemoved": [{"id": BOT_ACCOUNT_ID}]}
+        ctx.activity = ConversationUpdateActivity.model_validate(payload)
+    else:
+        payload |= {"type": "installationUpdate", "action": "remove"}
+        ctx.activity = UninstalledActivity.model_validate(payload)
+    return ctx
+
+
+@pytest.mark.parametrize("kind", ["update", "uninstall"])
+async def test_a_failed_forget_still_passes_the_activity_on(
+    db_session_factory: async_sessionmaker[AsyncSession], kind: str
+) -> None:
+    """The handlers after it (the installs record) must run whatever the DB says."""
+    harness = Harness(db_session_factory, FakeGraph())
+    harness.database.fail_writes = True
+    ctx = _removal(kind, PRIVATE)
+    with structlog.testing.capture_logs() as logs:
+        if kind == "update":
+            await harness.subscriptions.on_conversation_update(ctx)
+        else:
+            await harness.subscriptions.on_uninstall(ctx, ours=True)
+    ctx.next.assert_awaited_once()
+    assert [e for e in logs if e["event"] == "teams.channel_subscription.forget_failed"]
+
+
+async def test_an_uninstall_from_one_channel_leaves_the_teams_other_channels(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    other = "19:private-2@thread.tacv2"
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    await _stored(
+        db_session_factory,
+        expires_at=NOW + timedelta(days=3),
+        channel_id=other,
+        subscription_id="s2",
+    )
+
+    await harness.subscriptions.on_uninstall(_removal("uninstall", PRIVATE), ours=True)
+    assert await harness.row() is None, "the channel it left is dropped"
+    assert await harness.row(other) is not None, "the team's other channels keep theirs"
+
+    await harness.subscriptions.on_uninstall(_removal("uninstall", TEAM), ours=True)
+    assert await harness.row(other) is None, "a team uninstall (General) drops them all"
+
+
 # --- HTTP ingress -----------------------------------------------------------------
 
 
@@ -441,8 +765,10 @@ def no_renewals() -> Iterator[None]:
 def _service(
     factory: async_sessionmaker[AsyncSession], graph: FakeGraph, *, on: bool
 ) -> TeamsHttpService:
-    settings = teams_settings(public_url=PUBLIC_URL, private_channel_messages=on)
-    runtime = build_teams_runtime(factory, teams=settings, http_client=graph.http())
+    settings = teams_settings(public_url=PUBLIC_URL)
+    runtime = build_teams_runtime(
+        factory, teams=settings, http_client=graph.http(), private_channel_messages=on
+    )
     return create_teams_http_service(
         settings=settings, runtime=runtime, client=build_teams_client(TeamsApiFake())
     )
@@ -507,8 +833,10 @@ async def test_a_private_channel_mention_subscribes_only_with_the_setting_on(
 ) -> None:
     """Off: the routes are absent (404) and a private channel is never subscribed."""
     graph = FakeGraph()
-    settings = teams_settings(public_url=PUBLIC_URL, private_channel_messages=on)
-    runtime = build_teams_runtime(db_session_factory, teams=settings, http_client=graph.http())
+    settings = teams_settings(public_url=PUBLIC_URL)
+    runtime = build_teams_runtime(
+        db_session_factory, teams=settings, http_client=graph.http(), private_channel_messages=on
+    )
     with patch.object(TeamsApp, "_handle", new_callable=AsyncMock):
         async with running_service(runtime, TeamsApiFake()) as service:
             await post_activity(service, _private_mention())
@@ -518,3 +846,28 @@ async def test_a_private_channel_mention_subscribes_only_with_the_setting_on(
                 assert response.status_code == (200 if on else 404), "routes exist only when on"
     subscribed = [r for r in graph.calls("POST") if r.url.path == "/v1.0/subscriptions"]
     assert len(subscribed) == (1 if on else 0), "subscribed on first sight only when on"
+
+
+@pytest.mark.usefixtures("entra_env", "stub_bot_token", "no_renewals")
+async def test_a_draining_instance_answers_503_and_reads_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Graph retries a 5xx, so the batch reaches the next instance; nothing was claimed here."""
+    graph = FakeGraph()
+    graph.messages["100"] = _message("100", NOW)
+    service = _service(db_session_factory, graph, on=True)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    service.turns.draining = True
+    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')"
+    entry = {"subscriptionId": "sub-0", "clientState": SECRET, "changeType": "created"}
+    for path in (NOTIFICATIONS_PATH, LIFECYCLE_PATH):
+        response = await _post(service, path, json={"value": [entry | {"resource": resource}]})
+        assert response.status_code == 503, "refused so Graph retries elsewhere"
+    assert graph.requests == [], "nothing read"
+    row = await get_row(db_session_factory)
+    assert row is not None and row.last_message_id is None, "the watermark has not moved"
+
+
+async def get_row(factory: async_sessionmaker[AsyncSession]) -> TeamsChannelSubscriptionRow | None:
+    async with factory() as session:
+        return await get_teams_channel_subscription(session, tenant_id=TENANT, channel_id=PRIVATE)

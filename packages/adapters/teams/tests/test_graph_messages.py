@@ -7,6 +7,7 @@ gets the message Graph would return, so only routing is under test.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.identity import delivery_key
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
@@ -189,15 +191,67 @@ async def test_the_bots_own_message_and_an_untagged_root_post_are_skipped(
     assert routed.paths == [], "no app's message and no unaddressed root post is routed"
 
 
-async def test_a_sender_from_another_tenant_is_marked_external(
+async def test_a_guest_is_classified_by_the_roster_not_by_graphs_tenant(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    routed = Routed(_app(db_session_factory))
+    """Graph may show a B2B guest's home tenant; the roster, as for Bot Framework, decides."""
+    teams = _app(db_session_factory)
+    lookups: list[tuple[str, str]] = []
+
+    async def roster_member(conversation_id: str, user_id: str) -> MemberFacts | None:
+        lookups.append((conversation_id, user_id))
+        return MemberFacts(tenant_id=ENTRA_TENANT_ID, is_guest=True)
+
+    async def channel_type(_team: str, _channel: str) -> str | None:
+        return "private"
+
+    async def no_members(*_args: object) -> dict[str, MemberFacts]:
+        return {}
+
+    async def no_listed_guests() -> frozenset[str]:
+        return frozenset()
+
+    teams.runtime = dataclasses.replace(
+        teams.runtime,
+        externals=ExternalParticipants(
+            tenant_id=ENTRA_TENANT_ID,
+            roster_member=roster_member,
+            channel_type=channel_type,
+            channel_members=no_members,
+            member_guests=no_listed_guests,
+        ),
+    )
+    routed = Routed(teams)
     user = {"id": AAD_OBJECT_ID, "displayName": "Bob", "tenantId": FOREIGN_TENANT}
     await routed.graph(_graph("1700000000003", "<p>hello</p>", sender={"user": user}))
     [(_path, inbound)] = routed.paths
-    assert inbound.is_external and inbound.home_tenant_id == FOREIGN_TENANT, (
-        "a shared channel's external member is answered as one"
+    assert not inbound.is_external_known and inbound.home_tenant_id is None, (
+        "Graph's sender tenant is not taken as evidence"
+    )
+    classified = await teams._classified(inbound)  # pyright: ignore[reportPrivateUsage]
+    assert lookups == [(PRIVATE, AAD_OBJECT_ID)], "the Bot Framework roster is asked"
+    assert classified.is_external and classified.home_tenant_id is None, (
+        "a guest is held as one, not as a member of another organisation"
+    )
+
+
+async def test_while_draining_a_message_is_not_taken_and_a_replay_runs_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The draining instance claims nothing, so the next one runs Graph's replays once."""
+    draining = Routed(_app(db_session_factory))
+    draining.teams.draining = True
+    message = _graph("1700000000003", "<p>any thoughts?</p>")
+    taken = await draining.teams.handle_graph_message(message, CHANNEL)
+    assert taken is False and draining.paths == [], "nothing taken, nothing run"
+    assert delivery_key(PRIVATE, message.id) not in draining.teams._seen, (  # pyright: ignore[reportPrivateUsage]
+        "and nothing claimed"
+    )
+    successor = Routed(_app(db_session_factory))
+    await successor.graph(message)
+    await successor.graph(message)
+    assert [inbound.activity_id for _, inbound in successor.paths] == [message.id], (
+        "the replay runs once on the next instance"
     )
 
 

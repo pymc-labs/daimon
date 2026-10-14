@@ -470,11 +470,8 @@ def parse_graph_message(
     user_id = canonical_uuid(user.id)
     if tenant is None or user_id is None or not message.id.strip():
         return Refusal(DENIED if addressed else None)
-    # A shared channel's external member keeps their home tenant on Graph's sender.
-    home_tenant = (user.tenant_id or "").strip()
-    home = None
-    if home_tenant and canonical_uuid(home_tenant) != tenant:
-        home = canonical_uuid(home_tenant) or home_tenant
+    # Graph's sender tenant is not trusted to tell a guest from an external member (a guest
+    # may show their home tenant): the roster lookup classifies both, as for Bot Framework.
     quoted = "".join(
         describe_quote(_display_name(ref.message_sender), ref.message_preview) for ref in references
     )
@@ -498,9 +495,6 @@ def parse_graph_message(
         channel_name=_channel_name(channel.channel_id, channel.team_id, channel.channel_name),
         channel_type=channel.channel_type,
         team_name=channel.team_name,
-        is_external=home is not None,
-        is_external_known=home is not None,
-        home_tenant_id=home,
     )
     return _admitted(inbound, addressed=addressed)
 

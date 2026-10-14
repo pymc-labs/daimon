@@ -310,7 +310,9 @@ class TeamsApp:
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
-        self._sender = TimedSender(sender)
+        # With Graph subscriptions, a channel send refused with 403 or 404 checks the bot is
+        # still there: a lost removal event would otherwise keep its subscription alive.
+        self._sender = TimedSender(subscriptions.watch(sender) if subscriptions else sender)
         self._commands = commands
         self._bot_token = bot_token
         # Channel history and media through Graph; None replays nothing.
@@ -569,14 +571,16 @@ class TeamsApp:
 
     async def handle_graph_message(
         self, message: GraphMessage, channel: TeamsChannelSubscriptionRow
-    ) -> None:
+    ) -> bool:
         """A message Graph reported from a subscribed channel: claimed once, then routed.
 
         The claim follows the parse, which drops @mentions: Bot Framework
-        delivers those, and claiming one here would lose it.
+        delivers those, and claiming one here would lose it. False, while
+        draining, means the message was not taken (nor claimed): the caller
+        leaves its watermark so a replay or catch-up still runs it.
         """
         if self.draining:
-            return
+            return False
         parsed = parse_graph_message(
             message,
             channel,
@@ -584,9 +588,9 @@ class TeamsApp:
             bot_app_id=self._teams.client_id,
         )
         if isinstance(parsed, Refusal) and parsed.text is None:
-            return
+            return True
         if not self._first_delivery(channel.channel_id, message.id):
-            return
+            return True
         if isinstance(parsed, Refusal):
             thread = f"{channel.channel_id};messageid={message.reply_to_id or message.id}"
 
@@ -596,8 +600,9 @@ class TeamsApp:
                 )
 
             await self._refuse(parsed, thread, "channel", reply)
-            return
+            return True
         self._dispatch_inbound(parsed)
+        return True
 
     async def _refuse(
         self,
