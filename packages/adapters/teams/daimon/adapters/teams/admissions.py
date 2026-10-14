@@ -78,9 +78,13 @@ class TeamsAdmissions:
     owner_key: int
 
     async def claim(self, inbound: TeamsInbound, *, now: datetime) -> bool:
-        """Admit `inbound` once; one that may start a turn keeps its content for a replay."""
+        """Admit `inbound` once; one that may start a turn keeps its content for a replay.
+
+        A typed "@<bot name>" thread reply may too: its replay reads the switch again.
+        """
+        asks = not inbound.unprompted or inbound.by_name
         message: dict[str, JsonValue] | None = (
-            None if inbound.unprompted else _INBOUND.dump_python(inbound, mode="json")
+            _INBOUND.dump_python(inbound, mode="json") if asks else None
         )
         async with self.sessionmaker.begin() as session:
             return await claim_teams_message(

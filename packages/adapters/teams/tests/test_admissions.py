@@ -328,3 +328,100 @@ async def test_a_failed_turn_start_answers_once(
 
     turn.assert_not_awaited()
     assert _texts(sender) == [app_module._FAILED], "one error notice, then nothing"
+
+
+async def test_an_error_notice_that_cannot_be_fenced_is_not_sent_and_the_message_replays(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Sent unfenced, the notice would go out and the message replay after it as well."""
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    inbound = make_inbound("hi")
+    down = OperationalError("SELECT", {}, Exception("database is down"))
+
+    with (
+        patch.object(app_module, "live_tenant_id", AsyncMock(side_effect=down)),
+        patch.object(TeamsAdmissions, "finish", AsyncMock(side_effect=down)),
+    ):
+        await teams._admit(inbound)
+    with patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn:
+        await _boot(_app(db_session_factory, FakeSender()))
+
+    assert _texts(sender) == [], "no notice without a finished admission"
+    turn.assert_awaited_once()
+
+
+@pytest.mark.parametrize("refused", [True, False])
+async def test_a_queued_message_failing_its_fence_drops_alone_from_the_batch(
+    db_session_factory: async_sessionmaker[AsyncSession], refused: bool
+) -> None:
+    """Another owner, or an unreachable database, costs that message, not its neighbours."""
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[str] = []
+    two, three = _sent("two", 2), _sent("three", 3)
+    finish = TeamsAdmissions.finish
+
+    async def _finish(self: TeamsAdmissions, inbound: TeamsInbound) -> bool:
+        if inbound.activity_id != two.activity_id:
+            return await finish(self, inbound)
+        if refused:
+            return False
+        raise OperationalError("UPDATE", {}, Exception("database is down"))
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.text)
+        started.set()
+        await release.wait()
+
+    with (
+        patch.object(TeamsApp, "_run_turn", _turn),
+        patch.object(TeamsAdmissions, "finish", _finish),
+    ):
+        teams.spawn(teams._admit(make_inbound("one")), name="turn")
+        await started.wait()
+        await teams._admit(two)
+        await teams._admit(three)
+        release.set()
+        await _settle(teams)
+
+    assert ran == ["one", "three"], "the batch's turn runs without the fenced message"
+    assert _texts(sender) == [], "and nothing is said about it"
+
+
+async def test_a_typed_name_thread_reply_is_kept_for_a_replay(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    reply = dataclasses.replace(
+        make_inbound("@daimon look", kind="channel"), unprompted=True, by_name=True
+    )
+    await _left_by_exited_process(db_session_factory, reply)
+    gate = TeamsAdmissions(db_session_factory, TENANT, owner_key=uuid.uuid4().int >> 66)
+
+    reclaimed = await gate.reclaim(now=datetime.now(UTC))
+
+    assert reclaimed.replay == [reply], "it may start a turn, so a restart must not lose it"
+
+
+async def test_a_message_reaching_its_turn_during_the_drain_is_held_not_started(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Admitted before the drain, routed after: a turn started now would be cut off."""
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    inbound = make_inbound("hi")
+    assert await teams._admissions.claim(inbound, now=datetime.now(UTC))
+    teams.draining = True
+    ran: list[str] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.text)
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        await teams._intake(inbound)
+        assert ran == [], "no turn starts once the drain began"
+        await _boot(_app(db_session_factory, FakeSender()))
+
+    assert ran == ["hi"], "the next process runs it"
+    assert _texts(sender) == [HOLDING], "and the chat is told once it is held"

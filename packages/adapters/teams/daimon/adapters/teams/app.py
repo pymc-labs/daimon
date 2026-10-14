@@ -243,17 +243,18 @@ def _as_mention(inbound: TeamsInbound) -> TeamsInbound:
     return dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
 
 
-def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
-    """One turn per author, replying where that author's last message came from."""
-    return [
-        dataclasses.replace(
-            items[-1],
-            text="\n\n".join(item.text for item in items),
-            files=tuple(file for item in items for file in item.files),
-            composed_ids=tuple(item.activity_id for item in items[:-1]),
-        )
-        for items in group_by_author(queued, lambda item: item.user_id)
-    ]
+def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
+    return group_by_author(queued, lambda item: item.user_id)
+
+
+def _compose(items: list[TeamsInbound]) -> TeamsInbound:
+    """One author's messages as one turn, replying where the last came from."""
+    return dataclasses.replace(
+        items[-1],
+        text="\n\n".join(item.text for item in items),
+        files=tuple(file for item in items for file in item.files),
+        composed_ids=tuple(item.activity_id for item in items[:-1]),
+    )
 
 
 def _admission_refusal(
@@ -451,8 +452,9 @@ class TeamsApp:
     async def _reclaim(self) -> None:
         """Replay what an exited process admitted but never handled, oldest first per chat.
 
-        At boot it runs inside the sweep, so a replay queues ahead of anything
-        sent since. A failed pass leaves the rows for the next one.
+        At boot it runs inside the sweep, which turns wait for; a chat's replays
+        keep their order, but a message sent since may still run before them.
+        A failed pass leaves the rows for the next one.
         """
         try:
             reclaimed = await self._admissions.reclaim(now=datetime.now(UTC))
@@ -557,6 +559,8 @@ class TeamsApp:
 
     async def _admit(self, parsed: TeamsInbound) -> None:
         """Claim the message's admission, then run the intake; a duplicate stops here."""
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)  # the boot reclaim shares this path
         try:
             claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
         except _DB_ERRORS as exc:
@@ -580,13 +584,6 @@ class TeamsApp:
     async def _finish(self, inbound: TeamsInbound) -> bool:
         """The admission fence before a turn or an answer: False when another process has it."""
         return await self._admissions.finish(inbound)
-
-    async def _finish_or_unknown(self, inbound: TeamsInbound) -> bool:
-        """`_finish` for an error notice: an unreachable database still lets it go out."""
-        try:
-            return await self._finish(inbound)
-        except _DB_ERRORS:
-            return True
 
     async def _provision(self) -> None:
         settings = self.runtime.settings
@@ -895,7 +892,7 @@ class TeamsApp:
             log.error("teams.message.failed", conversation_id=inbound.conversation_id, exc_info=exc)
             capture_exception_with_scope(exc)
             with contextlib.suppress(*TEAMS_SEND_ERRORS, *_DB_ERRORS):
-                if await self._finish_or_unknown(inbound):
+                if await self._finish(inbound):  # unfinished, it replays: say nothing
                     await self._say(inbound, _FAILED)
 
     async def _route(self, inbound: TeamsInbound) -> None:
@@ -1053,22 +1050,35 @@ class TeamsApp:
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
         return ThreadQueue(self._processing, self._pending)
 
-    async def _run_turns(self, key: str, tenant_id: uuid.UUID, turns: list[TeamsInbound]) -> None:
-        async def run(queued: TeamsInbound) -> None:
-            if not await self._finish(queued):
-                return  # another process admitted it: its turn, not ours
-            turn = await route_to_setup(self.runtime.sessionmaker, queued, tenant_id)
+    async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
+        """One turn per author; each message passes the admission fence on its own."""
+
+        async def run(batch: list[TeamsInbound]) -> None:
+            if self.draining:
+                # A turn started now would be cut off: `_holding` holds these instead.
+                self._pending.setdefault(key, []).extend(batch)
+                return
+            kept: list[TeamsInbound] = []
+            for item in batch:
+                try:
+                    if await self._finish(item):  # False: another process has it
+                        kept.append(item)
+                except _DB_ERRORS as exc:
+                    # Left unhandled: it replays once this process is gone, never twice.
+                    log.error("teams.admission.finish_failed", exc_info=exc)
+            if not kept:
+                return
+            turn = await route_to_setup(self.runtime.sessionmaker, _compose(kept), tenant_id)
             await self._run_turn_guarded(turn, tenant_id)
             await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
 
-        def compose(queued: list[TeamsInbound]) -> list[TeamsInbound]:
+        def compose(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
             if self.draining and queued:
-                # A turn started now would be cut off: `_holding` holds these instead.
                 self._pending.setdefault(key, []).extend(queued)
                 return []
-            return _compose_queued(queued)
+            return _by_author(queued)
 
-        await self._thread_queue.drain(key, initial=turns, compose=compose, run=run)
+        await self._thread_queue.drain(key, initial=_by_author(queued), compose=compose, run=run)
 
     async def _run_turn_guarded(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """Error boundary for failures before the status card exists."""
@@ -1672,7 +1682,7 @@ class TeamsApp:
             async def drain() -> None:
                 if self.draining:
                     return  # `_holding` holds what is queued
-                queued = _compose_queued(self._pending.pop(conversation_id, []))
+                queued = self._pending.pop(conversation_id, [])
                 await self._run_turns(conversation_id, tenant_id, queued)
 
             await dispatch_and_drain(

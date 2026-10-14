@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from secrets import randbits
 
 import httpx
+import structlog
 from anthropic import AsyncAnthropic
+from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
+    InterfaceError,
+    InternalClientError,
+    PostgresError,
+)
 from daimon.adapters.teams.externals import ExternalParticipants
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembers, GroupMembersCache
@@ -24,7 +31,9 @@ from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True)
@@ -53,25 +62,96 @@ class TeamsRuntime:
     owner_key: int = field(default_factory=lambda: randbits(63))
 
 
+# How often the owner connection is checked; a relock retries from 1 s up to the cap.
+OWNER_WATCH_INTERVAL_S = 15.0
+_OWNER_RELOCK_MAX_DELAY_S = 120.0
+_OWNER_PROBE_TIMEOUT_S = 5.0
+# asyncpg failures can surface as raw socket errors, not SQLAlchemyError.
+_OWNER_FAILURES = (
+    SQLAlchemyError,
+    InterfaceError,
+    InternalClientError,
+    PostgresError,
+    OSError,
+    TimeoutError,
+)
+
+
+async def _discard(connection: AsyncConnection) -> None:
+    with suppress(*_OWNER_FAILURES):
+        async with asyncio.timeout(_OWNER_PROBE_TIMEOUT_S):
+            await connection.invalidate()
+            await connection.close()
+
+
+async def _lock_owner_key(engine: AsyncEngine, owner_key: int) -> AsyncConnection:
+    """A new connection holding `owner_key`; a dead one's backend still holding it times out."""
+    connection = await engine.connect()
+    try:
+        async with asyncio.timeout(_OWNER_PROBE_TIMEOUT_S):
+            await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
+            await connection.commit()
+    except BaseException:
+        await _discard(connection)
+        raise
+    return connection
+
+
 @asynccontextmanager
-async def hold_owner_key(engine: AsyncEngine, owner_key: int) -> AsyncIterator[None]:
+async def hold_owner_key(
+    engine: AsyncEngine, owner_key: int, *, watch_interval_s: float = OWNER_WATCH_INTERVAL_S
+) -> AsyncIterator[None]:
     """Hold `owner_key` as a session advisory lock on its own connection, for life.
 
-    Single process, so no heartbeat as Discord has: a lost connection frees the
-    key, and a later boot may then reclaim this process's unhandled messages.
-    The `finish_teams_messages` fence still keeps any turn from running twice.
+    Single process, so no heartbeat or fail-stop as Discord has: a watch checks
+    the connection and takes the key again on a new one when it drops. Until
+    then a later boot may reclaim this process's unhandled messages; the
+    `finish_teams_messages` fence still keeps any of them from running twice.
     """
-    async with engine.connect() as connection:
-        await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": owner_key})
-        await connection.commit()
-        try:
-            yield
-        finally:
-            with suppress(SQLAlchemyError, OSError):
+    connection: AsyncConnection | None = await _lock_owner_key(engine, owner_key)
+
+    async def watch() -> None:
+        nonlocal connection
+        delay = watch_interval_s
+        while True:
+            await asyncio.sleep(delay)
+            if connection is not None:
+                try:
+                    async with asyncio.timeout(_OWNER_PROBE_TIMEOUT_S):
+                        await connection.execute(text("SELECT 1"))
+                        await connection.commit()
+                    continue
+                except _OWNER_FAILURES as exc:
+                    log.warning("teams.owner_key.lost", error_type=type(exc).__name__)
+                    stale, connection, delay = connection, None, 1.0
+                    await _discard(stale)
+            try:
+                connection = await _lock_owner_key(engine, owner_key)
+            except _OWNER_FAILURES as exc:
+                delay = min(delay * 2, _OWNER_RELOCK_MAX_DELAY_S)
+                log.error(
+                    "teams.owner_key.relock_failed",
+                    error_type=type(exc).__name__,
+                    retry_delay_s=delay,
+                )
+                continue
+            log.info("teams.owner_key.relocked")
+            delay = watch_interval_s
+
+    watcher = asyncio.create_task(watch(), name="teams.owner-key-watch")
+    try:
+        yield
+    finally:
+        watcher.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher
+        if connection is not None:  # pyright: ignore[reportUnnecessaryComparison]  # the watch can drop it
+            with suppress(*_OWNER_FAILURES):
                 await connection.execute(
                     text("SELECT pg_advisory_unlock(:key)"), {"key": owner_key}
                 )
                 await connection.commit()
+            await _discard(connection)
 
 
 @asynccontextmanager
