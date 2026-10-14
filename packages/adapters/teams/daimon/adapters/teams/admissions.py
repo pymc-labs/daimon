@@ -63,6 +63,10 @@ def _sent_at(inbound: TeamsInbound, now: datetime) -> datetime:
     return sent if sent.tzinfo is not None else sent.replace(tzinfo=UTC)
 
 
+def too_old_to_replay(inbound: TeamsInbound, now: datetime) -> bool:
+    return _sent_at(inbound, now) < now - REPLAY_MAX_AGE
+
+
 @dataclass(frozen=True)
 class Reclaimed:
     """What a dead process left: to replay (oldest sent first), and to tell to resend."""

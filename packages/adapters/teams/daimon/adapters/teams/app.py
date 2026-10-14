@@ -30,6 +30,7 @@ from daimon.adapters.teams.admissions import (
     NOT_HELD,
     RECLAIM_INTERVAL_S,
     TeamsAdmissions,
+    too_old_to_replay,
 )
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
@@ -487,10 +488,16 @@ class TeamsApp:
             self.spawn(self._replay_chat(queue), name="teams.replay")
 
     async def _tell_stale(self, stale: list[TeamsInbound]) -> None:
-        """Ask a too-old message's chat to resend it; a typed name only while it still asks."""
+        """Ask a too-old message's chat to resend it; a typed name only while it still asks.
+
+        Only where Daimon may post: a protected or unreadable policy gets nothing.
+        """
         if any(i.by_name for i in stale) and await self._plain_text_mentions_on():
             stale = [_as_mention(i) if i.by_name else i for i in stale]
-        await self._tell([i for i in stale if not i.by_name], NOT_HELD)
+        told = [
+            i for i in stale if not i.by_name and await self._may_post(i.channel_id, i.thread_id)
+        ]
+        await self._tell(told, NOT_HELD)
 
     async def _reclaim_loop(self) -> None:
         """Catch rows of a predecessor still draining at boot, once it exits; retry
@@ -505,7 +512,8 @@ class TeamsApp:
                 log.warning("teams.admission.prune_failed", error_type=type(exc).__name__)
 
     async def _retry_unfenced(self) -> None:
-        """Run again what a failed fence left unhandled; its intake passes the fence first.
+        """Run again what a failed fence or an unread policy left unhandled; its intake
+        passes the fence first. One too old to replay is closed and told as a stale one.
 
         A message the fence did hold (its turn started) stays done, never rerun.
         """
@@ -519,9 +527,13 @@ class TeamsApp:
             self._unfenced[:0] = unfenced
             return
         if dropped := len(unfenced) - len(pending):
-            # Their fence committed unacknowledged: handled, so never run or told.
+            # Handled after all (an unacknowledged commit), rowless or another owner's.
             log.warning("teams.admission.retry_dropped", count=dropped)
-        self._replay(pending)
+        now = datetime.now(UTC)
+        if stale := [i for i in pending if too_old_to_replay(i, now)]:
+            closed = await self._finish(stale)
+            await self._tell_stale(closed)
+        self._replay([i for i in pending if not too_old_to_replay(i, now)])
 
     async def _replay_chat(self, queue: list[TeamsInbound]) -> None:
         """Feed one chat's replays through the intake in order, each queued behind

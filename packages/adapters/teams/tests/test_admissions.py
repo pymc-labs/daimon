@@ -384,6 +384,45 @@ async def test_a_stale_message_is_not_replayed_and_the_chat_is_told_once(
     assert [_texts(s) for s in senders] == [[NOT_HELD], []], "asked to resend, once"
 
 
+@pytest.mark.parametrize("state", [ProtectionState.PROTECTED, ProtectionState.UNKNOWN])
+async def test_a_stale_message_where_daimon_may_not_post_is_closed_untold(
+    db_session_factory: async_sessionmaker[AsyncSession], state: ProtectionState
+) -> None:
+    await _left_by_exited_process(db_session_factory, make_inbound("old"))
+    sender = FakeSender()
+
+    with (
+        patch.object(admissions_module, "REPLAY_MAX_AGE", timedelta(minutes=-1)),
+        patch.object(app_module, "protection_state", AsyncMock(return_value=state)),
+    ):
+        await _boot(_app(db_session_factory, sender))
+
+    assert _texts(sender) == [], "no resend notice into a protected or unread channel"
+
+
+async def test_a_retry_older_than_the_replay_window_is_closed_not_cycled(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A policy that stays unread does not keep a message cycling through the retry."""
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    unread = AsyncMock(return_value=ProtectionState.UNKNOWN)
+
+    with (
+        patch.object(app_module, "protection_state", unread),
+        patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn,
+    ):
+        await teams._admit(_sent("old", 0))
+        await _settle(teams)
+        assert len(teams._unfenced) == 1, "kept for the retry"
+        await teams._retry_unfenced()
+        await _settle(teams)
+
+    assert teams._unfenced == [], "closed, not queued again"
+    turn.assert_not_awaited()
+    assert _texts(sender) == [], "and nothing said where the policy is unread"
+
+
 async def test_a_replay_goes_through_admission_like_a_fresh_message(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -514,7 +553,10 @@ async def test_a_batch_whose_fence_fails_stays_silent_and_runs_on_the_retry(
         started.set()
         await release.wait()
 
-    with patch.object(TeamsApp, "_run_turn", _turn):
+    with (
+        patch.object(TeamsApp, "_run_turn", _turn),
+        patch.object(admissions_module, "REPLAY_MAX_AGE", timedelta(days=3650)),
+    ):
         with patch.object(TeamsAdmissions, "finish", _finish):
             teams.spawn(teams._admit(make_inbound("one")), name="turn")
             await started.wait()
