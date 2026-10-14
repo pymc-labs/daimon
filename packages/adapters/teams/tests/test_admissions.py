@@ -72,8 +72,11 @@ def _message(payload: dict[str, object]) -> Any:
     )
 
 
-def _sent(text: str, seconds: int, activity_id: str | None = None) -> TeamsInbound:
-    sent = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=seconds)
+def _sent(
+    text: str, seconds: int, activity_id: str | None = None, *, now: bool = False
+) -> TeamsInbound:
+    base = datetime.now(UTC) if now else datetime(2026, 1, 1, tzinfo=UTC)
+    sent = base + timedelta(seconds=seconds)
     inbound = dataclasses.replace(make_inbound(text), timestamp=sent.isoformat())
     return dataclasses.replace(inbound, activity_id=activity_id) if activity_id else inbound
 
@@ -216,7 +219,7 @@ async def test_an_unread_access_policy_retries_the_message_instead_of_dropping_i
         patch.object(app_module, "protection_state", _policy_unread_once()),
         patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn,
     ):
-        await teams._admit(make_inbound("hi"))
+        await teams._admit(_sent("hi", 0, now=True))
         await _settle(teams)
         turn.assert_not_awaited()
         await teams._retry_unfenced()
@@ -412,15 +415,41 @@ async def test_a_retry_older_than_the_replay_window_is_closed_not_cycled(
         patch.object(app_module, "protection_state", unread),
         patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn,
     ):
-        await teams._admit(_sent("old", 0))
+        await teams._admit(old := _sent("old", 0))
         await _settle(teams)
         assert len(teams._unfenced) == 1, "kept for the retry"
         await teams._retry_unfenced()
         await _settle(teams)
 
     assert teams._unfenced == [], "closed, not queued again"
+    assert await teams._admissions.unhandled([old]) == [], "its row is handled"
     turn.assert_not_awaited()
     assert _texts(sender) == [], "and nothing said where the policy is unread"
+
+
+async def test_stale_retries_in_two_chats_are_each_closed_and_told_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    first = _sent("a", 0)
+    other = dataclasses.replace(
+        _sent("b", 1), conversation_id="a:conversation-2", channel_id="a:conversation-2"
+    )
+
+    unread = AsyncMock(return_value=ProtectionState.UNKNOWN)
+    with patch.object(app_module, "protection_state", unread):
+        await teams._admit(first)
+        await teams._admit(other)
+        await _settle(teams)
+    unread.return_value = ProtectionState.UNPROTECTED
+    with patch.object(app_module, "protection_state", unread):
+        await teams._retry_unfenced()
+        await _settle(teams)
+
+    assert sorted(chat for chat, _, _ in sender.sent) == [CONVERSATION_ID, "a:conversation-2"]
+    assert _texts(sender) == [NOT_HELD, NOT_HELD], "each chat told once"
+    assert await teams._admissions.unhandled([first, other]) == [], "both fenced"
 
 
 async def test_a_replay_goes_through_admission_like_a_fresh_message(

@@ -494,10 +494,11 @@ class TeamsApp:
         """
         if any(i.by_name for i in stale) and await self._plain_text_mentions_on():
             stale = [_as_mention(i) if i.by_name else i for i in stale]
-        told = [
-            i for i in stale if not i.by_name and await self._may_post(i.channel_id, i.thread_id)
-        ]
-        await self._tell(told, NOT_HELD)
+        may_post: dict[str, bool] = {}
+        for i in stale:
+            if not i.by_name and i.conversation_id not in may_post:
+                may_post[i.conversation_id] = await self._may_post(i.channel_id, i.thread_id)
+        await self._tell([i for i in stale if may_post.get(i.conversation_id)], NOT_HELD)
 
     async def _reclaim_loop(self) -> None:
         """Catch rows of a predecessor still draining at boot, once it exits; retry
@@ -531,9 +532,16 @@ class TeamsApp:
             log.warning("teams.admission.retry_dropped", count=dropped)
         now = datetime.now(UTC)
         if stale := [i for i in pending if too_old_to_replay(i, now)]:
-            closed = await self._finish(stale)
-            await self._tell_stale(closed)
+            self.spawn(self._close_stale(stale), name="teams.admission-stale")
         self._replay([i for i in pending if not too_old_to_replay(i, now)])
+
+    async def _close_stale(self, stale: list[TeamsInbound]) -> None:
+        """Fence each chat's too-old retries (a fence is one chat's), then tell them."""
+        chats: dict[str, list[TeamsInbound]] = {}
+        for inbound in stale:
+            chats.setdefault(inbound.conversation_id, []).append(inbound)
+        closed = [i for chat in chats.values() for i in await self._finish(chat)]
+        await self._tell_stale(closed)
 
     async def _replay_chat(self, queue: list[TeamsInbound]) -> None:
         """Feed one chat's replays through the intake in order, each queued behind

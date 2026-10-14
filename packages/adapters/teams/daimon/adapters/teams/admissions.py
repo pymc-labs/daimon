@@ -64,7 +64,8 @@ def _sent_at(inbound: TeamsInbound, now: datetime) -> datetime:
 
 
 def too_old_to_replay(inbound: TeamsInbound, now: datetime) -> bool:
-    return _sent_at(inbound, now) < now - REPLAY_MAX_AGE
+    """One with no timestamp counts as old: its age is unknown."""
+    return inbound.timestamp is None or _sent_at(inbound, now) < now - REPLAY_MAX_AGE
 
 
 @dataclass(frozen=True)
