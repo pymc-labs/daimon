@@ -147,7 +147,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
-from daimon.core.turn.protection import protection_state
+from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
@@ -518,6 +518,9 @@ class TeamsApp:
             log.error("teams.admission.retry_failed", exc_info=exc)
             self._unfenced[:0] = unfenced
             return
+        if dropped := len(unfenced) - len(pending):
+            # Their fence committed unacknowledged: handled, so never run or told.
+            log.warning("teams.admission.retry_dropped", count=dropped)
         self._replay(pending)
 
     async def _replay_chat(self, queue: list[TeamsInbound]) -> None:
@@ -576,7 +579,10 @@ class TeamsApp:
                 return
             parsed = _as_mention(parsed)
         # Unaddressed chatter is not held: the participation it could feed is cancelled.
-        if parsed.unprompted or not await self._may_post(parsed.channel_id, parsed.thread_id):
+        if parsed.unprompted:
+            return
+        state = await self._post_state(parsed.channel_id, parsed.thread_id)
+        if state is ProtectionState.PROTECTED:
             return
         try:
             claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
@@ -584,7 +590,8 @@ class TeamsApp:
             # Unrecorded, a redelivery could be answered too: stay silent.
             log.error("teams.admission.claim_failed", exc_info=exc)
             return
-        if claimed:
+        if claimed and state.may_post:
+            # An unread policy is still kept: its replay reads it again before any post.
             await self._hold([parsed])
 
     async def _admit(self, parsed: TeamsInbound) -> None:
@@ -895,6 +902,9 @@ class TeamsApp:
 
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
         """True only for an unprotected target; a protected or unreadable one gets nothing."""
+        return (await self._post_state(channel_id, thread_id)).may_post
+
+    async def _post_state(self, channel_id: str, thread_id: str) -> ProtectionState:
         state = await protection_state(
             self.runtime.sessionmaker,
             tenant_id=self._tenant_id,
@@ -908,14 +918,18 @@ class TeamsApp:
                 thread_id=thread_id,
                 state=state.value,
             )
-        return state.may_post
+        return state
 
     async def _handle(self, inbound: TeamsInbound) -> None:
         """Error boundary around tenant lookup, routing, commands and the turn loop.
 
         May-post is decided first, so no post below (denial, pointer, shed, error) skips it.
         """
-        if not await self._may_post(inbound.channel_id, inbound.thread_id):
+        state = await self._post_state(inbound.channel_id, inbound.thread_id)
+        if state is ProtectionState.UNKNOWN:
+            self._unfenced.append(inbound)  # the policy went unread: retried, not dropped
+            return
+        if not state.may_post:
             await self._finish([inbound])  # nothing to answer, so nothing to replay
             return
         # For the billing card's names; in the background, never failing the turn.

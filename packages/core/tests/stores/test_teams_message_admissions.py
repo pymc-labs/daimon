@@ -178,6 +178,41 @@ async def test_the_restart_notice_is_marked_once_per_chat(db_session: AsyncSessi
     assert await mark("4"), "once the chat's held messages ran, a later one owes its own"
 
 
+async def test_a_reclaimed_message_owes_its_new_owners_drain_a_notice(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    dead, new = randbits(30), randbits(30) + 2**31
+    chat = f"{CHANNEL};messageid=0"
+    for message_id in ("1", "2"):
+        assert await _claim(db_session, tenant.id, dead, message_id, conversation=chat)
+
+    async def mark(owner: int, *ids: str) -> bool:
+        return await mark_restart_notice(
+            db_session,
+            tenant_id=tenant.id,
+            channel_id=CHANNEL,
+            conversation_id=chat,
+            message_ids=ids,
+            owner_key=owner,
+        )
+
+    assert await mark(dead, "1", "2"), "the exiting process told the chat"
+    taken = await reclaim_teams_messages(
+        db_session,
+        tenant_id=tenant.id,
+        owner_key=new,
+        replay_after=datetime.now(UTC) - timedelta(minutes=10),
+        horizon=datetime.now(UTC) - timedelta(days=1),
+    )
+    assert [row.message_id for row in taken.replay] == ["1", "2"]
+    assert await mark(new, "1", "2"), "a boot's reclaim owes its own drain the notice"
+
+    other = randbits(30) + 2**31
+    assert await _claim(db_session, tenant.id, other, "2", conversation=chat), "a redelivery"
+    assert await mark(other, "2"), "taken by a redelivery, it is owed one again"
+
+
 async def test_a_batch_fence_finishes_its_own_rows_and_leaves_another_owners(
     db_session: AsyncSession,
 ) -> None:

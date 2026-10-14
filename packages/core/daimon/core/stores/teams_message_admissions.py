@@ -83,7 +83,8 @@ async def claim_teams_message(
         return False
     if await owner_is_alive(session, row.owner_key):
         return False
-    row.owner_key = owner_key
+    # A new owner's drain owes the chat its own notice.
+    row.owner_key, row.notice_sent = owner_key, False
     await session.flush()
     return True
 
@@ -221,7 +222,7 @@ async def reclaim_teams_messages(
             continue
         before = TeamsMessageAdmissionRow.model_validate(row)
         fresh = row.created_at >= replay_after
-        row.owner_key = owner_key
+        row.owner_key, row.notice_sent = owner_key, False
         if not fresh:
             row.handled, row.message = True, None
         (taken.replay if fresh else taken.stale).append(before)

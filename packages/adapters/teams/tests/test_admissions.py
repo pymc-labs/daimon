@@ -23,6 +23,7 @@ from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import set_provision_status
+from daimon.core.turn.protection import ProtectionState
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import MessageActivity
 from sqlalchemy.exc import OperationalError
@@ -195,6 +196,50 @@ async def test_a_message_arriving_during_the_drain_is_held_unless_unaddressed(
 
     assert _texts(sender) == [HOLDING], "only the asker is told"
     assert ran == ["a-2"], "the addressed message is replayed; chatter is not held"
+
+
+def _policy_unread_once() -> AsyncMock:
+    """The access policy read fails once (`UNKNOWN`), then reads unprotected."""
+    states = [ProtectionState.UNKNOWN]
+    return AsyncMock(
+        side_effect=lambda *_, **__: states.pop() if states else ProtectionState.UNPROTECTED
+    )
+
+
+async def test_an_unread_access_policy_retries_the_message_instead_of_dropping_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+
+    with (
+        patch.object(app_module, "protection_state", _policy_unread_once()),
+        patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn,
+    ):
+        await teams._admit(make_inbound("hi"))
+        await _settle(teams)
+        turn.assert_not_awaited()
+        await teams._retry_unfenced()
+        await _settle(teams)
+
+    turn.assert_awaited_once()
+    assert _texts(sender) == [], "nothing is said while the policy is unread"
+
+
+async def test_an_arrival_during_the_drain_with_an_unread_policy_is_kept_untold(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    teams.draining = True
+
+    with patch.object(app_module, "protection_state", _policy_unread_once()):
+        await teams.handle_message(_message(make_message_activity(activity_id="a-2")))
+    with patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn:
+        await _boot(_app(db_session_factory, FakeSender()))
+
+    assert _texts(sender) == [], "no notice into a chat whose policy went unread"
+    turn.assert_awaited_once()
 
 
 @pytest.mark.parametrize("draining", [True, False])
