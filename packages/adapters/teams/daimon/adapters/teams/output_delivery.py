@@ -370,6 +370,7 @@ class TeamsOutputDelivery:
             return
         del self._offers[token]
         self._claimed.add(offer.file_id)
+        self._previewed.discard(offer.file_id)
         upload = activity.value.upload_info
         if activity.value.action == "accept" and upload is not None:
             work = self._upload(offer, upload)

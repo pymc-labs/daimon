@@ -592,6 +592,34 @@ async def test_dm_image_reoffered_after_its_card_expires_is_not_previewed_again(
     )
 
 
+async def test_dm_image_reoffered_after_a_failed_upload_is_previewed_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An answered offer is done with: the next offer is a fresh one, preview included."""
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], contents={"file_png": content})
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    card = _card(harness.sender, 1).content
+    assert isinstance(card, FileConsentCard)
+    harness.sender.fail_on.add(2)
+
+    await harness.delivery.handle_consent(
+        _consent("accept", cast("dict[str, str]", card.accept_context)["offer"])
+    )
+    with pytest.raises(httpx.ConnectError):
+        await harness.settle()
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    kinds = [(a.attachments or [])[0].content_type for a in harness.sender.activities]
+    assert kinds == [
+        "image/png",
+        FILE_CONSENT_CONTENT_TYPE,
+        FILE_INFO_CONTENT_TYPE,
+        "image/png",
+        FILE_CONSENT_CONTENT_TYPE,
+    ], "the output stays listed, and its next offer shows the chart again"
+
+
 async def test_failed_dm_preview_still_sends_the_consent_card(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
