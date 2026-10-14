@@ -44,7 +44,6 @@ from daimon.core.checkpoint_prompt import (
     CHECKPOINT_EXCLUDED_PATHS,
     HANDOFF_LEFT_OUT_MARKER,
     HANDOFF_LEFT_OUT_MORE_MARKER,
-    HANDOFF_PARTIAL_SUFFIX,
     HANDOFF_TOO_LARGE_MARKER,
     handoff_filename,
 )
@@ -581,38 +580,6 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_arch
 
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "checkpoint_failed"
-
-
-async def test_transfer_never_collects_a_bundle_still_being_written(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """tar writes under a partial name and renames when done; a turn killed
-    mid-pack leaves only the partial file, which is truncated, not a bundle."""
-    state = FakeSessionsState(ma=FakeMAState())
-    client = _client(state)
-    old_session = await _make_session(client)
-    _seed_conversation(state, old_session, with_reply=True)
-    _script_checkpoint_reply(state, old_session, "ok")
-    partial = handoff_filename(TRANSFER_ID) + HANDOFF_PARTIAL_SUFFIX
-    state.write_output(old_session, partial, TARBALL[:10])
-
-    outcome = await transfer_workspace(
-        client,
-        db_session_factory,
-        old_session_id=old_session,
-        old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-    )
-
-    assert isinstance(outcome, TranscriptOnly), "a partial archive is not a handoff"
-    assert outcome.gap_reason == "checkpoint_failed", "it reads as no archive at all"
 
 
 async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(

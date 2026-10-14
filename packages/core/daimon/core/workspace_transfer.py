@@ -65,7 +65,6 @@ from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_OUTPUTS_DIR,
     HANDOFF_MAX_BYTES,
-    HANDOFF_PARTIAL_SUFFIX,
     build_checkpoint_prompt,
     checkpoint_head_lines,
     checkpoint_left_out,
@@ -327,9 +326,7 @@ async def _poll_for_bundle(
             (
                 meta
                 for meta in page.data
-                if meta.downloadable is True
-                and is_handoff_filename(meta.filename)
-                and not meta.filename.endswith(HANDOFF_PARTIAL_SUFFIX)
+                if meta.downloadable is True and is_handoff_filename(meta.filename)
             ),
             None,
         )

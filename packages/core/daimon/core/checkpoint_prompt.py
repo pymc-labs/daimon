@@ -77,9 +77,8 @@ CHECKPOINT_EXCLUDED_PATHS: tuple[str, ...] = (
 CHECKPOINT_OUTPUTS_DIR = "/mnt/session/outputs"
 
 #: Printed by the checkpoint turn instead of a listing when the finished
-#: archive is over the cap even after the partial rebuild. The archive is
-#: deleted first, so a rejected transfer leaves nothing behind in the old
-#: session's outputs.
+#: archive is over the cap even after the partial rebuild. Such an archive
+#: never reaches the old session's outputs.
 HANDOFF_TOO_LARGE_MARKER = "HANDOFF_TOO_LARGE"
 
 #: Printed once per file the partial rebuild left out, as ``<marker> /<path>``
@@ -108,13 +107,13 @@ CHECKPOINT_EXCLUDED_GLOBS: tuple[str, ...] = (
     ".cache",
 )
 
-#: Appended to the bundle's name while tar writes it: the transfer never
-#: collects a name ending in it, and the sweep skips it by the prefix.
-HANDOFF_PARTIAL_SUFFIX = ".part"
-
-# The partial rebuild's scratch files, outside every archived root (``/tmp``
-# itself is not archived, only ``/tmp/work``): the members with sizes, and
-# the files the rebuild drops.
+# Scratch files, outside every archived root (``/tmp`` itself is not archived,
+# only ``/tmp/work``): the archive while tar writes it, the members with sizes,
+# and the files the partial rebuild drops. The archive is copied into the
+# outputs directory only when final, so that mount only ever sees the final
+# name written once, never a rename. All share the bundle prefix, so one glob
+# removes them.
+_SCRATCH_ARCHIVE_DIR = "/tmp"
 _MEMBER_SIZES_PATH = "/tmp/daimon-handoff-sizes"
 _LEFT_OUT_LIST_PATH = "/tmp/daimon-handoff-left-out.txt"
 
@@ -221,12 +220,10 @@ def build_checkpoint_prompt(
         + [f"    -o {line} \\" for line in rest]
         + ['    \\) -prune -o "$@"; }']
     )
-    # Built under a name the transfer never collects, then renamed in place, so a
-    # turn killed mid-pack leaves no truncated bundle to be picked up.
-    partial_path = f"{archive_path}{HANDOFF_PARTIAL_SUFFIX}"
+    scratch_path = f"{_SCRATCH_ARCHIVE_DIR}/{handoff_filename(transfer_id)}"
     # The left-out list goes to tar as anchored literal names, one per line.
     pack_function = (
-        f"  pack() {{ members -printf '%p\\0' | tar czf {partial_path} --no-recursion "
+        f"  pack() {{ members -printf '%p\\0' | tar czf {scratch_path} --no-recursion "
         f"--anchored --no-wildcards --exclude-from={_LEFT_OUT_LIST_PATH} --null -T -; }}"
     )
     # Over the cap, the archive is rebuilt once without its largest members
@@ -241,7 +238,7 @@ def build_checkpoint_prompt(
     budget = max_bundle_bytes - max_bundle_bytes // 20
     listed = _LEFT_OUT_LISTED
     size_check = [
-        f'  size=$(stat -c %s {partial_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
+        f'  size=$(stat -c %s {scratch_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
         "    members ! -type d \\( -links 1 -printf '%s %p\\0' -o -printf '%s/%n %p\\n\\0' \\) "
         f"> {_MEMBER_SIZES_PATH}",
         "    total=0; while IFS= read -r -d '' e; do total=$((total + ${e%% *} + 1024)); "
@@ -253,11 +250,11 @@ def build_checkpoint_prompt(
         f"    sed 's|^\\./||; s|^|{HANDOFF_LEFT_OUT_MARKER} /|; {listed}q' {_LEFT_OUT_LIST_PATH}",
         f'    n=$(wc -l < {_LEFT_OUT_LIST_PATH}); if [ "$n" -gt {listed} ]; then '
         f'echo "{HANDOFF_LEFT_OUT_MORE_MARKER} $((n - {listed}))"; fi',
-        f"    pack; size=$(stat -c %s {partial_path})",
+        f"    pack; size=$(stat -c %s {scratch_path})",
         "  fi",
-        f'  if [ "$size" -gt {max_bundle_bytes} ]; then rm -f {partial_path}; '
-        f'echo "{HANDOFF_TOO_LARGE_MARKER} $size"; else mv {partial_path} {archive_path}; '
-        f"ls -l {archive_path}; fi",
+        f'  if [ "$size" -gt {max_bundle_bytes} ]; then echo "{HANDOFF_TOO_LARGE_MARKER} $size"; '
+        f"else cp {scratch_path} {archive_path}; ls -l {archive_path}; fi",
+        f"  rm -f {_SCRATCH_ARCHIVE_DIR}/{HANDOFF_FILENAME_PREFIX}*",
     ]
 
     steps: list[str] = []
@@ -333,9 +330,8 @@ def build_checkpoint_prompt(
         )
 
     archive_commands = [
-        f"{step('build the archive and check its size.')} The shell starts in /, and the "
-        "archive must be written flat into the outputs directory. Run these commands in one "
-        "shell, in order, exactly as written:",
+        f"{step('build the archive and check its size.')} Run these commands in one shell, in "
+        "order, exactly as written:",
         "  cd /",
         f"  mkdir -p {home_dir}/work {CHECKPOINT_SCRATCH_DIR}",
         f"  : > {_LEFT_OUT_LIST_PATH}",

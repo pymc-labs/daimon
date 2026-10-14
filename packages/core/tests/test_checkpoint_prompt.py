@@ -60,11 +60,9 @@ def test_prompt_names_the_exact_archive_path_and_filename() -> None:
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
     filename = handoff_filename(TRANSFER_ID)
-    assert f"tar czf /mnt/session/outputs/{filename}.part " in prompt, (
-        "the archive must be written flat into the outputs directory, under a partial name"
-    )
-    assert f"mv /mnt/session/outputs/{filename}.part /mnt/session/outputs/{filename};" in prompt, (
-        "and renamed once it is done, so a killed turn leaves no truncated bundle"
+    assert f"tar czf /tmp/{filename} " in prompt, "tar writes outside the outputs directory"
+    assert f"cp /tmp/{filename} /mnt/session/outputs/{filename};" in prompt, (
+        "and the final archive is copied in flat, never renamed inside that mount"
     )
     assert f"ls -l /mnt/session/outputs/{filename}" in prompt, (
         "the reply has to show the archive so the transfer can read the size back"
@@ -369,7 +367,7 @@ def test_prompt_generates_the_whole_tar_command_exactly() -> None:
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
-    archive = f"/mnt/session/outputs/{handoff_filename(TRANSFER_ID)}.part"
+    archive = f"/tmp/{handoff_filename(TRANSFER_ID)}"
     expected = "\n".join(
         [
             "  members() { find . root mnt/session/outputs tmp/work mnt/repo/analytics -mindepth 1 "
@@ -397,14 +395,15 @@ def test_prompt_deletes_an_over_cap_archive_and_reports_the_size_instead() -> No
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
     )
     archive = f"/mnt/session/outputs/{handoff_filename(TRANSFER_ID)}"
-    partial = f"{archive}.part"
-    assert f'  size=$(stat -c %s {partial}); if [ "$size" -gt 20971520 ]; then\n' in prompt, (
+    scratch = f"/tmp/{handoff_filename(TRANSFER_ID)}"
+    assert f'  size=$(stat -c %s {scratch}); if [ "$size" -gt 20971520 ]; then\n' in prompt, (
         "an over-cap archive is rebuilt first"
     )
     assert (
-        f'  if [ "$size" -gt 20971520 ]; then rm -f {partial}; echo "HANDOFF_TOO_LARGE $size"; '
-        f"else mv {partial} {archive}; ls -l {archive}; fi" in prompt
-    ), "the size guard, the delete and the listing are one command, after the rebuild"
+        f'  if [ "$size" -gt 20971520 ]; then echo "HANDOFF_TOO_LARGE $size"; '
+        f"else cp {scratch} {archive}; ls -l {archive}; fi\n  rm -f /tmp/daimon-handoff-*\n"
+        in prompt
+    ), "only an archive under the cap reaches the outputs, and the scratch files go after"
     assert "do not retry, shrink or rebuild the archive yourself" in prompt, (
         "an over-cap archive is a final answer, not an invitation to a second attempt"
     )
@@ -644,8 +643,9 @@ def test_an_archive_still_over_the_cap_after_the_rebuild_is_deleted(tmp_path: Pa
 
     assert checkpoint_too_large_bytes(output) is not None, "the rejection is reported"
     assert list((old / "mnt" / "session" / "outputs").iterdir()) == [], (
-        "the over-cap archive is deleted, partial name and all"
+        "the over-cap archive never reaches the outputs directory"
     )
+    assert [p.name for p in (old / "tmp").iterdir()] == ["work"], "nor stays in scratch"
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
