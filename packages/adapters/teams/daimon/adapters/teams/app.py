@@ -705,9 +705,9 @@ class TeamsApp:
                     conversation_id, activity.id, now=datetime.now(UTC)
                 )
             except _DB_ERRORS as exc:
-                # Unrecorded, the refusal still goes out: the seen-set covers this process.
+                # Unrecorded, another process could send it too: stay silent.
                 log.warning("teams.admission.claim_failed", error_type=type(exc).__name__)
-                fresh = True
+                fresh = False
             if fresh:
                 try:
                     await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)

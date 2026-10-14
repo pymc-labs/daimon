@@ -452,6 +452,20 @@ async def test_a_refusal_that_cannot_be_sent_is_logged(
     } in logs, "a refusal nobody saw is still on record"
 
 
+async def test_a_refusal_whose_receipt_cannot_be_recorded_is_not_sent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Unrecorded, a second process could refuse it too: silence beats a double reply."""
+    teams = _app(db_session_factory, FakeSender())
+    reply = AsyncMock()
+    down = AsyncMock(side_effect=SQLAlchemyError("down"))
+    with patch("daimon.adapters.teams.app.TeamsAdmissions.claim_receipt", down):
+        await teams.handle_message(
+            _message(make_message_activity(conversation_type="groupChat"), reply)
+        )
+    reply.assert_not_awaited()
+
+
 async def test_only_the_author_can_cancel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
