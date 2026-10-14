@@ -95,6 +95,15 @@ FROM marked
 
 
 def upgrade() -> None:
+    # Hold off concurrent working-repo changes (set_working_repo, a binding
+    # clear, a mode switch) between the eligibility read and the update, so a
+    # choice made while the migration runs is never overwritten. The tables
+    # stay readable; the lock ends with this migration's transaction.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute(
+        "LOCK TABLE agent_github_mode, agent_github_grants, agent_repo_binding "
+        "IN SHARE ROW EXCLUSIVE MODE"
+    )
     op.execute(_MARK_WORKING_REPOS)
 
 
