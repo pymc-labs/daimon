@@ -19,7 +19,7 @@ before Daimon code runs; tokens from any other issuer (such as Entra ID) are
 refused with 401 first. The same listener serves `/healthz` and `/readyz`,
 and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
 (below); a reverse proxy in front must pass that path too. With
-`DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true` it also serves
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true` it also serves
 `POST /api/graph/notifications` and `/api/graph/lifecycle` for Microsoft Graph
 (see [Private and shared channels](#private-and-shared-channels-optional)).
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
@@ -251,13 +251,14 @@ consent above) a followed thread stays mention-only.
 Teams sends a bot only the private or shared channel posts that @mention it,
 whatever the app's resource-specific consent says, and that consent cannot
 subscribe to those channels' messages. With
-`DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true` Daimon subscribes to Microsoft
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true` Daimon subscribes to Microsoft
 Graph change notifications for each private or shared channel it is in, so
 replies in followed threads, Replies quoting the bot and typed `@<bot name>`
 mentions (when plain-text mentions are on) work there as in a standard
 channel. Graph's notification carries no content: Daimon reads the new
-message once and routes it exactly as a Bot Framework message. @mentions
-still arrive through Bot Framework and are ignored here. Expect a few seconds
+message once and routes it exactly as a Bot Framework message, guests and
+external members classified by the same roster lookup. @mentions still
+arrive through Bot Framework and are ignored here. Expect a few seconds
 of extra latency.
 
 Setup:
@@ -265,9 +266,10 @@ Setup:
 1. Entra → App registrations → the bot's app → API permissions → Add a
    permission → Microsoft Graph → Application permissions →
    `ChannelMessage.Read.All` → Grant admin consent. The permission is
-   tenant-wide; Daimon subscribes only to channels it has been added to.
+   tenant-wide, so Graph would serve any channel; Daimon subscribes only to
+   channels it is in, and checks it still is before each renewal.
 2. Set `DAIMON_TEAMS__PUBLIC_URL` and
-   `DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true`, and let the reverse proxy
+   `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true`, and let the reverse proxy
    pass `/api/graph/notifications` and `/api/graph/lifecycle`.
 3. Restart the service. A channel is subscribed when the bot is added to it
    or first sees a message there; in a channel that already had the bot, one
@@ -275,8 +277,13 @@ Setup:
 
 Subscriptions live about three days and are renewed half a day before they
 expire; removing the bot or deleting the channel deletes its subscription.
-Each notification must carry the channel's secret, compared in constant time,
-or it is refused with 401. When Graph reports missed notifications, Daimon
+If that removal event is lost, the membership check at the next renewal, or
+a send to the channel refused with 403 or 404, deletes it instead. Each
+notification must carry the channel's secret, compared in constant time; one
+that does not is ignored, and a request with no valid entry and a wrong
+secret gets 401. While the service shuts down it answers 503 and reads
+nothing, so Graph retries the batch (for up to four hours) against the next
+instance. When Graph reports missed notifications, Daimon
 reads the channel once for messages after the last one it handled. Edits never
 start a turn, and a message seen through both Bot Framework and Graph, or
 notified twice, runs once (in memory, so not across a restart). A shared

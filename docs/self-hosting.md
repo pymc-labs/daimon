@@ -573,7 +573,7 @@ Teams sends the bot only the private and shared channel posts that @mention
 it. To let followed threads, Replies to the bot and typed `@Daimon` work there
 too, grant the Graph application permission `ChannelMessage.Read.All` with
 admin consent (as in step 1 above), set `DAIMON_TEAMS__PUBLIC_URL` and
-`DAIMON_TEAMS__PRIVATE_CHANNEL_MESSAGES=true`, and add
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true`, and add
 `/api/graph/notifications /api/graph/lifecycle` to the proxy's path list.
 Details are in [`teams.md`](teams.md#private-and-shared-channels-optional).
 
