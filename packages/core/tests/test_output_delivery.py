@@ -929,6 +929,15 @@ def test_oversize_notice_quotes_the_callers_limit() -> None:
     assert "parts under 10 MB" in notice
 
 
+def test_oversize_notice_quotes_a_200_mib_limit() -> None:
+    notice = render_oversize_notice(
+        SkippedFile(file_id="f", filename="dump.bin", size_bytes=250 * 1024 * 1024),
+        max_bytes=200 * 1024 * 1024,
+    )
+    assert "`dump.bin` is 250 MB, over the 200 MB upload limit" in notice
+    assert "parts under 200 MB" in notice
+
+
 async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> None:
     """OutputPostingUnavailable propagates out of the sweep: no DELETE is ever
     made and no further file is downloaded."""

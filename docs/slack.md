@@ -51,11 +51,12 @@ from the session's file listing, so the listing only ever holds undelivered
 work and there is no delivery-receipt store to go stale. An interrupted
 delivery (a deploy restart mid-sweep) leaves the file listed and it goes out
 on the next turn; a crash between posting and deleting can re-post a file
-once. Files over 20 MB are not uploaded (Slack's own hard cap is far higher,
-but large files lose thread previews and the upload buffers the whole payload
-in memory). Such a file stays in the session's listing and the agent's
-workspace, and the thread gets one notice naming it and offering a smaller
-version or parts under 20 MB. 0-byte files are skipped silently, logged and
+once. Files over 200 MB are not uploaded (Slack's own hard cap is far higher,
+but Daimon downloads the whole file into memory and then uploads it). Such a
+file stays in the session's listing and the agent's workspace, and the thread
+gets one notice naming it and offering a smaller version or parts under
+200 MB. An upload has a time limit that grows with the file's size, so a
+file near the cap gets several minutes. 0-byte files are skipped silently, logged and
 removed. Delivery requires the
 `files:write` bot scope; adding a scope to an existing install requires
 re-running the install flow. Channel admin grants that name a user group need

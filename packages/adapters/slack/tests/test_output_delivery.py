@@ -17,9 +17,13 @@ import daimon.adapters.slack.output_delivery as delivery_module
 import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
-from daimon.adapters.slack.output_delivery import deliver_session_outputs
-from daimon.core.output_delivery import MAX_BYTES_PER_FILE, NoticedFiles
+from daimon.adapters.slack.output_delivery import (
+    SLACK_MAX_BYTES_PER_FILE,
+    deliver_session_outputs,
+)
+from daimon.core.output_delivery import NoticedFiles
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from slack_sdk.web.async_client import AsyncWebClient
 from yarl import URL
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
@@ -519,7 +523,7 @@ async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload
                     created_at=NOW,
                     filename="big data.bin",
                     mime_type="application/octet-stream",
-                    size_bytes=MAX_BYTES_PER_FILE + 1,
+                    size_bytes=SLACK_MAX_BYTES_PER_FILE + 1,
                     type="file",
                     downloadable=True,
                 ).model_dump(mode="json")
@@ -550,7 +554,7 @@ async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload
     assert len(notices) == 1, "exactly one oversize notice across both sweeps"
     notice_text = str(notices[0].kwargs)
     assert "big_data.bin" in notice_text, "the notice must name the sanitized file"
-    assert "20 MB upload limit" in notice_text, "the notice must quote the delivery limit"
+    assert "200 MB upload limit" in notice_text, "the notice must quote the delivery limit"
     assert "still saved" in notice_text, "the notice must say the file was kept"
     upload_requests = [
         url
@@ -559,6 +563,88 @@ async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload
     ]
     assert upload_requests == [], "an oversize file must produce no upload requests at all"
     assert deletes == [], "the oversize entry must be kept, not deleted"
+
+
+async def test_a_file_at_the_slack_cap_is_downloaded_and_uploaded(
+    fake_slack_web_client: Any,
+) -> None:
+    """The cap is 200 MiB: a file of exactly that size per its listing metadata
+    is delivered and deleted, not skipped. The metadata size is all the sweep
+    checks before downloading, so the test never holds 200 MiB of bytes."""
+    mock = fake_slack_web_client.mock
+    mock.post(
+        _GET_URL,
+        payload={"ok": True, "file_id": "F1", "upload_url": "https://files.slack.com/upload/v1/A"},
+    )
+    mock.post(_UPLOAD, status=200, body="OK", content_type="text/plain")
+    mock.post(_COMPLETE, payload={"ok": True, "files": [{"id": "F1", "title": "big.bin"}]})
+
+    deletes: list[str] = []
+
+    def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        deletes.append(match.group(1))
+        return httpx.Response(200, json={"id": match.group(1), "type": "file_deleted"})
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda request, match: list_response(
+            [
+                FileMetadata(
+                    id="file_big",
+                    created_at=NOW,
+                    filename="big",
+                    mime_type="application/octet-stream",
+                    size_bytes=SLACK_MAX_BYTES_PER_FILE,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"stand-in"),
+    )
+    router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    await deliver_session_outputs(
+        build_fake_anthropic(router.dispatch),
+        fake_slack_web_client.client,
+        session_id="sesn_1",
+        channel_id="C1",
+        thread_ts="1.2",
+        notice_keys=NoticeKeys(),
+        team_id="T1",
+        sleep=sleep,
+    )
+
+    assert deletes == ["file_big"], "a file at the cap is delivered, then removed from the listing"
+    assert _post_message_calls(mock) == [], "no oversize notice"
+    assert any("files.slack.com" in str(url) for _, url in mock.requests), "it was uploaded"
+
+
+def test_the_slack_cap_is_200_mib() -> None:
+    assert SLACK_MAX_BYTES_PER_FILE == 200 * 1024 * 1024
+
+
+def test_a_large_upload_gets_its_own_client_with_a_longer_timeout() -> None:
+    """The shared session times every call out at 30 s. A file that cannot upload
+    in that gets a client of its own, with minutes; a small one keeps the shared
+    client."""
+    base = AsyncWebClient(token="xoxb-test", retry_handlers=[])
+    uploader = delivery_module._uploader  # pyright: ignore[reportPrivateUsage]
+    assert uploader(base, size_bytes=1024) is base
+    big = uploader(base, size_bytes=SLACK_MAX_BYTES_PER_FILE)
+    assert big is not base
+    assert big.timeout > 300, "200 MiB must have well over the 30 s default"
+    assert big.token == "xoxb-test" and big.session is None
+    assert big.retry_handlers is base.retry_handlers
 
 
 def _abort_delivery_client(fake_slack_web_client: Any) -> Any:

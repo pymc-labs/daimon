@@ -20,6 +20,7 @@ from daimon.adapters.discord.output_delivery import (
     MAX_ATTACHMENTS_PER_MESSAGE,
     AnswerMessage,
     deliver_session_outputs,
+    upload_limit,
 )
 from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -230,6 +231,69 @@ async def test_oversize_uses_guild_limit_posts_skip_notice_and_keeps_the_file() 
         "the notice says the file was kept and how to get it"
     )
     assert deleted == [], "an oversize file is kept, not deleted after the notice"
+
+
+@pytest.mark.parametrize(
+    "guild_limit, expected",
+    [
+        (10 * _MIB, 10 * _MIB),
+        (50 * _MIB, 50 * _MIB),
+        (100 * _MIB, 100 * _MIB),
+        (500 * _MIB, 200 * _MIB),
+    ],
+)
+def test_upload_limit_is_the_guilds_and_never_above_the_ceiling(
+    guild_limit: int, expected: int
+) -> None:
+    assert upload_limit(_thread(guild_limit)) == expected
+
+
+def test_upload_limit_is_discords_default_where_there_is_no_guild() -> None:
+    dm = MagicMock(spec=discord.DMChannel)
+    dm.guild = None
+    thread = _thread()
+    thread.guild = None  # pyright: ignore[reportAttributeAccessIssue]
+    assert upload_limit(cast(discord.DMChannel, dm)) == 10 * _MIB
+    assert upload_limit(thread) == 10 * _MIB
+
+
+async def test_a_boosted_guild_takes_a_file_the_default_limit_would_skip() -> None:
+    client, deleted = _client_with_file(filename="render", size_bytes=40 * _MIB, content=b"video")
+    thread = _thread(50 * _MIB)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    files = [c.kwargs["file"] for c in thread.send.await_args_list if "file" in c.kwargs]
+    assert [f.filename for f in files] == ["render.png"], "uploaded under the 50 MiB limit"
+    assert deleted == ["file_chart"]
+
+
+async def test_an_unboosted_guild_skips_a_file_a_boosted_one_would_take_and_quotes_its_limit() -> (
+    None
+):
+    client, deleted = _client_with_file(filename="render.mp4", size_bytes=40 * _MIB)
+    thread = _thread(10 * _MIB)
+
+    await deliver_session_outputs(
+        client,
+        thread,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    thread.send.assert_awaited_once()
+    notice = thread.send.await_args.args[0]
+    assert "40 MB" in notice and "10 MB upload limit" in notice
+    assert deleted == [], "the file is kept, not downloaded or deleted"
 
 
 async def test_a_kept_oversize_file_is_announced_once_across_turns() -> None:

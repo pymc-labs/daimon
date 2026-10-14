@@ -1144,9 +1144,11 @@ only if a new attachment holds its exact bytes, and the next edit starts from
 what is there. A file the answer cannot take (Discord's
 10-attachment limit, or a failed edit) is posted on its own below it, and a
 turn that ended without an answer (stopped or failed) gets its files as
-separate posts. Discord uses the guild's upload limit and checks the
-channel's writers before posting. A file over the limit (the guild's on
-Discord, 20 MB on Slack) is never deleted: it stays listed and in the
+separate posts. Discord uses the guild's upload limit (10 MB, up to 100 MB
+for a boosted server; 10 MB where there is no guild) and checks the
+channel's writers before posting. No limit goes above 200 MB, because each
+file is read into memory whole. A file over the limit (the guild's on
+Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it stays listed and in the
 agent's workspace, and the thread gets one notice naming the file, its size
 and the limit, and offering a smaller version or parts under the limit.
 Each adapter remembers which kept files it has announced (bounded, per

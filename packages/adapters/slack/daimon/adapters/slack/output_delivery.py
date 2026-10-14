@@ -11,6 +11,7 @@ in the core engine.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
+    MAX_BYTES_CEILING,
     DeliverableFile,
     NoticedFiles,
     OutputPostingUnavailable,
@@ -32,6 +34,18 @@ from slack_sdk.web.async_client import AsyncWebClient
 log = structlog.get_logger(__name__)
 
 MAX_NOTICE_KEYS = 4096
+
+# Slack takes far more, but the sweep holds the whole file in memory, so Daimon
+# stops at its own ceiling.
+SLACK_MAX_BYTES_PER_FILE = MAX_BYTES_CEILING
+
+# The shared Slack session times every call out at 30 s. A file that would not
+# upload in that time at a floor rate of 512 KiB/s (about 4 Mbit/s) goes through
+# a client of its own, whose timeout is the 30 s plus its bytes at that rate:
+# 200 MiB gets about 7 minutes. Smaller files keep the shared session.
+_UPLOAD_BASE_TIMEOUT_S = 30
+_UPLOAD_MIN_BYTES_PER_S = 512 * 1024
+_SHARED_SESSION_MAX_BYTES = _UPLOAD_BASE_TIMEOUT_S * _UPLOAD_MIN_BYTES_PER_S
 
 
 class NoticeKeys:
@@ -118,6 +132,26 @@ def _abort_code(exc: OutputPostingUnavailable) -> str:
     return ""
 
 
+def _uploader(web_client: AsyncWebClient, *, size_bytes: int) -> AsyncWebClient:
+    """The client to upload ``size_bytes`` with: ``web_client``, or for a large
+    file one whose timeout grows with the file.
+
+    The shared session's timeout replaces the client's, so a client that keeps
+    the session cannot be given more time. The client built here has no session:
+    slack_sdk opens one per call with the client's timeout.
+    """
+    if size_bytes <= _SHARED_SESSION_MAX_BYTES:
+        return web_client
+    return AsyncWebClient(
+        token=web_client.token,
+        base_url=web_client.base_url,
+        timeout=_UPLOAD_BASE_TIMEOUT_S + math.ceil(size_bytes / _UPLOAD_MIN_BYTES_PER_S),
+        retry_handlers=web_client.retry_handlers,
+        proxy=web_client.proxy,
+        ssl=web_client.ssl,
+    )
+
+
 def _build_poster(
     web_client: AsyncWebClient, *, channel_id: str, thread_ts: str
 ) -> Callable[[DeliverableFile], Awaitable[None]]:
@@ -127,7 +161,7 @@ def _build_poster(
             # No content_type kwarg: files_upload_v2 forwards it into the
             # files.completeUploadExternal query string, where it is a silent
             # no-op — Slack derives the preview from the filename extension.
-            await web_client.files_upload_v2(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+            await _uploader(web_client, size_bytes=len(file.content)).files_upload_v2(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 thread_ts=thread_ts,
                 filename=display_name,
@@ -146,11 +180,13 @@ def _build_poster(
 
 
 def _build_skip_notice(
-    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str
+    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str, max_bytes: int
 ) -> Callable[[SkippedFile], Awaitable[None]]:
     async def on_skip(skipped: SkippedFile) -> None:
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id, thread_ts=thread_ts, text=render_oversize_notice(skipped)
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=render_oversize_notice(skipped, max_bytes=max_bytes),
         )
 
     return on_skip
@@ -176,7 +212,12 @@ async def deliver_session_outputs(
     a file over the limit gets one notice rather than one per sweep.
     """
     post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
-    on_skip = _build_skip_notice(web_client, channel_id=channel_id, thread_ts=thread_ts)
+    on_skip = _build_skip_notice(
+        web_client,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        max_bytes=SLACK_MAX_BYTES_PER_FILE,
+    )
     try:
         await sweep_session_outputs(
             anthropic_client,
@@ -184,6 +225,7 @@ async def deliver_session_outputs(
             post=post,
             on_skip=on_skip,
             sleep=sleep,
+            max_bytes=SLACK_MAX_BYTES_PER_FILE,
             noticed=noticed_files,
         )
     except OutputPostingUnavailable as exc:

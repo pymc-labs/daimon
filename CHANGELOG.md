@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Files an agent makes can now be up to 200 MB on Slack, and up to your Discord server's own upload limit.** Before, anything over 20 MB was kept and announced instead of attached, even where the platform takes more. On Discord the limit is the server's (10 MB, 50 MB or 100 MB depending on its boost level), and 10 MB where there is no server; it never goes above 200 MB. Teams stays at 20 MB. A file over the limit is still kept in the agent's workspace, and the notice now quotes the limit that applied. Slack uploads get a time limit that grows with the file size instead of 30 seconds. Files the agent sends with `send_message` stay capped at 20 MiB each.
 - **On Discord and Slack, the `Ref` line on a stop or failure notice is now shown only to admins.** It is the last six characters of the request id. Before, everyone saw it; now it appears only when the person whose turn it is holds the admin role there, and it is left out whenever that is not known. Support can still find the failure from the logs, which keep the full request id. Teams is unchanged.
 
 ### Fixed

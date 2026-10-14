@@ -18,7 +18,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
-    MAX_BYTES_PER_FILE,
+    MAX_BYTES_CEILING,
     DeliverableFile,
     NoticedFiles,
     OutputPostingUnavailable,
@@ -32,10 +32,24 @@ import discord
 log = structlog.get_logger(__name__)
 # Discord's limit on attachments per message, counting the ones already there.
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+# Discord's upload limit where the destination's own is unknown (a DM, or no guild).
+DEFAULT_MAX_BYTES_PER_FILE = 10 * 1024 * 1024
 _ATTACH_NOTICE = (
     "I couldn't attach the generated file. This bot needs the Attach Files "
     "permission in this thread."
 )
+
+
+def upload_limit(destination: discord.abc.Messageable) -> int:
+    """The most bytes one file may have where ``destination`` takes uploads.
+
+    The guild's own limit, which rises with its boost level, and never above
+    Daimon's ceiling. A destination with no guild (a DM) gets Discord's default.
+    """
+    guild = getattr(destination, "guild", None)
+    if guild is None:
+        return DEFAULT_MAX_BYTES_PER_FILE
+    return min(MAX_BYTES_CEILING, guild.filesize_limit)
 
 
 @dataclass(frozen=True)
@@ -71,7 +85,7 @@ async def deliver_session_outputs(
     posted on its own. A file over the guild's upload limit stays listed
     and gets one notice per ``noticed_files`` lifetime.
     """
-    max_bytes = min(MAX_BYTES_PER_FILE, thread.guild.filesize_limit)
+    max_bytes = upload_limit(thread)
     already_posted: dict[tuple[str, int], list[discord.Attachment]] | None = None
     target = _AnswerTarget(thread, answer, session_id=session_id)
 
