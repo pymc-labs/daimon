@@ -1088,7 +1088,11 @@ to commit with git and open pull requests with `gh pr create` on `GH_TOKEN`,
 ending the body with "Requested by <name>", instead of the GitHub MCP, where a
 person's own sign-in would outrank the agent's credential and author the work.
 A stored per-agent token is not read in App mode. Legacy sessions continue to
-use their existing binding and credential path.
+use their existing binding and credential path. Switching a legacy agent to
+App mode keeps its working repo: when the agent has a repo binding and no
+grant is marked as the working repo (a working repo chosen in the same flow
+wins), the one grant for the binding's repo becomes the working repo, because
+App mode ignores the binding and mounts only a marked grant.
 
 **Stage three, `run_prepared_turn()` —
 `packages/core/daimon/core/turn/run.py`.** Calls the driver, and on a

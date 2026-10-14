@@ -494,6 +494,55 @@ async def remove_grant(
     return True
 
 
+async def _keep_legacy_working_repo(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    grants: list[AgentGitHubGrant],
+    changed_by_account_id: uuid.UUID | None,
+) -> None:
+    """Carry a legacy agent's working repo over as the App working-repo grant.
+
+    App mode ignores the legacy repo binding and mounts only the grant marked
+    as the working repo, so an agent switched over without one silently stops
+    mounting its repo. A working repo chosen in the same flow wins: this acts
+    only when no grant is marked, and only when exactly one grant is the
+    binding's repo.
+    """
+    if any(grant.is_working_repo for grant in grants):
+        return
+    binding = await agent_repo_binding.get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
+    if binding is None:
+        return
+    wanted = binding.repo_url.casefold()
+    matches: list[AgentGitHubGrant] = []
+    for grant in grants:
+        repo = await repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
+        if repo is not None and repo.repo_full_name.casefold() == wanted:
+            matches.append(grant)
+    if len(matches) != 1:
+        return
+    matches[0].is_working_repo = True
+    matches[0].version += 1
+    await session.flush()
+    await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=changed_by_account_id,
+        agent_id=agent_id,
+        platform=None,
+        platform_user_id=None,
+        tool_name="github_grants",
+        operation="github_grant",
+        outcome="allowed",
+        reason="working repo kept from legacy binding",
+        github_repo_ids=[matches[0].repo_id],
+    )
+
+
 async def activate_agent(
     session: AsyncSession,
     *,
@@ -507,10 +556,13 @@ async def activate_agent(
         mode = AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="legacy")
         session.add(mode)
         await session.flush()
-    grants = await session.scalars(
-        select(AgentGitHubGrant)
-        .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
-        .with_for_update()
+    switching = mode.mode != "app"
+    grants = list(
+        await session.scalars(
+            select(AgentGitHubGrant)
+            .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+            .with_for_update()
+        )
     )
     for grant in grants:
         authorized = await repo_for_agent(
@@ -528,6 +580,14 @@ async def activate_agent(
         if grant.staged:
             grant.staged = False
             grant.version += 1
+    if switching:
+        await _keep_legacy_working_repo(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            grants=grants,
+            changed_by_account_id=changed_by_account_id,
+        )
     mode.mode = "app"
     await session.flush()
     await append_event(
