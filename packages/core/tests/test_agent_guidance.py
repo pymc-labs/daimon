@@ -359,7 +359,7 @@ def test_commits_and_prs_go_through_git_and_gh_with_a_requested_by_line() -> Non
     # Commits and PRs made through the GitHub MCP are authored by whoever signed
     # in to it; git and gh with GH_TOKEN are authored by the GitHub App.
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
-    assert "Make every commit and pull request with git and `gh` (GH_TOKEN)" in block
+    assert "When GH_TOKEN is set, make every commit and pull request with git and `gh`" in block
     assert "never through the GitHub MCP" in block
     assert "open the PR with `gh pr create`" in block
     assert 'End every PR body with "Requested by <name>"' in block

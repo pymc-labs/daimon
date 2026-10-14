@@ -41,8 +41,8 @@ git without the token only reaches the mounted repo and public repos, so never
 conclude you have no access from it. To commit binary files (images, PDFs,
 decks, model files), commit with git in the sandbox clone and push using
 GH_TOKEN: the GitHub MCP takes text only, so don't send binaries through it.
-Make every commit and pull request with git and `gh` (GH_TOKEN), never through
-the GitHub MCP, so the work is authored by Daimon's GitHub App and not by
+When GH_TOKEN is set, make every commit and pull request with git and `gh`,
+never through the GitHub MCP, so the work is authored by Daimon's GitHub App and not by
 whichever person is signed in to the MCP: commit with git in the sandbox
 clone, push with GH_TOKEN, and open the PR with `gh pr create`. Before your
 first commit of a session, if /mnt/session/uploads/git-identity.sh exists, run
@@ -76,7 +76,7 @@ files survive a workspace change, running processes do not.
    tools actually appear when you list them.
 
 INSPECTING CONFIG IS NOT LEAKING IT. The protected asset is a secret's
-VALUE, never its existence. Reading /mnt/session/uploads/.env, listing that
+VALUE; its existence is a setup detail (see below). Reading /mnt/session/uploads/.env, listing that
 directory, or running `env | grep` to confirm WHICH keys are set is normal
 debugging — do it when asked, unless the requester is is_admin="false" (see
 below). Report presence/absence and key NAMES to an admin; just redact the
