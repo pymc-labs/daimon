@@ -172,12 +172,18 @@ class TeamsOutputDelivery:
         try:
             await self._send_attachments(inbound, previews)
             return
-        except TEAMS_SEND_ERRORS:
-            if len(previews) == 1:
-                log.warning("teams.output_preview.send_failed", count=1, exc_info=True)
+        except httpx.HTTPStatusError as err:
+            # Bot Framework's message size cap is undocumented: several previews together
+            # may be refused (413, 400) where each alone fits. Only a refusal is retried
+            # one by one; 429 is throttling, not size.
+            status = err.response.status_code
+            if len(previews) == 1 or not 400 <= status < 500 or status == 429:
+                log.warning("teams.output_preview.send_failed", count=len(previews), status=status)
                 return
-        # Bot Framework's message size cap is undocumented: several previews together
-        # may be refused (413) where each alone fits, so retry them one by one.
+        except TEAMS_SEND_ERRORS:
+            # A timed-out or dropped send may have landed: a retry could show them twice.
+            log.warning("teams.output_preview.send_failed", count=len(previews), exc_info=True)
+            return
         for preview in previews:
             try:
                 await self._send_attachments(inbound, [preview])

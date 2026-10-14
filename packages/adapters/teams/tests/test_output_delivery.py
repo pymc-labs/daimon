@@ -610,7 +610,7 @@ async def test_failed_channel_preview_leaves_the_delivery_alone(
     """A 413 on the preview message is logged; the files are saved and linked as before."""
     meta, content = _png("file_png")
     harness = _harness(db_session_factory, [meta], _channel_files(_uploaded), {"file_png": content})
-    harness.sender.fail_on.add(0)
+    harness.sender.refuse_on.add(0)
 
     async def append(_: str) -> bool:
         return True
@@ -631,7 +631,8 @@ async def test_refused_channel_previews_are_retried_one_per_message(
     harness = _harness(
         db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
     )
-    harness.sender.fail_on.update({0, 2})
+    harness.sender.refuse_on.add(0)
+    harness.sender.fail_on.add(2)
 
     async def append(_: str) -> bool:
         return True
@@ -649,6 +650,30 @@ async def test_refused_channel_previews_are_retried_one_per_message(
     failures = [e for e in logs if e["event"] == "teams.output_preview.send_failed"]
     assert len(failures) == 1, "only the preview refused on its own is logged"
     assert len(harness.deletes) == 3, "the files are delivered whatever the previews do"
+
+
+@pytest.mark.parametrize("timeout_index", [0, 1], ids=["asyncio", "httpx"])
+async def test_timed_out_channel_previews_are_not_resent(
+    db_session_factory: async_sessionmaker[AsyncSession], timeout_index: int
+) -> None:
+    """A timed-out send may have landed: resending one by one could show each twice."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(2)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(
+        db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
+    )
+    # The links message takes index 0 when the answer cannot carry them.
+    harness.sender.timeout_on.add(timeout_index)
+
+    async def append(_: str) -> bool:
+        return timeout_index == 0
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    previews = [a for a in harness.sender.activities if a.attachments]
+    assert len(previews) == 1, "the combined preview message is sent once, never retried"
+    assert any(e["event"] == "teams.output_preview.send_failed" for e in logs), "logged"
 
 
 async def test_an_unprompted_channel_turn_posts_no_previews(
