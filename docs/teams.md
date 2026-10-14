@@ -415,7 +415,9 @@ On shutdown the adapter stops admitting, gives running turns 15 seconds, then
 cancels them. The next boot edits every card a restart cut off to an
 interrupted notice before admitting new turns. A channel card whose send never
 returned an id is found by reading its thread through Graph; one in a 1:1 chat,
-which cannot be read back, is left as is.
+which cannot be read back, is left as is. A message still queued behind a
+cancelled turn gets a short "I restarted for an update" reply asking for it
+again, not the generic error.
 
 Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a

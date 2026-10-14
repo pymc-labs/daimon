@@ -178,6 +178,8 @@ _SEEN_ACTIVITY_CAP = 10_000
 _RECOVERY_RETRY_DELAY_S = 1.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
+# A message still queued when a deploy drains the process: not a bug, so not _FAILED.
+_RESTARTED = "I restarted for an update before I got to this. Please send it again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
 # "Daimon can't answer here": the same words as Discord and Slack, with
 # Teams' `setup` command.
@@ -821,9 +823,10 @@ class TeamsApp:
                 yield
         finally:
             self._release(key)
+            notice = _RESTARTED if self.draining else _FAILED
             for item in self._pending.pop(key, []):
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._say(item, _FAILED)
+                    await self._say(item, notice)
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
