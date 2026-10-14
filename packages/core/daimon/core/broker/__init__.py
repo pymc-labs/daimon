@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 logger = structlog.get_logger()
 
 # Stateless protocol implementers — module-level dict is acceptable
-# (no I/O, no settings cached).
+# (no I/O, no settings cached); provider configuration is injected per call.
 _REGISTRY: dict[str, TokenProvider] = {
     GitHubTokenProvider.service: GitHubTokenProvider(),
     GcloudTokenProvider.service: GcloudTokenProvider(),

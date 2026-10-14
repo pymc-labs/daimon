@@ -1,0 +1,105 @@
+{
+  "scenario_id": "QA-NEW29-DM-CONVERSATION-FORM",
+  "source": {
+    "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+    "sha256": "d6ab4b94d50a03e0a84ed446f0e4233bae1238579ef9fa60264731ef5589fa7b"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+    "sha256": "6da69a60c049506cf9adadd4729c4e522abd1a6ee25a6f745b4a55509a36a75c"
+  },
+  "scenario": {
+    "id": "QA-NEW29-DM-CONVERSATION-FORM",
+    "title": "asking for a private form inside a /dm conversation gives a clear route, not a broken form",
+    "friction": [
+      "NEW-29"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 1,
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "Admin: `/dm action:enable` in the QA guild. You: `/dm action:move` from a QA channel, then in the DM ask: 'store my ACME_API_KEY with a private form'.",
+        "expect": "Either a working form, or one clear line: forms only work in the server, ask in #channel. No tool error, no 'no longer valid' loop."
+      },
+      {
+        "click": "Admin: `/dm action:disable`.",
+        "expect": "Ongoing DM says DMs were turned off (not silence)."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+      },
+      "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

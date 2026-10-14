@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import pytest
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock
 from daimon.core.turn.status_lines import (
     format_draft,
@@ -150,3 +151,157 @@ def test_a_long_mcp_tool_name_is_clipped_before_its_server() -> None:
 def test_tool_lines_strip_backticks_so_the_code_block_holds() -> None:
     lines = format_tool_lines([_call("run", type="agent.mcp_tool_use", server="ops`evil")])
     assert "`" not in "".join(lines), "a backtick would close the adapter's code block early"
+
+
+def test_default_summary_does_not_display_a_backend_inside_a_turn() -> None:
+    import uuid
+
+    from daimon.core.turn.outcomes import TurnObservation
+    from daimon.core.turn.status_lines import backend_footer_text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    observation = TurnObservation(async_sessionmaker(), uuid.UUID(int=701), "slack")
+    assert backend_footer_text() is None
+    with observation.activate():
+        assert backend_footer_text() is None
+        assert format_summary(agent_name="Ada", elapsed_seconds=5, cost=None, left=None) == (
+            "Ada\u2003\u20035s"
+        )
+    assert backend_footer_text() is None
+
+
+@pytest.mark.parametrize(
+    "profile,expected",
+    [
+        ("anthropic.managed_agents", "anthropic"),
+        ("openai.persistent_workspace", "openai"),
+        ("gemini.inline_reuse", "gemini"),
+    ],
+)
+def test_configured_summary_uses_only_the_admitted_profile_metadata(profile, expected) -> None:
+    import uuid
+
+    from daimon.core.turn.outcomes import TurnObservation
+    from daimon.core.turn.status_lines import backend_footer_text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    observation = TurnObservation(
+        async_sessionmaker(), uuid.UUID(int=702), "slack", backend_profile=profile
+    )
+    with observation.activate():
+        assert backend_footer_text() == expected
+        assert (
+            format_summary(agent_name="Ada", elapsed_seconds=5, cost="Cost unknown", left="$1 left")
+            == f"Ada\u2003\u20035s\u2003\u2003Cost unknown\u2003\u2003$1 left\u2003\u2003{expected}"
+        )
+    assert backend_footer_text() is None
+
+
+async def test_concurrent_turns_keep_their_backend_footers_isolated() -> None:
+    import asyncio
+    import uuid
+
+    from daimon.core.turn.outcomes import TurnObservation
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    first = asyncio.Event()
+    second = asyncio.Event()
+
+    async def render(profile, ready, peer):
+        observation = TurnObservation(
+            async_sessionmaker(), uuid.UUID(int=703), "slack", backend_profile=profile
+        )
+        with observation.activate():
+            ready.set()
+            await peer.wait()
+            return format_summary(agent_name=None, elapsed_seconds=5, cost=None, left=None)
+
+    rows = await asyncio.gather(
+        render("openai.persistent_workspace", first, second),
+        render("gemini.inline_reuse", second, first),
+    )
+    assert rows == ["5s\u2003\u2003openai", "5s\u2003\u2003gemini"]
+    assert format_summary(agent_name=None, elapsed_seconds=5, cost=None, left=None) == "5s"
+
+
+@pytest.mark.parametrize(
+    "profile,enabled,expected",
+    [
+        (None, True, "5s"),
+        ("openai.persistent_workspace", False, "5s"),
+        ("openai.persistent_workspace", True, "5s\u2003\u2003openai"),
+        ("gemini.inline_reuse", True, "5s\u2003\u2003gemini"),
+        ("anthropic.managed_agents", True, "5s\u2003\u2003anthropic"),
+    ],
+)
+async def test_prepared_turn_activates_only_its_admitted_footer(
+    monkeypatch, profile, enabled, expected
+) -> None:
+    import asyncio
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from daimon.core.turn import run as run_module
+    from daimon.core.turn.outcomes import TurnObservation, current_outcome
+    from daimon.core.turn.prepare import PreparedTurn
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.running import RunningTurns
+    from daimon.core.turn.state import TurnState
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from .test_provider_dispatch import ACCOUNT, TENANT, admission, record_usage
+
+    # Only the outer context wrapper is controlled here; the admission and
+    # preparation proofs exercise real selection and retained bindings.
+    prepared = PreparedTurn(
+        replace(admission(), backend_footer_profile=profile),
+        "session",
+        None,
+        None,
+        True,
+        ACCOUNT,
+        record_usage,
+    )
+    observed = []
+
+    async def run(*args, **kwargs):
+        assert current_outcome.get() is not None
+        observed.append(format_summary(agent_name=None, elapsed_seconds=5, cost=None, left=None))
+        return RunOutcome(TurnState(), "session", None, False)
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", run)
+    monkeypatch.setattr(TurnObservation, "finish", lambda *args, **kwargs: None)
+
+    async def reseed():
+        raise AssertionError("no recovery in a context proof")
+
+    await run_module.run_prepared_turn(
+        SimpleNamespace(
+            sessionmaker=async_sessionmaker(),
+            backend_selection_enabled=enabled,
+            running_turns=RunningTurns(),
+        ),
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="offline",
+        lifecycle=object(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda _: object(),
+    )
+    assert observed == [expected]
+    assert current_outcome.get() is None
+    assert format_summary(agent_name=None, elapsed_seconds=5, cost=None, left=None) == "5s"
+
+
+def test_optional_backend_context_does_not_shift_existing_positional_fields() -> None:
+    import inspect
+
+    from daimon.core.turn.outcomes import TurnObservation
+
+    signature = inspect.signature(TurnObservation)
+    assert signature.parameters["backend_profile"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD

@@ -1,0 +1,182 @@
+{
+  "scenario_id": "QA-D1-CANARY-TWO-TURN",
+  "scenario_sha256": "f27cb01435d171ed9ae253d7cbbc0ba58ca61815a5970c53832d1aed5cfd34f1",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>",
+      "events": [
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA canary, turn 1. Do exactly this: (1) read the attached PDF; (2) run this bash command in your working directory and do not show its output: python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt ; (3) reply with only one line: CODE=<the code word printed in the PDF>"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:bash:2",
+          "type": "agent.tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "bash",
+          "input": {
+            "command": "python3 -c \"import secrets;print(secrets.token_hex(6))\" > qa_canary.txt"
+          },
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:bash:2:result",
+          "type": "agent.tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "tool_use_id": "qa-anthropic:f9a8a68cd096bd45-turn-1:bash:2",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "CODE=TANGERINE-4471"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:f9a8a68cd096bd45-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "request_text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist.",
+      "events": [
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA canary, turn 2. Run `cat qa_canary.txt` in your working directory and reply with only one line: FILE=<its exact contents>, or FILE=MISSING if the file does not exist."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:bash:2",
+          "type": "agent.tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "bash",
+          "input": {
+            "command": "cat qa_canary.txt"
+          },
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:bash:2:result",
+          "type": "agent.tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "tool_use_id": "qa-anthropic:f9a8a68cd096bd45-turn-2:bash:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "a1b2c3d4e5f6\n"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "FILE=a1b2c3d4e5f6"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:f9a8a68cd096bd45-turn-2:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:f9a8a68cd096bd45-turn-2:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

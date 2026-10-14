@@ -313,6 +313,18 @@ async def list_agent_files(
     return [_row(cipher, o) for o in rows]
 
 
+async def list_agent_file_revisions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> tuple[tuple[str, datetime], ...]:
+    """Read owned key identities/generations without loading or decoding values."""
+    result = await session.execute(
+        select(AgentFile.key, AgentFile.updated_at)
+        .where(AgentFile.tenant_id == tenant_id, AgentFile.agent_id == agent_id)
+        .order_by(AgentFile.key)
+    )
+    return tuple((key, updated_at) for key, updated_at in result)
+
+
 async def delete_agent_file(
     session: AsyncSession,
     *,

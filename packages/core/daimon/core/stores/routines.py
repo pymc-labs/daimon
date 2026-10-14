@@ -445,7 +445,7 @@ async def record_result(
     `tail` accepts the complete final reply. The preview keeps its last 1000
     characters, with an explicit truncation marker when shortened.
 
-    `delivery` is only passed for a routine with a destination (FEAT-085):
+    `delivery` is only passed for a routine with a destination:
     `pending` queues this fire's complete reply for the adapter to post (copied into
     `delivery_payload`), `skipped` records why it will not be
     (`delivery_note`). Either replaces whatever an earlier fire left in the

@@ -1,0 +1,27 @@
+id: QA-NEW2-CSV-ATTACHMENT-READ
+title: a CSV attached to the mention is read in the same turn
+friction:
+- NEW-1
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  file: fixtures/sales.csv
+  text: 'Which region in the attached CSV has the most units? Reply with only: TOP=<region>'
+- do: wait_done
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 15
+- kind: text_present
+  turn: 1
+  pattern: (?i)TOP=west
+- kind: done_within_s
+  turn: 1
+  max: 60
+teardown: []

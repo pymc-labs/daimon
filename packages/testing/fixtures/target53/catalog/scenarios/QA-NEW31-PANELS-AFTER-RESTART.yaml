@@ -1,0 +1,34 @@
+id: QA-NEW31-PANELS-AFTER-RESTART
+title: setup, billing and routines panels left open across a restart explain they
+  expired
+friction:
+- NEW-31
+- D37
+- F16
+set: B
+surface: discord
+tier: manual
+priority: P2
+est_turns: 0
+setup: []
+steps: []
+assert: []
+human:
+- click: Open `/agent-setup`, `/billing` and `/routines`. Driver restarts workers.
+    Click any button in each.
+  expect: A 'panel expired, run /x again' message, never 'This interaction failed'.
+- click: Open `/billing` and wait 11 minutes, then click Refresh.
+  expect: Same expired message.
+- click: '`/billing` as an admin: look at the usage breakdown.'
+  expect: People shown by name, never 'User 1243'; one 'Channel budget' heading (F16).
+- click: "`/billing` \u2192 Add credit \u2192 $50."
+  expect: "Checkout link within 3 s or 'thinking\u2026' then link; never 'This interaction\
+    \ failed'."
+- click: "`/agent-setup` \u2192 agent \u2192 Details \u2192 Use from your coding tools\
+    \ \u2192 mint a token. Wait 6 min, try to revoke it."
+  expect: Revoke still possible (a list of your coding tokens), not a dead 5-minute
+    button.
+- click: Finish a $10 test-mode checkout.
+  expect: The success page names Daimon/the server and the amount; nothing that looks
+    like a phishing page (v2-discord N27).
+teardown: []

@@ -489,6 +489,11 @@ async def _create_routine_impl(
     destination_channel_id = await _check_destination(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
+    if runtime.settings.mcp.require_routine_destination and destination_kind is None:
+        raise ToolError(
+            "No destination was supplied. This routine won't post, so nothing was created. "
+            "Where should results be delivered?"
+        )
     async with runtime.session_factory() as session:
         policy = await _load_policy_for_save(session, tenant_id=tenant_id)
     budget_channel_id = destination_channel_id

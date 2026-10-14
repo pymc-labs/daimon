@@ -17,7 +17,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Concatenate, ParamSpec, cast
 
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.channel_admins import ChannelAdminCaller
+from daimon.core.channel_admins import ChannelAdminCaller, is_guild_admin_by_permissions
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import get_tenant
 
@@ -40,9 +40,12 @@ def is_member_guild_admin(member: discord.Member, *, guild_owner_id: int | None)
     Checks: guild owner, administrator permission, or manage_guild permission.
     Pure function — no I/O, no DB access.
     """
-    if guild_owner_id is not None and member.id == guild_owner_id:
-        return True
-    return member.guild_permissions.administrator or member.guild_permissions.manage_guild
+    return is_guild_admin_by_permissions(
+        user_id=member.id,
+        owner_id=guild_owner_id,
+        administrator=member.guild_permissions.administrator,
+        manage_guild=member.guild_permissions.manage_guild,
+    )
 
 
 def member_role_ids(member: discord.Member) -> list[str]:

@@ -88,7 +88,11 @@ class LegacyTurnTransport:
 
     async def replay(self) -> list[BetaManagedAgentsSessionEvent]:
         events: list[BetaManagedAgentsSessionEvent] = []
-        async for event in self._client.beta.sessions.events.list(session_id=self._session_id):
+        # Every reconnect walks the whole session log; the SDK default page size
+        # would multiply the round trips on a long session fivefold.
+        async for event in self._client.beta.sessions.events.list(
+            session_id=self._session_id, limit=100
+        ):
             events.append(event)
         return events
 

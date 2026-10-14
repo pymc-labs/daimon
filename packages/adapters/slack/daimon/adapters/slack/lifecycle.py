@@ -38,11 +38,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import aiohttp
@@ -52,7 +53,6 @@ from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
     EmbedEvent,
-    State,
     TurnPhase,
     format_termination_notice,
     to_blocks,
@@ -68,6 +68,7 @@ from daimon.adapters.slack.mrkdwn import (
     prose_mentions,
     seal_markdown_block,
 )
+from daimon.adapters.slack.progress_receipt import InitialProgressReceipt
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -75,13 +76,16 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
+from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
+from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -90,6 +94,9 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_totals import ProviderUsageTotals
+from mux.contracts.events import Event
+from mux.profiles import emits_legacy_events_for
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -183,6 +190,7 @@ class SlackTurnLifecycle:
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: UUID | None = None,
         budget_channel_id: str | None = None,
+        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
         identity: AgentIdentity | None = None,
@@ -203,6 +211,7 @@ class SlackTurnLifecycle:
         self._ma_agent_id = ma_agent_id
         self._intent_id = intent_id
         self._budget_channel_id = budget_channel_id
+        self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
         self._agent_name = agent_name
@@ -212,6 +221,7 @@ class SlackTurnLifecycle:
         # Only an admin sees the request ref on a stop or failure notice.
         self._requester_is_admin = requester_is_admin
         self._model_id = model_id
+        self._provider_draft: ProviderDraft | None = None
         self._markup = markup
         self._register = register
         self._deregister = deregister
@@ -341,7 +351,7 @@ class SlackTurnLifecycle:
         card, before its response supplies the message ts. Once the response
         returns, the ts is registered as a recovery and legacy lookup key.
         """
-        await self._maybe_flush()
+        await self._maybe_flush(initial=True)
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -349,12 +359,28 @@ class SlackTurnLifecycle:
         # call only. The Block Kit flush (chat-API I/O) rides the render
         # tick instead, where a slow or rate-limited chat.update only
         # delays the render task, never the consume loop.
+        if self._provider_draft is not None:
+            return
         embed_event = _map_sse_event(event)
         if embed_event is None:
             return
         self._state = update(self._state, embed_event)
 
-    async def _maybe_flush(self) -> None:
+    async def on_provider_event(self, event: Event) -> None:
+        """Cheap local tap; only on_render may send the provider's draft."""
+        if emits_legacy_events_for(event.native.provider) or self._terminal:
+            return
+        if self._provider_draft is None:
+            self._provider_draft = ProviderDraft()
+        text = self._provider_draft.text(event)
+        if text is not None:
+            self._state = (
+                update(self._state, EmbedEvent(kind="message", label=text))
+                if text
+                else dataclasses.replace(self._state, text_preview=None)
+            )
+
+    async def _maybe_flush(self, *, initial: bool = False) -> None:
         """Post or update the status message, subject to debounce. No-op after terminal."""
         if self._terminal:
             return
@@ -371,6 +397,11 @@ class SlackTurnLifecycle:
             cancel_key = self._status_ts
         blocks = to_blocks(self._state, now=now, cancel_key=cancel_key)
         text = to_fallback_text(self._state, now=now)
+        rendered_json = (
+            json.dumps({"blocks": blocks, "text": text})
+            if initial and self._on_initial_progress is not None
+            else None
+        )
 
         if self._status_ts is None:
             # First flush — immediate, no debounce.
@@ -395,6 +426,8 @@ class SlackTurnLifecycle:
                     self._pending_registered = False
                 raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
+            if rendered_json is not None:
+                self._observe_initial_progress(rendered_json, operation="send")
             self._register(self._status_ts, self._cancel, self._author_id)
             # The card is now routable by its message ts. Remove the temporary
             # key promptly so later clicks follow any recovery rebind of that ts.
@@ -412,6 +445,25 @@ class SlackTurnLifecycle:
                 text=text,
             )
             self._last_flush = now
+            if rendered_json is not None:
+                self._observe_initial_progress(rendered_json, operation="edit")
+
+    def _observe_initial_progress(
+        self, rendered_json: str, *, operation: Literal["send", "edit"]
+    ) -> None:
+        if self._on_initial_progress is None:
+            return
+        assert self._status_ts is not None
+        self._on_initial_progress(
+            InitialProgressReceipt(
+                operation=operation,
+                destination_id=self._channel,
+                thread_id=self._thread_ts,
+                message_id=self._status_ts,
+                rendered_json=rendered_json,
+                observed_s=self._clock(),
+            )
+        )
 
     def _apply_usage(self, state: TurnState) -> None:
         """Price accumulated token totals onto the Block Kit state.
@@ -419,6 +471,12 @@ class SlackTurnLifecycle:
         Price the short and long prompt request totals at their respective rates.
         An unpriced model omits the cost from the summary line.
         """
+        t = state.usage_totals
+        if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
+            # Only an opted-in, authorized host attempt supplies a complete
+            # native cost. Compatibility counters never become an MA meter.
+            self._state = dataclasses.replace(self._state, cost_str=native_footer_text(t))
+            return
         cost = cost_of_totals(
             state.usage_totals,
             state.long_prompt_usage_totals,

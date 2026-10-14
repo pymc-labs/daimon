@@ -55,7 +55,7 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> MagicMock:
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=TEAM)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/skills":
+        if request.url.path in ("/v1/skills", "/v1/skills/skill_lib"):
             skill = {
                 "id": "skill_lib",
                 "created_at": _NOW,
@@ -65,6 +65,8 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> MagicMock:
                 "type": "skill",
                 "updated_at": _NOW,
             }
+            if request.url.path != "/v1/skills":  # the attach's existence check
+                return httpx.Response(200, json=skill)
             return httpx.Response(200, json={"data": [skill], "next_page": None})
         agent = ma_agent(name="shared", tenant_id=tenant_id).model_dump(mode="json")
         return httpx.Response(200, json={"data": [agent], "next_page": None})

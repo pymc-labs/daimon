@@ -69,6 +69,7 @@ __all__ = [
     "ContinuationAction",
     "ContinuationDecision",
     "ContinuationRequest",
+    "ContinuationReasonUnavailable",
     "ResponderChanged",
     "build_input_continuation",
     "check_wake_responder",
@@ -77,6 +78,7 @@ __all__ = [
     "load_asking_agent_id",
     "record_continuation",
     "record_input_continuation",
+    "require_writable_reason",
     "sanitize_requested_work",
     "settle_continuation",
 ]
@@ -155,6 +157,23 @@ class ContinuationDecision(BaseModel):
     action: ContinuationAction
     message: str | None = None
     seed_user_message: str | None = None
+
+
+class ContinuationReasonUnavailable(DaimonError):
+    """A reason is readable but not yet safe to produce during a rolling release."""
+
+
+def require_writable_reason(reason: ContinuationReason) -> None:
+    """Keep new writes closed until every queue reader can ignore unknown reasons.
+
+    The previous release aborts a queue scan on a worker-completion row, hiding
+    unrelated timers. There is deliberately no caller override: enabling this
+    producer requires a compatible-reader release and a proved rollback floor.
+    """
+    if reason == "worker_finished":
+        raise ContinuationReasonUnavailable(
+            "Worker completion enqueueing requires a compatible-reader release"
+        )
 
 
 class ResponderChanged(DaimonError):
@@ -280,6 +299,7 @@ async def record_continuation(
     request: ContinuationRequest,
 ) -> None:
     """Queue `request` as pending. Dispatches nothing; commits its own transaction."""
+    require_writable_reason(request.reason)
     async with sessionmaker.begin() as session:
         await _record_continuation_row(
             session,

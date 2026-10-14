@@ -67,13 +67,13 @@ async def test_normalizer_spans_sdk_pages_and_preserves_exact_paginator_requests
             "GET",
             "/v1/sessions/session/events",
             httpx.Response(200, json={"data": first, "next_page": "page2"}),
-            query=(("beta", "true"),),
+            query=(("beta", "true"), ("limit", "100")),
         ),
         ScriptedReply(
             "GET",
             "/v1/sessions/session/events",
             httpx.Response(200, json={"data": second, "next_page": None}),
-            query=(("beta", "true"), ("page", "page2")),
+            query=(("beta", "true"), ("limit", "100"), ("page", "page2")),
         ),
     )
     async with transport.client() as client:

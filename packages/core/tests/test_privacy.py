@@ -937,6 +937,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     """
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
+        "neutral_agent_revisions": "accounts.id FK cascade",
+        "neutral_skill_versions": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",
@@ -1034,6 +1036,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # FK; the scheduler then retires the orphaned session and vault
             # instead of renewing its tokens as a headless requester.
             "github_app_session_vaults",
+            # The provider-neutral operation log (`stores.mux_state`). Nothing
+            # writes it until the mux turn path lands; a row holds an
+            # operation key, request digest and status, no content. The lane
+            # that first writes it wires the purge.
+            "operation",
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",

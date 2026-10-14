@@ -46,6 +46,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.mcp_auth import mint_jwt
+from daimon.core.tool_safety import backend_switch_tools
 from daimon.testing import ma_agent
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -337,5 +338,5 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
     assert {tool["name"] for tool in chat["result"]["tools"]} == {
         "call_tool",
         "search_tools",
-        *APPROVAL_TOOLS,
+        *(APPROVAL_TOOLS - backend_switch_tools(enabled=True)),
     }

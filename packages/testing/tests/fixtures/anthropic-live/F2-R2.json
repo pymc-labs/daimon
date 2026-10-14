@@ -1,0 +1,238 @@
+{
+  "advisor": false,
+  "attempt_identity": "F2-R2-20261011T183539Z",
+  "attempts_per_session": 1,
+  "cleanup_policy": "interrupt/archive within the total run deadline; unknown/failed cleanup or running-time evidence retains full hold and is reported, never zero runtime",
+  "config_sha256": "36c06fdfe606ba07f42f6f5866cbc68f13b25387fc9aceb62f256ffbabc247e9",
+  "created_at": "2026-10-11T18:35:39.692442+00:00",
+  "credential_file": "/home/clsandoval/.config/daimon-nc/anthropic.env",
+  "dated_model_price": {
+    "config_sha256": "36c06fdfe606ba07f42f6f5866cbc68f13b25387fc9aceb62f256ffbabc247e9",
+    "encoding": "SHA256 sorted-key compact JSON UTF-8 model price object (no newline)",
+    "model_price_sha256": "0403ed42c37c8df954e20756c5cc1cf9f5446a2fea90aa721ef2ae87431911b8",
+    "rates": {
+      "cache_write_5m_input": "0.625",
+      "cache_write_input": "1.00",
+      "cached_input": "0.05",
+      "effective_from": "2026-10-11",
+      "effective_until": "2026-10-12",
+      "input": "0.50",
+      "output": "2.50",
+      "pricing_basis": "standard-global",
+      "short_prompt": {
+        "cache_write_5m_input": "0.125",
+        "cache_write_input": "0.20",
+        "cached_input": "0.01",
+        "input": "0.10",
+        "output": "0.50",
+        "through_input_tokens": 100000
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    }
+  },
+  "deadline_scope": "entire single F2 workload run including setup, session and cleanup; one shared600s clock",
+  "decision_records": [
+    "inbox/20261011T122213Z-LEAD-N4-N8-N3-A7-F2-ENVELOPE-REVISION-DECISION.md",
+    "inbox/20261011T122323Z-LEAD-N4-N8-N12-CLARIFICATIONS.md",
+    "inbox/20261011T183325Z-LEAD-N8-F2-R2-ENVELOPES-REQUEST.md"
+  ],
+  "delegation": false,
+  "expires_at": "2026-10-12T00:00:00Z",
+  "go_requires": "lead replacement signature + separate GO + main merge landed + exact dual-signed live entry on integration + config/ledger/source/recipe pins + offline fake proof of one attempt/no retries, shared deadline including cleanup and cumulative streamed-cost interrupt/archive; reserve before credential/client/session; observed token thresholds are NOT execution preconditions; separately signed acceptance probe GO and successful exact budget/tool ACK readbacks precede the separate workload GO",
+  "guard_policy": {
+    "config_sha256": "36c06fdfe606ba07f42f6f5866cbc68f13b25387fc9aceb62f256ffbabc247e9",
+    "ledger_id": "091ee642b92141f88a8f3026edaa1a5a",
+    "maximum_hold_usd": ".65",
+    "minimum_hold_usd": ".65",
+    "reserve_before": "any credential read, client construction, session creation or other provider I/O",
+    "reserve_method": "BudgetGuard.reserve_with_hold",
+    "settle": "one outer final settlement of the entire run; full disjoint native tokens and ALL measured billed running intervals; incomplete remains held, no synthetic zero"
+  },
+  "kind": "conditional-financial-envelope-v1",
+  "ledger_id": "091ee642b92141f88a8f3026edaa1a5a",
+  "ledger_path": "/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md",
+  "maximum_usd": ".65",
+  "model": "claude-haiku-5-5",
+  "native_budget": {
+    "max_list_cost": {
+      "amount": "25",
+      "currency": "USD"
+    },
+    "type": "limit"
+  },
+  "native_budget_acknowledgement": "require exact create ACK AND independent session GET echo of budget plus effective agent toolset before any user message; mismatch/missing refuses and cleanup follows; acceptance is not proof of enforcement",
+  "native_budget_must_be_acknowledged": true,
+  "native_budget_sent": true,
+  "native_control_mode": "acknowledged-native-budget-plus-guard-deadline-and-streamed-monitor",
+  "native_threads_per_session": 1,
+  "native_tools": [
+    {
+      "configs": [
+        {
+          "enabled": true,
+          "name": "bash",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": true,
+          "name": "read",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": true,
+          "name": "edit",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": true,
+          "name": "grep",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": true,
+          "name": "glob",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": true,
+          "name": "write",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": false,
+          "name": "web_fetch",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": false,
+          "name": "web_search",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        }
+      ],
+      "default_config": {
+        "enabled": false,
+        "permission_policy": {
+          "type": "always_allow"
+        }
+      },
+      "type": "agent_toolset_20260401"
+    },
+    {
+      "configs": [
+        {
+          "enabled": true,
+          "name": "describe_agent",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        },
+        {
+          "enabled": true,
+          "name": "list_my_sessions",
+          "permission_policy": {
+            "type": "always_allow"
+          }
+        }
+      ],
+      "default_config": {
+        "enabled": false,
+        "permission_policy": {
+          "type": "always_allow"
+        }
+      },
+      "mcp_server_name": "daimon-mcp",
+      "type": "mcp_toolset"
+    }
+  ],
+  "not_a_guard_reservation": true,
+  "observed_per_request_thresholds": {
+    "inclusive_input_tokens": 100000,
+    "output_tokens": 20000,
+    "purpose": "record and flag observed exceedance only; never an execution cap or admission precondition",
+    "receipt": "retain per-request counters in guard actual_evidence and explicit flags in the live harness receipt",
+    "unknown": "null/not_observed, never zero or below-threshold"
+  },
+  "on_deadline_expiry": "interrupt and archive the accepted session, then settle once; no further leg/session, retry or resume",
+  "owner": "N4",
+  "package": "F2-Anthropic",
+  "provider": "anthropic",
+  "provider_token_limits_enforced": false,
+  "reservation_estimation_tokens": {
+    "input_tokens": 500000,
+    "output_tokens": 32000
+  },
+  "reservation_estimation_tokens_purpose": "financial sizing/accounting overrun thresholds only, not enforced provider token limits",
+  "retry_resume_or_fresh_extra_sessions": false,
+  "runtime_deadline_must_be_proved": true,
+  "scope": "one F2-R2 workload, one session, fixtureF1, acknowledged25-cent native budget, default-off explicit tools, shared600s including cleanup, cumulative$.52 monitor stop",
+  "sdk_max_retries": 0,
+  "session_order": [
+    "F2"
+  ],
+  "sessions": 1,
+  "settlement": "complete disjoint native usage at per-request tier + TTL writes + matching measured running seconds; unknown keeps full hold; rounded list_cost is only corroboration",
+  "streamed_usage_monitor": {
+    "dated_price_sha256": "0403ed42c37c8df954e20756c5cc1cf9f5446a2fea90aa721ef2ae87431911b8",
+    "model": "claude-haiku-5-5",
+    "on_every": "native span/usage event",
+    "on_threshold": "interrupt and archive immediately, then settle once; no further leg/session",
+    "pricing": "sum disjoint native model-request usage at its per-request short/long tier, cache hits and known 5m/1h cache writes, plus known priced running time; never use rounded list_cost as actual",
+    "provider": "anthropic",
+    "scope": "cumulative across the one F2 session",
+    "threshold_fraction_of_hold": "0.8",
+    "threshold_usd": ".52",
+    "unknown_policy": "unknown counters/costs remain null, never zero; known priced components are labelled lower bounds; threshold may also trigger on a known lower bound; retain full hold for N8 reconciliation when final usage or runtime is incomplete",
+    "unresolved_cache_write_policy": "monitor-only conservative1h rate at the pinned per-request tier for valid unresolved write aggregate; no synthesized TTL counters or settlement actual; invalid/missing/negative counters refuse"
+  },
+  "supersedes_digest": "8eea963b8f3541d8a36d79b87e6e983c40cb9cbe1875086202270e505585fab3",
+  "tool_policy": {
+    "advisor": false,
+    "builtin_allowlist": [
+      "bash",
+      "read",
+      "edit",
+      "grep",
+      "glob",
+      "write"
+    ],
+    "default_enabled": false,
+    "delegation": false,
+    "mcp_allowlist": [
+      "describe_agent",
+      "list_my_sessions"
+    ],
+    "mcp_server": "daimon-mcp",
+    "unknown_tools": "refuse",
+    "web_fetch": false,
+    "web_search": false
+  },
+  "unknown_paid_tools": "refuse",
+  "wall_clock_deadline_seconds_total": 600,
+  "web_fetch": false,
+  "web_search": false,
+  "worst_case_sizing": {
+    "basis": "standard-global maximum1M input at highest1h-write rate plus128k output; excludes separately billed runtime; native budget acceptance/enforcement and tool/no-delegation assumptions must hold",
+    "budget_plus_token_overshoot_usd": "1.57",
+    "native_budget_usd": "0.25",
+    "one_request_token_overshoot_usd": "1.32",
+    "routing_unknown_policy": "standard-global attribution not inferred; prior US1.1 overshoot upper bound retained in ledger-readback report; exact settlement requires verified attribution",
+    "runtime_max_seconds": 600,
+    "runtime_usd_per_hour": "0.08"
+  }
+}

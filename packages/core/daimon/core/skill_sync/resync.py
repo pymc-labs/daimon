@@ -362,7 +362,7 @@ async def resync_bound_repo(
     async def _resync_all(
         client: httpx.AsyncClient,
     ) -> tuple[int, int, datetime | None]:
-        # Shared per-binding loop body (D-01): http_client is the only input
+        # Shared per-binding loop body: http_client is the only input
         # that varies between the caller-owned and self-owned client paths.
         failed_bindings = 0
         retryable_bindings = 0

@@ -35,6 +35,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     build_metadata,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_environment, create_environment, update_environment
 from daimon.core.specs import EnvironmentSpec
 from daimon.core.stores.scoped_config_write import clear_environment_references
 from fastmcp import Context, FastMCP
@@ -124,7 +126,11 @@ async def _create_environment_impl(
     await _reject_environment_name_collision(runtime, auth, spec.name)
     payload = spec.model_dump(exclude_none=True)
     payload["metadata"] = build_metadata(tenant_id=auth.tenant_id, name=spec.name)
-    ma_env = await runtime.client.beta.environments.create(**payload)
+    ma_env = await create_environment(
+        runtime.client,
+        payload,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     return EnvironmentInfo.from_ma(ma_env)
 
 
@@ -173,7 +179,12 @@ async def _update_environment_impl(
             raise ToolError(
                 build_limited_channels_confirm(environment_name=name) + CONFIRM_OPEN_NETWORK_ASK
             )
-    updated = await runtime.client.beta.environments.update(env.id, **patch)
+    updated = await update_environment(
+        runtime.client,
+        env.id,
+        patch,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     return EnvironmentInfo.from_ma(updated)
 
 
@@ -217,7 +228,11 @@ async def _archive_environment_impl(
             raise ToolError(
                 build_limited_channels_confirm(environment_name=None) + CONFIRM_OPEN_NETWORK_ASK
             )
-    await runtime.client.beta.environments.archive(env.id)
+    await archive_environment(
+        runtime.client,
+        env.id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     async with runtime.session_factory.begin() as session:
         cleared = await clear_environment_references(
             session, tenant_id=auth.tenant_id, environment_name=name

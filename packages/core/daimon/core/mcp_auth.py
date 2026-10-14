@@ -54,7 +54,7 @@ def mint_jwt(
 
     This is the Discord/CLI mint path. It intentionally NEVER emits the ``internal``
     claim, so a Discord vault token cannot be treated as a trusted internal token
-    by the MCP admin gate (ADMIN-01/closes #162). Admin elevation for Discord tokens
+    by the MCP admin gate. Admin elevation for Discord tokens
     comes exclusively from the live DB ``role`` re-read by the verifier each turn.
 
     - ``sub`` is the string form of the account UUID (stable across principal renames).
@@ -100,10 +100,10 @@ def mint_internal_mcp_token(
     Signed HS256 with ``secret``. ``sub`` is the stringified account UUID (stable
     across principal renames); ``iat`` is ``int(now.timestamp())``.
 
-    ``is_admin: True`` is always minted per D-50b — headless/routine tokens run with
+    ``is_admin: True`` is always minted — headless/routine tokens run with
     admin privileges.
 
-    ``internal: True`` is the trusted-token discriminator (ADMIN-02). The MCP admin
+    ``internal: True`` is the trusted-token discriminator. The MCP admin
     gate keys on ``is_admin AND internal`` together: a Discord vault token minted by
     ``mint_jwt`` never carries ``internal``, so a stale pre-sweep Discord vault cred
     with ``is_admin=True`` and ``role=user`` is DENIED admin elevation at the gate.
@@ -142,10 +142,10 @@ async def mint_agent_mcp_token(
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
     Writes an mcp_tokens row (jti registry) then signs a token carrying
-    exactly {sub, agent_id, jti, exp} per A1 — no role, no tenant_id.
+    exactly {sub, agent_id, jti, exp} — no role, no tenant_id.
     The verifier re-derives role and tenant from the DB on each request.
 
-    `agent_id` is the derived per-agent UUID (A2, derive_agent_uuid output).
+    `agent_id` is the derived per-agent UUID (derive_agent_uuid output).
     It is stringified into both the row column and the `agent_id` claim.
 
     `now` and `secret` are injected per guideline:architecture — no globals,

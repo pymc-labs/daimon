@@ -1,10 +1,9 @@
-"""Thin helpers over the anthropic SDK's Managed Agents beta.
+"""Managed Agents host policy over scoped resource ports and the turn edge.
 
 Per refinements §6, this module holds ONLY operations whose logic extends
-beyond one SDK call: full-history replay (for SSE reconnect rebuilds) and
-interrupt-with-ack-wait. Everything else (create/list/retrieve/archive on
-agents, environments, sessions) stays a direct SDK call in its call site;
-no delegation layer to maintain.
+beyond one provider call: replay, interrupt acknowledgement and best-effort
+cleanup. Resource I/O uses ports; the remaining replay and acknowledgement
+SDK calls belong to the separately owned turn migration.
 
 Design rules:
 - Free async functions; no class (no cross-call state to own).
@@ -25,12 +24,25 @@ from dataclasses import dataclass
 
 import structlog
 from anthropic import APIError, APIStatusError, AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic._models import construct_type_unchecked
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSessionStatusIdleEvent,
 )
 from daimon.core.errors import DaimonError, TurnError
+from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
+from daimon.core.mux_compat import (
+    delete_skill,
+    delete_skill_version,
+    legacy_call,
+    legacy_iter,
+    list_skill_versions,
+    retrieve_agent,
+)
+from mux.contracts.ids import Scope
+from mux.drivers.anthropic.core_admin import CoreAdmin
+from mux.drivers.anthropic.transport import LegacyTurnTransport
 
 log = structlog.get_logger()
 
@@ -59,9 +71,6 @@ SessionEvent = BetaManagedAgentsSessionEvent
 # Generous default: replay is a paginated GET walk, not a long-lived stream.
 # A stalled paginator would otherwise wedge a reconnecting turn forever.
 REPLAY_TIMEOUT_S: float = 60.0
-# Every reconnect walks the whole session log; the SDK default page size
-# would multiply the round trips on a long session fivefold.
-REPLAY_PAGE_SIZE = 100
 
 
 async def replay_events(
@@ -69,6 +78,7 @@ async def replay_events(
     *,
     session_id: str,
     timeout_s: float = REPLAY_TIMEOUT_S,
+    scope: Scope | None = None,
 ) -> list[SessionEvent]:
     """Return the full ordered event history for `session_id`.
 
@@ -86,16 +96,10 @@ async def replay_events(
     `__cause__`.
     """
 
-    async def _walk() -> list[SessionEvent]:
-        events: list[SessionEvent] = []
-        async for event in anthropic.beta.sessions.events.list(
-            session_id=session_id, limit=REPLAY_PAGE_SIZE
-        ):
-            events.append(event)
-        return events
-
     try:
-        return await asyncio.wait_for(_walk(), timeout=timeout_s)
+        return await asyncio.wait_for(
+            LegacyTurnTransport(anthropic, session_id, scope=scope).replay(), timeout=timeout_s
+        )
     except TimeoutError as err:
         raise TurnError(
             kind="upstream",
@@ -141,6 +145,7 @@ async def send_interrupt_and_wait(
     *,
     session_id: str,
     timeout_s: float = 120.0,
+    scope: Scope | None = None,
 ) -> None:
     """Fire `user.interrupt` against `session_id` and block until MA reaches a
     terminal idle or `timeout_s` elapses.
@@ -159,14 +164,12 @@ async def send_interrupt_and_wait(
     The caller owns rendering (`lifecycle.on_render("… interrupting")`). This
     helper is pure I/O-and-wait.
     """
+    transport = LegacyTurnTransport(anthropic, session_id, scope=scope)
 
     async def _wait_for_terminal_idle() -> None:
-        stream = await anthropic.beta.sessions.events.stream(session_id=session_id)
+        stream = await transport.open_interrupt_stream()
         try:
-            await anthropic.beta.sessions.events.send(
-                session_id,
-                events=[{"type": "user.interrupt"}],
-            )
+            await transport.send([{"type": "user.interrupt"}])
             async for event in stream:
                 if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
                     continue
@@ -205,6 +208,7 @@ async def interrupt_orphaned_session(
     anthropic: AsyncAnthropic,
     *,
     session_id: str,
+    scope: Scope | None,
     timeout_s: float | None = None,
 ) -> bool:
     """Stop the MA turn a dead adapter process left running. Best-effort.
@@ -232,13 +236,21 @@ async def interrupt_orphaned_session(
     overlapping process would see the first one's live markers as orphans,
     and this call would then stop those live MA turns, not just relabel their cards.
     """
+    if scope is None:
+        log.info(
+            "turn.orphan_interrupt_skipped", session_id=session_id, reason="missing_account_id"
+        )
+        return False
     if timeout_s is None:
         timeout_s = ORPHAN_INTERRUPT_TIMEOUT_S
+    backend = managed_agents(anthropic, scope=scope, resources=frozenset({("session", session_id)}))
+    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
     try:
         await asyncio.wait_for(
-            anthropic.beta.sessions.events.send(
-                session_id,
-                events=[{"type": "user.interrupt"}],
+            legacy_call(
+                port.interrupt_orphan(
+                    scope, resource_ref(backend, "session", session_id, scope=scope)
+                )
             ),
             timeout=timeout_s,
         )
@@ -261,6 +273,8 @@ async def update_agent_with_version_retry(
     anthropic: AsyncAnthropic,
     agent_id: str,
     apply_update: Callable[[BetaManagedAgentsAgent], Awaitable[BetaManagedAgentsAgent]],
+    *,
+    scope: Scope | None = None,
 ) -> BetaManagedAgentsAgent:
     """Retrieve `agent_id`, apply `apply_update`, retry once on version conflict.
 
@@ -278,7 +292,10 @@ async def update_agent_with_version_retry(
     Retry-once lives here at the I/O shell; pure logic (reducers, decision functions)
     must not retry internally per guideline:architecture.
     """
-    agent = await anthropic.beta.agents.retrieve(agent_id)
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.ma:update_agent_with_version_retry"
+    )
+    agent = await retrieve_agent(anthropic, agent_id, scope=scope)
     try:
         return await apply_update(agent)
     except APIStatusError as err:
@@ -289,19 +306,24 @@ async def update_agent_with_version_retry(
             agent_id=agent_id,
             status_code=err.status_code,
         )
-        fresh = await anthropic.beta.agents.retrieve(agent_id)
+        fresh = await retrieve_agent(anthropic, agent_id, scope=scope)
         return await apply_update(fresh)
 
 
-async def delete_skill_and_versions(anthropic: AsyncAnthropic, skill_id: str) -> None:
+async def delete_skill_and_versions(
+    anthropic: AsyncAnthropic, skill_id: str, *, scope: Scope | None = None
+) -> None:
     """Delete all versions of a skill on MA, then delete the skill itself.
 
     Tolerates 404 on individual version deletes: a previous partial cleanup
     attempt may have already deleted some versions.
     """
-    async for v in anthropic.beta.skills.versions.list(skill_id, limit=100):
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.ma:delete_skill_and_versions"
+    )
+    async for v in list_skill_versions(anthropic, skill_id, limit=100, scope=scope):
         try:
-            await anthropic.beta.skills.versions.delete(v.version, skill_id=skill_id)
+            await delete_skill_version(anthropic, skill_id, v.version, scope=scope)
         except APIStatusError as err:
             if err.status_code == 404:
                 log.info(
@@ -311,7 +333,7 @@ async def delete_skill_and_versions(anthropic: AsyncAnthropic, skill_id: str) ->
                 )
                 continue
             raise
-    await anthropic.beta.skills.delete(skill_id)
+    await delete_skill(anthropic, skill_id, scope=scope)
 
 
 # Name of the agent that marks a workspace as disposable. Only the metadata
@@ -340,7 +362,13 @@ async def find_workspace_disposable_sentinel(
         MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
     )
 
-    async for agent in client.beta.agents.list(limit=100):
+    scope = Scope.platform(
+        reason="sentinel cleanup: explicit destructive opt-in, enumerates all tenants"
+    )
+    backend = managed_agents(client, scope=scope)
+    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+    async for record in legacy_iter(port.workspace_agents(scope)):
+        agent = construct_type_unchecked(value=record, type_=BetaManagedAgentsAgent)
         if agent.metadata.get(MA_METADATA_KEY_WORKSPACE) == MA_METADATA_VALUE_WORKSPACE_DISPOSABLE:
             return agent
     return None
@@ -376,6 +404,11 @@ async def delete_entire_workspace_for_testing(
     sentinel = await find_workspace_disposable_sentinel(client)
     if sentinel is None:
         raise DaimonError(WORKSPACE_NOT_DISPOSABLE_MESSAGE)
+    scope = Scope.platform(
+        reason="sentinel cleanup: explicit destructive opt-in, enumerates all tenants"
+    )
+    backend = managed_agents(client, scope=scope)
+    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
     errors: list[Exception] = []
 
     # Skills: versions first (MA requires this), then skill.
@@ -386,7 +419,7 @@ async def delete_entire_workspace_for_testing(
     skills, _truncated = await list_skills_lenient(client)
     for skill in skills:
         try:
-            await delete_skill_and_versions(client, skill.id)
+            await delete_skill_and_versions(client, skill.id, scope=scope)
         except APIStatusError as err:
             if err.status_code not in (400, 404):
                 errors.append(err)
@@ -394,13 +427,16 @@ async def delete_entire_workspace_for_testing(
             errors.append(err)
 
     # Environments: delete; 409 means active sessions → archive fallback
-    async for env in client.beta.environments.list(limit=100):
+    async for environment_id in legacy_iter(port.workspace_environment_ids(scope)):
+        ref = resource_ref(backend, "environment", environment_id, scope=scope)
         try:
-            await client.beta.environments.delete(env.id)
+            await legacy_call(backend.environments.delete(scope, ref, key=uuid.uuid4().hex))
         except APIStatusError as err:
             if err.status_code == 409:
                 try:
-                    await client.beta.environments.archive(env.id)
+                    await legacy_call(
+                        backend.environments.archive(scope, ref, key=uuid.uuid4().hex)
+                    )
                 except APIStatusError as arch_err:
                     if arch_err.status_code != 404:
                         errors.append(arch_err)
@@ -410,11 +446,18 @@ async def delete_entire_workspace_for_testing(
     # Agents: archive only — DELETE /v1/agents/{id} returns 404.
     # The sentinel is spared: archiving it would un-mark the workspace and make
     # the next module's pre-clean refuse.
-    async for agent in client.beta.agents.list(limit=100):
-        if agent.id == sentinel.id:
+    async for record in legacy_iter(port.workspace_agents(scope)):
+        agent_id = construct_type_unchecked(value=record, type_=BetaManagedAgentsAgent).id
+        if agent_id == sentinel.id:
             continue
         try:
-            await client.beta.agents.archive(agent.id)
+            await legacy_call(
+                backend.agents.archive(
+                    scope,
+                    resource_ref(backend, "agent", agent_id, scope=scope),
+                    key=uuid.uuid4().hex,
+                )
+            )
         except APIStatusError as err:
             if err.status_code != 404:
                 errors.append(err)
@@ -449,10 +492,20 @@ async def delete_sessions_for_account(
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 
     agents = await list_agents_for_privacy_deletion(client, tenant_id=tenant_id)
+    scope = resource_scope(
+        tenant_id=str(tenant_id), account_id=str(account_id), authorization_id="account-purge"
+    )
+    backend = managed_agents(
+        client, scope=scope, resources=frozenset(("agent", agent.id) for agent in agents)
+    )
+    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
 
     target_ids: set[str] = set()
     for agent in agents:
-        async for session in client.beta.sessions.list(agent_id=agent.id):
+        async for record in legacy_iter(
+            port.sessions_for_agent(scope, resource_ref(backend, "agent", agent.id, scope=scope))
+        ):
+            session = construct_type_unchecked(value=record, type_=BetaManagedAgentsSession)
             if session.metadata.get(MA_METADATA_KEY_ACCOUNT) == str(account_id):
                 target_ids.add(session.id)
 
@@ -462,9 +515,19 @@ async def delete_sessions_for_account(
 
     deleted = 0
     failed = 0
+    backend = managed_agents(
+        client,
+        scope=scope,
+        resources=frozenset(("session", session_id) for session_id in target_ids),
+    )
+    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
     for session_id in target_ids:
         try:
-            await client.beta.sessions.delete(session_id)
+            await legacy_call(
+                port.delete_session(
+                    scope, resource_ref(backend, "session", session_id, scope=scope)
+                )
+            )
             deleted += 1
             if on_deleted is not None:
                 await on_deleted(session_id)

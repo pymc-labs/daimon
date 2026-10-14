@@ -2,28 +2,39 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Final, cast
+from typing import Annotated, Final
 
+import click
 import typer
 from daimon.adapters.cli.commands.channels import agent_rule_app
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.prompt import confirm_or_abort
-from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime, build_runtime
+from daimon.adapters.cli.runtime import (
+    CLI_AUTHORIZATION_ID,
+    FACE_WAIT_S,
+    CliRuntime,
+    build_runtime,
+    cli_principal_id,
+    request_resource_host,
+)
 from daimon.adapters.cli.tenant import (
     TenantSelector,
     discover_tenant,
     resolve_tenant_display,
     resolve_tenant_override,
 )
+from daimon.core import channel_backend
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
 from daimon.core.authz import Subject
-from daimon.core.config import load_settings
+from daimon.core.config import load_settings, load_turn_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_agents_by_daimon_tag,
@@ -42,15 +53,41 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
+from typer.core import TyperGroup
 
-agents_app = typer.Typer(help="Agents: create, list, get, update, archive, fork, rule.")
+
+class AgentCommands(TyperGroup):
+    """Discover optional commands only when the agent group is used."""
+
+    def _prune_disabled(self) -> None:
+        if not channel_backend.backend_selection_enabled(load_turn_settings()):
+            self.commands.pop("backend", None)
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        self._prune_disabled()
+        return super().list_commands(ctx)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        self._prune_disabled()
+        return super().resolve_command(ctx, args)
+
+
+agents_app = typer.Typer(
+    help="Agents: create, list, get, update, archive, fork, rule.", cls=AgentCommands
+)
 agents_app.add_typer(agent_rule_app, name="rule")
+backend_app = typer.Typer(help="Set or clear an agent's model backend.")
+agents_app.add_typer(backend_app, name="backend")
 
 
 @agents_app.callback()
@@ -158,6 +195,12 @@ async def agents_get(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
+    hosted = await _hosted_agent(rt, tenant_id=tenant_id, name=name)
+    if hosted is not None:
+        emit_rows(
+            console, [hosted], columns=("name", "id", "description", "created_at"), as_json=as_json
+        )
+        return
     agent = await find_agent_by_daimon_tag(
         rt.anthropic, tenant_id=tenant_id, name=name, include_archived=include_archived
     )
@@ -169,6 +212,122 @@ async def agents_get(
         columns=("name", "id", "description", "created_at"),
         as_json=as_json,
     )
+
+
+class _HostedAgentRow(BaseModel):
+    """An OpenAI agent read back from its provider, as `agents get` reports it."""
+
+    name: str
+    id: str
+    description: str | None
+    created_at: datetime
+    model: str
+    skills: tuple[str, ...]
+
+
+async def _hosted_agent(
+    rt: CliRuntime, *, tenant_id: uuid.UUID, name: str
+) -> _HostedAgentRow | None:
+    """The named agent from the OpenAI catalog, read back from the provider, or None.
+
+    Only with the operator capability (`rt.resource_hosts`), and only for a
+    tenant the operator's deployment manifest authorizes in the factory's
+    workspace: any other tenant keeps the existing path without the catalog
+    being opened. Under each authorized account the neutral catalog is read
+    fresh, and a host is requested only when an active agent has that name.
+    The readback retrieves the provider's agent and refuses one that differs
+    from the catalog row.
+    """
+    from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
+
+    if rt.gemini_resource_hosts is not None:
+        from daimon.adapters.cli.runtime import ResourceHostMismatch, request_gemini_resource_host
+        from daimon.core.channel_backend import channel_ref, current_backend
+
+        selected_grants = [g for g in rt.gemini_resource_grants if g.tenant_id == tenant_id]
+        for grant in selected_grants:
+            async with rt.sessionmaker() as session:
+                selected = await current_backend(
+                    session, channel_ref(tenant_id, grant.platform, grant.channel_id)
+                )
+            if selected is None or selected.profile != INLINE_REUSE.profile_id:
+                continue
+            if selected.digest != grant.config_digest:
+                raise ResourceHostMismatch("Gemini resource grant is stale")
+            host = request_gemini_resource_host(rt, grant)
+            view = await host.find(name)
+            if view is None:
+                continue
+            fresh = await host.read(view.revision.catalog_id)
+            spec = fresh.agent.spec
+            return _HostedAgentRow(
+                name=name,
+                id=fresh.agent.ref.id,
+                description=spec.description,
+                created_at=fresh.agent.created_at,
+                model=spec.model.id,
+                skills=tuple(skill.id for skill in spec.skills or ()),
+            )
+    factory = rt.resource_hosts
+    if factory is None:
+        return None
+    from daimon.core.turn.runtimes import authorized_channel_deployments
+
+    accounts = sorted(
+        {
+            deployment.account_id
+            for deployment in authorized_channel_deployments(
+                PERSISTENT_WORKSPACE.profile_id, str(tenant_id)
+            )
+            if deployment.project == factory.account_scope_id
+        }
+    )
+    if not accounts:
+        return None
+    from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+    from mux.contracts.ids import Scope
+
+    catalog = PostgresNeutralCatalog(
+        rt.sessionmaker, provider="openai", account_scope_id=factory.account_scope_id
+    )
+    for account in accounts:
+        scope = Scope(
+            tenant_id=str(tenant_id),
+            account_id=account,
+            principal_id=cli_principal_id(rt),
+            authorization_id=CLI_AUTHORIZATION_ID,
+        )
+        named = [
+            row
+            for row in await catalog.list_agents(scope)
+            if row.agent.lifecycle == "active"
+            and (row.agent.spec.metadata or {}).get(MA_METADATA_KEY_NAME, row.agent.spec.name)
+            == name
+        ]
+        if not named:
+            continue
+        # Refuses, rather than falls back, if the host is for any other scope.
+        host = request_resource_host(
+            rt,
+            tenant_id=tenant_id,
+            account_id=uuid.UUID(account),
+            workspace=factory.account_scope_id,
+            operation_key=f"cli-agent-get:{uuid.uuid4()}",
+        )
+        view = await host.find(name)
+        if view is None:
+            return None
+        fresh = await host.read(view.revision.catalog_id)
+        spec = fresh.agent.spec
+        return _HostedAgentRow(
+            name=name,
+            id=fresh.agent.ref.id,
+            description=spec.description,
+            created_at=fresh.agent.created_at,
+            model=spec.model.id,
+            skills=tuple(skill.id for skill in spec.skills or ()),
+        )
+    return None
 
 
 class _GoogleBindingRow(BaseModel):
@@ -377,6 +536,144 @@ async def agents_update(
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
 
 
+@backend_app.command("set")
+def agents_backend_set_command(
+    ctx: typer.Context,
+    name: str,
+    backend: str,
+    yes: Annotated[bool, YES_OPTION] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Preview and set an enabled backend for new threads using this agent."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_backend_change(
+                rt=runtime,
+                console=console,
+                name=name,
+                backend=backend,
+                yes=yes,
+                as_json=as_json,
+                selector=ctx.obj,
+            )
+
+    run_cli(work(), console=console)
+
+
+@backend_app.command("clear")
+def agents_backend_clear_command(
+    ctx: typer.Context,
+    name: str,
+    yes: Annotated[bool, YES_OPTION] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Preview and clear this agent's setting; channel overrides still apply."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_backend_change(
+                rt=runtime,
+                console=console,
+                name=name,
+                backend=None,
+                yes=yes,
+                as_json=as_json,
+                selector=ctx.obj,
+            )
+
+    run_cli(work(), console=console)
+
+
+async def agents_backend_change(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    backend: str | None,
+    yes: bool,
+    as_json: bool,
+    selector: TenantSelector | None = None,
+) -> None:
+    from mux.contracts.config import BackendConfig
+
+    if not channel_backend.backend_selection_enabled(rt.settings.turn):
+        raise StoreError("Model backend selection is disabled on this deployment.")
+    try:
+        target = BackendConfig.model_validate({"backend": backend}).backend
+    except ValidationError as exc:
+        raise typer.BadParameter("Choose a backend supported by this deployment.") from exc
+    if as_json and not yes:
+        raise typer.BadParameter("Use --yes with --json after reviewing the backend preview.")
+    async with rt.sessionmaker.begin() as session:
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    actor = channel_backend.BackendActor(
+        tenant_id=tenant_id,
+        account_id=principal.account_id,
+        subject=Subject(is_admin=True),
+    )
+    service = channel_backend.make_backend_service(rt.sessionmaker, rt.settings.turn)
+    agent = await channel_backend.load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
+    )
+    preview = await service.preview(agent, target)
+    preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
+    if not as_json:
+        console.print(f"Model backend: {preview.target_backend}", markup=False)
+        for label, items in (
+            ("Unsupported skills", preview.unsupported_skills),
+            ("Unsupported MCPs", preview.unsupported_mcps),
+            ("Unsupported capabilities", preview.unsupported_capabilities),
+            ("Shared-thread limits", preview.shared_thread_limits),
+        ):
+            console.print(f"{label}: {', '.join(items) or 'None'}", markup=False)
+        console.print(preview.cost_line, markup=False)
+        console.print("Existing threads keep their backend; channel overrides still apply.")
+    confirm_or_abort(console, f"Change {name}'s model backend?", yes=yes)
+    current = await channel_backend.load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
+    )
+    if target is None:
+        revision = await service.clear_backend(
+            current,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+        )
+    else:
+        revision = await service.set_backend(
+            current,
+            target,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+        )
+    if as_json:
+        console.print(
+            json.dumps(
+                {
+                    "agent": name,
+                    "backend": revision.backend,
+                    "revision": revision.local,
+                    "preview": json.loads(preview_json),
+                }
+            ),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+    else:
+        console.print(f"Updated {name}'s model backend for new threads.", markup=False)
+
+
 @agents_app.command("archive")
 def agents_archive_command(
     ctx: typer.Context,
@@ -426,7 +723,7 @@ async def agents_archive(
     agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
-    await rt.anthropic.beta.agents.archive(agent.id)
+    await archive_agent(rt.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
     await archive_memory_store_best_effort(
         anthropic=rt.anthropic,
         sessionmaker=rt.sessionmaker,
@@ -608,7 +905,9 @@ async def agents_backfill_toolset(
     confirm_or_abort(console, summary, yes=yes)
 
     for row in report_rows:
-        fresh = await rt.anthropic.beta.agents.retrieve(row.agent_id)
+        fresh = await retrieve_agent(
+            rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=row.tenant_id)
+        )
         # Re-check predicate against fresh copy — a concurrent edit may have
         # already added the toolset; skip rather than double-apply.
         already_has_toolset = any(tool.type == "agent_toolset_20260401" for tool in fresh.tools)
@@ -620,10 +919,12 @@ async def agents_backfill_toolset(
         patched_tools = merge_default_agent_toolset(
             [t.model_dump(mode="json", exclude_none=True) for t in fresh.tools]  # type: ignore[arg-type]
         )
-        await rt.anthropic.beta.agents.update(
+        await update_agent(
+            rt.anthropic,
             fresh.id,
             version=fresh.version,
-            tools=patched_tools,  # type: ignore[arg-type]
+            payload={"tools": patched_tools},
+            scope=resource_scope(tenant_id=row.tenant_id),
         )
         console.print(f"[green]✓[/green] patched {row.agent_name!r}")
 
@@ -796,7 +1097,9 @@ async def agents_rekey(
     for (tid, guild_acct, agent_id, _agent_name, _current_acct), new_name in zip(
         to_rekey, post_rekey_names, strict=True
     ):
-        agent = await rt.anthropic.beta.agents.retrieve(agent_id)
+        agent = await retrieve_agent(
+            rt.anthropic, agent_id, scope=resource_scope(tenant_id=str(tid))
+        )
         new_meta = build_metadata(
             tenant_id=tid,
             name=new_name,  # renamed if collision; original name otherwise
@@ -809,11 +1112,12 @@ async def agents_rekey(
         for key in (MA_METADATA_KEY_READER_OF, MA_METADATA_KEY_READER_SOURCE):
             if key in agent.metadata:
                 new_meta[key] = agent.metadata[key]
-        await rt.anthropic.beta.agents.update(
+        await update_agent(
+            rt.anthropic,
             agent.id,
             version=agent.version,
-            name=new_name,
-            metadata=cast("dict[str, str | None]", new_meta),
+            payload={"name": new_name, "metadata": new_meta},
+            scope=resource_scope(tenant_id=str(tid)),
         )
 
     console.print(f"[green]✓ Re-keyed {n_agents} agent(s).[/green]")

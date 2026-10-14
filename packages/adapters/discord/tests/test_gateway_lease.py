@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from secrets import randbits
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -19,8 +20,9 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.discord_gateway_lease import GatewayLease
 from daimon.core.stores.worker_ownership import OWNER_LOSS_GRACE_S
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker
 
 from .harness import make_bot
 
@@ -215,6 +217,17 @@ async def _kill_owner_backend(engine: AsyncEngine, owner_key: int) -> None:
         assert pid is not None
         await session.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
         await session.commit()
+        # Termination signals the backend before shutdown releases its locks.
+        # Synchronize with that shutdown, not with a retry of the thief's take.
+        async with asyncio.timeout(3):
+            while await session.scalar(
+                text("""SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = :pid)
+                     OR EXISTS (SELECT 1 FROM pg_locks WHERE pid = :pid)"""),
+                {"pid": pid},
+            ):
+                # A new transaction refreshes PostgreSQL's activity snapshot.
+                await session.commit()
+                await asyncio.sleep(0.01)
 
 
 async def test_holder_keeps_the_lease_across_a_brief_connection_loss(
@@ -231,8 +244,17 @@ async def test_holder_keeps_the_lease_across_a_brief_connection_loss(
 
 
 async def test_lease_taken_during_a_connection_loss_fails_the_old_holder_stop(
-    db_nullpool_engine: AsyncEngine, lock_key: int
+    db_nullpool_engine: AsyncEngine, lock_key: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    thief_acquired = asyncio.Event()
+    original_confirm = GatewayLease.confirm_after_reconnect
+
+    async def confirm_after_thief(lease: GatewayLease, connection: AsyncConnection) -> bool:
+        # Choose the loss/takeover interleaving before the real lease check.
+        await thief_acquired.wait()
+        return await original_confirm(lease, connection)
+
+    monkeypatch.setattr(GatewayLease, "confirm_after_reconnect", confirm_after_thief)
     await _reset(db_nullpool_engine)
     async with _process(db_nullpool_engine, lock_key, probe_interval_s=0.3) as (lease, lost):
         await lease.acquire(asyncio.Event())
@@ -240,6 +262,7 @@ async def test_lease_taken_during_a_connection_loss_fails_the_old_holder_stop(
         async with db_nullpool_engine.connect() as thief:
             assert await thief.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key})
             await thief.commit()
+            thief_acquired.set()
             await asyncio.wait_for(lost.wait(), timeout=5)
 
 
@@ -275,7 +298,7 @@ def _runtime(lease: GatewayLease) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),
+        turn_deps=replace(deps_for(), turn_path=None),
         gateway_lease=lease,
     )
 

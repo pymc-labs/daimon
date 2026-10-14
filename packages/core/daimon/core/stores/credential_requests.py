@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Any, cast
 
-from daimon.core._models import CredentialRequest
+from daimon.core._models import CredentialRequest, Tenant
 from daimon.core.credential_requests import (
     DEFAULT_TTL,
     CredentialRequestKind,
@@ -23,6 +23,7 @@ from daimon.core.credential_requests import (
 from daimon.core.stores.domain import CredentialRequestRow
 from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 
 async def create_credential_request(
@@ -346,3 +347,100 @@ async def release_failed_credential_request(
     )
     orm = (await session.execute(stmt)).scalar_one_or_none()
     return None if orm is None else CredentialRequestRow.model_validate(orm)
+
+
+def _expiry_card_scope(tenant_id: uuid.UUID | None) -> tuple[ColumnElement[bool], ...]:
+    predicates = (
+        CredentialRequest.platform == "discord",
+        CredentialRequest.tenant_id.in_(select(Tenant.id).where(Tenant.platform == "discord")),
+        CredentialRequest.origin_thread_id.is_not(None),
+        CredentialRequest.origin_thread_id != "",
+        CredentialRequest.posted_message_id.is_not(None),
+        CredentialRequest.posted_message_id != "",
+    )
+    return (
+        predicates if tenant_id is None else (*predicates, CredentialRequest.tenant_id == tenant_id)
+    )
+
+
+async def retire_expired_credential_requests(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    tenant_id: uuid.UUID | None = None,
+    limit: int = 20,
+) -> int:
+    """Spend unused expired cards under the same row lock as a real consume.
+
+    A consumer/superseder holding the row first wins. The pending outcome is
+    committed by the caller before any HTTP, so a restart cannot lose the edit.
+    """
+    due = (
+        select(CredentialRequest.token)
+        .where(
+            *_expiry_card_scope(tenant_id),
+            CredentialRequest.used_at.is_(None),
+            CredentialRequest.outcome.is_(None),
+            CredentialRequest.expires_at <= now,
+        )
+        .order_by(CredentialRequest.expires_at, CredentialRequest.token)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    tokens = await session.scalars(
+        update(CredentialRequest)
+        .where(
+            CredentialRequest.token.in_(due),
+            CredentialRequest.used_at.is_(None),
+            CredentialRequest.outcome.is_(None),
+        )
+        .values(used_at=now, outcome="expired_card_pending")
+        .returning(CredentialRequest.token)
+    )
+    return len(tokens.all())
+
+
+async def list_pending_credential_card_expiries(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    tenant_id: uuid.UUID | None = None,
+    limit: int = 20,
+    after_token: str | None = None,
+) -> list[CredentialRequestRow]:
+    """A bounded keyset page; callers retain the cursor so failed cards cannot starve others."""
+    stmt = select(CredentialRequest).where(
+        *_expiry_card_scope(tenant_id),
+        CredentialRequest.used_at.is_not(None),
+        CredentialRequest.outcome == "expired_card_pending",
+        CredentialRequest.expires_at <= now,
+    )
+    if after_token is not None:
+        stmt = stmt.where(CredentialRequest.token > after_token)
+    rows = await session.scalars(stmt.order_by(CredentialRequest.token).limit(limit))
+    return [CredentialRequestRow.model_validate(row) for row in rows]
+
+
+async def acknowledge_credential_card_expiry(
+    session: AsyncSession, *, row: CredentialRequestRow
+) -> bool:
+    """Retire exactly the pending card identity whose edit was acknowledged."""
+    token = await session.scalar(
+        update(CredentialRequest)
+        .where(
+            CredentialRequest.token == row.token,
+            CredentialRequest.tenant_id == row.tenant_id,
+            CredentialRequest.platform == "discord",
+            CredentialRequest.outcome == "expired_card_pending",
+            CredentialRequest.used_at.is_not(None),
+            CredentialRequest.used_at >= CredentialRequest.expires_at,
+            CredentialRequest.used_at == row.used_at,
+            CredentialRequest.expires_at == row.expires_at,
+            CredentialRequest.origin_thread_id == row.origin_thread_id,
+            CredentialRequest.posted_message_id == row.posted_message_id,
+            CredentialRequest.parent_channel_id == row.parent_channel_id,
+        )
+        .values(outcome="expired_card_updated")
+        .returning(CredentialRequest.token)
+    )
+    return token is not None

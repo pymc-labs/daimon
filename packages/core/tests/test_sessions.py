@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -2785,4 +2786,1325 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
 
     assert session_bodies[0]["agent"] == "ag_personal", (
         "nothing hidden means the call shape does not change at all"
+    )
+
+
+@pytest.mark.parametrize(
+    "warm,read_only", [(False, False), (False, True), (True, False), (True, True)]
+)
+async def test_read_only_source_projection_keeps_implicit_memory_without_provisioning(
+    db_preflight, db_nullpool_engine, warm, read_only, monkeypatch
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.memory_resource import memory_instructions
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_memory_stores
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    agent = ma_agent(id="agent-source", tenant_id=str(tenant.id), name="source")
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    if warm:
+        async with sessions.begin() as db:
+            await agent_memory_stores.insert_memory_store(
+                db, tenant_id=tenant.id, agent_id=agent_uuid, memory_store_id="mem-existing"
+            )
+
+    def no_materialization(*args, **kwargs):
+        raise AssertionError("read-only projection attempted a materialization or decryption")
+
+    monkeypatch.setattr("daimon.core.memory_resource.create_memory_store", no_materialization)
+    monkeypatch.setattr("daimon.core.credential_env.upload_env_file", no_materialization)
+    monkeypatch.setattr("daimon.core.github_app_session.prepare_app_access", no_materialization)
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=agent_uuid,
+            account_id=account.id,
+            memory_read_only=read_only,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+        )
+    assert projected.memory_required is True
+    assert projected.memory_store_id == ("mem-existing" if warm else None)
+    assert projected.memory_read_only is read_only
+    assert projected.memory_instructions == memory_instructions(read_only=read_only)
+    assert projected.environment.spec.network.mode == "unrestricted"
+    assert projected.environment.native["config"]["networking"]["type"] == "unrestricted"
+    assert projected.resource_scope.tenant_id == str(tenant.id)
+    assert projected.resource_scope.account_id == str(account.id)
+    async with sessions() as db:
+        assert await agent_memory_stores.get_memory_store_id(
+            db, tenant_id=tenant.id, agent_id=agent_uuid
+        ) == ("mem-existing" if warm else None)
+    assert not transport.requests and not transport.violations
+
+
+@pytest.mark.parametrize(
+    "changed", ["tenant", "identity", "version", "instructions", "archived_environment"]
+)
+async def test_source_projection_refuses_changed_source_before_database_or_native_io(changed):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import source_agent_record
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores.domain import BackendAgent
+    from mux.errors import ScopeViolation
+
+    class NoDatabase:
+        def __call__(self):
+            raise AssertionError("foreign/stale source read a database")
+
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    agent = ma_agent(id="agent-source", tenant_id=str(tenant_id), name="source")
+    source = BackendAgent(
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+        name="source",
+        configuration_digest="preview",
+        source=source_agent_record(agent, resource_scope(tenant_id=str(tenant_id))),
+    )
+    environment = ma_environment(tenant_id=str(tenant_id))
+    if changed == "tenant":
+        tenant_id = uuid.uuid4()
+    elif changed == "identity":
+        agent = agent.model_copy(update={"id": "same-name-new-source"})
+    elif changed == "version":
+        agent = agent.model_copy(update={"version": agent.version + 1})
+    elif changed == "instructions":
+        agent = agent.model_copy(update={"system": "changed source intent"})
+    else:
+        environment = environment.model_copy(update={"archived_at": "2026-10-12T00:00:00Z"})
+    with pytest.raises(ScopeViolation):
+        await project_session_resources(
+            source,
+            agent=agent,
+            environment=environment,
+            session_factory=NoDatabase(),
+            tenant_id=tenant_id,
+            agent_uuid=source.agent_id,
+            account_id=account_id,
+            memory_read_only=False,
+            resource_scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
+        )
+
+
+async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
+    db_preflight, db_nullpool_engine, monkeypatch
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_mcp_credentials as credentials
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        agent = ma_agent(id="agent-resources", tenant_id=str(tenant.id), name="source")
+        identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+        await put_agent_file(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            key="SOURCE_KEY",
+            content="private-env-value",
+            set_by_account_id=None,
+        )
+        credential = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url="https://source.example.test",
+            encrypted_token=b"private-ciphertext",
+        )
+        await repo_binding_store.set_binding(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            repo_url="owner/source",
+            default_branch="work",
+            ma_secret_ref="owned-repo-credential",
+            proof=None,
+        )
+
+    def no_secret_resolution(*args, **kwargs):
+        raise AssertionError("projection tried to resolve or export a secret")
+
+    monkeypatch.setattr("daimon.core.stores.agent_files.decode_value", no_secret_resolution)
+    monkeypatch.setattr("daimon.core.sessions.get_pat", no_secret_resolution)
+    monkeypatch.setattr("daimon.core.sessions.resolve_clone_token", no_secret_resolution)
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=identity,
+            account_id=account.id,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+            memory_read_only=True,
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            mcp_settings=McpSettings(
+                public_url=HttpUrl("https://mcp.example.test/mcp"), jwt_secret=SecretStr("test-jwt")
+            ),
+        )
+    assert {resource.credential_ref for resource in projected.resource_requirements} == {
+        f"agent-env:{tenant.id}:{identity}:SOURCE_KEY",
+        f"agent-mcp:{credential.id}",
+        f"caller-mcp:{tenant.id}:{account.id}:{identity}",
+    }
+    assert projected.repository_sources[0].repository_url == "https://github.com/owner/source"
+    assert projected.repository_sources[0].ref == "work"
+    assert len(projected.resource_generations) == 3
+    for output in (repr(projected), projected.model_dump_json()):
+        assert "private-env-value" not in output and "private-ciphertext" not in output
+        assert "owned-repo-credential" not in output and "SOURCE_KEY" not in output
+    assert not transport.requests and not transport.violations
+
+
+@pytest.mark.parametrize("app_mode", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("crypto_available", [False, True])
+async def test_projection_uses_composer_vault_copilot_and_app_filters(
+    db_preflight, db_nullpool_engine, app_mode, configured, crypto_available, monkeypatch
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_mcp_credentials as credentials
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        foreign = await make_tenant(db)
+        foreign_account = await make_account(db, tenant=foreign)
+        agent = ma_agent(id="agent-composer", tenant_id=str(tenant.id), name="source")
+        identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+        db.add(
+            AgentGitHubMode(
+                tenant_id=tenant.id, agent_id=identity, mode="app" if app_mode else "legacy"
+            )
+        )
+        await github_binding_store.set_agent_github_binding(
+            db, agent_id=identity, principal_id=account.id
+        )
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "SOURCE_KEY"):
+            await put_agent_file(
+                db,
+                tenant_id=tenant.id,
+                agent_id=identity,
+                key=key,
+                content="private-env-value",
+                set_by_account_id=None,
+            )
+        copilot = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url=GITHUB_COPILOT_MCP_URL,
+            encrypted_token=b"private-copilot",
+        )
+        external = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url="https://external.example.test/mcp",
+            encrypted_token=b"private-external",
+        )
+        other = await credentials.upsert_credential(
+            db,
+            tenant_id=foreign.id,
+            agent_id=identity,
+            mcp_server_url="https://foreign.example.test/mcp",
+            encrypted_token=b"private-foreign",
+        )
+        await repo_binding_store.set_binding(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            repo_url="owner/legacy",
+            default_branch="work",
+            ma_secret_ref="owned-repo-credential",
+            proof=None,
+        )
+    await upsert_credential_encrypted(
+        sessionmaker=sessions,
+        fernet=fernet,
+        principal_id=account.id,
+        github_login="owned",
+        plaintext_token="private-owned-pat",
+        scopes=("repo",),
+    )
+    await upsert_credential_encrypted(
+        sessionmaker=sessions,
+        fernet=fernet,
+        principal_id=foreign_account.id,
+        github_login="foreign",
+        plaintext_token="private-foreign-pat",
+        scopes=("repo",),
+    )
+
+    def no_secret_or_materialization(*args, **kwargs):
+        raise AssertionError("projection resolved a secret or materialized a resource")
+
+    for path in (
+        "daimon.core.github_credentials.decrypt_token",
+        "daimon.core.stores.agent_files.decode_value",
+        "daimon.core.stores.github_credentials.get_credential_by_principal",
+        "daimon.core.stores.agent_mcp_credentials.list_credentials",
+        "daimon.core.sessions.create_session_vault",
+        "daimon.core.sessions.ensure_agent_mcp_vault",
+        "daimon.core.sessions.add_github_copilot_credential",
+        "daimon.core.sessions.prepare_app_access",
+        "daimon.core.sessions.resolve_clone_token",
+    ):
+        monkeypatch.setattr(path, no_secret_or_materialization)
+    mcp = McpSettings(
+        public_url=HttpUrl("https://mcp.example.test/mcp"),
+        jwt_secret=SecretStr("private-jwt") if configured else None,
+    )
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=identity,
+            account_id=account.id,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+            memory_read_only=True,
+            mcp_settings=mcp,
+            fernet=fernet if crypto_available else None,
+        )
+    refs = {r.id for r in projected.resource_requirements}
+    assert (f"caller-mcp:{tenant.id}:{account.id}:{identity}" in refs) is configured
+    assert (f"app-session-vault:{tenant.id}:{identity}" in refs) is app_mode
+    assert ("github-copilot-mirror" in refs) is (configured and crypto_available and not app_mode)
+    assert (f"github-credential:{account.id}" in refs) is (crypto_available and not app_mode)
+    assert (f"agent-mcp:{copilot.id}" in refs) is (configured and crypto_available and not app_mode)
+    assert (f"agent-mcp:{external.id}" in refs) is (configured and crypto_available)
+    assert f"agent-mcp:{other.id}" not in refs
+    assert not any(str(foreign_account.id) in ref for ref in refs)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        assert (f"agent-env:{tenant.id}:{identity}:{key}" in refs) is (not app_mode)
+    assert f"agent-env:{tenant.id}:{identity}:SOURCE_KEY" in refs
+    assert bool(projected.repository_sources) is (not app_mode)
+    if not app_mode:
+        assert projected.repository_sources[0].repository_url == "https://github.com/owner/legacy"
+    assert projected.memory_required is True
+    assert projected.memory_store_id is None
+    assert not transport.requests and not transport.violations
+    for output in (repr(projected), projected.model_dump_json()):
+        assert "private-" not in output and "owned-repo-credential" not in output
+
+
+async def worker_source_context(
+    db_nullpool_engine,
+    *,
+    original_tools=(),
+    granted_tools=(),
+    environment_config=None,
+    warm=False,
+    native_budget=None,
+):
+    from dataclasses import replace
+
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import managed_agents, resource_ref
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.sessions import project_session_resources
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import ChannelRef, Scope, ThreadRef
+    from mux.contracts.resources import AgentSpec, ResourceBinding
+
+    from .test_fleet_permissions import POLICY, parent
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    original = ma_agent(
+        id="original-source",
+        tenant_id=str(tenant.id),
+        name="source",
+        system="Protected root instruction",
+        tools=original_tools,
+    )
+    environment = ma_environment(tenant_id=str(tenant.id))
+    if environment_config is not None:
+        environment = BetaEnvironment.model_validate(
+            {**environment.model_dump(mode="json"), "config": environment_config}
+        )
+    root = parent()
+    root = replace(
+        root,
+        spec=AgentSpec(
+            name="worker",
+            model=root.spec.model,
+            system=root.base_system,
+            metadata={"daimon_tenant": str(tenant.id)},
+            tools=granted_tools or None,
+        ),
+        fleet=replace(
+            root.fleet,
+            scope=Scope(
+                tenant_id=str(tenant.id),
+                account_id=str(account.id),
+                principal_id="caller",
+                authorization_id="root",
+            ),
+            account_id=account.id,
+            root=ThreadRef(
+                channel=ChannelRef(
+                    tenant_id=str(tenant.id), platform="discord", channel_id="channel"
+                ),
+                thread_id="thread",
+            ),
+        ),
+    )
+    if native_budget is not None:
+        root = replace(
+            root,
+            limits=type(root.limits).model_validate(
+                root.limits.model_dump()
+                | {
+                    "native_budget_usd": native_budget,
+                    "max_turns": 1,
+                    "deadline": datetime(2026, 10, 12, 18, tzinfo=UTC) + timedelta(seconds=120),
+                }
+            ),
+        )
+    worker = resolve_worker_spec(
+        root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
+    )
+    from daimon.core.memory_resource import ensure_memory_store_and_mount
+    from daimon.testing.ma import MARouter
+
+    router = MARouter()
+    memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
+    router.add("POST", r"/v1/memory_stores", lambda request, match: memory_handler(request))
+    trace = ScriptedTransport(router=router)
+    async with trace.client() as client:
+        captured = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=original
+        )
+        if warm:
+            mount = await ensure_memory_store_and_mount(
+                client,
+                sessions,
+                tenant_id=tenant.id,
+                agent_id=captured.agent_id,
+                agent_name="source",
+                read_only=True,
+            )
+            backend = managed_agents(client, scope=root.fleet.scope)
+            binding = ResourceBinding(
+                id=mount["memory_store_id"],
+                kind="native",
+                resource=resource_ref(
+                    backend, "memory_store", mount["memory_store_id"], scope=root.fleet.scope
+                ),
+                native=ExtensionConfig(
+                    namespace="anthropic.session_resource_create",
+                    version=1,
+                    value={"resource": mount},
+                ),
+            )
+            root = replace(root, resources=(binding,))
+            worker = resolve_worker_spec(
+                root,
+                root.spec,
+                resources=root.resources,
+                policy=POLICY,
+                now=datetime(2026, 10, 12, 18, tzinfo=UTC),
+            )
+        projected = await project_session_resources(
+            captured,
+            agent=original,
+            environment=environment,
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=captured.agent_id,
+            account_id=account.id,
+            memory_read_only=True,
+            resource_scope=worker.permissions.fleet.scope,
+        )
+    assert captured.agent_id == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=original.id)
+    return sessions, tenant.id, account.id, original, environment, worker, projected
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "session",
+        "agent",
+        "environment",
+        "tenant",
+        "account",
+        "memory",
+        "access",
+        "instructions",
+        "missing_mount",
+        "duplicate_mount",
+        "environment_snapshot",
+        "row",
+        "memory_cleared_before_read",
+        "memory_rebound_before_read",
+        *(
+            f"{stage}_{field}"
+            for stage in ("ack", "get")
+            for field in (
+                "model",
+                "options",
+                "system",
+                "version",
+                "tools",
+                "mcp",
+                "skills",
+                "missing",
+            )
+        ),
+    ],
+)
+@pytest.mark.parametrize("native_budget", [None, Decimal("0.01")])
+async def test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
+    db_preflight, db_nullpool_engine, fault, native_budget
+):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_compat import create_agent
+    from daimon.core.stores.agent_memory_stores import get_memory_store_id
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    (
+        sessions,
+        tenant_id,
+        account_id,
+        original,
+        environment,
+        worker,
+        source,
+    ) = await worker_source_context(db_nullpool_engine, warm=True, native_budget=native_budget)
+    executing = ma_agent(
+        id="actual-worker",
+        tenant_id=str(tenant_id),
+        name="worker",
+        model=worker.spec.model.id,
+        system=worker.spec.system,
+    )
+    transport = ScriptedTransport(router=None)
+    # Provisioning already ran through the real SDK/store; readback must preserve its mount.
+    from daimon.testing.ma import MARouter
+
+    router = MARouter()
+    snapshots = {}
+
+    def drift(raw, stage):
+        if fault == f"{stage}_budget":
+            raw["budget"]["max_list_cost"]["amount"] = "2"
+        if fault == f"{stage}_budget_missing":
+            raw.pop("budget")
+        if fault == f"{stage}_model":
+            raw["agent"]["model"]["id"] = "claude-opus-4-6"
+        elif fault == f"{stage}_options":
+            raw["agent"]["model"]["speed"] = "fast"
+        elif fault == f"{stage}_system":
+            raw["agent"]["system"] = "unapproved protected instructions"
+        elif fault == f"{stage}_version":
+            raw["agent"]["version"] = 99
+        elif fault == f"{stage}_tools":
+            raw["agent"]["tools"] = [{"type": "bash", "name": "bash"}]
+        elif fault == f"{stage}_mcp":
+            raw["agent"]["mcp_servers"] = [
+                {"type": "url", "name": "unapproved", "url": "https://unapproved.invalid/mcp"}
+            ]
+        elif fault == f"{stage}_skills":
+            raw["agent"]["skills"] = [{"type": "custom", "skill_id": "unapproved", "version": "1"}]
+        elif fault == f"{stage}_missing":
+            raw["agent"].pop("model")
+        return raw
+
+    def native(request, match):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            if request.url.path == "/v1/agents":
+                return httpx.Response(
+                    200, json=executing.model_dump(mode="json", exclude_unset=True)
+                )
+            result = _session_create_handler()(request).json()
+            result.update(
+                agent=executing.model_dump(mode="json"),
+                metadata=body["metadata"],
+                resources=body["resources"],
+            )
+            if "budget" in body:
+                result["budget"] = body["budget"]
+            snapshots[result["id"]] = result
+            return httpx.Response(200, json=drift(json.loads(json.dumps(result)), "ack"))
+        if "/environments/" in request.url.path:
+            raw = environment.model_dump(mode="json", exclude_unset=True)
+            if fault == "environment_snapshot":
+                raw["description"] = "changed policy"
+            return httpx.Response(200, json=raw)
+        raw = json.loads(json.dumps(snapshots[request.url.path.rsplit("/", 1)[-1]]))
+        if fault == "session":
+            raw["id"] = "foreign-session"
+        elif fault == "agent":
+            raw["agent"]["id"] = "foreign-agent"
+        elif fault == "environment":
+            raw["environment_id"] = "foreign-environment"
+        elif fault == "tenant":
+            raw["metadata"]["daimon_tenant"] = str(uuid.uuid4())
+        elif fault == "account":
+            raw["metadata"]["daimon_account"] = str(uuid.uuid4())
+        elif fault == "memory":
+            raw["resources"][0]["memory_store_id"] = "foreign-memory"
+        elif fault == "access":
+            raw["resources"][0]["access"] = "read_write"
+        elif fault == "instructions":
+            raw["resources"][0]["instructions"] = "altered instructions"
+        elif fault == "missing_mount":
+            raw["resources"] = []
+        elif fault == "duplicate_mount":
+            raw["resources"] *= 2
+        return httpx.Response(200, json=drift(raw, "get"))
+
+    router.add("POST", r"/v1/agents", native)
+    router.add(
+        "POST",
+        r"/v1/sessions/[^/]+/archive",
+        lambda request, match: httpx.Response(
+            200,
+            json={
+                **snapshots[request.url.path.split("/")[-2]],
+                "archived_at": datetime.now(UTC).isoformat(),
+            },
+        ),
+    )
+    router.add("POST", r"/v1/sessions", native)
+    router.add("GET", r"/v1/sessions/.*", native)
+    router.add("GET", r"/v1/environments/.*", native)
+    transport.router = router
+    guards = []
+
+    async def fence():
+        guards.append("fresh")
+        if (
+            fault in ("memory_cleared_before_read", "memory_rebound_before_read")
+            and len(guards) == 1
+        ):
+            from daimon.core.stores.agent_memory_stores import (
+                clear_memory_store,
+                insert_memory_store,
+            )
+
+            async with sessions.begin() as db:
+                await clear_memory_store(db, tenant_id=tenant_id, agent_id=source.agent_id)
+                if fault == "memory_rebound_before_read":
+                    await insert_memory_store(
+                        db,
+                        tenant_id=tenant_id,
+                        agent_id=source.agent_id,
+                        memory_store_id="rebound-memory",
+                    )
+        if fault == "row" and len(guards) == 2:
+            from daimon.core.stores.agent_memory_stores import clear_memory_store
+
+            async with sessions.begin() as db:
+                await clear_memory_store(db, tenant_id=tenant_id, agent_id=source.agent_id)
+
+    async with transport.client() as client:
+        executing = await create_agent(
+            client, worker.spec, scope=worker.permissions.fleet.scope, key="warm-worker-agent"
+        )
+        if fault is not None:
+            from mux.errors import ScopeViolation
+
+            with pytest.raises(ScopeViolation):
+                await create_session(
+                    client,
+                    agent=executing,
+                    environment=environment,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    agent_uuid=source.agent_id,
+                    session_factory=sessions,
+                    resource_source=source,
+                    worker=worker,
+                    before_create=fence,
+                    memory_read_only=True,
+                )
+            expected_posts = (
+                0 if fault in ("memory_cleared_before_read", "memory_rebound_before_read") else 1
+            )
+            assert (
+                sum(request.path == "/v1/sessions" for request in transport.requests)
+                == expected_posts
+            )
+            assert not any("/memory_stores" in request.path for request in transport.requests)
+            assert sum(request.path.endswith("/archive") for request in transport.requests) == (
+                0
+                if fault
+                in {
+                    "session",
+                    "agent",
+                    "environment",
+                    "tenant",
+                    "account",
+                    "memory_cleared_before_read",
+                    "memory_rebound_before_read",
+                }
+                else 1
+            )
+            if expected_posts == 0:
+                async with sessions() as db:
+                    assert await get_memory_store_id(
+                        db, tenant_id=tenant_id, agent_id=source.agent_id
+                    ) == (None if fault == "memory_cleared_before_read" else "rebound-memory")
+            assert not any("/events" in request.path for request in transport.requests)
+            transport.assert_consumed()
+            return
+        created = await create_session(
+            client,
+            agent=executing,
+            environment=environment,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            agent_uuid=source.agent_id,
+            session_factory=sessions,
+            resource_source=source,
+            worker=worker,
+            before_create=fence,
+            memory_read_only=True,
+        )
+    transport.assert_consumed()
+    assert created.agent.id == executing.id
+    session_request = next(
+        request.json() for request in transport.requests if request.path == "/v1/sessions"
+    )
+    assert session_request["agent"] == executing.id
+    if native_budget is not None:
+        assert worker.limits.max_turns == 1
+        assert (
+            worker.limits.deadline - datetime(2026, 10, 12, 18, tzinfo=UTC)
+        ).total_seconds() == 120
+        assert session_request["budget"] == {
+            "type": "limit",
+            "max_list_cost": {"amount": "1", "currency": "USD"},
+        }
+    else:
+        assert "budget" not in session_request
+    assert guards == ["fresh", "fresh", "fresh"]
+    async with sessions() as db:
+        source_memory = await get_memory_store_id(db, tenant_id=tenant_id, agent_id=source.agent_id)
+        assert source_memory is not None
+        assert (
+            await get_memory_store_id(
+                db,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=executing.id),
+            )
+            is None
+        )
+    mount = next(
+        resource for resource in session_request["resources"] if resource["type"] == "memory_store"
+    )
+    assert mount["memory_store_id"] == source_memory and mount["access"] == "read_only"
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "source_uuid",
+        "tenant",
+        "account",
+        "snapshot",
+        "environment",
+        "environment_policy",
+        "missing_environment",
+        "environment_ref_kind",
+        "environment_ref_provider",
+        "environment_ref_tenant",
+        "environment_ref_account",
+        "environment_ref_space",
+        "guard",
+        "drops",
+    ],
+)
+async def test_worker_source_context_refuses_before_resources_or_native_io(
+    db_preflight, db_nullpool_engine, changed
+):
+    from dataclasses import replace
+
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.errors import ScopeViolation, UnsupportedCapability
+
+    (
+        sessions,
+        tenant_id,
+        account_id,
+        original,
+        environment,
+        worker,
+        source,
+    ) = await worker_source_context(db_nullpool_engine)
+    executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
+    source_uuid = source.agent_id
+
+    async def fence():
+        raise DaimonError("fresh source authority refused")
+
+    if changed != "guard":
+
+        async def fence():
+            pass
+
+    if changed == "source_uuid":
+        source_uuid = uuid.uuid4()
+    elif changed == "tenant":
+        tenant_id = uuid.uuid4()
+    elif changed == "account":
+        account_id = uuid.uuid4()
+    elif changed == "snapshot":
+        source = source.model_copy(
+            update={"source": source.source.model_copy(update={"native": None})}
+        )
+    elif changed == "environment":
+        environment = ma_environment(id="neighbour-environment", tenant_id=str(tenant_id))
+    elif changed == "environment_policy":
+        environment = environment.model_copy(update={"description": "changed policy revision"})
+    elif changed == "missing_environment":
+        source = source.model_copy(update={"environment": None})
+    elif changed.startswith("environment_ref_"):
+        field = {
+            "kind": "kind",
+            "provider": "provider",
+            "tenant": "tenant_id",
+            "account": "account_id",
+            "space": "account_scope_id",
+        }[changed.removeprefix("environment_ref_")]
+        source = source.model_copy(
+            update={
+                "environment": source.environment.model_copy(
+                    update={"ref": source.environment.ref.model_copy(update={field: "foreign"})}
+                )
+            }
+        )
+    elif changed == "drops":
+        worker = replace(
+            worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
+        )
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        with pytest.raises((ScopeViolation, UnsupportedCapability, DaimonError)):
+            await create_session(
+                client,
+                agent=executing,
+                environment=environment,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_uuid=source_uuid,
+                session_factory=sessions,
+                resource_source=source,
+                worker=worker,
+                before_create=fence,
+                memory_read_only=True,
+            )
+    assert trace.requests == []
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "cold",
+        "missing_grant",
+        "duplicate",
+        "tenant",
+        "account",
+        "provider",
+        "memory",
+        "access",
+        "instructions",
+        "version",
+        "schema",
+    ],
+)
+async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
+    db_preflight, db_nullpool_engine, fault
+):
+    from dataclasses import replace
+
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.errors import ScopeViolation, UnsupportedCapability
+
+    sessions, tenant, account, _, environment, worker, source = await worker_source_context(
+        db_nullpool_engine, warm=fault != "cold"
+    )
+    if fault != "cold":
+        binding = worker.resources[0]
+        if fault == "missing_grant":
+            resources = ()
+        elif fault == "duplicate":
+            resources = (binding, binding)
+        else:
+            if fault in {"tenant", "account", "provider", "memory"}:
+                key = {
+                    "tenant": "tenant_id",
+                    "account": "account_id",
+                    "provider": "provider",
+                    "memory": "id",
+                }[fault]
+                binding = binding.model_copy(
+                    update={"resource": binding.resource.model_copy(update={key: "foreign"})}
+                )
+            else:
+                value = json.loads(json.dumps(dict(binding.native.value)))
+                if fault == "access":
+                    value["resource"]["access"] = "read_write"
+                elif fault == "instructions":
+                    value["resource"]["instructions"] = "changed"
+                elif fault == "schema":
+                    value["resource"]["unknown"] = "unrepresented"
+                binding = binding.model_copy(
+                    update={
+                        "native": binding.native.model_copy(
+                            update={"value": value, "version": 2 if fault == "version" else 1}
+                        )
+                    }
+                )
+            resources = (binding,)
+        worker = replace(worker, resources=resources)
+    trace = ScriptedTransport()
+
+    async def guard():
+        pass
+
+    async with trace.client() as client:
+        with pytest.raises((ScopeViolation, UnsupportedCapability)):
+            await create_session(
+                client,
+                agent=ma_agent(id="actual-worker", tenant_id=str(tenant)),
+                environment=environment,
+                tenant_id=tenant,
+                account_id=account,
+                agent_uuid=source.agent_id,
+                session_factory=sessions,
+                worker=worker,
+                resource_source=source,
+                before_create=guard,
+                memory_read_only=True,
+            )
+    assert trace.requests == []
+
+
+async def test_worker_never_silently_loses_retained_memory_on_materialization_failure(
+    db_preflight, db_nullpool_engine, monkeypatch
+):
+    from daimon.core.errors import StoreError
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    (
+        sessions,
+        tenant_id,
+        account_id,
+        original,
+        environment,
+        worker,
+        source,
+    ) = await worker_source_context(db_nullpool_engine, warm=True)
+    executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
+
+    async def missing(*args, **kwargs):
+        raise StoreError("retained memory unavailable")
+
+    async def fence():
+        pass
+
+    monkeypatch.setattr("daimon.core.sessions.ensure_memory_store_and_mount", missing)
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        with pytest.raises(StoreError):
+            await create_session(
+                client,
+                agent=executing,
+                environment=environment,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_uuid=source.agent_id,
+                session_factory=sessions,
+                resource_source=source,
+                worker=worker,
+                before_create=fence,
+                memory_read_only=True,
+            )
+    assert trace.requests == []
+
+
+@pytest.mark.parametrize("custom", [False, True])
+async def test_actual_sdk_projected_worker_source_normalizes_represented_native_intent(
+    db_preflight, db_nullpool_engine, custom
+):
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+    from mux.contracts.resources import ToolSpec
+    from mux.drivers.anthropic.resources.agents import tool_payload
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    tool = ToolSpec(
+        name="owned-helper",
+        kind="custom",
+        description="Owned helper",
+        input_schema={"type": "object"},
+    )
+    _, _, _, original, _, worker, captured = await worker_source_context(
+        db_nullpool_engine,
+        original_tools=(tool_payload(tool),) if custom else (),
+        granted_tools=(tool,) if custom else (),
+    )
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+    )
+    namespaces = {item.namespace for item in captured.effective_spec.extensions}
+    assert namespaces == {
+        "anthropic.agent_tools",
+        "anthropic.model_config",
+        "anthropic.multiagent",
+        "anthropic.agent_create_nulls",
+    }
+    assert captured.source.native == original.model_dump(mode="json", exclude_unset=True)
+    requested = worker.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
+    result = resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
+    assert result.spec.tools == ((tool,) if custom else ())
+    assert result.spec.system.count("Protected root instruction") == 1
+    assert not result.spec.extensions
+    assert result.environment is None
+    assert (
+        classify_source_obligations(
+            captured, result.spec, environment=result.environment, resources=result.resources
+        )
+        == frozenset()
+    )
+    assert (
+        result.digest
+        == resolve_worker_spec(
+            root, requested, policy=POLICY, now=NOW, captured_source=captured
+        ).digest
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", ["namespace", "model_option", "version", "tools", "memory", "sandbox"]
+)
+async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
+    db_preflight, db_nullpool_engine, failure
+):
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.resources import ToolSpec
+    from mux.drivers.anthropic.resources.agents import tool_payload
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    tool = ToolSpec(
+        name="owned-helper",
+        kind="custom",
+        description="Owned helper",
+        input_schema={"type": "object"},
+    )
+    _, _, _, _, _, worker, captured = await worker_source_context(
+        db_nullpool_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
+    )
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+    )
+    requested = worker.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
+    if failure in ("namespace", "model_option", "version"):
+        extensions = captured.effective_spec.extensions
+        if failure == "namespace":
+            extensions += (ExtensionConfig(namespace="anthropic.opaque", version=1, value={}),)
+        elif failure == "model_option":
+            extensions = tuple(
+                item.model_copy(update={"value": {"model": {"id": "other", "speed": "fast"}}})
+                if item.namespace == "anthropic.model_config"
+                else item
+                for item in extensions
+            )
+        else:
+            extensions = tuple(item.model_copy(update={"version": 2}) for item in extensions)
+        captured = captured.model_copy(
+            update={
+                "effective_spec": captured.effective_spec.model_copy(
+                    update={"extensions": extensions}
+                )
+            }
+        )
+    elif failure == "tools":
+        requested = requested.model_copy(update={"tools": ()})
+    else:
+        requested = requested.model_copy(
+            update={
+                "declared_drops": tuple(
+                    item for item in requested.declared_drops if item != failure
+                )
+            }
+        )
+    with pytest.raises(WorkerSpecRefused):
+        resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
+
+
+@pytest.mark.parametrize("network", ["unrestricted", "limited"])
+async def test_actual_sdk_source_explicit_cloud_policy_is_preserved_by_normalization(
+    db_preflight, db_nullpool_engine, network
+):
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    networking = {"type": network}
+    if network == "limited":
+        networking.update(
+            allowed_hosts=["pypi.org"], allow_mcp_servers=False, allow_package_managers=False
+        )
+    config = {
+        "type": "cloud",
+        "networking": networking,
+        "packages": {
+            "apt": ["git"],
+            "pip": ["pandas"],
+            "npm": [],
+            "cargo": [],
+            "gem": [],
+            "go": [],
+        },
+    }
+    _, _, _, _, environment, worker, captured = await worker_source_context(
+        db_nullpool_engine, environment_config=config
+    )
+    assert captured.environment.native == environment.model_dump(mode="json", exclude_unset=True)
+    projected = captured.environment.spec
+    assert projected.native_config is None
+    assert projected.network.mode == network
+    assert projected.packages == {"system": ("git",), "python": ("pandas",), "npm": ()}
+    assert projected.sources == ()
+    assert projected.metadata == environment.metadata
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+        environment=projected,
+    )
+    requested = worker.spec.model_copy(update={"declared_drops": ("memory",)})
+    resolved = resolve_worker_spec(
+        root, requested, policy=POLICY, now=NOW, captured_source=captured
+    )
+    assert resolved.environment == projected
+    assert not classify_source_obligations(
+        captured, resolved.spec, environment=resolved.environment
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing_network",
+        "missing_packages",
+        "package_default",
+        "extra_manager",
+        "network_permission",
+        "network_default",
+        "unknown",
+        "self_hosted",
+    ],
+)
+async def test_source_environment_projection_retains_unrepresented_native_policy(failure):
+    from daimon.core.mux_compat import retrieve_environment, source_environment_record
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.contracts.ids import Scope
+
+    config = {
+        "type": "cloud",
+        "networking": {
+            "type": "limited",
+            "allowed_hosts": [],
+            "allow_mcp_servers": False,
+            "allow_package_managers": False,
+        },
+        "packages": {"apt": [], "pip": [], "npm": [], "cargo": [], "gem": [], "go": []},
+    }
+    if failure == "missing_network":
+        del config["networking"]
+    elif failure == "missing_packages":
+        del config["packages"]
+    elif failure == "package_default":
+        del config["packages"]["pip"]
+    elif failure == "extra_manager":
+        config["packages"]["cargo"] = ["ripgrep"]
+    elif failure == "network_permission":
+        config["networking"]["allow_mcp_servers"] = True
+    elif failure == "network_default":
+        del config["networking"]["allow_package_managers"]
+    elif failure == "unknown":
+        config["future_policy"] = {"secrets": "unrepresented"}
+    else:
+        config = {"type": "self_hosted"}
+    raw = ma_environment(tenant_id="tenant").model_dump(mode="json")
+    raw["config"] = config
+    scope = Scope(
+        tenant_id="tenant", account_id="account", principal_id="caller", authorization_id="owned"
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/environments/.*", lambda request, match: httpx.Response(200, json=raw))
+    transport = ScriptedTransport(router=router)
+    async with transport.client() as client:
+        environment = await retrieve_environment(client, raw["id"], scope=scope)
+    projected = source_environment_record(environment, scope)
+    assert projected.spec.native_config is not None
+    assert projected.spec.native_config.value["config"] == config
+    assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
+    transport.assert_consumed()
+    assert [request.method for request in transport.requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        "missing_capture",
+        "missing_grant",
+        "foreign_account",
+        "unbound_account",
+        "foreign_tenant",
+        "capture_scope",
+        "stale_revision",
+    ],
+)
+async def test_actual_tenant_scoped_source_clone_requires_the_root_account_capture_and_pin(
+    db_preflight, db_nullpool_engine, failure
+):
+    from dataclasses import replace
+
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+    from mux.contracts.resources import AgentPatch
+
+    from .test_fleet_permissions import NOW, POLICY
+
+    _, _, _, original, _, worker, captured = await worker_source_context(db_nullpool_engine)
+    actual = captured.source
+    assert actual.ref.account_id == resource_scope(tenant_id=actual.ref.tenant_id).account_id
+    assert actual.native == original.model_dump(mode="json", exclude_unset=True)
+    root = replace(
+        worker.permissions,
+        fleet=replace(worker.permissions.fleet, depth=0),
+        agent_id=captured.agent_id,
+        spec=worker.spec.model_copy(update={"metadata": actual.spec.metadata}),
+        source_agents=(actual.ref,),
+        source_revisions=((actual.ref, actual.revision),),
+    )
+    desired = root.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
+    if failure == "missing_capture":
+        captured = None
+    elif failure == "missing_grant":
+        root = replace(root, source_agents=())
+    elif failure in {"foreign_account", "unbound_account", "foreign_tenant"}:
+        ref = actual.ref.model_copy(
+            update={
+                "tenant_id" if failure == "foreign_tenant" else "account_id": None
+                if failure == "unbound_account"
+                else str(uuid.uuid4())
+            }
+        )
+        actual = actual.model_copy(update={"ref": ref})
+        captured = captured.model_copy(update={"source": actual})
+        root = replace(root, source_agents=(ref,), source_revisions=((ref, actual.revision),))
+    elif failure == "capture_scope":
+        captured = captured.model_copy(
+            update={
+                "resource_scope": captured.resource_scope.model_copy(
+                    update={"account_id": str(uuid.uuid4())}
+                )
+            }
+        )
+    elif failure == "stale_revision":
+        root = replace(root, source_revisions=())
+    kwargs = {
+        "policy": POLICY,
+        "now": NOW,
+        "captured_source": captured,
+        "overrides": AgentPatch.model_validate(desired.model_dump(mode="json")),
+    }
+    if failure is not None:
+        with pytest.raises(WorkerSpecRefused):
+            resolve_worker_spec(root, actual, **kwargs)
+        return
+    result = resolve_worker_spec(root, actual, **kwargs)
+    assert result.source_agent == (actual.ref, actual.revision)
+    assert result.source_agent[0] == actual.ref
+    assert result.permissions.fleet.scope.account_id == root.fleet.scope.account_id
+    assert result.spec.metadata == root.spec.metadata
+    assert result.digest == resolve_worker_spec(root, actual, **kwargs).digest
+
+
+@pytest.mark.parametrize(
+    "fault", ["ack_budget", "get_budget", "ack_budget_missing", "get_budget_missing"]
+)
+async def test_worker_budget_echo_mismatch_refuses_owned_session(
+    db_preflight, db_nullpool_engine, fault
+):
+    await test_worker_executes_new_agent_with_original_source_memory_and_resource_identity(
+        db_preflight, db_nullpool_engine, fault, Decimal("0.01")
     )

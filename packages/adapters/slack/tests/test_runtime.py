@@ -8,6 +8,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ from daimon.adapters.slack.runtime import SlackRuntime, build_runtime
 from daimon.core.channel_budget_notice import BudgetNotice, spawn_budget_notice
 from daimon.core.config import Settings
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 
 
@@ -62,7 +64,7 @@ class TestSlackRuntime:
             billing_config=None,
             http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
             resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
-            turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+            turn_deps=replace(deps_for(), turn_path=None),
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             rt.settings = MagicMock()  # type: ignore[misc]  # intentionally testing frozen

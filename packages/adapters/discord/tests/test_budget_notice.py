@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import MISSING, fields
+from dataclasses import MISSING, fields, replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +13,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.turn.deps import TurnDeps
+from daimon.testing.turn_fakes import deps_for
 
 _TENANT = uuid.uuid4()
 
@@ -25,7 +26,11 @@ def _required(cls: Any, **given: object) -> dict[str, object]:
 def _runtime(policies: dict[uuid.UUID, DirectMessagePolicy]) -> DiscordRuntime:
     settings = MagicMock()
     settings.direct_message_policies = policies
-    return DiscordRuntime(**_required(DiscordRuntime, settings=settings, turn_deps=MagicMock()))
+    return DiscordRuntime(
+        **_required(
+            DiscordRuntime, settings=settings, turn_deps=replace(deps_for(), turn_path=None)
+        )
+    )
 
 
 def _notice() -> BudgetNotice:

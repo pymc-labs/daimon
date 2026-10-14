@@ -42,6 +42,13 @@ def _base(module, name):
         NOT_YOURS_MESSAGE=NOT_YOURS_MESSAGE,
         NO_LONGER_PENDING_MESSAGE=NO_LONGER_PENDING_MESSAGE,
     )
+    if name == "slack_confirm":
+        posted_card = scope["_PostedCard"]
+
+        def legacy_posted_card(prompt, client, channel, ts):
+            return posted_card(prompt, client, channel, ts, thread_ts=None)
+
+        scope["_PostedCard"] = legacy_posted_card
     exec("from __future__ import annotations\n" + (BASE / f"{name}.txt").read_text(), scope)
     return SimpleNamespace(**scope)
 
@@ -247,11 +254,11 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             trace.append(("registries", sorted(pending._pending), sorted(registry)))
         return trace
 
+    expected = await run(old)
+    actual = await run(module)
     if platform == "slack" and scenario != "post_error":
-        # 8e4280f05 intentionally moved Slack replies into their thread, so
-        # the frozen handler is no longer an equivalence oracle. Keep driving
-        # every recorded case and assert the current outcomes and cleanup.
-        trace = await run(module)
+        # Main #807 current-outcome assertions complement the full trace check below.
+        trace = actual
         kinds = [item[0] for item in trace]
         assert kinds.count("post") == 1
         assert trace[-1] == ("registries", [], [])
@@ -271,9 +278,15 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
         if scenario == "stranger":
             refusals = [item[1] for item in trace if item[0] == "refusal"]
             assert len(refusals) == 1 and refusals[0]["thread_ts"] == "1699.9"
-        return
 
-    assert await run(old) == await run(module)
+    if platform == "slack" and scenario in ("stranger", "lost"):
+        # Main 8e4280f0518c3f669a715dab20951a24eaaac43c threads refusal replies.
+        # Update only that cited field in the two pre-main expected rows.
+        assert expected[1][0] == actual[1][0] == "refusal"
+        assert "thread_ts" not in expected[1][1]
+        assert actual[1][1]["thread_ts"] == "1699.9"
+        expected[1][1]["thread_ts"] = "1699.9"
+    assert expected == actual
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])

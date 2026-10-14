@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -55,6 +56,7 @@ from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_toke
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
@@ -148,7 +150,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
 

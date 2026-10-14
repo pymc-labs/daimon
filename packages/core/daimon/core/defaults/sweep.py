@@ -32,6 +32,8 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DefaultsError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, archive_environment
 from daimon.core.skills.attachments import delete_skill_unless_attached
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,7 +71,7 @@ async def sweep_removed_agents(
                 ResourceOutcome(kind="agent", name=name, action=Action.ARCHIVED, anthropic_id=ag.id)
             )
             continue
-        await client.beta.agents.archive(ag.id)
+        await archive_agent(client, ag.id, scope=resource_scope(tenant_id=str(tenant_id)))
         outcomes.append(
             ResourceOutcome(kind="agent", name=name, action=Action.ARCHIVED, anthropic_id=ag.id)
         )
@@ -98,7 +100,7 @@ async def sweep_removed_environments(
                 )
             )
             continue
-        await client.beta.environments.archive(env.id)
+        await archive_environment(client, env.id, scope=resource_scope(tenant_id=str(tenant_id)))
         outcomes.append(
             ResourceOutcome(
                 kind="environment", name=name, action=Action.ARCHIVED, anthropic_id=env.id
@@ -185,7 +187,13 @@ async def sweep_removed_skills(
             continue
         if session is None:
             raise DefaultsError("the skill sweep needs a database session to delete")
-        outcome = await delete_skill_unless_attached(client, session, skill_id=sk.id, detach=False)
+        outcome = await delete_skill_unless_attached(
+            client,
+            session,
+            skill_id=sk.id,
+            detach=False,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+        )
         if not outcome.deleted:
             _log.info("defaults.sweep_skip_attached_since", name=display_title, skill_id=sk.id)
             continue

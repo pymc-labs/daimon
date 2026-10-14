@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+  "scenario_sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

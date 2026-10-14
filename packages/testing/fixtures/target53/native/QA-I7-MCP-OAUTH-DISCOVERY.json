@@ -1,0 +1,106 @@
+{
+  "scenario_id": "QA-I7-MCP-OAUTH-DISCOVERY",
+  "source": {
+    "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+    "sha256": "85ae51df972c745edccfa895c7310ef3bcf5e368bd6fb7db948d70addd4e316d"
+  },
+  "projection": {
+    "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+    "sha256": "53b8316ce89969d0a7d366952368a0138bab3c80d19dbb8378227d65204126fe"
+  },
+  "scenario": {
+    "id": "QA-I7-MCP-OAUTH-DISCOVERY",
+    "title": "the MCP protected-resource metadata resolves for both /mcp and /mcp/",
+    "friction": [
+      "I2"
+    ],
+    "set": "A",
+    "surface": "headless",
+    "tier": "weekly",
+    "priority": "P2",
+    "est_turns": 0,
+    "setup": [],
+    "steps": [],
+    "assert": [
+      {
+        "kind": "http_check",
+        "url": "{env.mcp_public_url}/.well-known/oauth-protected-resource/mcp",
+        "expect_status": 200
+      },
+      {
+        "kind": "http_check",
+        "url": "{env.mcp_public_url}/.well-known/oauth-protected-resource/mcp/",
+        "expect_status": 200
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+      },
+      "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

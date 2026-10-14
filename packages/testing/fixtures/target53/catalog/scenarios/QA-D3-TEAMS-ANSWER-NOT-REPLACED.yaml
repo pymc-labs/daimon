@@ -1,0 +1,36 @@
+id: QA-D3-TEAMS-ANSWER-NOT-REPLACED
+title: 'Teams: the answer with the ''Ask a person'' card is delivered, not ''Something
+  went wrong'''
+friction:
+- D5
+- D20
+- F12
+- F13
+set: B
+surface: teams
+tier: manual
+priority: P1
+est_turns: 2
+setup: []
+steps: []
+assert: []
+human:
+- click: 'In the staging Teams test tenant, @mention Daimon: ''reply with only TEAMS-OK''.'
+  expect: TEAMS-OK delivered; no 'Something went wrong. Mention me to try again.'
+- click: Click 'Ask a person' on that answer.
+  expect: Confirmation that a person was notified; the escalation lands in the configured
+    support channel.
+- click: '@mention again in the same thread: ''reply with only TEAMS-2''.'
+  expect: TEAMS-2 within 40 s, no 'came across' preamble.
+- click: '@mention: ''run sleep 90 then say DONE''; driver restarts staging workers
+    15 s in.'
+  expect: Card says Daimon restarted and to @mention it again (Teams channels need
+    a mention, F12); not 'send a message'.
+- click: '@mention: ''run sleep 60 then say DONE'', press Stop after 10 s.'
+  expect: "Card says Stopped; no 'Done.', no \U0001F44D/\U0001F44E, no ping (surfaces\
+    \ #8)."
+- click: '@mention in a channel whose SharePoint files are not granted: ''make a tiny
+    CSV and attach it''.'
+  expect: 'A visible ''files aren''t enabled here, ask an admin'' line, not a silent
+    drop (R6/surfaces #12).'
+teardown: []

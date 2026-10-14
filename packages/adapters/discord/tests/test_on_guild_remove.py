@@ -6,6 +6,7 @@ Tenant row (RESEARCH Anti-Pattern 3 / PITFALLS #7).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -17,6 +18,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant, get_tenant_liveness
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -33,7 +35,7 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # on_guild_remove never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # on_guild_remove never runs a turn
     )
 
 

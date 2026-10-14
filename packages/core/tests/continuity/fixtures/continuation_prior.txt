@@ -1,0 +1,273 @@
+# Exact parser and queue function excerpts from integration 1d02fd8a7d529b54bb7fc54a6694ca9fc385940b.
+from __future__ import annotations
+import uuid
+import uuid as _uuid
+from datetime import datetime, timedelta
+from typing import Literal
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
+from daimon.core._models import TaskContinuation
+
+ContinuationReason = Literal[
+    "task_handoff", "private_input_applied", "timer", "github_access_ready"
+]
+
+
+ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
+
+
+class TaskContinuationRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+    parent_channel_id: str
+    requester_account_id: uuid.UUID
+    requester_external_user_id: str
+    target_ma_agent_id: str
+    target_name: str
+    requested_work: str | None
+    reason: ContinuationReason
+    status: ContinuationStatus
+    skip_reason: str | None
+    idempotency_key: uuid.UUID
+    created_at: datetime
+    claimed_at: datetime | None
+    delivered_at: datetime | None
+    available_at: datetime | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    started_at: datetime | None = None
+    attempts: int = 0
+
+
+async def list_pending_continuations(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> list[TaskContinuationRow]:
+    """Undispatched continuations for one thread that are due now, oldest first.
+
+    A wake scheduled for later (`available_at` in the future, by the database
+    clock) is left out, so a caller that predates the wake queue can never
+    run it early.
+    """
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
+                TaskContinuation.status == "pending",
+                or_(
+                    TaskContinuation.available_at.is_(None),
+                    TaskContinuation.available_at <= func.now(),
+                ),
+            )
+            .order_by(TaskContinuation.created_at, TaskContinuation.id)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+def _dispatchable(now: datetime, *, max_attempts: int) -> ColumnElement[bool]:
+    """Rows a dispatcher may claim at `now`.
+
+    Pending and due, or claimed by a process whose lease ran out before it
+    committed the start fence — nothing can have run for such a row, so taking
+    it over cannot repeat a turn. A claim with `started_at` set is never
+    dispatchable again, however stale.
+    """
+    return or_(
+        and_(
+            TaskContinuation.status == "pending",
+            or_(TaskContinuation.available_at.is_(None), TaskContinuation.available_at <= now),
+        ),
+        and_(
+            TaskContinuation.status == "claimed",
+            TaskContinuation.lease_expires_at.is_not(None),
+            TaskContinuation.lease_expires_at < now,
+            TaskContinuation.started_at.is_(None),
+            TaskContinuation.attempts < max_attempts,
+        ),
+    )
+
+
+async def claim_wake_row(
+    session: AsyncSession,
+    *,
+    idempotency_key: _uuid.UUID,
+    owner: str,
+    now: datetime,
+    lease: timedelta,
+    max_attempts: int,
+) -> TaskContinuationRow | None:
+    """Claim one row under a lease; the claimed row, or None if it was not claimable.
+
+    Same single conditional UPDATE as `claim_continuation`, so two racing
+    dispatchers still get exactly one winner, widened to take over an expired,
+    unstarted claim.
+    """
+    orm = (
+        await session.execute(
+            update(TaskContinuation)
+            .where(
+                TaskContinuation.idempotency_key == idempotency_key,
+                _dispatchable(now, max_attempts=max_attempts),
+            )
+            .values(
+                status="claimed",
+                claimed_at=now,
+                lease_owner=owner,
+                lease_expires_at=now + lease,
+                attempts=TaskContinuation.attempts + 1,
+            )
+            .returning(TaskContinuation)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    return None if orm is None else TaskContinuationRow.model_validate(orm)
+
+
+async def start_wake_row(
+    session: AsyncSession,
+    *,
+    idempotency_key: _uuid.UUID,
+    owner: str,
+    now: datetime,
+    lease: timedelta,
+) -> bool:
+    """Commit the start fence; False when `owner` no longer holds the claim.
+
+    Not gated on the lease still being live: a takeover is itself an UPDATE on
+    this row, so either it landed first (the owner no longer matches) or it
+    comes after the fence and finds `started_at` set.
+    """
+    started = (
+        await session.execute(
+            update(TaskContinuation)
+            .where(
+                TaskContinuation.idempotency_key == idempotency_key,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_owner == owner,
+                TaskContinuation.started_at.is_(None),
+            )
+            .values(started_at=now, lease_expires_at=now + lease)
+            .returning(TaskContinuation.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    return started is not None
+
+
+async def settle_wake_row(
+    session: AsyncSession,
+    *,
+    idempotency_key: _uuid.UUID,
+    owner: str,
+    status: Literal["delivered", "skipped"],
+    now: datetime,
+    skip_reason: str | None = None,
+) -> bool:
+    """Close out a claim this owner still holds; False when it was taken over."""
+    values: dict[str, object] = {
+        "status": status,
+        "skip_reason": skip_reason,
+        "lease_expires_at": None,
+    }
+    if status == "delivered":
+        values["delivered_at"] = now
+    settled = (
+        await session.execute(
+            update(TaskContinuation)
+            .where(
+                TaskContinuation.idempotency_key == idempotency_key,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_owner == owner,
+            )
+            .values(**values)
+            .returning(TaskContinuation.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    return settled is not None
+
+
+async def list_dispatchable_continuations(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    now: datetime,
+    max_attempts: int,
+) -> list[TaskContinuationRow]:
+    """Rows in one thread a dispatcher may claim now, oldest first."""
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
+                _dispatchable(now, max_attempts=max_attempts),
+            )
+            .order_by(TaskContinuation.created_at, TaskContinuation.id)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+async def list_due_wake_rows(
+    session: AsyncSession,
+    *,
+    platform: str,
+    now: datetime,
+    max_attempts: int,
+    limit: int,
+) -> list[TaskContinuationRow]:
+    """The oldest actionable row of up to `limit` threads, longest-waiting thread first.
+
+    Actionable: a due wake, or a claim to take over. A pending row with no
+    `available_at` is left to the next turn in its thread, as it always was;
+    an expired unstarted claim is taken over whatever its origin, since that
+    is the only way it would ever settle. One row per thread, so a thread with
+    many rows cannot crowd the others out of the batch; a thread the adapter
+    could not open is pushed back (`defer_wake_rows`), so the scan moves on.
+    """
+    actionable = and_(
+        TaskContinuation.platform == platform,
+        _dispatchable(now, max_attempts=max_attempts),
+        or_(
+            TaskContinuation.status == "claimed",
+            TaskContinuation.available_at.is_not(None),
+        ),
+    )
+    first_per_thread = (
+        select(TaskContinuation.id)
+        .where(actionable)
+        .distinct(TaskContinuation.tenant_id, TaskContinuation.thread_id)
+        .order_by(
+            TaskContinuation.tenant_id,
+            TaskContinuation.thread_id,
+            TaskContinuation.available_at.nulls_first(),
+            TaskContinuation.id,
+        )
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(TaskContinuation.id.in_(select(first_per_thread.c.id)))
+            .order_by(TaskContinuation.available_at.nulls_first(), TaskContinuation.id)
+            .limit(limit)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]

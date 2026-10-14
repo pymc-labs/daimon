@@ -53,6 +53,7 @@
             ],
             "thread_id": "555000555"
           },
+          "personal_memory": false,
           "session_factory": {
             "fixture_type": "async_sessionmaker"
           },

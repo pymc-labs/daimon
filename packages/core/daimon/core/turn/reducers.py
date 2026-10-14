@@ -72,9 +72,17 @@ from daimon.core.turn.state import (
     UsageTotals,
 )
 from daimon.core.turn.termination import TerminationReason
+from mux.contracts.usage import UsageObservation
 
 
-def apply(state: TurnState, event: SessionEvent) -> TurnState:
+def apply_usage_observation(state: TurnState, usage: UsageObservation) -> TurnState:
+    """Fold a real neutral usage snapshot independently of display/native events."""
+    return dataclasses.replace(state, usage_totals=state.usage_totals.add_observation(usage))
+
+
+def apply(
+    state: TurnState, event: SessionEvent, *, usage: UsageObservation | None = None
+) -> TurnState:
     """Fold a single SDK session event into `state` and return a new
     `TurnState`. Unhandled `event.type` values fall through to a dedup-only
     update — see contract point 4."""
@@ -118,6 +126,14 @@ def apply(state: TurnState, event: SessionEvent) -> TurnState:
             )
         case "span.model_request_end":
             assert isinstance(event, BetaManagedAgentsSpanModelRequestEndEvent)
+            if usage is not None:
+                if usage.id != event.id:
+                    raise ValueError("usage observation does not belong to this event")
+                return dataclasses.replace(
+                    state,
+                    usage_totals=state.usage_totals.add_observation(usage),
+                    seen_event_ids=seen,
+                )
             u = event.model_usage
             t = state.usage_totals
             new_totals = UsageTotals(

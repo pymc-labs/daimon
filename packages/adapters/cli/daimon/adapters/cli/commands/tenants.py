@@ -5,14 +5,17 @@ from __future__ import annotations
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Annotated, Literal
 
+import httpx
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core import channel_admins, channel_backend
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
@@ -33,7 +36,7 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
-from daimon.core.stores.domain import Platform
+from daimon.core.stores.domain import Platform, TenantBackendPolicy
 from daimon.core.stores.tenants import (
     delete_tenant,
     get_tenant,
@@ -42,7 +45,8 @@ from daimon.core.stores.tenants import (
     set_funding_mode,
     set_turn_cap,
 )
-from pydantic import BaseModel, ValidationError
+from mux.contracts.ids import Provider
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -52,6 +56,165 @@ access_policy_app = typer.Typer(
     help=("A tenant's access policy: who may invoke the agent, and its channel and agent rules.")
 )
 tenants_app.add_typer(access_policy_app, name="access-policy")
+
+
+class TenantPolicySnapshot(TenantBackendPolicy):
+    """Policy data for an explicit compare-and-set; never saved authorization."""
+
+    platform: str
+    external_id: str
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@tenants_app.command("backend-policy")
+def tenants_backend_policy_command(
+    operation: str,
+    platform: str,
+    external_id: str,
+    actor_user: Annotated[
+        str, typer.Option("--actor-user", help="Current platform admin user ID.")
+    ],
+    snapshot: Annotated[Path | None, typer.Option("--snapshot")] = None,
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+    backends: Annotated[str | None, typer.Option("--backends")] = None,
+    expected_revision: Annotated[str | None, typer.Option("--expected-revision")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Snapshot, apply or revert a tenant backend allowlist with fresh admin verification."""
+    settings, console = load_settings(), Console(highlight=False)
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_backend_policy(
+                rt=rt,
+                console=console,
+                operation=operation,
+                platform=platform,
+                external_id=external_id,
+                actor_user=actor_user,
+                snapshot=snapshot,
+                output=output,
+                backends=backends,
+                expected_revision=expected_revision,
+                dry_run=dry_run,
+                yes=yes,
+            )
+
+    run_cli(run(), console=console)
+
+
+async def tenants_backend_policy(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    operation: str,
+    platform: str,
+    external_id: str,
+    actor_user: str,
+    snapshot: Path | None = None,
+    output: Path | None = None,
+    backends: str | None = None,
+    expected_revision: str | None = None,
+    dry_run: bool = False,
+    yes: bool = False,
+    http_client: httpx.AsyncClient | None = None,
+) -> None:
+    """Use the shared attestation and policy owners, including for preview and rollback."""
+    if operation not in ("snapshot", "apply", "revert") or not actor_user.strip():
+        raise typer.BadParameter("choose snapshot, apply or revert and a current admin user")
+    if operation == "snapshot":
+        if (
+            output is None
+            or snapshot is not None
+            or backends is not None
+            or expected_revision is not None
+        ):
+            raise typer.BadParameter("snapshot requires only --output and --actor-user")
+    elif snapshot is None or output is not None:
+        raise typer.BadParameter("apply/revert require --snapshot; --output is snapshot-only")
+    elif (operation == "apply" and (backends is None or expected_revision is not None)) or (
+        operation == "revert" and (backends is not None or not expected_revision)
+    ):
+        raise typer.BadParameter("apply requires --backends; revert requires --expected-revision")
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
+    saved = None
+    if snapshot is not None:
+        try:
+            with snapshot.open("rb") as file:
+                content = file.read(65_537)
+            if len(content) > 65_536:
+                raise ValueError("snapshot too large")
+            saved = TenantPolicySnapshot.model_validate_json(content)
+        except (OSError, ValueError) as exc:
+            raise typer.BadParameter("invalid policy snapshot") from exc
+        if (saved.tenant_id, saved.platform, saved.external_id) != (
+            tenant_id,
+            platform,
+            external_id,
+        ):
+            raise typer.BadParameter("policy snapshot belongs to another tenant or workspace")
+    service = channel_backend.make_backend_service(rt.sessionmaker, rt.settings.turn)
+
+    async def actor() -> channel_backend.BackendActor:
+        return await channel_admins.verify_backend_actor(
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            platform_user_id=actor_user,
+            settings=rt.settings,
+            http_client=http_client,
+        )
+
+    verified = await actor()
+    before = await service.tenant_policy(tenant_id)
+    if operation == "snapshot":
+        captured = TenantPolicySnapshot(
+            **before.model_dump(), platform=platform, external_id=external_id
+        )
+        if not dry_run:
+            assert output is not None
+            try:
+                with output.open("x", encoding="utf-8") as file:
+                    file.write(captured.model_dump_json() + "\n")
+            except OSError as exc:
+                raise StoreError("could not create policy snapshot; no policy was changed") from exc
+        console.print(captured.model_dump_json(), markup=False)
+        return
+    assert saved is not None
+    revision = saved.revision if operation == "apply" else expected_revision
+    assert revision is not None
+    try:
+        proposed = (
+            TypeAdapter(tuple[Provider, ...]).validate_python(tuple((backends or "").split(",")))
+            if operation == "apply"
+            else saved.enabled_backends
+        )
+        if not dry_run:
+            confirm_or_abort(
+                console, f"{operation} backend policy for {platform}:{external_id}?", yes=yes
+            )
+            verified = await actor()
+        result = await service.set_tenant_allowlist(
+            tenant_id, proposed, revision, verified, dry_run=dry_run
+        )
+    except ValidationError as exc:
+        raise typer.BadParameter("invalid backend allowlist") from exc
+    readback = None
+    try:
+        readback = await service.tenant_policy(tenant_id)
+    finally:
+        console.print_json(
+            data={
+                "operation": operation,
+                "dry_run": dry_run,
+                "expected_revision": revision,
+                "before": before.model_dump(mode="json"),
+                "result": result.model_dump(mode="json"),
+                "readback": readback.model_dump(mode="json") if readback is not None else None,
+            }
+        )
+    if (not dry_run and readback != result) or (dry_run and readback != before):
+        raise StoreError("policy changed during independent readback; CAS result is in the receipt")
 
 
 _VALID_PLATFORMS = ("discord", "cli", "slack", "teams")
@@ -386,7 +549,12 @@ def _print_policy(
     console: Console, *, label: str, policy: TenantAccessPolicy, as_json: bool
 ) -> None:
     if as_json:
-        console.print_json(policy.model_dump_json())
+        exclude = (
+            {"enabled_backends"}
+            if policy.enabled_backends == OPEN_ACCESS_POLICY.enabled_backends
+            else None
+        )
+        console.print_json(policy.model_dump_json(exclude=exclude))
         return
     if policy == OPEN_ACCESS_POLICY:
         console.print(f"{label} access policy: open (anyone may invoke; no rules)")

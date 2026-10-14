@@ -73,7 +73,12 @@ CredentialRequestOutcome = Literal[
     "token_rejected",
     "declined",
     "expired",
+    "expired_card_pending",
+    "expired_card_updated",
 ]
+
+# Expiry spends the same single-use gate without applying a credential. The
+# pending/updated pair is an in-place card-edit outbox, not a save result.
 
 # `target` for kind='env_file'. The column is NOT NULL and a whole-file import
 # names no single key, so every env_file request carries this one sentinel.

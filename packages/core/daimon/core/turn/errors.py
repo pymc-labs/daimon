@@ -1,4 +1,4 @@
-"""Typed errors raised by the turn admission chokepoint (D-01 stage one).
+"""Typed errors raised by the turn admission chokepoint (stage one).
 
 Split out of `admission.py` to keep that module under the 200-line target.
 Both subclass `DaimonError` so the adapters' existing
@@ -24,6 +24,9 @@ AdmissionDenialReason = Literal[
     "runs_elsewhere",
     "own_agents_only",
     "external_participant",
+    # The channel's backend configuration (`daimon.core.channel_backend`) names
+    # a profile that cannot meet it, or one this release cannot run yet.
+    "backend_unsupported",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

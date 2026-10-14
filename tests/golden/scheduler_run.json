@@ -51,6 +51,7 @@
             "seal_ids": [],
             "thread_id": null
           },
+          "personal_memory": false,
           "session_factory": {
             "fixture_type": "async_sessionmaker"
           },

@@ -21,17 +21,25 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, cast
 
 import anthropic
 import httpx
+from anthropic import AsyncAnthropic
 from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
+from daimon.core.config import McpSettings
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import DeploymentDefault
+from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # --- Stream scripts --------------------------------------------------------
 
@@ -395,3 +403,24 @@ def assert_lifecycle(lc: TurnLifecycle) -> None:
     form for tests that want the check spelled out.
     """
     _ = lc  # runtime no-op; compile-time structural check
+
+
+def deps_for(client: object = None, sm: async_sessionmaker[AsyncSession] | None = None) -> TurnDeps:
+    """Build the real turn bundle; tests replace only dependencies they exercise."""
+
+    return TurnDeps(
+        anthropic=cast(AsyncAnthropic, client),
+        sessionmaker=sm if sm is not None else async_sessionmaker(),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        defaults_root=Path("/unused"),
+        mcp=McpSettings(),
+        billing_config=None,
+        markup=Decimal(1),
+        fernet=None,
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+        public_url=None,
+        turn_path="mux",
+    )

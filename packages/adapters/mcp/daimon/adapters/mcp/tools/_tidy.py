@@ -335,7 +335,7 @@ async def conversation_refusal(
 ) -> RefusalReason | None:
     """Why a turn, auto-thread or routine post may not be tidied for this caller, or None.
 
-    Tool posts (`source='tool'`) pass: #383's rules cover them. A turn post
+    Tool posts (`source='tool'`) use the separate tool-post rules. A turn post
     is refused while its turn is still running, so the lifecycle never edits
     a message tidy removed. Then the person asking (the caller's platform
     user) must be the one who started that turn, opened that thread or made

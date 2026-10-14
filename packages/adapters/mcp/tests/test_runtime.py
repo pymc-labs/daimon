@@ -27,8 +27,10 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
         "group_lookups",
         "slack_http",
         "resolver_cache",
+        "resource_hosts",
+        "gemini_skill_capability",
     }, (
-        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + group lookups + shared caches"
+        "McpRuntime exposes core collaborators + deployment_default + optional media-tool slots + fernet + Teams client + group lookups + shared caches + the operator's resource hosts and Gemini skill capability"
     )
     # Frozen: assignment raises FrozenInstanceError
     sf: async_sessionmaker[AsyncSession] = async_sessionmaker()  # type: ignore[call-arg]
@@ -64,3 +66,7 @@ def test_mcp_runtime_optional_fields_default_to_none() -> None:
     )
     assert rt.gemini_client is None
     assert rt.artifact_store is None
+    # The operator's OpenAI resource capability is off unless a host wires it.
+    assert rt.resource_hosts is None
+    # The Gemini chat Add-skill capability is also off unless explicitly supplied.
+    assert rt.gemini_skill_capability is None

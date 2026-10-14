@@ -1,0 +1,22 @@
+id: QA-NEW37-MARKDOWN-TABLE-READABLE
+title: a markdown table answer is not shown as raw pipes on Discord
+friction:
+- D29
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 1
+notes: Expected FAIL while table_rendering defaults off. Pass = no raw pipe rows (rendered
+  image or reformatted list).
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Show a 3-column table of 4 fruits with colour and price. No tools.
+- do: wait_done
+assert:
+- kind: text_absent
+  turn: 1
+  pattern: (?m)^\s*\|.*\|\s*$
+teardown: []

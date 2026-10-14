@@ -36,6 +36,7 @@ from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import effective_repo_url_sets
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_fence_retry import try_fence
+from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -226,7 +227,15 @@ async def recorded_snapshot(
 
     if observed is None:
         try:
-            observed = await anthropic.beta.sessions.retrieve(existing.ma_session_id)
+            observed = await retrieve_session_record(
+                anthropic,
+                existing.ma_session_id,
+                scope=session_scope(
+                    tenant_id=existing.tenant_id,
+                    account_id=existing.account_id,
+                    call_site="session_preparation_stages:recorded_snapshot",
+                ),
+            )
         except APIStatusError as error:
             if error.status_code == 404:
                 return None
@@ -276,6 +285,7 @@ async def desired_snapshot_for(
     public_url: str | None,
     memory_read_only: bool = False,
     asks_before_publishing: bool = False,
+    confirmed_tools: frozenset[str] = frozenset(),
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
@@ -358,6 +368,7 @@ async def desired_snapshot_for(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         asks_before_publishing=asks_before_publishing,
+        confirmed_tools=confirmed_tools,
         vault_id=None if recorded is None else recorded.vault_id,
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,

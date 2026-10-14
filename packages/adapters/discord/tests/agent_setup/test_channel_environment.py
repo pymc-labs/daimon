@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -54,6 +55,7 @@ from daimon.testing.ma import (
     build_no_retry_anthropic,
     list_response,
 )
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -93,7 +95,7 @@ def _runtime(sessionmaker: Any, anthropic: AsyncAnthropic) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DEFAULT,
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
 

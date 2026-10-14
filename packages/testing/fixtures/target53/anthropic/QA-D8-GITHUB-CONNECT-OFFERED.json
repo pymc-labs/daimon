@@ -1,0 +1,102 @@
+{
+  "scenario_id": "QA-D8-GITHUB-CONNECT-OFFERED",
+  "scenario_sha256": "0d774eaef640bcb864becc1212a1708911ce091b73fc92bf87b22efaa1e8285a",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "Connect GitHub for this channel's agent.",
+      "events": [
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Connect GitHub for this channel's agent."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "github_connect",
+          "input": {
+            "origin_context_id": "qa-origin-QA-D8-GITHUB-CONNECT-OFFERED-1",
+            "agent_name": "qa-channel-agent"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"status\":\"sent\",\"message\":\"A private connection button was offered to the admin.\"}"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the private connection button to connect GitHub."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

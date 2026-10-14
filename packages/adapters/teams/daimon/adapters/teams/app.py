@@ -68,6 +68,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
+from daimon.adapters.teams.provider_actions import TeamsProviderActions, provider_action_options
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
@@ -95,6 +96,8 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
@@ -170,6 +173,7 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
+from mux.errors import ScopeViolation
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
@@ -207,6 +211,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "writers_none": "turn.skipped.writers_none",
     "own_agents_only": "turn.skipped.own_agents_only",
     "external_participant": "turn.skipped.external_participant",
+    "backend_unsupported": "turn.skipped.backend_unsupported",
 }
 
 _NO_CONTEXT = (
@@ -319,6 +324,7 @@ class TeamsApp:
         )
         # Tool-write confirmation cards awaiting a click.
         self.confirmations = TeamsConfirmationCards(self._sender)
+        self.provider_actions = TeamsProviderActions(self._sender)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         # Per-tenant turn slots, with the queue a turn waits in at the cap.
@@ -1069,6 +1075,7 @@ class TeamsApp:
         agent: BetaManagedAgentsAgent,
         *,
         direct_chat: bool,
+        tenant_id: uuid.UUID,
     ) -> tuple[str, tuple[ExecuteAction, ...]]:
         """The notice for a refused bind, and the Hand over button when the agent changed."""
         name = agent.name
@@ -1077,8 +1084,14 @@ class TeamsApp:
         if isinstance(error, SessionBusyError):
             return render_current_work_must_finish(name, handoff=True), ()
         owner = "the previous agent"
-        with contextlib.suppress(anthropic.APIStatusError):
-            owner = (await self.runtime.anthropic.beta.agents.retrieve(error.source_agent_id)).name
+        with contextlib.suppress(anthropic.APIStatusError, ScopeViolation):
+            owner = (
+                await retrieve_agent(
+                    self.runtime.anthropic,
+                    error.source_agent_id,
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
+            ).name
         text = render_responder_changed_without_handoff(
             new_responder=name,
             owner=owner,
@@ -1122,7 +1135,7 @@ class TeamsApp:
             )
         except _BIND_REFUSALS as error:
             text, actions = await self._refusal(
-                error, admission.agent, direct_chat=inbound.kind == "dm"
+                error, admission.agent, direct_chat=inbound.kind == "dm", tenant_id=tenant_id
             )
             await lifecycle.close_with_notice(text, actions=actions)
             if reraise:
@@ -1233,9 +1246,20 @@ class TeamsApp:
                 image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
                 confirm_write=self.confirmations.hook(
+                    runtime=self.runtime,
+                    tenant_id=tenant_id,
+                    account_id=admission.account_id,
                     conversation_id=inbound.conversation_id,
                     service_url=inbound.service_url,
                     requester_display_name=inbound.user_name,
+                ),
+                **provider_action_options(
+                    prepared,
+                    lambda: self.provider_actions.hook(
+                        conversation_id=inbound.conversation_id,
+                        service_url=inbound.service_url,
+                        thread_id=inbound.thread_id,
+                    ),
                 ),
             )
         if outcome.mapping_id is not None:

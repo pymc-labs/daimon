@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -43,6 +44,7 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant, make_tenant_config
 from daimon.testing.ma import MARouter, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -91,7 +93,7 @@ def _build_runtime(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
 

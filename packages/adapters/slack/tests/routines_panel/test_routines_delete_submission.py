@@ -9,6 +9,7 @@ Real Postgres + transport-level Slack/MA fakes. Covers:
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,6 +21,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.turn_fakes import deps_for
 
 _TEAM_ID = "T_DEL_SUB"
 _USER_ID = "U_DEL_CREATOR"
@@ -37,7 +39,7 @@ def _build_runtime(db_session_factory: Any) -> SlackRuntime:
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
 

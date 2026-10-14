@@ -1,0 +1,107 @@
+{
+  "scenario_id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+  "scenario_sha256": "11eb9261b0718da078bbc9118430f2963e6c191a23d82e2e51a58ecef278d513",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "Create a routine that runs every minute and posts to this channel. Each run: curl -sL https://example.com -o qa.pdf, then read qa.pdf as a PDF document and reply ROUTINE-RAN-qa-fixture-0001 plus one sentence about it.",
+      "events": [
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Create a routine that runs every minute and posts to this channel. Each run: curl -sL https://example.com -o qa.pdf, then read qa.pdf as a PDF document and reply ROUTINE-RAN-qa-fixture-0001 plus one sentence about it."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "create_routine",
+          "input": {
+            "agent_name": "qa-channel-agent",
+            "cron_expr": "* * * * *",
+            "timezone": "UTC",
+            "trigger_message": "curl -sL https://example.com -o qa.pdf; read qa.pdf as a PDF document and reply ROUTINE-RAN-qa-fixture-0001 plus one sentence.",
+            "origin_context_id": "qa-origin-QA-NEW35-ROUTINE-FAILURE-IS-REPORTED-1",
+            "destination_kind": "channel",
+            "destination_id": "default"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:1aadab7f1469bcef-turn-1:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "Routine creation reply received; scheduling and delivery require host capture."
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "The routine request is configured to run every minute."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:1aadab7f1469bcef-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:1aadab7f1469bcef-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

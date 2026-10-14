@@ -14,7 +14,10 @@ from daimon.core.continuity.continuation import (
     ResponderChanged,
     record_continuation,
 )
-from daimon.core.continuity.dispatch import dispatch_pending_continuations
+from daimon.core.continuity.dispatch import (
+    WorkerFinishedDecision,
+    dispatch_pending_continuations,
+)
 from daimon.core.continuity.wakes import WAKE_RETRY_DELAY, enqueue_wake
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
@@ -93,6 +96,7 @@ async def _dispatch(
     run: Exception | None = None,
     latest: datetime | None = None,
     target_tenant: uuid.UUID | None = None,
+    worker_finished_decision: WorkerFinishedDecision | None = None,
 ) -> tuple[list[str], list[str]]:
     """`target_tenant` owns the target agent: another tenant's means it is gone."""
     seeds: list[str] = []
@@ -119,6 +123,7 @@ async def _dispatch(
         post_notice=post_notice,
         latest_user_message_at=latest_user_message_at,
         dispatch_errors=(RuntimeError,),
+        worker_finished_decision=worker_finished_decision,
     )
     return seeds, notices
 
@@ -144,6 +149,19 @@ async def test_dispatches_once_and_settles_delivered(
     assert await _dispatch(db_session_factory, caller) == (["finish the writeup"], [])
     assert await _status(db_session_factory, key) == ("delivered", None)
     assert await _dispatch(db_session_factory, caller) == ([], []), "a settled row never reruns"
+
+
+async def test_worker_completion_hook_does_not_intercept_a_handoff(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    async def worker_finished(_row: TaskContinuationRow, _now: datetime) -> None:
+        raise AssertionError("A handoff must use its existing history and agent checks")
+
+    key = await _queue(db_session_factory, caller, "finish the writeup")
+    assert await _dispatch(
+        db_session_factory, caller, worker_finished_decision=worker_finished
+    ) == (["finish the writeup"], [])
+    assert await _status(db_session_factory, key) == ("delivered", None)
 
 
 @pytest.mark.parametrize(

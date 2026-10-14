@@ -2504,6 +2504,57 @@ class TestCredentialButtonRegistration:
         assert dynamic_items.get(template) is StalePictureChangeButton
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("posting_owner", [False, True])
+async def test_credential_expiry_starts_only_with_explicit_flag_and_posting_ownership(
+    enabled, posting_owner, monkeypatch
+) -> None:
+    from daimon.adapters.discord import bot as bot_module
+
+    factory = MagicMock(side_effect=AssertionError("startup must not connect"))
+    runtime = _make_runtime(factory)
+    runtime.settings.discord = DiscordSettings(
+        bot_token="offline-expiry-fixture", credential_form_expiry=enabled
+    )
+    bot = make_bot(runtime)
+    bot.wake_poller_enabled = posting_owner
+    bot.start_orphan_recovery = MagicMock()
+    bot.add_cog = AsyncMock()
+    started = []
+
+    def capture(coroutine):
+        started.append(coroutine.cr_code.co_name)
+        coroutine.close()  # Inspect construction without launching unrelated owner jobs.
+
+    bot._spawn = capture
+    poller = MagicMock(wraps=bot_module.run_credential_form_expiry_poller)
+    monkeypatch.setattr(bot_module, "run_credential_form_expiry_poller", poller)
+    await bot.setup_hook()
+    expected = enabled and posting_owner
+    assert started.count("run_credential_form_expiry_poller") == int(expected)
+    assert poller.call_count == int(expected)
+    factory.assert_not_called()
+    factory.begin.assert_not_called()
+    if expected:
+        assert poller.call_args.args == (factory,)
+        assert poller.call_args.kwargs["edit"] == bot._edit_expired_credential_card
+        stop = poller.call_args.kwargs["should_stop"]
+        assert stop() is False
+        bot.draining = True
+        assert stop() is True
+
+
+async def test_credential_expiry_bot_companion_returns_verified_ack(monkeypatch) -> None:
+    from daimon.adapters.discord import posted_controls
+
+    bot = make_bot(_make_runtime(MagicMock()))
+    row = MagicMock()
+    edit = AsyncMock(return_value=False)
+    monkeypatch.setattr(posted_controls, "edit_expired_posted_card", edit)
+    assert await bot._edit_expired_credential_card(row) is False
+    edit.assert_awaited_once_with(bot, row=row)
+
+
 class TestGuildInstallLifecycle:
     async def test_delayed_remove_cannot_archive_after_rejoin(
         self,

@@ -86,6 +86,10 @@ from daimon.adapters.discord.errors import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.provider_actions import (
+    discord_provider_action_hook,
+    provider_action_options,
+)
 from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.thread_send import safe_thread_send
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
@@ -464,7 +468,7 @@ async def run_wizard_submit_turn_observed(
             await channel.send(_OVER_CAP)
             return
 
-        # --- Stage one: admission -- D-01 admit(). Same four branches
+        # --- Stage one: admission -- admit(). Same four branches
         # _orchestrate has, prefixed with a sentence saying the answers were
         # already recorded (the claim committed before this runs). ---
         # The live role, read from the interaction before admission: the
@@ -681,7 +685,7 @@ async def run_wizard_submit_turn_observed(
             )
             return
 
-        # D-03 boundary, mirroring bot.py's mention path: the per-turn
+        # Mirroring bot.py's mention path, the per-turn
         # ceiling clock starts here, once admission has passed and the turn
         # holds its slot, and covers session bind (bind_session) plus the
         # driver pump (run_prepared_turn) as ONE shared budget. This call
@@ -690,7 +694,7 @@ async def run_wizard_submit_turn_observed(
         # wizard-submit turn could hang forever.
         turn_deadline_at = turn_deadline(now=datetime.now(UTC))
 
-        # --- Stage two: bind_session -- D-01 bind_session(). Always reuses
+        # --- Stage two: bind_session -- bind_session(). Always reuses
         # the thread's existing session: the form lives in the conversation
         # the turn should continue, so the agent resumes with the history of
         # having asked. A bind failure ends the card before the error
@@ -792,11 +796,24 @@ async def run_wizard_submit_turn_observed(
                 recovery_lifecycle=_recovery_lifecycle,
                 render_interval_s=2.0,
                 deadline=turn_deadline_at,
-                confirm_write=discord_confirmation_hook(channel),
+                confirm_write=discord_confirmation_hook(
+                    channel,
+                    runtime=bot.runtime,
+                    tenant_id=row.tenant_id,
+                    account_id=admission.account_id,
+                ),
                 # A dead-session recovery moves this turn's marker to the replacement.
                 active_turn_message_id=marker_ids.get(prepared.mapping_id)
                 if prepared.mapping_id is not None
                 else None,
+                **provider_action_options(
+                    prepared,
+                    lambda: discord_provider_action_hook(
+                        channel,
+                        thread_id=thread_id,
+                        channel_id=channel.id,
+                    ),
+                ),
             )
         finally:
             if outcome is not None and outcome.mapping_id is not None:

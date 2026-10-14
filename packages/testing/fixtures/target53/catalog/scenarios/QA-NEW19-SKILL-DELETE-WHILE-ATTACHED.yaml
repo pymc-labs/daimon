@@ -1,0 +1,40 @@
+id: QA-NEW19-SKILL-DELETE-WHILE-ATTACHED
+title: deleting a skill that an agent still uses is refused (or detaches), never strands
+  the agent
+friction:
+- NEW-19
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from
+    daimon
+- do: admin
+  tool: cli
+  args: daimon skills --guild {guild_id} add fixtures/SKILL.md --agent {fork.name}
+    --yes
+- do: admin
+  tool: cli
+  args: daimon skills --guild {guild_id} delete qa-echo-skill --yes
+  allow_fail: true
+- do: mention
+  text: 'QA strand check: reply with only NOT-STRANDED'
+- do: wait_done
+assert:
+- kind: text_present
+  turn: 1
+  pattern: NOT-STRANDED
+- kind: text_absent
+  turn: 1
+  pattern: (?i)could not get .* ready with the latest setup
+teardown:
+- do: admin
+  tool: archive_channel_forks
+  args:
+    channel: '{channel_id}'

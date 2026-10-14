@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,6 +29,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
 from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,7 +52,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name=agent_name),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # seed tests never run a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # seed tests never run a turn
     )
 
 

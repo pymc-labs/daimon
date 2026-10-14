@@ -1,0 +1,66 @@
+id: QA-NEW12-AGENT-SWITCH-HANDOFF-COPY
+title: after the channel's agent changes, the next mention gets plain copy (no rid)
+  and a way forward
+friction:
+- D23
+- D30
+- D19
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 4
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'QA handoff turn 1: reply with only H1'
+- do: wait_done
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from
+    daimon
+- do: thread_reply
+  mention: true
+  text: 'QA handoff turn 2: reply with only H2'
+- do: wait_done
+  timeout_s: 180
+- do: thread_reply
+  mention: true
+  text: 'QA handoff turn 3: reply with only H3'
+- do: wait_done
+  timeout_s: 180
+- do: thread_reply
+  mention: true
+  text: Which agent answers in this channel now? Give its exact name only.
+- do: wait_done
+assert:
+- kind: no_silent_drop
+  turn: 2
+  max: 15
+- kind: text_absent
+  turn: 2
+  pattern: 'rid: ?01|take over this task'
+- kind: text_present
+  turn: 2
+  pattern: H2
+- kind: text_absent
+  turn: 2
+  pattern: (?i)belongs to another agent
+- kind: text_absent
+  turn: 3
+  pattern: (?i)now answers in|belongs to another agent|take over this task
+- kind: text_present
+  turn: 3
+  pattern: H3
+- kind: text_present
+  turn: 4
+  pattern: '{fork.name}'
+- kind: text_absent
+  turn: 4
+  pattern: (?i)unchanged
+teardown:
+- do: admin
+  tool: archive_channel_forks
+  args:
+    channel: '{channel_id}'

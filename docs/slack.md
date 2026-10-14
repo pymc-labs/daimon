@@ -394,3 +394,5 @@ opens `/agent-setup`, selects the agent, and clicks **Use default** in the
 Picture row. The Picture row is hidden when identity is off. Each change gets a
 new URL. Pictures are public: anyone who sees a message can open its image, and
 platform caches can keep a copy after the picture changes.
+
+For explicitly configured alternate providers, progress cards display neutral message snapshots and ordered draft previews. Terminal callbacks replace the card with the authoritative answer and retire Cancel. A provider cost is omitted until a verified display tariff is available; the default Anthropic display and price calculation are unchanged.

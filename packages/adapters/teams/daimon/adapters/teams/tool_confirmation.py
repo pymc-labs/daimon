@@ -8,9 +8,11 @@ in-process, like the cancel registry: a restart ends the card and its turn toget
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC
+from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.teams.card_actions import (
@@ -35,6 +37,7 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import (
     PostedConfirmations,
+    check_confirmation_admin,
     edit_card_within,
     queue_card_edit,
 )
@@ -54,6 +57,9 @@ from microsoft_teams.cards import (
     TextRun,
     ToggleVisibilityAction,
 )
+
+if TYPE_CHECKING:
+    from daimon.adapters.teams.runtime import TeamsRuntime
 
 __all__ = ["VERB", "TeamsConfirmationCards", "confirmation_adaptive_card"]
 
@@ -99,11 +105,13 @@ def confirmation_adaptive_card(
         body.append(RichTextBlock(inlines=[TextRun(text=card.body)]))
     if card.consequence:
         body.append(RichTextBlock(inlines=[TextRun(text=card.consequence)]))
+    if prompt.admin:
+        body.extend(RichTextBlock(inlines=[TextRun(text=line)]) for line in card.detail_lines)
     if card.token is not None:
         body.append(Container(items=[], separator=True))
         approve = button(
             VERB,
-            "Approve",
+            "Confirm" if prompt.admin else "Approve",
             "approve",
             style="positive",
             token=card.token,
@@ -149,6 +157,7 @@ class _PostedCard:
     service_url: str | None
     message_id: str
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
+    check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None
 
 
 class TeamsConfirmationCards:
@@ -164,10 +173,41 @@ class TeamsConfirmationCards:
         conversation_id: str,
         service_url: str | None,
         requester_display_name: str | None = None,
+        runtime: TeamsRuntime | None = None,
+        tenant_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
+        prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
+        check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
     ) -> ConfirmationHook:
         """A hook that posts each prompt's card into the turn's conversation."""
 
+        if runtime is not None:
+            from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+
+            if backend_selection_enabled(runtime.settings.turn):
+                from daimon.core.confirmation import backend_switch_callbacks
+
+                if tenant_id is None or account_id is None:
+                    raise ValueError("Backend confirmation requires an admitted account and tenant")
+
+                async def current_admin(clicker: str) -> bool:
+                    settings = runtime.settings.teams
+                    return settings is not None and clicker in settings.admin_user_ids
+
+                prepare_admin, check_admin = backend_switch_callbacks(
+                    make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+                    sessionmaker=runtime.sessionmaker,
+                    anthropic=runtime.anthropic,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    current_admin=current_admin,
+                )
+
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
+            if prompt.admin:
+                if prepare_admin is None or check_admin is None:
+                    return "denied"
+                prompt = await prepare_admin(prompt)
             posted_cards: list[_PostedCard] = []
             if requester_display_name:
                 prompt = prompt.model_copy(
@@ -178,7 +218,9 @@ class TeamsConfirmationCards:
                 card = build_confirmation_card(prompt, state="pending", token=token)
                 message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
                 sent = await self._sender.send(conversation_id, message, service_url=service_url)
-                posted = _PostedCard(prompt, conversation_id, service_url, sent.id)
+                posted = _PostedCard(
+                    prompt, conversation_id, service_url, sent.id, check_admin=check_admin
+                )
                 posted_cards.append(posted)
                 return posted
 
@@ -210,6 +252,9 @@ class TeamsConfirmationCards:
         if posted is None or answer is None:
             return toast(self._controls.missing_message(token))
         clicker = canonical_uuid(activity.from_.aad_object_id)
+        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin)
+        if refusal is not None:
+            return toast(refusal)
         if refusal := self._controls.claim(token, clicker, answer):
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(

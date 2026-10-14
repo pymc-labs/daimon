@@ -11,6 +11,7 @@ FakeSlackWebClient from conftest (no AsyncMock on client.* methods).
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -68,7 +70,7 @@ def _build_runtime(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
 

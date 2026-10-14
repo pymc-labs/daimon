@@ -144,9 +144,14 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one_or_none()
     if record is None:
         return OPEN_ACCESS_POLICY
+    payload = cast(object, record.policy)
+    if isinstance(payload, dict):
+        if "enabled_backends" in payload:
+            raise AccessPolicyUnreadable(tenant_id=tenant_id)
+        payload = {**cast("dict[str, Any]", payload), "enabled_backends": record.enabled_backends}
     try:
         # JSON null, an array or a string fail validation like a bad field does.
-        return TenantAccessPolicy.model_validate(record.policy)
+        return TenantAccessPolicy.model_validate(payload)
     except ValidationError as exc:
         raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
 
@@ -157,6 +162,7 @@ async def set_access_policy(
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     payload = policy.model_dump(mode="json")
+    backends = payload.pop("enabled_backends")
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
     for key in ("channel_rules", "category_rules", "agent_rules", "member_guest_ids"):
@@ -164,10 +170,10 @@ async def set_access_policy(
             payload.pop(key, None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
-        .values(tenant_id=tenant_id, policy=payload)
+        .values(tenant_id=tenant_id, policy=payload, enabled_backends=backends)
         .on_conflict_do_update(
             index_elements=[TenantAccessPolicyRecord.tenant_id],
-            set_={"policy": payload, "updated_at": func.now()},
+            set_={"policy": payload, "enabled_backends": backends, "updated_at": func.now()},
         )
     )
     await session.flush()

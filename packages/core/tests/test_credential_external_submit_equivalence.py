@@ -15,6 +15,7 @@ import subprocess
 import sys
 import types
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
@@ -49,6 +50,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic
+from daimon.testing.turn_fakes import deps_for
 
 BASE = "4b368d56fdce16934e65c4e48c51da18da4a5a7a"
 URL = "https://external.example.com/mcp"
@@ -270,7 +272,7 @@ async def _run(db, module, tenant, row, agent, admin, monkeypatch, fault="none")
             ),
             github=SimpleNamespace(oauth_scopes=("repo",)),
         ),
-        turn_deps=SimpleNamespace(fernet=fernet),
+        turn_deps=replace(deps_for(None, None), fernet=fernet, turn_path=None),
         # No Graph: a Teams channel admin grant names no team owner here.
         team_owners=None,
     )

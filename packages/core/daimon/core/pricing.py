@@ -10,12 +10,68 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, localcontext
+from types import MappingProxyType
 from typing import Protocol
 
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
+from mux.contracts.config import ResolvedBackend
+from mux.contracts.ids import ModelRef
+from mux.contracts.usage import UsageObservation
+from mux.profiles import get_profile
+
+
+class LegacyUsage(Protocol):
+    """Temporary structural boundary for unchanged M0 SDK/adapter callers."""
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+    @property
+    def cache_creation_input_tokens(self) -> int: ...
+    @property
+    def cache_read_input_tokens(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class UsageTokens:
+    """The existing four disjoint billing/telemetry columns."""
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+
+
+def uncached_input_tokens(usage: UsageObservation) -> int | None:
+    """Project the input stage when all three input counts were reported."""
+    if (
+        usage.input_tokens is None
+        or usage.input_cached_tokens is None
+        or usage.input_cache_write_tokens is None
+    ):
+        return None
+    uncached = usage.input_tokens - usage.input_cached_tokens - usage.input_cache_write_tokens
+    if uncached < 0:
+        raise ValueError("cached input exceeds inclusive input tokens")
+    return uncached
+
+
+def usage_tokens(usage: UsageObservation) -> UsageTokens | None:
+    """Project inclusive neutral counts without treating unknown as zero."""
+    uncached = uncached_input_tokens(usage)
+    if uncached is None or usage.output_tokens is None:
+        return None
+    assert usage.input_cached_tokens is not None and usage.input_cache_write_tokens is not None
+    return UsageTokens(
+        input_tokens=uncached,
+        output_tokens=usage.output_tokens,
+        cache_creation_input_tokens=usage.input_cache_write_tokens,
+        cache_read_input_tokens=usage.input_cached_tokens,
+    )
 
 
 @dataclass(frozen=True)
@@ -128,16 +184,22 @@ MODEL_PRICING: dict[str, ModelRates] = _ModelPricing({**AGENT_MODEL_PRICING, **T
 
 
 def cost_of(
-    usage: BetaManagedAgentsSpanModelUsage,
+    usage: UsageObservation | LegacyUsage,
     rates: ModelRates | None,
 ) -> float | None:
-    """Compute USD cost for one model request's usage against `rates`.
+    """Compute USD cost for one reported request at its prompt-length tier.
 
-    Returns None when rates is None (unknown model id). `usage` must be one
-    request: the long-context tier depends on that request's prompt length.
-    To price usage summed over many requests, use `cost_of_totals` with the
-    long-prompt subset, or `cost_of_bucket` for requests all in one tier.
+    Neutral observations project to disjoint counts first. Unknown rates or
+    token stages stay unknown; float operation order retains historical parity.
+    Multiple requests use cost_of_totals or an explicitly selected tier bucket.
     """
+    if rates is None:
+        return None
+    if isinstance(usage, UsageObservation):
+        tokens = usage_tokens(usage)
+        if tokens is None:
+            return None
+        usage = tokens
     prompt_tokens = (
         usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens
     )
@@ -177,7 +239,7 @@ def cost_of_totals(
     The rest is priced at the base rates and the subset at the long-context
     rates, so the sum equals pricing each request on its own.
     """
-    short = BetaManagedAgentsSpanModelUsage(
+    short = UsageTokens(
         input_tokens=all_usage.input_tokens - long_usage.input_tokens,
         output_tokens=all_usage.output_tokens - long_usage.output_tokens,
         cache_creation_input_tokens=all_usage.cache_creation_input_tokens
@@ -200,3 +262,258 @@ def format_cost(amount: float | None) -> str | None:
         return "<$0.001"
     s = f"{amount:.3f}".rstrip("0").rstrip(".")
     return f"${s}"
+
+
+@dataclass(frozen=True)
+class ProviderPrice:
+    """Dated USD/M rates for an explicitly selected backend.
+
+    A None cache-write rate declares that billing stage inapplicable, rather
+    than asserting that the provider reported a zero count. Reasoning is
+    already included in output. Actual infrastructure cost is supplied
+    separately for the observation's grain and revision.
+    """
+
+    provider: str
+    model: str
+    checked_on: date
+    input: Decimal
+    output: Decimal
+    cache_read: Decimal
+    cache_write: Decimal | None = None
+    verified: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.provider or not self.model:
+            raise ValueError("provider pricing requires provider and model identity")
+        for rate in (self.input, self.output, self.cache_read, self.cache_write):
+            if rate is not None and (not rate.is_finite() or rate < 0):
+                raise ValueError("provider rates must be finite nonnegative Decimals")
+
+
+def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice) -> int | None:
+    """Validate attribution and project the input stage independently."""
+    if usage.model is None or (usage.session.provider, usage.model.provider, usage.model.id) != (
+        price.provider,
+        price.provider,
+        price.model,
+    ):
+        raise ValueError("usage and dated provider pricing identity differ")
+    written = usage.input_cache_write_tokens
+    if price.cache_write is None:
+        if written not in (None, 0):
+            raise ValueError("provider reported an inapplicable cache-write stage")
+        written = 0
+    if usage.input_tokens is None or usage.input_cached_tokens is None or written is None:
+        return None
+    uncached = usage.input_tokens - usage.input_cached_tokens - written
+    if uncached < 0:
+        raise ValueError("cached input exceeds inclusive input tokens")
+    return uncached
+
+
+def provider_usage_tokens(usage: UsageObservation, price: ProviderPrice) -> UsageTokens | None:
+    """Project measured stages to host columns without altering the native DTO."""
+    uncached = provider_uncached_input_tokens(usage, price)
+    if uncached is None or usage.output_tokens is None:
+        return None
+    return UsageTokens(
+        uncached,
+        usage.output_tokens,
+        usage.input_cache_write_tokens or 0,
+        usage.input_cached_tokens or 0,
+    )
+
+
+def provider_cost_of(
+    usage: UsageObservation,
+    price: ProviderPrice,
+    *,
+    infrastructure_usd: Decimal | None,
+) -> Decimal | None:
+    """Verified total cost, including actual session/container charges.
+
+    Missing counts or infrastructure remain unverified, never a free turn.
+    A caller may explicitly supply zero for inapplicable infrastructure.
+    Equal cached/uncached rates permit exact inclusive-input pricing even
+    when the split is unreported. No missing native count is filled in.
+    """
+    tokens = provider_usage_tokens(usage, price)
+    if not price.verified or infrastructure_usd is None:
+        return None
+    if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
+        raise ValueError("actual infrastructure cost must be finite and nonnegative")
+    with localcontext() as context:
+        context.prec = 80
+        if tokens is None:
+            if (
+                usage.input_tokens is None
+                or usage.output_tokens is None
+                or usage.input_cached_tokens is not None
+                or price.cache_read != price.input
+                or price.cache_write is not None
+            ):
+                return None
+            incoming = Decimal(usage.input_tokens) * price.input
+        else:
+            incoming = (
+                Decimal(tokens.input_tokens) * price.input
+                + Decimal(tokens.cache_read_input_tokens) * price.cache_read
+                + Decimal(tokens.cache_creation_input_tokens) * (price.cache_write or Decimal(0))
+            )
+        return (incoming + Decimal(usage.output_tokens or 0) * price.output) / Decimal(
+            1_000_000
+        ) + infrastructure_usd
+
+
+def minimum_cost_of(
+    usage: UsageObservation,
+    rates: ModelRates | ProviderPrice | None,
+) -> Decimal | None:
+    """Price a reported token floor, never an exact bill or a spend ceiling.
+
+    The caller supplies the resolved tariff. Inclusive input with an unknown
+    cache split is priced at the cheapest applicable input stage. Known cache
+    stages are retained even when another category is unknown. Reasoning is
+    included in output, so those counts are never summed. Unknown runtime is
+    outside this token floor; it still prevents complete settlement.
+    """
+    if rates is None:
+        return None
+    if isinstance(rates, ProviderPrice):
+        if usage.model is None or (
+            usage.session.provider,
+            usage.model.provider,
+            usage.model.id,
+        ) != (rates.provider, rates.provider, rates.model):
+            raise ValueError("usage and dated provider pricing identity differ")
+        if not rates.verified or rates.checked_on > usage.observed_at.date():
+            return None
+        variants = (rates,)
+    elif rates.long_context is None:
+        variants = (rates,)
+    elif usage.input_tokens is None or usage.grain != "model_request":
+        # A turn/session total can contain many short prompts. Its total
+        # tokens cannot establish a request's long-context pricing tier.
+        variants = (rates, rates.long_context)
+    else:
+        variants = (
+            rates.long_context if usage.input_tokens > LONG_CONTEXT_PROMPT_TOKENS else rates,
+        )
+
+    cached = usage.input_cached_tokens or 0
+    written = usage.input_cache_write_tokens or 0
+    incoming = usage.input_tokens
+    if incoming is not None and incoming < cached + written:
+        raise ValueError("cached input exceeds inclusive input tokens")
+    # The inclusive total owns output when present. A contradictory reasoning
+    # subset cannot inflate its valid floor; an absent total can still retain
+    # the independently reported reasoning floor.
+    output = (
+        usage.output_tokens
+        if usage.output_tokens is not None
+        else usage.output_reasoning_tokens or 0
+    )
+    floors: list[Decimal] = []
+    with localcontext() as context:
+        context.prec = 80
+        for variant in variants:
+            prices = [
+                Decimal(str(variant.input)),
+                Decimal(str(variant.cache_read)),
+                Decimal(str(variant.output)),
+            ]
+            write_rate = None if variant.cache_write is None else Decimal(str(variant.cache_write))
+            if any(not value.is_finite() or value < 0 for value in prices) or (
+                write_rate is not None and (not write_rate.is_finite() or write_rate < 0)
+            ):
+                raise ValueError("token floors require finite nonnegative rates")
+            if written and write_rate is None:
+                raise ValueError("provider reported an inapplicable cache-write stage")
+            token_cost = Decimal(cached) * prices[1] + Decimal(written) * (write_rate or Decimal(0))
+            if incoming is not None:
+                unknown_stage_rates = [prices[0]]
+                if usage.input_cached_tokens is None:
+                    unknown_stage_rates.append(prices[1])
+                if usage.input_cache_write_tokens is None and write_rate is not None:
+                    unknown_stage_rates.append(write_rate)
+                token_cost += Decimal(incoming - cached - written) * min(unknown_stage_rates)
+            floors.append((token_cost + Decimal(output) * prices[2]) / Decimal(1_000_000))
+        return min(floors)
+
+
+def list_price_preview(model: str, rates: ModelRates | ProviderPrice | None) -> str:
+    """Describe supplied list rates without promising an invoice ceiling.
+
+    The profile/service resolves the actual model and existing tariff. Native
+    rates describe the supplied request tier only; no prices are discovered or
+    synthesized here. A context/output limit alone cannot bound a whole turn.
+    """
+    bound = "Worst-case per turn: unknown; request count, tools and hosted runtime are not bounded."
+    exclusions = "Excludes billing markup, hosted runtime, external tools and cache storage."
+    if rates is None:
+        return f"{model}: list price unknown. {bound} {exclusions}"
+    if isinstance(rates, ProviderPrice):
+        if rates.model != model:
+            raise ValueError("preview model and supplied pricing identity differ")
+        if not rates.verified:
+            return (
+                f"{model}: list price unverified (checked {rates.checked_on}). {bound} {exclusions}"
+            )
+        quoted = _list_rate_text(rates)
+        label = f"list price (USD/1M tokens; checked {rates.checked_on}; supplied request tier)"
+    else:
+        quoted = _list_rate_text(rates)
+        label = f"list price (USD/1M tokens; checked {AGENT_PRICING_CHECKED_ON})"
+        if rates.long_context is not None:
+            quoted = (
+                f"prompt <= {LONG_CONTEXT_PROMPT_TOKENS:,}: {quoted}; "
+                f"prompt > {LONG_CONTEXT_PROMPT_TOKENS:,}: {_list_rate_text(rates.long_context)}"
+            )
+        quoted += "; cache-write is the 5-minute rate"
+    return f"{model}: {label}: {quoted}. {bound} {exclusions}"
+
+
+def _list_rate_text(rates: ModelRates | ProviderPrice) -> str:
+    def amount(value: float | Decimal | None) -> str:
+        if value is None:
+            return "inapplicable"
+        number = Decimal(str(value))
+        if not number.is_finite() or number < 0:
+            raise ValueError("preview rates must be finite and nonnegative")
+        # Fixed-point formatting preserves list-price precision independently of
+        # the caller's Decimal context; format_cost rounds actual display costs.
+        rendered = format(number, "f")
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return f"${rendered}"
+
+    return (
+        f"input {amount(rates.input)}, output {amount(rates.output)}, "
+        f"cache-read {amount(rates.cache_read)}, cache-write {amount(rates.cache_write)}"
+    )
+
+
+def resolved_worker_prices(
+    choices: Sequence[tuple[ResolvedBackend, ModelRef]],
+    *,
+    native_prices: Mapping[tuple[str, str], ProviderPrice],
+) -> Mapping[tuple[str, str], ModelRates | ProviderPrice]:
+    """Resolve host-owned tariffs; missing prices stay missing for admission.
+
+    This context grants no model authority and proves no final provider bill.
+    Native rates come from the registered preparation owners, never tool input.
+    Financial validation remains in the shared admission producer.
+    """
+    prices: dict[tuple[str, str], ModelRates | ProviderPrice] = {}
+    for selection, model in choices:
+        profile = get_profile(selection.profile)
+        key = (model.provider, model.id)
+        rate = (
+            native_prices.get(key)
+            if profile.accounting_mode.settles_natively
+            else MODEL_PRICING.get(model.id)
+        )
+        if rate is not None:
+            prices[key] = rate
+    return MappingProxyType(prices)

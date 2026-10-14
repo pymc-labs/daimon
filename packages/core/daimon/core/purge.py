@@ -47,7 +47,7 @@ Divergent helper signatures: identity-store `delete_for_principal` is keyed by
 UUID; routines `delete_for_principal` is keyed by `(platform, external_id)`
 because routines reference platform users by their external id, not the
 principal UUID. The orchestrator dispatches manually rather than via a unified
-Protocol — see RESEARCH.md A2.
+Protocol.
 
 Deliberate carve-outs:
 - Shared setup conversations retain their binding and other participants' work;
@@ -561,7 +561,7 @@ async def purge_account(
             )
         )
 
-        # slack_turn_contexts (D-07): keyed by (tenant_id, account_id), not
+        # slack_turn_contexts: keyed by (tenant_id, account_id), not
         # principal_id. Loop every tenant the account's principals belong to —
         # mirrors the upstream session-deletion loop below.
         slack_turn_contexts_count = 0

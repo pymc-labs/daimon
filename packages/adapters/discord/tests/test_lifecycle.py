@@ -14,6 +14,7 @@ import time
 import types
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -37,16 +38,20 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
+from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.prepare import ContinuityOutcome
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import deps_for
 from discord.http import HTTPClient, Route
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -425,17 +430,31 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     def unused_recovery(*args: Any) -> NoReturn:
         raise AssertionError("unexpected recovery")
 
-    prepared = types.SimpleNamespace(
-        admission=types.SimpleNamespace(
-            asks_before_publishing=False, agent=types.SimpleNamespace(system="")
+    async def unused_record(event: Any) -> None:
+        raise AssertionError("unexpected usage recording")
+
+    account_id = uuid.uuid4()
+    prepared = PreparedTurn(
+        admission=Admission(
+            account_id=account_id,
+            agent=ma_agent(system=""),
+            environment=ma_environment(),
+            config=ResolvedConfig(agent_name="test", environment_name="test"),
         ),
         ma_session_id="fake-session",
         mapping_id=None,
+        watermark=None,
+        reused=False,
+        session_account_id=account_id,
         continuity=ContinuityOutcome(),
-        _record=None,
+        _record=unused_record,
     )
-    deps = types.SimpleNamespace(
-        tool_safety=False, public_url="https://example.test", anthropic=None, sessionmaker=None
+    deps = replace(
+        deps_for(None, None),
+        tool_safety=False,
+        public_url="https://example.test",
+        turn_path="legacy",
+        backend=None,
     )
     monkeypatch.setattr(turn_runner, "run_turn", fake_driver)
     monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)
@@ -597,6 +616,7 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     in_dm: bool | None = None,
+    waiting_for_tenant_slot: Callable[[], bool] | None = None,
     clock: Callable[[], float] = time.monotonic,
     requester_is_admin: bool = True,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
@@ -630,6 +650,7 @@ def _make_lifecycle(
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
         in_dm=in_dm,
+        waiting_for_tenant_slot=waiting_for_tenant_slot,
         clock=clock,
     )
     return lc, sends, edits
@@ -768,6 +789,54 @@ class TestFirstEventSendsEmbed:
 
 
 class TestPostInitial:
+    async def test_queue_card_changes_only_title_and_clears_same_card(self) -> None:
+        default, default_sends, default_edits = _make_lifecycle(clock=lambda: 1.0)
+        off, off_sends, off_edits = _make_lifecycle(
+            waiting_for_tenant_slot=lambda: False, clock=lambda: 1.0
+        )
+        queued, queued_sends, queued_edits = _make_lifecycle(
+            waiting_for_tenant_slot=lambda: True, clock=lambda: 1.0
+        )
+        for lifecycle in (default, off, queued):
+            await lifecycle.post_initial()
+
+        def wire(sends: list[dict[str, Any]]) -> bytes:
+            return json.dumps(
+                {"embeds": [e.to_dict() for e in sends[0]["embeds"]], "view": sends[0]["view"]},
+                ensure_ascii=False,
+            ).encode()
+
+        assert wire(off_sends) == wire(default_sends)
+        expected = default_sends[0]["embeds"][0].to_dict()
+        expected["title"] = "Queued — waiting for a free slot…"
+        assert queued_sends[0]["embeds"][0].to_dict() == expected
+        await default.on_slot_started()
+        await off.on_slot_started()
+        await queued.on_slot_started()  # immediate, inside the ordinary debounce
+        assert not default_edits and not off_edits
+        assert len(queued_sends) == len(queued_edits) == 1
+        assert queued_edits[0][0] is _SENTINEL_REF
+        assert queued_edits[0][1]["embeds"][0].to_dict() == default_sends[0]["embeds"][0].to_dict()
+        await queued.on_slot_started()
+        assert len(queued_edits) == 1
+
+    async def test_queue_card_clear_failure_does_not_prevent_turn_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lifecycle, sends, edits = _make_lifecycle(waiting_for_tenant_slot=lambda: True)
+        await lifecycle.post_initial()
+        original = lifecycle._edit
+
+        async def unavailable(*args: Any, **kwargs: Any) -> None:
+            raise OSError("offline lost cosmetic edit")
+
+        monkeypatch.setattr(lifecycle, "_edit", unavailable)
+        await lifecycle.on_slot_started()
+        monkeypatch.setattr(lifecycle, "_edit", original)
+        await lifecycle.on_slot_started()
+        assert len(sends) == len(edits) == 1
+        assert edits[0][1]["embeds"][0].title == "Working on it…"
+
     async def test_post_initial_sends_thinking_embed_immediately(self) -> None:
         """post_initial posts the thinking embed without waiting for SSE events,
         giving instant feedback while session setup (a potentially minutes-long

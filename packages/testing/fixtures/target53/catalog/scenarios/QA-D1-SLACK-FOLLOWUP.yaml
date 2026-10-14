@@ -1,0 +1,32 @@
+id: QA-D1-SLACK-FOLLOWUP
+title: 'Slack: canary shape (follow-up reuses the session, no preamble, nothing silent)'
+friction:
+- D1
+- D7
+- D26
+- NEW-25
+set: B
+surface: slack
+tier: manual
+priority: P1
+est_turns: 2
+notes: The QA guild can't reach Slack and no Slack QA bot exists yet; promote to set
+  A once one does.
+setup: []
+steps: []
+assert: []
+human:
+- click: In the staging Slack QA channel, @Daimon with fixtures/canary.pdf attached
+    and the canary turn-1 text.
+  expect: Reply in-thread with CODE=TANGERINE-4471 within 60 s; a pending reaction
+    within 10 s.
+- click: '@Daimon in the same thread with the canary turn-2 text.'
+  expect: FILE=<12 hex chars> within 40 s; no 'came across' preamble.
+- click: Slack DM the bot 'hi'.
+  expect: 'A one-time pointer, not silence (#574 also: reply lands in the DM thread).'
+- click: With DMs enabled, Slack DM the bot fixtures/canary.pdf with 'what is the
+    code word?'.
+  expect: 'An answer with TANGERINE-4471, not silence (R7: file_share DMs are dropped).'
+- click: Check your earlier mentions in the channel.
+  expect: "No \U0001F440 left on answered messages (surfaces #10)."
+teardown: []

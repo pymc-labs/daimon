@@ -13,6 +13,7 @@ handle_credential_request_click (real Postgres + FakeSlackWebClient):
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -335,7 +336,9 @@ async def test_mcp_oauth_click_sends_a_private_sign_in_link_instead_of_a_modal(
     await db_session.commit()
     runtime = _build_runtime(fernet_key, db_session_factory, mcp_configured=True)
     runtime.settings.mcp.app_root_url = "https://d.example"
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
 
     await handle_credential_request_click(runtime, _click_payload(token))
 
@@ -376,7 +379,7 @@ async def test_mcp_oauth_click_refuses_when_the_deployment_has_no_crypto_keys(
     await db_session.commit()
     runtime = _build_runtime(fernet_key, db_session_factory, mcp_configured=True)
     runtime.settings.mcp.app_root_url = "https://d.example"
-    runtime.turn_deps.fernet = None
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fernet=None))
 
     await handle_credential_request_click(runtime, _click_payload(token))
 

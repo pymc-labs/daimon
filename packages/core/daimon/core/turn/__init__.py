@@ -63,7 +63,7 @@ __all__ = [
     "SessionEvent",
     "TurnLifecycle",
     "TurnDeps",
-    # admission (D-01 stage one)
+    # admission (stage one)
     "Admission",
     "AdmissionDenied",
     "MissingTurnConfigError",
@@ -86,7 +86,7 @@ __all__ = [
     "interactive_decider",
     "pending_confirmation_ids",
     "unattended_decider",
-    # session preparation (D-01 stage two)
+    # session preparation (stage two)
     "PreparedTurn",
     "bind_session",
     # per-turn ceiling

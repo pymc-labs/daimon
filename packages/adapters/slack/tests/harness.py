@@ -5,6 +5,7 @@ tests that drive `_orchestrate` / `_run_thread_turn`.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -17,6 +18,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import build_fake_anthropic, make_agent_env_echo_handler, make_fake_ma_handler
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -47,7 +49,7 @@ def build_slack_runtime(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
 

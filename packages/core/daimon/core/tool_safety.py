@@ -60,6 +60,7 @@ __all__ = [
     "ToolSafetyPolicy",
     "ToolVerdict",
     "VerdictReason",
+    "backend_switch_tools",
     "classify_tool",
     "decide_tool_call",
     "has_confirmation_gate",
@@ -104,7 +105,21 @@ ANY_KEY: Final[str] = "*"
 #: Daimon's own tools that wait for the card like a third-party write, keyed
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
-CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {"add_skill": "content_hash"}
+CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    "add_skill": "content_hash",
+    "request_agent_backend_switch": "preview_digest",
+}
+
+
+def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
+    """Project authoritative backend-selection eligibility into session controls."""
+    return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
+
+
+def _always_confirmed_tools() -> frozenset[str]:
+    """Every other confirmation-table entry requires review when policy is on."""
+    return frozenset(CONFIRMED_DAIMON_TOOLS) - backend_switch_tools(enabled=True)
+
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.
 #: A session that asks before publishing waits for the card on each, and an
@@ -389,8 +404,14 @@ def _gated(server_name: str | None, trusted_servers: frozenset[str]) -> bool:
     return server_name is not None and server_name not in trusted_servers
 
 
-def _confirmed_daimon_write(call: ToolCall) -> bool:
-    field = CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
+def _confirmed_daimon_write(
+    call: ToolCall, *, confirmed_tools: frozenset[str] = frozenset()
+) -> bool:
+    field = (
+        CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
+        if call.tool_name in _always_confirmed_tools() or call.tool_name in confirmed_tools
+        else None
+    )
     return (
         call.server_name == DAIMON_SERVER_NAME
         and field is not None
@@ -418,7 +439,11 @@ def trusted_servers_for(public_url: str | None) -> frozenset[str]:
 
 
 def heal_reserved_server(
-    policy: ToolSafetyPolicy, servers: Sequence[Mapping[str, Any]], *, public_url: str | None
+    policy: ToolSafetyPolicy,
+    servers: Sequence[Mapping[str, Any]],
+    *,
+    public_url: str | None,
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]] | None:
     """`servers` with a foreign-URL `daimon-mcp` entry re-pointed, or `None`.
 
@@ -428,7 +453,7 @@ def heal_reserved_server(
     gets the real endpoint under that name instead, so the exemption can never
     cover a third party.
     """
-    if not policy.enabled or not public_url:
+    if (not policy.enabled and not confirmed_tools) or not public_url:
         return None
     canonical = public_url.rstrip("/")
     changed = False
@@ -453,6 +478,7 @@ def decide_tool_call(
     attended: bool,
     trusted_servers: frozenset[str] = frozenset(),
     annotations: ToolAnnotations | None = None,
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Decide one blocked call.
 
@@ -467,6 +493,17 @@ def decide_tool_call(
         if attended:
             return ToolVerdict(outcome="ask", effect="write", reason="publish_needs_confirmation")
         return ToolVerdict(outcome="deny", effect="write", reason="unattended_publish")
+    if (
+        not policy.enabled
+        and call.server_name in trusted_servers
+        and call.tool_name in confirmed_tools
+        and _confirmed_daimon_write(call, confirmed_tools=confirmed_tools)
+    ):
+        return ToolVerdict(
+            outcome="ask" if attended else "deny",
+            effect="write",
+            reason="write_needs_confirmation" if attended else "unattended_write",
+        )
     if not policy.enabled:
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
@@ -476,7 +513,7 @@ def decide_tool_call(
         effect = classify_tool(
             policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
         )
-    elif _confirmed_daimon_write(call):
+    elif _confirmed_daimon_write(call, confirmed_tools=confirmed_tools):
         effect = "write"
     else:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
@@ -486,7 +523,7 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
-    if not _confirmed_daimon_write(call) and (
+    if not _confirmed_daimon_write(call, confirmed_tools=confirmed_tools) and (
         ANY_KEY in policy.unattended_writes
         or _listed(policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name)
     ):
@@ -517,6 +554,7 @@ def session_tools_for_policy(
     *,
     trusted_servers: frozenset[str] = frozenset(),
     asks_before_publishing: bool = False,
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]] | None:
     """`tools` (SDK params dicts) with every toolset's policy set, or `None`.
 
@@ -527,7 +565,8 @@ def session_tools_for_policy(
     one tool skip the pause. Daimon's own trusted toolset stays `always_allow`
     except for its `CONFIRMED_DAIMON_TOOLS`, which ask, and with
     `asks_before_publishing` its `PUBLISH_TOOLS`; with the policy off only
-    those publish configs are written. Every config written here is complete
+    publish and explicitly selected confirmed-tool configs are written.
+    Every config written here is complete
     (`enabled` and `permission_policy`), so the session reports back exactly
     what was sent and its tools hash the same on the next bind.
 
@@ -535,10 +574,11 @@ def session_tools_for_policy(
     `agent_with_overrides`, so however the agent was written (panel, chat
     tools, a fork, the API directly) its sessions are gated.
     """
-    if not policy.enabled and not asks_before_publishing:
+    if not policy.enabled and not asks_before_publishing and not confirmed_tools:
         return None
     asked = (
-        *(CONFIRMED_DAIMON_TOOLS if policy.enabled else ()),
+        *(sorted(_always_confirmed_tools()) if policy.enabled else ()),
+        *sorted(confirmed_tools),
         *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
     )
     changed = False

@@ -7,7 +7,7 @@ the MCP process originally posted.
 
 from __future__ import annotations
 
-from daimon.adapters.discord.posted_controls.edit import edit_posted_card
+from daimon.adapters.discord.posted_controls.edit import edit_expired_posted_card, edit_posted_card
 from daimon.adapters.discord.posted_controls.view import build_card_view
 
-__all__ = ["build_card_view", "edit_posted_card"]
+__all__ = ["build_card_view", "edit_expired_posted_card", "edit_posted_card"]

@@ -140,8 +140,9 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
         allow_plaintext=settings.crypto.allow_plaintext,
     )
     deployment_default = parse_deployment_default(settings.defaults_root)
-    # Shared, process-lifetime resolver cache (D-12) — Slack adopts Discord's
-    # <=300s TTL semantics instead of building a fresh cache per turn.
+    # Reuse one resolver cache across turns for the adapter process.
+    # ID mappings and full-resource entries retain the shared resolver owner's
+    # separate expiration policies.
     resolver_cache = new_resolver_cache()
     billing_config = load_billing_config()
     async with (

@@ -39,6 +39,7 @@ PanelOp = Literal[
     "handoff",
     "agent_avatar_change",
     "agent_avatar_reset",
+    "agent_backend",
 ]
 
 PanelOutcome = Literal["allowed", "denied", "error"]

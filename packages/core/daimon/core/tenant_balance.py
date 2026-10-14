@@ -3,7 +3,7 @@
 Admission: prepaid balance > 0; operator-funded balances only alert.
 Composed with is_over_cap by the caller —
 final admit = balance_ok AND NOT over_cap. The balance gate is INDEPENDENT of
-Stripe config (RESEARCH Pitfall 4 / OQ#1): a trial-credit-only guild with no
+Stripe config: a trial-credit-only guild with no
 STRIPE_* env must still turn. Gate on tenant_id presence + the ledger.
 
 Per `guideline:architecture`: exceptions propagate (fail-closed admission).
@@ -39,7 +39,7 @@ async def is_over_balance(
     """True iff a prepaid tenant balance is depleted (<= 0).
 
     tenant_id=None -> False (DM exemption — mirrors the cap DM exemption).
-    Stripe-independent: no Stripe env required for this check (Pitfall 4 / OQ#1).
+    Stripe-independent: no Stripe env required for this check.
     Exceptions propagate (fail-closed admission).
     """
     if tenant_id is None:

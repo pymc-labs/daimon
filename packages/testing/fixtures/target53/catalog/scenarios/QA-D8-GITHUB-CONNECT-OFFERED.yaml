@@ -1,0 +1,36 @@
+id: QA-D8-GITHUB-CONNECT-OFFERED
+title: asking to connect GitHub on a fork with no saved key offers the Connect button,
+  not 'ask your operator'
+friction:
+- D13
+- F7
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 1
+notes: 'The saved-key variant (the actual D8 refusal) needs a repo-card modal submit:
+  see QA-D8-GITHUB-SAVED-KEY-SWITCH (B).'
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from
+    daimon
+- do: mention
+  as: admin
+  text: Connect GitHub for this channel's agent.
+- do: wait_done
+assert:
+- kind: text_absent
+  turn: 1
+  pattern: (?i)ask your daimon operator|didn'?t answer\. try again
+- kind: component_present
+  turn: 1
+  label_pattern: (?i)connect github
+teardown:
+- do: admin
+  tool: archive_channel_forks
+  args:
+    channel: '{channel_id}'

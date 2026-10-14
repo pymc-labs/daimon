@@ -18,6 +18,7 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.resource_ports import mcp_scope, walk_skill_versions
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
@@ -47,6 +48,8 @@ from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_r
 from daimon.core.github_credentials import get_pat
 from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_token
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import update_agent
 from daimon.core.skills.attachments import delete_skill_unless_attached, still_attached_message
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
@@ -310,12 +313,21 @@ async def _attach_synced_skills(
         )
         if collision is not None:
             raise ToolError(f"Cannot attach: {collision}")
-        return await runtime.client.beta.agents.update(
-            fresh.id, version=fresh.version, skills=merged
+        return await update_agent(
+            runtime.client,
+            fresh.id,
+            version=fresh.version,
+            payload={"skills": merged},
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
         )
 
     try:
-        await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+        await update_agent_with_version_retry(
+            runtime.client,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
     except (ToolError, DaimonError, anthropic.APIStatusError) as exc:
         return f"Uploaded to the registry, but attaching to '{agent_name}' failed: {exc}"
     return f"Attached to '{agent_name}'."
@@ -488,7 +500,7 @@ async def _get_impl(
     if skill is None or await _hidden(runtime, auth, skill, origin_context_id):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     version_count = 0
-    async for _ in runtime.client.beta.skills.versions.list(skill.id):
+    async for _ in walk_skill_versions(runtime.client, skill.id, scope=mcp_scope(auth)):
         version_count += 1
     return SkillDetail(
         name=name,
@@ -522,7 +534,11 @@ async def _delete_impl(
     # detaches in bulk: each removal goes through its own tool and its checks.
     async with runtime.session_factory() as session, session.begin():
         outcome = await delete_skill_unless_attached(
-            runtime.client, session, skill_id=skill.id, detach=False
+            runtime.client,
+            session,
+            skill_id=skill.id,
+            detach=False,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
         )
     if not outcome.deleted:
         raise ToolError(

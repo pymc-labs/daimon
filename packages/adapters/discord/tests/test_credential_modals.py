@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
@@ -75,7 +77,13 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
+from daimon.testing.ma import (
+    build_fake_anthropic,
+    build_stub_anthropic,
+    list_response,
+    skill_response,
+)
+from daimon.testing.turn_fakes import deps_for
 from pydantic import HttpUrl
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -128,8 +136,10 @@ def _runtime(
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
         # fernet is real: the MCP modal encrypts an agent-scoped copy of the token.
-        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # credential-modal tests never run a turn
-            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        turn_deps=replace(
+            deps_for(None, None),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            turn_path=None,
         ),
     )
 
@@ -1478,6 +1488,9 @@ async def test_skill_repo_modal_attaches_the_imported_skills_to_the_requested_ag
             if request.method in ("POST", "PATCH"):
                 updates.append(json.loads(request.content))
             return httpx.Response(200, json=agent.model_dump(mode="json"))
+        skill = re.fullmatch(r"/v1/skills/([^/]+)", request.url.path)
+        if skill is not None:  # the attach's existence check
+            return httpx.Response(200, json=skill_response(skill.group(1)))
         return list_response([agent.model_dump(mode="json")])
 
     runtime = _runtime(

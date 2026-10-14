@@ -25,6 +25,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.routines import (
     _create_routine_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
@@ -69,7 +70,7 @@ def _runtime(
     return McpRuntime(
         session_factory=sessionmaker,
         client=client if client is not None else MagicMock(),  # type: ignore[arg-type]
-        settings=MagicMock(),  # type: ignore[arg-type]
+        settings=MagicMock(mcp=McpSettings()),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
 

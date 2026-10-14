@@ -1,0 +1,32 @@
+id: QA-NEW9-NO-INTERNAL-PLUMBING
+title: '''what can you do?'' from a non-admin shows no ids, paths, tool or config
+  names'
+friction:
+- D25
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: hi! what can you do? I'm new here.
+- do: wait_done
+assert:
+- kind: text_absent
+  turn: 1
+  pattern: 'rid: ?01[0-9A-Z]{20,}|agent_01[0-9A-Za-z]{10,}|sesn_01[0-9A-Za-z]{10,}|/mnt/memory/|HANDOFF\.md|origin_context_id|daimon-mcp|DAIMON_[A-Z_]{4,}|tool_safety|approval
+    cards are turned off|\bon MA\b'
+- kind: text_absent
+  turn: 1
+  pattern: (?i)memory is empty|you're an admin|mint-operator-token|system prompt
+- kind: message_count
+  turn: 1
+  max: 2
+- kind: thread_name
+  turn: 1
+  pattern_absent: (?i)^(greeting|hello|hi|help request|chat with .*)$
+  max_len: 50
+teardown: []

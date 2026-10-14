@@ -1,0 +1,21 @@
+id: QA-NEW29-DM-CONVERSATION-FORM
+title: asking for a private form inside a /dm conversation gives a clear route, not
+  a broken form
+friction:
+- NEW-29
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 1
+setup: []
+steps: []
+assert: []
+human:
+- click: 'Admin: `/dm action:enable` in the QA guild. You: `/dm action:move` from
+    a QA channel, then in the DM ask: ''store my ACME_API_KEY with a private form''.'
+  expect: 'Either a working form, or one clear line: forms only work in the server,
+    ask in #channel. No tool error, no ''no longer valid'' loop.'
+- click: 'Admin: `/dm action:disable`.'
+  expect: Ongoing DM says DMs were turned off (not silence).
+teardown: []

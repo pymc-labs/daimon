@@ -16,6 +16,7 @@ an SDK model is expected.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -47,6 +48,7 @@ from daimon.testing.ma import (
     build_stub_anthropic,
     not_found_response,
 )
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
@@ -173,7 +175,7 @@ async def test_on_coding_tools_writes_row_and_replies_with_config_block(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot")
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
@@ -259,7 +261,7 @@ async def test_on_coding_tools_mints_for_card_agent_when_newer_same_name_exists(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     monkeypatch.setattr(
         mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
@@ -339,7 +341,7 @@ async def test_on_coding_tools_refuses_unavailable_card_agent_without_minting(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     monkeypatch.setattr(
         mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
@@ -413,7 +415,7 @@ async def test_on_coding_tools_reply_is_ephemeral(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot-2")
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
@@ -469,7 +471,7 @@ async def test_revoke_callback_flips_revoked_at(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot-3")
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
@@ -558,7 +560,7 @@ async def test_revoke_confirmation_edits_message_content_and_clears_view(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot-wr01")
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
@@ -632,7 +634,7 @@ async def test_mcp_access_timeout_disables_revoke_and_keeps_the_config_block(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot-timeout")
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
@@ -694,7 +696,7 @@ async def test_revoke_stops_the_view_so_the_timer_cannot_fire(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot-stop")
     state = PanelState(roster=[entry], selected=entry, account_id=account_id)
@@ -751,7 +753,7 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot")
     interaction = _make_interaction()
@@ -840,7 +842,7 @@ async def test_on_coding_tools_lets_a_channel_admin_mint_only_bound_for_their_ag
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot")
     interaction = _make_interaction(is_admin=False, role_ids=(_CHANNEL_ADMIN_ROLE,))

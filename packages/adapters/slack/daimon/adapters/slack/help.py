@@ -80,7 +80,7 @@ async def handle_help_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
     build_help_blocks(). The ephemeral is visible only to the invoker and does not
     steal focus (no views.open).
 
-    Catches DaimonError | SlackApiError at the listener boundary (S3).
+    Catches DaimonError | SlackApiError at the listener boundary.
 
     Args:
         runtime: Injected SlackRuntime (sessionmaker, settings).

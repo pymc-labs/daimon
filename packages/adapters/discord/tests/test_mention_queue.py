@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,6 +30,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -54,7 +56,9 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # _handle_mention/_orchestrate stubbed per-test
+        turn_deps=replace(
+            deps_for(), turn_path=None
+        ),  # _handle_mention/_orchestrate stubbed per-test
     )
 
 

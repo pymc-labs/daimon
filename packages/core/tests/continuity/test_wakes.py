@@ -18,6 +18,7 @@ from daimon.core.continuity.continuation import (
     claim_continuation,
     record_continuation,
 )
+from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.wakes import (
     WAKE_CLAIM_LEASE,
     WAKE_MAX_ATTEMPTS,
@@ -37,7 +38,9 @@ from daimon.core.continuity.wakes import (
 )
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
+from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -333,8 +336,10 @@ async def test_a_thread_with_many_rows_takes_one_slot_in_the_batch(
     assert sorted(t.thread_id for t in due) == ["busy", "quiet"]
 
 
+@pytest.mark.parametrize("unavailable", ["opener", "decision"])
 async def test_unopenable_threads_do_not_starve_the_101st(
     db_session_factory: async_sessionmaker[AsyncSession],
+    unavailable: str,
 ) -> None:
     """100 threads the adapter cannot open (no token, archived) ahead of a healthy one.
 
@@ -346,14 +351,38 @@ async def test_unopenable_threads_do_not_starve_the_101st(
     for n in range(100):
         dead = _request(tenant_id, thread_id=f"dead-{n:03d}")
         dead_keys.append(dead.idempotency_key)
-        await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
+        if unavailable == "decision":
+            dead = dead.model_copy(update={"reason": "worker_finished"})
+            async with db_session_factory.begin() as db:
+                await insert_reader_fixture(
+                    db, **dead.model_dump(), available_at=_NOW - timedelta(minutes=10)
+                )
+        else:
+            await enqueue_wake(db_session_factory, dead, available_at=_NOW - timedelta(minutes=10))
     healthy = _request(tenant_id, thread_id="healthy")
     await enqueue_wake(db_session_factory, healthy, available_at=_NOW)
     reached: list[str] = []
 
+    async def forbidden(*args):
+        raise AssertionError("An unbound completion must not look up history, send or post")
+
     async def _open(thread: WakeThread) -> bool:
         if thread.thread_id.startswith("dead-"):
-            return False
+            if unavailable == "opener":
+                return False
+            async with build_fake_anthropic(forbidden) as client:
+                await dispatch_pending_continuations(
+                    db_session_factory,
+                    client,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=thread.thread_id,
+                    run_follow_up=forbidden,
+                    post_notice=forbidden,
+                    latest_user_message_at=forbidden,
+                    now=lambda: _NOW,
+                )
+            return True
         reached.append(thread.thread_id)
         return True
 
@@ -366,6 +395,7 @@ async def test_unopenable_threads_do_not_starve_the_101st(
     deferred = await _read(db_session_factory, dead_keys[0])
     assert deferred.status == "pending", "unopenable threads are deferred, never dropped"
     assert deferred.available_at == _NOW + WAKE_UNAVAILABLE_DELAY
+    assert deferred.attempts == 0 and deferred.started_at is None
 
 
 def _concurrency_dsn() -> str:
@@ -427,3 +457,56 @@ async def test_a_wake_survives_a_restart_and_two_pollers_run_it_exactly_once() -
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
+
+
+async def test_enqueued_wake_rolls_back_with_its_callers_transaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.tenants import get_tenant
+
+    tenant_id: uuid.UUID | None = None
+    request: ContinuationRequest | None = None
+    async with db_session_factory() as session:
+        with pytest.raises(RuntimeError, match="abort state transition"):
+            async with session.begin():
+                tenant = await make_tenant(session)
+                tenant_id = tenant.id
+                request = _request(tenant.id)
+                await enqueue_wake(session, request, available_at=_NOW)
+                assert await get_continuation(session, idempotency_key=request.idempotency_key)
+                raise RuntimeError("abort state transition")
+    assert tenant_id is not None and request is not None
+    async with db_session_factory() as session:
+        assert await get_tenant(session, tenant_id) is None
+        assert await get_continuation(session, idempotency_key=request.idempotency_key) is None
+
+
+async def test_enqueuing_with_a_session_requires_the_owners_active_transaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    request = _request(await _tenant(db_session_factory))
+    async with db_session_factory() as session:
+        assert not session.in_transaction()
+        with pytest.raises(ValueError, match="requires an active transaction"):
+            await enqueue_wake(session, request, available_at=_NOW)
+        assert not session.in_transaction()
+        assert await get_continuation(session, idempotency_key=request.idempotency_key) is None
+
+
+async def test_enqueued_wake_commits_once_with_its_callers_transaction(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.tenants import get_tenant
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        request = _request(tenant.id)
+        await enqueue_wake(session, request, available_at=_NOW)
+        assert session.in_transaction(), "enqueue must not commit its owner's transaction"
+        queued = await get_continuation(session, idempotency_key=request.idempotency_key)
+        assert queued is not None
+        assert queued.status == "pending" and queued.attempts == 0
+    async with db_session_factory() as session:
+        assert await get_tenant(session, tenant.id) is not None
+        committed = await get_continuation(session, idempotency_key=request.idempotency_key)
+        assert committed == queued, "the committed wake retains its single durable identity"

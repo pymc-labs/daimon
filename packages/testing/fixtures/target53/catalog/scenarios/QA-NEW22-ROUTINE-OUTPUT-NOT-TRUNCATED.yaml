@@ -1,0 +1,34 @@
+id: QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED
+title: a routine's long result is delivered whole (or marked truncated), and its memory
+  write works
+friction:
+- D15
+- F9
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 2
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'Create a routine that runs every minute, posts to this channel, and does:
+    save the word ROUTINE-MEM to a memory note qa_routine.md (say MEMRY-FAIL-X plus
+    the error if that fails), then reply with the numbers 1 to 400 separated by spaces
+    and nothing else. Do not call send_message yourself in the routine.'
+- do: wait_done
+- do: wait
+  s: 240
+assert:
+- kind: channel_text_present
+  since_turn: 1
+  pattern: (?i)\b400\b|truncated
+- kind: channel_text_absent
+  since_turn: 1
+  pattern: (?i)MEMRY-FAIL-X|read-only
+teardown:
+- do: admin
+  tool: delete_routines
+  args:
+    channel: '{channel_id}'

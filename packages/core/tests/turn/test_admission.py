@@ -44,6 +44,7 @@ from daimon.testing.ma import (
     resolved_agent_env_router,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1763,7 +1764,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
         config=MagicMock(),
         source_sealed=True,
     )
-    deps = MagicMock()
+    deps = replace(deps_for(None, MagicMock()), turn_path=None)
     with pytest.raises(DaimonError, match="Only turns inside this channel read it"):
         await start_dm(
             deps,

@@ -189,6 +189,8 @@ async def list_events(
     account_id: uuid.UUID | None = None,
     limit: int = 100,
     offset: int = 0,
+    agent_id: uuid.UUID | None = None,
+    tool_name: str | None = None,
 ) -> list[SecurityAuditRow]:
     """Tenant-scoped chronological export, optionally restricted to one account."""
     if not 1 <= limit <= 1000 or offset < 0:
@@ -196,6 +198,10 @@ async def list_events(
     if since is not None and since.utcoffset() is None:
         raise ValueError("since must include a timezone")
     stmt = select(SecurityAuditEvent).where(SecurityAuditEvent.tenant_id == tenant_id)
+    if agent_id is not None:
+        stmt = stmt.where(SecurityAuditEvent.agent_id == agent_id)
+    if tool_name is not None:
+        stmt = stmt.where(SecurityAuditEvent.tool_name == tool_name)
     if since is not None:
         stmt = stmt.where(SecurityAuditEvent.occurred_at >= since)
     if account_id is not None:

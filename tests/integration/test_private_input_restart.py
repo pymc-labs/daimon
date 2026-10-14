@@ -30,6 +30,7 @@ own submission path is covered by its unit tests.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -55,6 +56,7 @@ from daimon.core.stores.task_continuations import get_continuation, list_pending
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _GUILD_ID = 770001
@@ -87,16 +89,19 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession], router: MARouter) -
     settings.mcp.jwt_secret = None
     settings.crypto.keys = ()
     settings.github.oauth_scopes = ("repo", "read:user")
+    client = build_fake_anthropic(router.dispatch)
     return DiscordRuntime(
         settings=settings,
-        anthropic=build_fake_anthropic(router.dispatch),
+        anthropic=client,
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # this flow never runs a turn; the follow-up itself is injected
-            fernet=build_multifernet((Fernet.generate_key().decode(),))
+        turn_deps=replace(
+            deps_for(client, sessionmaker),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            turn_path=None,
         ),
     )
 

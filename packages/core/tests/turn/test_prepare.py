@@ -593,7 +593,16 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "reused",
         "session_account_id",
         "continuity",
+        "backend",
+        "session_ref",
+        "runtime",
+        "native_footer_cost",
     }, "PreparedTurn must expose exactly the documented public fields"
+    assert next(f for f in dataclasses.fields(PreparedTurn) if f.name == "runtime").default is None
+    assert (
+        next(f for f in dataclasses.fields(PreparedTurn) if f.name == "native_footer_cost").default
+        is None
+    )
 
 
 async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vault(
@@ -1370,3 +1379,157 @@ def test_replacement_notice_is_only_for_changes_a_person_notices(
 def test_no_replacement_notice_without_a_replacement_or_a_transfer() -> None:
     assert not ContinuityOutcome().announces_replacement()
     assert not ContinuityOutcome(state="replaced", applied=("model",)).announces_replacement()
+
+
+@pytest.mark.parametrize(
+    "field", ["tenant_id", "account_id", "platform_reason", "legacy_call_site"]
+)
+async def test_prepared_scope_is_refused_by_all_existing_owners_before_io(field):
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.turn.binding import prepared_persistence
+    from daimon.core.turn.run import _turn_port_kwargs
+    from mux.errors import ScopeViolation
+
+    tenant, account = uuid.uuid4(), uuid.uuid4()
+    admission = _admission(
+        account_id=account,
+        agent=ma_agent(tenant_id=str(tenant)),
+        env=ma_environment(tenant_id=str(tenant)),
+    )
+    scope = resource_scope(
+        tenant_id=str(tenant), account_id=str(account), authorization_id="worker-owned"
+    )
+    assert (
+        prepare_mod.admitted_session_scope(
+            admission, tenant_id=tenant, session_id="session", prepared=scope
+        )
+        is scope
+    )
+    foreign = scope.model_copy(update={field: "foreign"})
+    # An unbound factory cannot connect; every refusal must occur before its use.
+    deps = _deps(sessionmaker=async_sessionmaker(), router=MARouter())
+    async with deps.anthropic:
+        with pytest.raises(ScopeViolation, match="prepared scope differs from admitted identity"):
+            prepare_mod.admitted_session_scope(
+                admission, tenant_id=tenant, session_id="session", prepared=foreign
+            )
+        with pytest.raises(ScopeViolation, match="prepared scope differs from admitted identity"):
+            _turn_port_kwargs(deps, admission, "session", tenant_id=tenant, provider_scope=foreign)
+        with pytest.raises(ScopeViolation, match="prepared scope differs from admitted identity"):
+            await prepared_persistence(
+                deps,
+                admission,
+                tenant_id=tenant,
+                platform="discord",
+                thread_id="worker",
+                session_id="session",
+                mapping_id=None,
+                scope=foreign,
+            )
+
+
+@pytest.mark.parametrize("outcome", ["ack", "lost_agent_ack", "drops"])
+async def test_unproved_native_worker_refuses_before_agent_and_resource_creation(
+    db_preflight, db_nullpool_engine, outcome
+):
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn.persistence import TurnPersistence
+    from daimon.testing.ma import FakeMemoryStoreState, combine_handlers
+    from mux.contracts.config import ConfigRevision
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    from ..test_sessions import _session_create_handler, worker_source_context
+
+    sessions, tenant, account, original, environment, worker, source = await worker_source_context(
+        db_nullpool_engine
+    )
+    if outcome == "drops":
+        worker = dataclasses.replace(
+            worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
+        )
+    calls = []
+    memory = FakeMemoryStoreState()
+    resources = combine_handlers(make_fake_memory_store_handler(memory), _session_create_handler())
+    executing = ma_agent(
+        id="allocated-worker",
+        tenant_id=str(tenant),
+        name=worker.spec.name,
+        model=worker.spec.model.id,
+        system=worker.spec.system,
+    )
+
+    def native(request, match):
+        calls.append(request)
+        if request.url.path == "/v1/agents":
+            assert json.loads(request.content)["model"] == worker.spec.model.id
+            if outcome == "lost_agent_ack":
+                raise httpx.ReadError("lost agent acknowledgement", request=request)
+            return httpx.Response(200, json=executing.model_dump(mode="json"))
+        response = resources(request)
+        if request.url.path == "/v1/sessions":
+            payload = response.json()
+            payload["agent"] = ma_session_agent(
+                id=executing.id,
+                name=executing.name,
+                model=worker.spec.model.id,
+                system=worker.spec.system,
+            ).model_dump(mode="json")
+            return httpx.Response(200, json=payload)
+        return response
+
+    router = MARouter()
+    for method in ("GET", "POST", "DELETE"):
+        router.add(method, r"/v1/.*", native)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=sessions, router=router),
+        turn_path="mux",
+        channel_backends=True,
+        agent_backends=True,
+    )
+    deps.anthropic.max_retries = 8
+    revision = ConfigRevision.create(worker.permissions.fleet.root.channel, 1, worker.backend)
+    admitted = dataclasses.replace(
+        _admission(account_id=account, agent=original, env=environment),
+        backend_revision=revision,
+        backend_revision_origin="agent",
+        memory_read_only=True,
+        budget_channel_id=revision.channel.channel_id,
+    )
+    slot = Slot(
+        thread=ThreadRef(channel=revision.channel, thread_id="private-worker"),
+        account_id=str(account),
+    )
+    store = PostgresStateStore(sessions)
+
+    async def prepare():
+        return await prepare_mod.bind_session_impl(
+            deps,
+            admitted,
+            tenant_id=tenant,
+            platform="discord",
+            external_user_id="user",
+            thread_id=slot.thread.thread_id,
+            session_account_id=account,
+            reuse_existing=True,
+            worker=worker,
+            now=lambda: _NOW,
+        )
+
+    async def attempt():
+        persistence = TurnPersistence(
+            store,
+            None,
+            worker.permissions.fleet.scope,
+            slot=slot,
+            operation_key=spawn_operation_key(worker.permissions.fleet.run_id, 0),
+            now=lambda: _NOW,
+        )
+        with persistence.activate():
+            return await persistence.run(prepare)
+
+    async with deps.anthropic:
+        with pytest.raises(prepare_mod.AdmissionDenied):
+            await attempt()
+    assert calls == []

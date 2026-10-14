@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "unit": "I7",
+  "status": "PREPARED_ONLY",
+  "base_sha": "1d02fd8a7d529b54bb7fc54a6694ca9fc385940b",
+  "execution_authorized": false,
+  "target_environment": "staging",
+  "platform": "discord",
+  "points_available": 1,
+  "points_earned": 0,
+  "flags_required": {
+    "DAIMON_TURN__PATH": "mux",
+    "DAIMON_TURN__CHANNEL_BACKENDS": true,
+    "DAIMON_FLEET__ENABLED": true
+  },
+  "model_pins": {
+    "anthropic": "claude-haiku-5-5",
+    "openai": "gpt-6-luna",
+    "gemini": "gemini-3.8-flash"
+  },
+  "attempts_per_cell": 1,
+  "sdk_max_retries": 0,
+  "fallback_allowed": false,
+  "automatic_rerun": false,
+  "worker_depth": 1,
+  "max_workers_per_run": 4,
+  "initial_parallel_workers": 3,
+  "task": {
+    "name": "Review a QA rollout proposal",
+    "nonce": "UNBOUND_FRESH_ATTEMPT_NONCE",
+    "prompt": "Assess the three supplied rollout proposals against the supplied safety rules. Fan out independent accounting, permission, and evidence reviews across the three backends. Cross-review the accounting result with OpenAI before collecting. Return one recommendation with findings from every worker and the required cross-review. Do not execute the proposals.",
+    "rules": [
+      "Unknown billed usage retains its conservative bound and is never zero actual.",
+      "A cloned worker may only reduce its parent permissions.",
+      "A task passes only with its real scoped native outcome and actual platform evidence."
+    ],
+    "proposals": [
+      {
+        "label": "A",
+        "text": "Release the entire reserve when usage is missing and report zero actual."
+      },
+      {
+        "label": "B",
+        "text": "Allow a cloned worker to add an MCP server outside its parent grant."
+      },
+      {
+        "label": "C",
+        "text": "Preserve unknown-usage bounds, attenuate clone permissions, and join the native outcome with actual platform receipts."
+      }
+    ],
+    "expected_findings": {
+      "A": "reject: unknown usage is not zero",
+      "B": "reject: permission expansion",
+      "C": "recommend: satisfies supplied rules"
+    },
+    "output_comparison": "structural and outcome, not byte equality",
+    "inputs_are_untrusted_data": true
+  },
+  "workers": [
+    {
+      "ordinal": 1,
+      "role": "accounting review",
+      "backend": "anthropic",
+      "model": "claude-haiku-5-5",
+      "phase": "initial_parallel",
+      "spec_binding": null,
+      "result_contract_binding": null
+    },
+    {
+      "ordinal": 2,
+      "role": "permission review",
+      "backend": "openai",
+      "model": "gpt-6-luna",
+      "phase": "initial_parallel",
+      "spec_binding": null,
+      "result_contract_binding": null
+    },
+    {
+      "ordinal": 3,
+      "role": "evidence review",
+      "backend": "gemini",
+      "model": "gemini-3.8-flash",
+      "phase": "initial_parallel",
+      "spec_binding": null,
+      "result_contract_binding": null
+    },
+    {
+      "ordinal": 4,
+      "role": "required accounting cross-review",
+      "backend": "openai",
+      "model": "gpt-6-luna",
+      "phase": "after_initial_results",
+      "reviewer_of_ordinal": 1,
+      "spec_binding": null,
+      "result_contract_binding": null
+    }
+  ],
+  "orchestrator": {
+    "backend": "anthropic",
+    "model": "claude-haiku-5-5",
+    "spec_binding": null,
+    "required_review_ordinal": 4
+  },
+  "lower_bound_only": {
+    "worker_host_turns": 4,
+    "orchestrator_host_turns": 3,
+    "native_worker_sessions": 4,
+    "native_orchestrator_sessions": 1,
+    "provider_requests": "UNBOUND: host-turn count does not bound internal inference/tool loops, titles or retries"
+  },
+  "limits_proposed": {
+    "worker_max_turns": 1,
+    "worker_deadline_seconds": 120,
+    "whole_attempt_seconds": 600,
+    "cleanup_seconds": 90,
+    "financial_bound_verified": false
+  },
+  "finance": {
+    "signed_go": null,
+    "signed_envelope": null,
+    "budget_config_sha256": null,
+    "ledger_ids": null,
+    "provider_caps_usd": null,
+    "maximum_hold_usd": null,
+    "actual_usd": null,
+    "held_usd": null,
+    "accounting_status": "pending",
+    "reservation_is_not_actual": true,
+    "missing_usage_retains_bound": true
+  },
+  "shared_interfaces": {
+    "N2_store": "DECLARED_180205Z_SOURCE_UNBOUND",
+    "N6_resolver_attenuation": "OWNER_SOURCE_UNBOUND",
+    "N4_driver_admission": "OWNER_SOURCE_UNBOUND",
+    "N8_reservation_watchdog": "DECLARED_180719Z_SOURCE_UNBOUND",
+    "N5_worker_finished_wake": "DECLARED_180529Z_SOURCE_UNBOUND",
+    "N11_orchestrator_tools": "DECLARED_180329Z_SOURCE_UNBOUND",
+    "N7_discord_card": "DECLARED_180335Z_SOURCE_UNBOUND"
+  },
+  "receipts_required": [
+    "separate_staging_go_and_financial_pins",
+    "owned_resource_manifest_and_scoped_root",
+    "resolved_specs_derived_grants_and_audits",
+    "atomic_reservations_and_concurrency",
+    "native_worker_provider_model_session_turn_outcome",
+    "immutable_journal_result_pointers_and_digest_readback",
+    "frozen_batch_wake_and_at_most_once_resume",
+    "required_cross_provider_review_and_collect_gate",
+    "actual_discord_card_and_single_final_summary",
+    "request_usage_runtime_and_separate_actual_held_status",
+    "manifest_only_cleanup_and_revoke",
+    "lead_signed_scored_evidence_manifest"
+  ],
+  "offline_controls_required": [
+    "default_off_unchanged",
+    "disabled_backend_and_foreign_scope_refuse",
+    "clone_and_implicit_defaults_cannot_expand_permissions",
+    "duplicate_spawn_and_changed_intent_refuse",
+    "parallel_reservation_cap_race",
+    "unknown_usage_retains_bound_and_no_double_debit",
+    "budget_overrun_and_deadline_cancel_confirmed",
+    "kill_resume_reauthorize_and_cas",
+    "restart_and_duplicate_wake_no_duplicate_send",
+    "required_review_refusal_blocks_collect",
+    "corrupt_or_foreign_result_pointer_refuses",
+    "real_discord_split_delivery_and_control_binding"
+  ],
+  "hard_stops": [
+    "missing_separate_staging_go",
+    "owner_interface_unbound",
+    "deployed_source_mismatch",
+    "scope_or_grant_mismatch",
+    "unproved_request_runtime_bound",
+    "insufficient_provider_or_run_room",
+    "deadline_or_overrun",
+    "uncertified_native_outcome_or_delivery",
+    "missing_required_review",
+    "ambiguous_dispatch_no_retry"
+  ],
+  "planned_result": "NOT_RUN",
+  "run_id": null
+}

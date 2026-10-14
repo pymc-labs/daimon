@@ -33,6 +33,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import get_tenant, get_tenant_liveness, set_provision_status
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -125,7 +126,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # guild-join tests never run a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # guild-join tests never run a turn
     )
 
 

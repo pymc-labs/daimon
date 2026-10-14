@@ -13,7 +13,7 @@ from typing import Any, cast
 
 from daimon.core._models import GitHubCredential
 from daimon.core.stores.domain import GitHubCredentialRow
-from sqlalchemy import CursorResult, delete
+from sqlalchemy import CursorResult, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +76,15 @@ async def get_credential_login_by_principal(
     if orm is None:
         return None
     return str(orm.github_login)
+
+
+async def get_credential_revision(
+    session: AsyncSession, *, principal_id: uuid.UUID
+) -> datetime | None:
+    """Read the credential generation without fetching its encrypted token."""
+    return await session.scalar(
+        select(GitHubCredential.updated_at).where(GitHubCredential.principal_id == principal_id)
+    )
 
 
 async def delete_credential_for_principal(

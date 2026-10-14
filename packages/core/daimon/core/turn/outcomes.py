@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -15,15 +15,23 @@ from importlib.metadata import version
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
-from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
-    BetaManagedAgentsSpanModelUsage,
-)
 from daimon.core.context_prompt import TurnContext
-from daimon.core.pricing import MODEL_PRICING, cost_of
+from daimon.core.pricing import (
+    MODEL_PRICING,
+    ProviderPrice,
+    cost_of,
+    provider_cost_of,
+    provider_uncached_input_tokens,
+    uncached_input_tokens,
+)
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.usage_aggregation import disjoint_observations, replace_observation
+from daimon.core.usage_compat import event_observation
+from mux.contracts.usage import UsageObservation
+from mux.profiles import accounting_mode_for
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -61,10 +69,11 @@ async def drain_outcomes() -> None:
 
 @dataclass(frozen=True)
 class UsageSample:
-    usage: BetaManagedAgentsSpanModelUsage
+    usage: UsageObservation
     model_id: str | None
     cost: Decimal | None
     metered: bool
+    provider_price: ProviderPrice | None = None
 
 
 @dataclass
@@ -78,6 +87,8 @@ class TurnObservation:
     account_id: uuid.UUID | None = None
     agent_id: str | None = None
     session_id: str | None = None
+    backend_profile: str | None = field(default=None, kw_only=True)
+    """Admitted profile displayed only for explicitly configured neutral turns."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _started: float = field(default_factory=time.monotonic)
@@ -105,18 +116,98 @@ class TurnObservation:
         default_factory=lambda: dict[tuple[str, str], UsageSample]()
     )
 
+    def check_root_usage(self, root_turn_id: str, values: tuple[UsageObservation, ...]) -> None:
+        """Validate a delegated batch before its transaction, without capture."""
+        existing = tuple(sample.usage for sample in self._samples.values())
+        for value in (*existing, *values):
+            if (
+                not accounting_mode_for(value.session.provider).settles_natively
+                or value.session.tenant_id != str(self.tenant_id)
+                or (self.session_id is not None and value.session.id != self.session_id)
+                or value.turn_id != root_turn_id
+            ):
+                raise ValueError("root usage differs from the active outcome attribution")
+        for value in values:
+            existing = replace_observation(existing, value)
+        disjoint_observations(existing)
+
     def note_usage(
-        self, event: BetaManagedAgentsSpanModelRequestEndEvent, *, metered: bool = False
+        self,
+        event: BetaManagedAgentsSpanModelRequestEndEvent | UsageObservation,
+        *,
+        metered: bool = False,
+        provider_price: ProviderPrice | None = None,
+        infrastructure_usd: Decimal | None = None,
+        reuse_provider_price: bool = True,
     ) -> None:
+        if (
+            isinstance(event, UsageObservation)
+            and accounting_mode_for(event.session.provider).settles_natively
+        ):
+            if event.session.kind != "session" or event.session.tenant_id != (
+                str(self.tenant_id) if self.tenant_id is not None else None
+            ):
+                raise ValueError("usage observation belongs to another tenant/session")
+            if self.session_id is not None and event.session.id != self.session_id:
+                raise ValueError("usage observation belongs to another session")
+            values = tuple(sample.usage for sample in self._samples.values())
+            updated = replace_observation(values, event)
+            disjoint_observations(updated)
+            if any(
+                value.session == event.session
+                and value.id == event.id
+                and value.revision > event.revision
+                for value in updated
+            ):
+                return
+            key = (event.session.id, event.id)
+            prior = self._samples.get(key)
+            price = provider_price or (
+                prior.provider_price if prior is not None and reuse_provider_price else None
+            )
+            cost = (
+                provider_cost_of(event, price, infrastructure_usd=infrastructure_usd)
+                if price is not None
+                else None
+            )
+            if prior is not None and prior.usage.revision == event.revision and cost is None:
+                cost = prior.cost
+            self._usage[key] = {"session_id": key[0], "event_id": key[1]}
+            self._samples[key] = UsageSample(
+                event,
+                event.model.id if event.model is not None else None,
+                cost,
+                metered or (prior.metered if prior is not None else False),
+                price,
+            )
+            self.usage_available = True
+            return
         if self.session_id is not None:
+            if isinstance(event, UsageObservation):
+                if event.session.id != self.session_id:
+                    raise ValueError("usage observation belongs to another session")
+                if event.grain != "model_request" or event.basis != "increment":
+                    raise ValueError("turn telemetry requires incremental model-request usage")
             key = (self.session_id, event.id)
             if key in self._usage:
                 return
             self._usage[key] = {"session_id": key[0], "event_id": key[1]}
             model_id = self.model_by_session.get(self.session_id)
-            cost = cost_of(event.model_usage, MODEL_PRICING.get(model_id or ""))
+            usage = (
+                event
+                if isinstance(event, UsageObservation)
+                else event_observation(
+                    event,
+                    session_id=self.session_id,
+                    model_id=model_id,
+                    tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
+                )
+            )
+            if usage.model is not None:
+                model_id = usage.model.id
+            cost = cost_of(usage, MODEL_PRICING.get(model_id or ""))
             self._samples[key] = UsageSample(
-                event.model_usage,
+                usage,
                 model_id,
                 Decimal(str(cost)) if cost is not None else None,
                 metered,
@@ -141,6 +232,24 @@ class TurnObservation:
         )
         terminal_error = error or (state.error if state else None)
         samples = list(self._samples.values())
+        if any(
+            accounting_mode_for(sample.usage.session.provider).settles_natively
+            for sample in samples
+        ):
+            selected = disjoint_observations(sample.usage for sample in samples)
+            identities = {(usage.session, usage.id) for usage in selected}
+            samples = [
+                sample
+                for sample in samples
+                if (sample.usage.session, sample.usage.id) in identities
+            ]
+
+        def total(getter: Callable[[UsageSample], int | None]) -> int | None:
+            counts = [getter(sample) for sample in samples]
+            if any(count is None for count in counts):
+                return None
+            return sum(count for count in counts if count is not None)
+
         unpriced_calls = sum(sample.cost is None for sample in samples)
         postures = {sample.metered for sample in samples}
         posture = (
@@ -169,12 +278,25 @@ class TurnObservation:
             recovered=recovered,
             error_class=type(terminal_error).__name__ if terminal_error else None,
             release=_RELEASE,
-            usage_refs=list(self._usage.values()),
-            input_tokens=sum(sample.usage.input_tokens for sample in samples),
-            output_tokens=sum(sample.usage.output_tokens for sample in samples),
-            cache_read_input_tokens=sum(sample.usage.cache_read_input_tokens for sample in samples),
-            cache_creation_input_tokens=sum(
-                sample.usage.cache_creation_input_tokens for sample in samples
+            usage_refs=[
+                self._usage[(sample.usage.session.id, sample.usage.id)] for sample in samples
+            ],
+            input_tokens=total(
+                lambda sample: (
+                    provider_uncached_input_tokens(sample.usage, sample.provider_price)
+                    if sample.provider_price is not None
+                    else uncached_input_tokens(sample.usage)
+                )
+            ),
+            output_tokens=total(lambda sample: sample.usage.output_tokens),
+            cache_read_input_tokens=total(lambda sample: sample.usage.input_cached_tokens),
+            cache_creation_input_tokens=total(
+                lambda sample: (
+                    0
+                    if sample.provider_price is not None
+                    and sample.provider_price.cache_write is None
+                    else sample.usage.input_cache_write_tokens
+                )
             ),
             model_calls=len(samples),
             model_ids=sorted(

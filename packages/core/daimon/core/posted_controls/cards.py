@@ -78,7 +78,7 @@ CardState = Literal[
 ]
 #: `env_file` is a bulk upload of one .env file; the other four match the
 #: single-value request kinds in `daimon.core.credential_requests`.
-CardKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo"]
+CardKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "fleet"]
 RefusalReason = Literal[
     "admin_required",
     "replacement_admin_required",
@@ -189,6 +189,14 @@ class PostedCard(BaseModel):
 
     @model_validator(mode="after")
     def _check_requested_only_fields(self) -> Self:
+        if self.kind == "fleet":
+            if self.state not in ("received", "applied", "refused"):
+                raise ValueError("fleet cards use received, applied or refused states")
+            if self.requester_platform_user_id is not None or self.expires_at_unix is not None:
+                raise ValueError("fleet cards do not carry private-form fields")
+            if self.state == "applied" and self.buttons:
+                raise ValueError("completed fleet cards must not carry controls")
+            return self
         requested = self.state == "requested"
         if self.buttons and not requested:
             raise ValueError(f"state={self.state!r} must not carry buttons")
@@ -443,6 +451,8 @@ def build_posted_card(
     request without its URL, a repo request without a branch, or an outcome
     whose availability is `ready_now`.
     """
+    if kind == "fleet":
+        raise ValueError("fleet cards are built from authenticated run state")
     if (outcome is not None) != (state in ("applied", "partial")):
         raise ValueError("outcome belongs to state='applied' or state='partial' only")
     if (refusal is not None) != (state == "refused"):

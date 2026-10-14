@@ -51,25 +51,34 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as _anthropic
 import structlog
-from anthropic import AsyncAnthropic, omit
+from anthropic import AsyncAnthropic
+from anthropic._models import construct_type
 from anthropic.types.beta import BetaManagedAgentsSession
-from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsSessionEvent,
+    BetaManagedAgentsSpanModelRequestEndEvent,
+)
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
+from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
+from daimon.core.mux_compat import legacy_call
 from daimon.core.pricing import MODEL_PRICING, ModelRates, cost_of
+from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores import session_settle_state, turn_outcomes, usage_events
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
+from mux.contracts.ids import Scope
+from mux.drivers.anthropic.resources.session_tools import EventPage, EventQuery, SessionTools
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -90,6 +99,68 @@ DRAIN_MAX_PAGES = 100
 _SEND_IN_FLIGHT = timedelta(minutes=10)
 # Marked sessions one drain pass settles.
 _DRAIN_BATCH = 50
+# Authorization of a settle read the host already validated: a session stamped
+# with a tenant this database holds, or the turn's own admitted session.
+_SETTLE_AUTHORIZATION = "usage_sweep:validated_session"
+
+
+def _platform_settle_scope() -> Scope:
+    """For reading a session this deployment named itself, before its stamp is known."""
+    return platform_scope(
+        "billing settle of a session named by this deployment's own records",
+        authorization_id="usage_sweep:settle_request",
+    )
+
+
+def _stamped_scope(session: BetaManagedAgentsSession) -> Scope:
+    """The tenant scope of a retrieved session's stamp; platform if it has none."""
+    try:
+        tenant_id = uuid.UUID(session.metadata.get(MA_METADATA_KEY_TENANT) or "")
+    except ValueError:
+        return _platform_settle_scope()
+    return resource_scope(tenant_id=str(tenant_id), authorization_id=_SETTLE_AUTHORIZATION)
+
+
+@dataclass(frozen=True)
+class _EventPage:
+    """Host SDK decoding edge; native paging stays behind SessionTools."""
+
+    data: list[BetaManagedAgentsSessionEvent]
+    native: EventPage
+
+    def has_next_page(self) -> bool:
+        # Match AsyncPageCursor, including empty pages and empty cursor strings.
+        return bool(self.data) and bool(self.native.next_page)
+
+    async def get_next_page(self) -> _EventPage:
+        return _event_page(await legacy_call(self.native.continue_page()))
+
+
+def _event_page(page: EventPage) -> _EventPage:
+    return _EventPage(
+        data=[
+            cast(
+                BetaManagedAgentsSessionEvent,
+                construct_type(value=item.native, type_=BetaManagedAgentsSessionEvent),
+            )
+            for item in page.data
+        ],
+        native=page,
+    )
+
+
+async def _list_events(
+    anthropic: AsyncAnthropic, session_id: str, *, scope: Scope, query: EventQuery
+) -> _EventPage:
+    backend = managed_agents(anthropic, scope=scope, resources=frozenset({("session", session_id)}))
+    port = backend.extension(SessionTools, namespace="anthropic.session_tools", version=1)
+    return _event_page(
+        await legacy_call(
+            port.list_events(
+                scope, resource_ref(backend, "session", session_id, scope=scope), query
+            )
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -115,6 +186,7 @@ async def settle_session(
     session_id: str,
     *,
     record: UsageRecorder | None,
+    scope: Scope | None = None,
     max_pages: int | None = SETTLE_MAX_PAGES,
     deadline: float | None = None,
     backlog: bool = False,
@@ -134,7 +206,12 @@ async def settle_session(
     stored progress: a settle cut short keeps every debit it wrote and reports
     itself incomplete, and the next settle reads the listing again, which is
     safe because a call with a usage row is never recorded twice.
+
+    `scope` authorizes the read: the turn's admitted session scope, or the
+    tenant of a validated session stamp. None reads under the platform scope
+    for a session this deployment named itself.
     """
+    scope = scope if scope is not None else _platform_settle_scope()
     scanned = 0
     unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
     debited = 0
@@ -145,14 +222,13 @@ async def settle_session(
         async with asyncio.timeout(timeout):
             async with sessionmaker() as s:
                 cutoff = await session_settle_state.backlog_cutoff(s)
-            page = await anthropic.beta.sessions.events.list(
-                session_id,
-                order="desc",
-                limit=_PAGE_SIZE,
-                types=["span.model_request_end"],
-                created_at_gte=cutoff if cutoff is not None and not backlog else omit,
-                created_at_lt=cutoff if cutoff is not None and backlog else omit,
-            )
+            query = EventQuery(order="desc", limit=_PAGE_SIZE, types=["span.model_request_end"])
+            # Unset fields mean SDK omit; never turn them into explicit nulls.
+            if cutoff is not None and not backlog:
+                query = query.model_copy(update={"created_at_gte": cutoff})
+            if cutoff is not None and backlog:
+                query = query.model_copy(update={"created_at_lt": cutoff})
+            page = await _list_events(anthropic, session_id, scope=scope, query=query)
             pages = 1
             while True:
                 calls = [
@@ -228,6 +304,11 @@ class SessionBilling:
     @property
     def pricing(self) -> ModelRates | None:
         return MODEL_PRICING.get(self.model_id)
+
+    @property
+    def scope(self) -> Scope:
+        """The read scope of a session whose stamp names a tenant this database holds."""
+        return resource_scope(tenant_id=str(self.tenant_id), authorization_id=_SETTLE_AUTHORIZATION)
 
     def recorder(
         self,
@@ -341,17 +422,25 @@ async def settle_stamped_session(
     billing = await session_billing(sessionmaker, session)
     if billing is None:
         return None
+    scope = billing.scope
     if billing.exempt_reason is None:
         return await settle_session(
             anthropic,
             sessionmaker,
             session.id,
             record=billing.recorder(sessionmaker, session.id, markup=markup),
+            scope=scope,
             max_pages=max_pages,
             deadline=deadline,
         )
     result = await settle_session(
-        anthropic, sessionmaker, session.id, record=None, max_pages=max_pages, deadline=deadline
+        anthropic,
+        sessionmaker,
+        session.id,
+        record=None,
+        scope=scope,
+        max_pages=max_pages,
+        deadline=deadline,
     )
     cost, debit = price(result.unbilled, pricing=billing.pricing, markup=markup)
     log.info(
@@ -369,7 +458,11 @@ async def settle_stamped_session(
 
 
 async def turn_ended(
-    anthropic: AsyncAnthropic, session_id: str, request: session_settle_state.PendingSettle
+    anthropic: AsyncAnthropic,
+    session_id: str,
+    request: session_settle_state.PendingSettle,
+    *,
+    scope: Scope | None = None,
 ) -> bool:
     """Whether the turn a settle request waits on is listed as ended.
 
@@ -379,13 +472,18 @@ async def turn_ended(
     right after a send is the previous turn's, so the status alone is never
     trusted. A request whose send could not name its message (the write after
     the send failed) waits on the first message processed at or after the
-    request was written. Walks newest first, at most 10 pages.
+    request was written. Walks newest first, at most 10 pages. `scope` is as
+    for `settle_session`.
     """
-    page = await anthropic.beta.sessions.events.list(
+    page = await _list_events(
+        anthropic,
         session_id,
-        order="desc",
-        limit=_PAGE_SIZE,
-        types=["user.message", "session.status_idle", "session.status_terminated"],
+        scope=scope if scope is not None else _platform_settle_scope(),
+        query=EventQuery(
+            order="desc",
+            limit=_PAGE_SIZE,
+            types=["user.message", "session.status_idle", "session.status_terminated"],
+        ),
     )
     ended_after = False  # an end event is listed after the current position
     unnamed_turn: bool | None = None  # for an unnamed request: the oldest candidate's answer
@@ -447,7 +545,9 @@ async def settle_finished_turn(
                 and datetime.now(UTC) - request.requested_at < _SEND_IN_FLIGHT
             ):
                 return None
-            if session.status == "idle" and not await turn_ended(anthropic, session.id, request):
+            if session.status == "idle" and not await turn_ended(
+                anthropic, session.id, request, scope=_stamped_scope(session)
+            ):
                 return None
             result = await settle_stamped_session(
                 anthropic,
@@ -494,7 +594,9 @@ async def sweep_headless_usage(
     debited = 0
     for session_id in pending:
         try:
-            session = await client.beta.sessions.retrieve(session_id)
+            session = await retrieve_session_record(
+                client, session_id, scope=_platform_settle_scope()
+            )
         except _anthropic.NotFoundError:
             async with sessionmaker() as s, s.begin():
                 request = await session_settle_state.settle_request(
@@ -587,7 +689,9 @@ async def settle_backlog(
     totals: dict[uuid.UUID, BacklogTotal] = {}
     for session_id in session_ids:
         try:
-            session = await anthropic.beta.sessions.retrieve(session_id)
+            session = await retrieve_session_record(
+                anthropic, session_id, scope=_platform_settle_scope()
+            )
         except _anthropic.NotFoundError:
             continue
         billing = await session_billing(sessionmaker, session)
@@ -599,6 +703,7 @@ async def settle_backlog(
             sessionmaker,
             session_id,
             record=billing.recorder(sessionmaker, session_id, markup=markup) if debit else None,
+            scope=billing.scope,
             max_pages=None,
             backlog=True,
         )

@@ -31,6 +31,7 @@ No try/except — exceptions propagate. None means 'not found', NEVER
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core.stores import agent_github_binding as binding_store
@@ -85,6 +86,30 @@ async def upsert_credential_encrypted(
         )
 
 
+async def _pat_principal(
+    session: AsyncSession, *, principal_id: uuid.UUID, agent_id: uuid.UUID | None
+) -> uuid.UUID | None:
+    if agent_id is None:
+        return principal_id
+    binding = await binding_store.get_agent_github_binding(session, agent_id=agent_id)
+    return binding.principal_id if binding is not None else None
+
+
+async def get_pat_revision(
+    *,
+    principal_id: uuid.UUID,
+    agent_id: uuid.UUID | None,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, datetime] | None:
+    """Capture the same real credential selection as get_pat, without reading its token."""
+    async with sessionmaker() as session:
+        selected = await _pat_principal(session, principal_id=principal_id, agent_id=agent_id)
+        if selected is None:
+            return None
+        revision = await cred_store.get_credential_revision(session, principal_id=selected)
+        return (selected, revision) if revision is not None else None
+
+
 async def get_pat(
     *,
     principal_id: uuid.UUID,
@@ -106,20 +131,9 @@ async def get_pat(
     contract and the callers that must never opt in.
     """
     async with sessionmaker() as session:
-        if agent_id is not None:
-            # Agent path is overlay-only. No fallback to principal default.
-            binding = await binding_store.get_agent_github_binding(session, agent_id=agent_id)
-            if binding is not None:
-                overlay_cred = await cred_store.get_credential_by_principal(
-                    session, principal_id=binding.principal_id
-                )
-                if overlay_cred is not None:
-                    return decrypt_token(fernet, overlay_cred.encrypted_token)
-            return fallback_pat if allow_service_default and fallback_pat is not None else None
-
-        # agent_id=None: principal-default path (OAuth-callback / CLI flows).
-        cred = await cred_store.get_credential_by_principal(session, principal_id=principal_id)
-        if cred is not None:
-            return decrypt_token(fernet, cred.encrypted_token)
-
+        selected = await _pat_principal(session, principal_id=principal_id, agent_id=agent_id)
+        if selected is not None:
+            cred = await cred_store.get_credential_by_principal(session, principal_id=selected)
+            if cred is not None:
+                return decrypt_token(fernet, cred.encrypted_token)
         return fallback_pat if allow_service_default and fallback_pat is not None else None

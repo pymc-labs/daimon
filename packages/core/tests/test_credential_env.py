@@ -316,6 +316,56 @@ async def test_upload_env_and_mount_never_logs_secret_values(
     assert mounted.get("key_count") == 1, "log should carry key_count"
 
 
+async def test_owned_env_metadata_projection_never_selects_or_decodes_content(
+    db_preflight, db_nullpool_engine, monkeypatch
+):
+    from daimon.core.stores import agent_files
+    from daimon.testing.db import require_owned_sessionmaker
+    from sqlalchemy import event
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    agent_id = uuid.uuid4()
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        foreign = await make_tenant(db)
+        for owner, key, value in [
+            (tenant, "OWNED", "secret-owned"),
+            (foreign, "FOREIGN", "secret-foreign"),
+        ]:
+            await put_agent_file(
+                db,
+                tenant_id=owner.id,
+                agent_id=agent_id,
+                key=key,
+                content=value,
+                set_by_account_id=None,
+            )
+
+    def refuse_decode(*args, **kwargs):
+        raise AssertionError("metadata projection decoded an environment value")
+
+    monkeypatch.setattr(agent_files, "decode_value", refuse_decode)
+    queries = []
+
+    def capture(connection, cursor, statement, parameters, context, many):
+        queries.append(statement)
+
+    event.listen(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with sessions() as db:
+            refs = await agent_files.list_agent_file_revisions(
+                db, tenant_id=tenant.id, agent_id=agent_id
+            )
+    finally:
+        event.remove(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+    assert [key for key, _ in refs] == ["OWNED"]
+    assert all(
+        "agent_files.content" not in sql and "agent_files.encoding" not in sql for sql in queries
+    )
+    assert "secret-owned" not in repr(refs) and "secret-foreign" not in repr(refs)
+
+
 _BOT = BotIdentity(
     name="daimon-pymc[bot]", email="987654+daimon-pymc[bot]@users.noreply.github.com"
 )

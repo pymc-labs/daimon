@@ -4,6 +4,7 @@ before it is consumed."""
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,6 +18,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.testing import MARouter, build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -128,7 +130,7 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://daimon.example.com", jwt_secret="s")
         ),
-        turn_deps=SimpleNamespace(fernet=object()),
+        turn_deps=replace(deps_for(None, None), fernet=object(), turn_path=None),
     )
     interaction = SimpleNamespace(
         response=SimpleNamespace(defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock())

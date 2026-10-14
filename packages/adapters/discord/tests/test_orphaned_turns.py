@@ -13,6 +13,7 @@ import asyncio
 import json
 import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from secrets import randbits
 from typing import Any
@@ -47,6 +48,7 @@ from daimon.core.stores.turn_card_intents import (
 from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
@@ -77,7 +79,7 @@ def _make_bot(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # the sweep never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # the sweep never runs a turn
     )
     intents = discord.Intents.default()
     intents.message_content = True

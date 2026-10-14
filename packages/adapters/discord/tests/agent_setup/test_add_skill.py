@@ -6,6 +6,7 @@ import io
 import re
 import uuid
 import zipfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -51,6 +52,7 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -110,7 +112,7 @@ class _World:
             billing_config=None,
             deployment_default=DeploymentDefault(),
             resolver_cache=new_resolver_cache(),
-            turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+            turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
         )
 
 

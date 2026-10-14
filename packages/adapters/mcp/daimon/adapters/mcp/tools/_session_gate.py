@@ -13,14 +13,20 @@ from typing import Literal
 import anthropic
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
+from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.confirmation import backend_switch_tools
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import has_confirmation_gate
+from mux.errors import ScopeViolation
 
 _log = structlog.get_logger(__name__)
 
@@ -60,7 +66,9 @@ async def session_card_gap(
     if live is None:
         return "no_live_session"
     try:
-        ma_session = await runtime.client.beta.sessions.retrieve(live.ma_session_id)
+        ma_session = await retrieve_session(
+            runtime.client, live.ma_session_id, scope=mcp_scope(auth)
+        )
         if ma_session.agent.id != origin.responder_ma_agent_id:
             return "other_agents_session"
         if has_confirmation_gate(
@@ -75,6 +83,8 @@ async def session_card_gap(
         ):
             return None
         return "session_not_gated"
+    except ScopeViolation:
+        return "other_agents_session"
     except anthropic.APIError as exc:
         # Unreadable (a deleted session, an outage) is not evidence of a card.
         _log.warning(
@@ -108,7 +118,11 @@ async def _recorded_as_gated(
     recorded = live.effective_config
     if recorded is None:
         return False
-    agent = await runtime.client.beta.agents.retrieve(ma_agent_id)
+    agent = await retrieve_agent(
+        runtime.client,
+        ma_agent_id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     hidden = await resolve_hidden_mcp_server_names(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -130,6 +144,9 @@ async def _recorded_as_gated(
             tool_safety=runtime.settings.tool_safety,
             public_url=None if public_url is None else str(public_url),
             asks_before_publishing=asks_before_publishing,
+            confirmed_tools=backend_switch_tools(
+                enabled=backend_selection_enabled(runtime.settings.turn)
+            ),
         )
         if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
             [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name

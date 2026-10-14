@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
@@ -43,6 +44,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------
@@ -96,7 +98,7 @@ def _runtime_for_inline_pat(
         billing_config=None,
         http_client=MagicMock(),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
         deployment_default=DeploymentDefault(),
     )
 

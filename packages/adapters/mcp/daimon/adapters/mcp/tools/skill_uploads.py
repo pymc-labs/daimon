@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import unquote, urlparse
 
 import anthropic
@@ -38,6 +38,12 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._channel_policy import load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
+from daimon.adapters.mcp.tools._openai_resources import (
+    gate_view,
+    openai_skill_host,
+    resolve_host_agent,
+)
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.agents import (
@@ -62,6 +68,7 @@ from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import (
     SkillAddResult,
     add_agent_skill,
+    add_host_agent_skill,
     fetch_attachment,
     fetch_repo_skill,
     fetch_teams_attachment,
@@ -80,6 +87,7 @@ from daimon.core.skills.ingest import (
 )
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.neutral_catalog import CatalogConflict
 from daimon.core.stores.pending_skill_adds import (
     PENDING_SKILL_ADD_TTL,
     consume_pending_skill_add,
@@ -88,7 +96,11 @@ from daimon.core.stores.pending_skill_adds import (
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.errors import MuxError
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from mux.contracts.resources import Agent
 
 __all__ = ["AddSkillResult", "register_skill_upload_tools", "require_skill_change"]
 
@@ -410,6 +422,16 @@ async def _fetch_slack_attachment(
     return data, filename
 
 
+def _upstream_recovery(chat_confirms: bool) -> str:
+    # A chat approval was used up above; only a card approval can be retried as is.
+    if chat_confirms:
+        return (
+            "Ask the person to preview again and reply `yes` to the new preview before "
+            "trying again."
+        )
+    return "Try again later."
+
+
 async def _add_skill_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -427,23 +449,76 @@ async def _add_skill_impl(
     if sum(source is not None for source in (skill_md, attachment_url, repo_url)) != 1:
         raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
-    agent = await resolve_setup_agent(
-        runtime,
-        auth,
-        name=agent_name,
-        expected_ma_agent_id=expected_ma_agent_id,
-        location_channel_id=origin_channel_id(origin),
+    # Gemini uses a separate default-off operator grant and the catalog.
+    # Otherwise retain the existing OpenAI/Anthropic selection unchanged.
+    hosted = await gemini_skill_host(
+        runtime, auth, origin, capability=runtime.gemini_skill_capability, operation="skill-add"
     )
-
-    async def recheck(fresh: BetaManagedAgentsAgent) -> None:
-        # The upload waits for the person's Approve on the card, like the private
-        # request forms, so a member inside a pinned agent's channels may add one.
-        await require_pin_write_access(runtime, auth, ma_agent=fresh, origin=origin)
-        await require_skill_change(
-            runtime, auth, fresh, agent_name=agent_name, operation="skill_add"
+    if hosted is None:
+        hosted = await openai_skill_host(runtime, auth, origin, operation="skill-add")
+    if hosted is None:
+        agent = await resolve_setup_agent(
+            runtime,
+            auth,
+            name=agent_name,
+            expected_ma_agent_id=expected_ma_agent_id,
+            location_channel_id=origin_channel_id(origin),
         )
 
-    await recheck(agent)
+        async def recheck(fresh: BetaManagedAgentsAgent) -> None:
+            # The upload waits for the person's Approve on the card, like the private
+            # request forms, so a member inside a pinned agent's channels may add one.
+            await require_pin_write_access(runtime, auth, ma_agent=fresh, origin=origin)
+            await require_skill_change(
+                runtime, auth, fresh, agent_name=agent_name, operation="skill_add"
+            )
+
+        await recheck(agent)
+        target_id = agent.id
+
+        async def add(bundle: SkillBundle, source: str) -> SkillAddResult:
+            return await add_agent_skill(
+                runtime.client,
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                agent=agent,
+                agent_name=agent_name,
+                bundle=bundle,
+                origin=source,
+                added_by_account_id=auth.account_id,
+                recheck=recheck,
+            )
+    else:
+        host = hosted
+        # The same identity and channel-isolation rules as resolve_setup_agent.
+        view = await resolve_host_agent(
+            runtime,
+            auth,
+            host,
+            name=agent_name,
+            expected_ma_agent_id=expected_ma_agent_id,
+            location_channel_id=origin_channel_id(origin),
+        )
+
+        async def neutral_recheck(fresh: Agent) -> None:
+            # The same pin and skill-change policy as the Anthropic path, on the
+            # agent as the host reads it now.
+            gate = gate_view(fresh)
+            await require_pin_write_access(runtime, auth, ma_agent=gate, origin=origin)
+            await require_skill_change(
+                runtime, auth, gate, agent_name=agent_name, operation="skill_add"
+            )
+
+        await neutral_recheck(view.revision.agent)
+        target_id = view.id
+        catalog_id = view.revision.catalog_id
+
+        async def add(bundle: SkillBundle, source: str) -> SkillAddResult:
+            del source  # the host retains its own upload provenance
+            return await add_host_agent_skill(
+                host, catalog_id=catalog_id, bundle=bundle, recheck=neutral_recheck
+            )
+
     chat_confirms = False
     try:
         no_card = await _no_card_reason(runtime, auth, origin, origin_context_id=origin_context_id)
@@ -469,7 +544,7 @@ async def _add_skill_impl(
                 path=path,
                 origin_context_id=origin_context_id,
             )
-        bound = confirmation_hash(bundle.preview, agent_id=agent.id)
+        bound = confirmation_hash(bundle.preview, agent_id=target_id)
         preview = bundle.preview.model_copy(update={"content_hash": bound})
         if content_hash is None:
             scripts = (
@@ -481,7 +556,7 @@ async def _add_skill_impl(
                     await record_pending_skill_add(
                         session,
                         origin=origin,
-                        ma_agent_id=agent.id,
+                        ma_agent_id=target_id,
                         content_hash=bound,
                         now=datetime.now(UTC),
                     )
@@ -521,7 +596,7 @@ async def _add_skill_impl(
                 confirmed = await consume_pending_skill_add(
                     session,
                     origin=origin,
-                    ma_agent_id=agent.id,
+                    ma_agent_id=target_id,
                     content_hash=bound,
                     now=datetime.now(UTC),
                 )
@@ -532,31 +607,25 @@ async def _add_skill_impl(
                     "else, it expired, a newer preview replaced it, or it was already used). "
                     "Do not retry this confirmation; preview it again if they ask."
                 )
-        added = await add_agent_skill(
-            runtime.client,
-            runtime.session_factory,
-            tenant_id=auth.tenant_id,
-            agent=agent,
-            agent_name=agent_name,
-            bundle=bundle,
-            origin=source,
-            added_by_account_id=auth.account_id,
-            recheck=recheck,
-        )
+        added = await add(bundle, source)
     except DaimonError as exc:
         raise ToolError(str(exc)) from exc
     except anthropic.APIError as exc:
         status = getattr(exc, "status_code", None)
-        # A chat approval was used up above; only a card approval can be retried as is.
-        recovery = (
-            "Ask the person to preview again and reply `yes` to the new preview before "
-            "trying again."
-            if chat_confirms
-            else "Try again later."
-        )
         raise ToolError(
             f"Adding the skill failed upstream{f' (HTTP {status})' if status else ''}; it is "
-            f"not attached. {recovery}"
+            f"not attached. {_upstream_recovery(chat_confirms)}"
+        ) from exc
+    except CatalogConflict as exc:
+        raise ToolError(
+            f"'{agent_name}' changed while the skill was being added; it is not attached. "
+            "Preview it again if they still want it."
+        ) from exc
+    except MuxError as exc:
+        # The resource host's own errors; their text is never relayed.
+        raise ToolError(
+            "Adding the skill failed upstream; it is not attached. "
+            f"{_upstream_recovery(chat_confirms)}"
         ) from exc
     done = {
         "created": f"Added '{preview.name}' to '{agent_name}'",

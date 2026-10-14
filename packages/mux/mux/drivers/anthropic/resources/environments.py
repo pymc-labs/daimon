@@ -253,7 +253,9 @@ class AnthropicEnvironments:
         """Preserve the SDK's full async iterator for legacy host walks."""
         authorize(self._authorization, scope, "environment")
         async for item in provider_iter(
-            self._client.beta.environments.list(include_archived=filters.include_archived)
+            self._client.beta.environments.list(
+                limit=100, include_archived=filters.include_archived
+            )
         ):
             if visible(scope, item.metadata) and (
                 filters.name is None or item.name == filters.name

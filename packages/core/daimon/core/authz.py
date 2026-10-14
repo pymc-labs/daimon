@@ -144,7 +144,8 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, cast
+from uuid import UUID
 
 from daimon.core.access_policy import DM_SCOPE_PREFIX, TenantAccessPolicy, is_invoker_allowed
 from daimon.core.defaults.metadata import (
@@ -170,6 +171,7 @@ from daimon.core.permissions import (
     session_homes,
     session_readable_from,
 )
+from mux.contracts.ids import Scope, ThreadRef
 
 
 class Action(StrEnum):
@@ -178,6 +180,7 @@ class Action(StrEnum):
     # A platform turn's caller gates: the reply target's writers, then the
     # invoker allowlist. Runs before the agent is known.
     START_TURN = "start_turn"
+    SPAWN_WORKER = "spawn_worker"
     # Run a resolved agent here (a turn, a routine fire, a handoff binding).
     RUN_AGENT = "run_agent"
     # Save (create or update) a routine for an agent: RUN_AGENT at the
@@ -255,11 +258,27 @@ class Surface(StrEnum):
     AGENT_CHAT = "agent_chat"  # an agent-key or bearer call
     ROUTINE = "routine"  # a scheduled run posting into a channel
     HANDOFF = "handoff"  # a task handed to another agent in a thread
+    FLEET = "fleet"
     CONFIG = "config"  # a configuration write (request tool, form, OAuth, direct tool)
 
 
 #: Surfaces whose output reaches only the acting admin.
 _ADMIN_ONLY_SURFACES = frozenset({Surface.DM, Surface.HUB})
+
+
+@dataclass(frozen=True)
+class FleetFacts:
+    """Host-attested root execution, never a worker request's identity fields."""
+
+    scope: Scope
+    root: ThreadRef
+    origin_id: UUID
+    account_id: UUID
+    run_id: UUID
+    place: Place
+    depth: int = 0
+    enabled: bool = False
+    active: bool = False
 
 
 @dataclass(frozen=True)
@@ -418,6 +437,9 @@ class AgentStanding:
 
 
 DenyReason = Literal[
+    "fleet_origin_required",
+    "worker_spawn_forbidden",
+    "worker_depth_exceeded",
     "writers_none",
     "invoker_not_allowed",
     "runs_elsewhere",
@@ -478,6 +500,7 @@ class Request:
     # PUBLISH: the requester approved this very call on a card, as the caller
     # verified (`daimon.core.publish_gate`).
     approved: bool = False
+    fleet: FleetFacts | None = None
 
 
 def _outside_rule(agent: AgentRef, place: Place) -> bool:
@@ -690,6 +713,37 @@ def agent_held_in(
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     subject, agent, place = req.subject, req.agent, req.place
     admin_only_surface = req.surface in _ADMIN_ONLY_SURFACES
+
+    if req.action is Action.SPAWN_WORKER:
+        fleet = req.fleet
+        if req.surface is not Surface.FLEET or fleet is None:
+            return _deny("fleet_origin_required")
+        if fleet.enabled is not True or fleet.active is not True or place.setup_thread:
+            return _deny("worker_spawn_forbidden")
+        if type(fleet.depth) is not int or fleet.depth != 0:
+            return _deny("worker_depth_exceeded")
+        if (
+            fleet.scope.is_platform
+            or fleet.scope.is_legacy_host_authorized
+            or not fleet.scope.principal_id.strip()
+            or not fleet.scope.authorization_id.strip()
+            or not isinstance(cast(object, fleet.origin_id), UUID)
+            or not isinstance(cast(object, fleet.run_id), UUID)
+            or str(fleet.account_id) != fleet.scope.account_id
+            or fleet.scope.tenant_id != fleet.root.channel.tenant_id
+            # authorize refreshes the policy-derived permissions. Every other
+            # admission fact must still be the authentic root's complete Place.
+            or replace(place, permissions=fleet.place.permissions) != fleet.place
+            or place.channel_id != fleet.root.thread_id
+            or place.parent_channel_id != fleet.root.channel.channel_id
+            or not agent.present
+            or not agent.resolved
+        ):
+            return _deny("fleet_origin_required")
+        started = _decide(policy, replace(req, action=Action.START_TURN))
+        if not started:
+            return started
+        return _decide(policy, replace(req, action=Action.RUN_AGENT))
 
     if req.action is Action.START_TURN:
         if _writers_none(place):
@@ -1068,6 +1122,7 @@ def authorize(
     answers_here: bool = False,
     recorded_seal_ids: frozenset[str] = frozenset(),
     approved: bool = False,
+    fleet: FleetFacts | None = None,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -1091,6 +1146,7 @@ def authorize(
             answers_here=answers_here,
             recorded_seal_ids=recorded_seal_ids,
             approved=approved,
+            fleet=fleet,
         ),
     )
 
@@ -1098,6 +1154,7 @@ def authorize(
 __all__ = [
     "ALLOW",
     "Action",
+    "FleetFacts",
     "AgentReach",
     "AgentRef",
     "AgentStanding",

@@ -38,6 +38,8 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DefaultsError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.stores.seeded_skills import load_seeded_skill, record_seeded_skill
@@ -89,14 +91,15 @@ async def reconcile_skill(
             )
             # A duplicate an agent or a channel rule still uses is kept, or
             # its turns would all fail.
+            dedup_scope = resource_scope(tenant_id=str(tenant_id))
             if db_session is None:
                 async with session_factory() as dedup_session, dedup_session.begin():
                     outcome = await delete_skill_unless_attached(
-                        client, dedup_session, skill_id=dup.id, detach=False
+                        client, dedup_session, skill_id=dup.id, detach=False, scope=dedup_scope
                     )
             else:
                 outcome = await delete_skill_unless_attached(
-                    client, db_session, skill_id=dup.id, detach=False
+                    client, db_session, skill_id=dup.id, detach=False, scope=dedup_scope
                 )
             if not outcome.deleted:
                 _log.warning(
@@ -143,8 +146,11 @@ async def reconcile_skill(
                 had_fingerprint=recorded is not None,
             )
             with pkg.path.open("rb") as fh:
-                await client.beta.skills.versions.create(
-                    ma_match.id, files=[("SKILL.zip", fh, "application/zip")]
+                await publish_skill_version(
+                    client,
+                    ma_match.id,
+                    data=fh.read(),
+                    scope=resource_scope(tenant_id=str(tenant_id)),
                 )
             if db_session is None:
                 async with session_factory() as seed_session:
@@ -172,8 +178,11 @@ async def reconcile_skill(
         if dry_run:
             return ResourceOutcome(kind="skill", name=spec.name, action=Action.CREATED)
         with pkg.path.open("rb") as fh:
-            created = await client.beta.skills.create(
-                display_title=display_title, files=[("SKILL.zip", fh, "application/zip")]
+            created = await create_skill(
+                client,
+                display_title=display_title,
+                data=fh.read(),
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
         if db_session is None:
             async with session_factory() as seed_session:

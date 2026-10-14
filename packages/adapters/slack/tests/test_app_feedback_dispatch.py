@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,7 @@ from daimon.adapters.slack.feedback import (
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.support_escalation import ASK_HUMAN_ACTION_ID, SUPPORT_CALLBACK_ID
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
@@ -58,7 +60,7 @@ def _make_app() -> SlackApp:
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
     return SlackApp(runtime=runtime)
 

@@ -66,6 +66,20 @@ async def list_credentials(
     return tuple(AgentMcpCredentialRow.model_validate(orm) for orm in result.scalars())
 
 
+async def list_credential_revisions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> tuple[tuple[uuid.UUID, str, datetime], ...]:
+    """Read owned capability identities/generations, never encrypted tokens."""
+    result = await session.execute(
+        select(
+            AgentMcpCredential.id, AgentMcpCredential.mcp_server_url, AgentMcpCredential.updated_at
+        )
+        .where(AgentMcpCredential.tenant_id == tenant_id, AgentMcpCredential.agent_id == agent_id)
+        .order_by(AgentMcpCredential.created_at)
+    )
+    return tuple((identity, url, updated_at) for identity, url, updated_at in result)
+
+
 async def delete_credential(
     session: AsyncSession,
     *,

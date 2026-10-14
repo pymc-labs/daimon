@@ -13,6 +13,7 @@ import subprocess
 import sys
 import types
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
@@ -41,6 +42,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.turn_fakes import deps_for
 
 BASE = "86cbeee1d7c9757e4c28936ee2fb1c52a68db877"
 FILENAMES = {
@@ -143,7 +145,7 @@ async def _run(db, module, row, agent, is_admin, collision, monkeypatch):
         deployment_default=DeploymentDefault(),
         anthropic=None,
         settings=SimpleNamespace(mcp=SimpleNamespace()),
-        turn_deps=SimpleNamespace(),
+        turn_deps=replace(deps_for(None, None), turn_path=None),
     )
     target = "GH_TOKEN" if collision == "alias" else "API_KEY"
     value = f"ALPHA_KEY=first\n{target}=submitted\n" if row.kind == "env_file" else "submitted"

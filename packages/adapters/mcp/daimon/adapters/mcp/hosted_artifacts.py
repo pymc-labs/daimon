@@ -13,8 +13,12 @@ from pathlib import PurePosixPath
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.file_metadata import FileMetadata
+from daimon.adapters.mcp.resource_ports import walk_chart_files
 from daimon.core.artifacts import ArtifactStore
 from daimon.core.config import ArtifactsSettings
+from daimon.core.mux_backend import resource_scope
+from daimon.core.output_ports_compat import read_output_record
+from mux.contracts.ids import Scope
 from PIL import Image
 from pydantic import BaseModel
 
@@ -158,16 +162,15 @@ async def _discover_chart_outputs(
     *,
     session_id: str,
     turn_started_at: dt.datetime,
+    scope: Scope,
 ) -> tuple[_ChartOutput, ...]:
     """Enumerate recent image outputs from the session's Files API scope."""
     if turn_started_at.tzinfo is None:
         turn_started_at = turn_started_at.replace(tzinfo=dt.UTC)
     cutoff = turn_started_at - _CLOCK_SLACK
     candidates: list[FileMetadata] = []
-    async for item in anthropic.beta.files.list(
-        scope_id=session_id,
-        limit=min(_MAX_SCANNED, 1000),
-        betas=["managed-agents-2026-04-01"],
+    async for item in walk_chart_files(
+        anthropic, session_id, limit=min(_MAX_SCANNED, 1000), scope=scope
     ):
         candidates.append(item)
         if len(candidates) >= _MAX_SCANNED:
@@ -195,17 +198,13 @@ async def _discover_chart_outputs(
 
 
 async def _download_chart(
-    anthropic: AsyncAnthropic, output: _ChartOutput
+    anthropic: AsyncAnthropic, output: _ChartOutput, *, scope: Scope
 ) -> tuple[str, bytes, str]:
     """One chart's safe filename, bytes and content type, within the byte limit."""
     filename = _safe_filename(output.filename)
     if output.size_bytes > _MAX_BYTES:
         raise ValueError("artifact exceeds the per-chart byte limit")
-    response = await anthropic.beta.files.download(
-        output.file_id,
-        betas=["managed-agents-2026-04-01"],
-    )
-    content = await response.read()
+    content = await read_output_record(anthropic, output.file_id, scope=scope)
     if len(content) > _MAX_BYTES:
         raise ValueError("artifact exceeds the per-chart byte limit")
     return filename, content, _image_content_type(filename, content)
@@ -227,11 +226,13 @@ async def _deliver_hosted_charts_impl(
     """Embed charts by default and add URLs only when storage is configured."""
     if settings is not None and store is None:
         _log.warning("mcp.hosted_artifact.store_unconfigured")
+    scope = resource_scope(tenant_id=tenant_id, account_id=account_id, authorization_id="mcp-chart")
     try:
         outputs = await _discover_chart_outputs(
             anthropic,
             session_id=session_id,
             turn_started_at=turn_started_at,
+            scope=scope,
         )
     except Exception as exc:  # degrade-not-block boundary
         record_failure(stage="discovery", key=None, exc=exc)
@@ -250,7 +251,8 @@ async def _deliver_hosted_charts_impl(
     # Download together (at most _MAX_CHARTS at once) rather than one after
     # another at the end of a turn; results are handled in chart order.
     downloads = await asyncio.gather(
-        *(_download_chart(anthropic, output) for output in charts), return_exceptions=True
+        *(_download_chart(anthropic, output, scope=scope) for output in charts),
+        return_exceptions=True,
     )
     for output, download in zip(charts, downloads, strict=True):
         key: str | None = None

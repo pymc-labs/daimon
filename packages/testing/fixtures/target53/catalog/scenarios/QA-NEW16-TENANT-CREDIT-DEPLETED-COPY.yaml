@@ -1,0 +1,36 @@
+id: QA-NEW16-TENANT-CREDIT-DEPLETED-COPY
+title: a depleted tenant gets a refusal that names who can top up (and admins were
+  warned first)
+friction:
+- D17
+set: A
+surface: discord
+tier: manual
+priority: P1
+est_turns: 0
+notes: 'Needs a dedicated QA tenant (a second staging guild) whose balance can be
+  zeroed: zeroing the shared QA guild blocks every other lane. Manual until that tenant
+  exists.'
+setup:
+- do: admin
+  tool: cli
+  args: daimon tenants credit discord {env.qa_drain_guild_id} -<balance> --note qa-deplete
+    --id qa-deplete-{nonce}
+steps:
+- do: new_channel
+  guild: '{env.qa_drain_guild_id}'
+- do: mention
+  text: 'QA depleted: hello'
+- do: wait
+  s: 20
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 15
+- kind: text_present
+  turn: 1
+  pattern: (?i)/billing
+- kind: text_absent
+  turn: 1
+  pattern: (?i)an operator
+teardown: []

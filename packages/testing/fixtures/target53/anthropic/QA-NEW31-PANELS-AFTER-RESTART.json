@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW31-PANELS-AFTER-RESTART",
+  "scenario_sha256": "365e787511f21c7a011599afc373125ce92679aac3f30f25acd5ae355761b9ca",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

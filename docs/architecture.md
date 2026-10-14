@@ -1,5 +1,40 @@
 # Architecture
 
+Opted-in Discord worker fleets use the existing posted-card renderer and Stop
+guard. The card shows each worker's role, backend, model and current state.
+Complete rows stay in ordinal order within Discord's total text limit; large
+fleets show one `+N more` count for the rows that do not fit.
+Enabled runtime composition requires the shared fleet service and authenticated
+root resolver. Root lookup waits until render time; control recovery and
+replacement capture reuse the recorded post and existing Discord transport.
+Proven fleet absence preserves ordinary sealed and final delivery. Unresolved
+or foreign roots and active fleets never disclose intermediate sealed text.
+Live and recovered replacement posts share the bounded core turn-post writer.
+With the explicit trusted grant loader and shared service supplied, Discord's
+runtime installs the real frozen-root reader over the same Postgres state
+store as the turn. It selects by the genuine intent, verifies a recovered run,
+and preserves the original account and host scope while refreshing the click
+subject through existing role readers. Unbound or stale authority refuses.
+Stop and Resume reload current root permissions and use the shared fleet
+operation owner with a scoped version and idempotency key. The ordinary
+orchestrator answer is delivered only after authoritative collection and
+required result reviews succeed. Default fleet settings create no card,
+service discovery or additional sender.
+
+With the mux turn path and channel backends enabled, an admin can choose **Model
+backend** in an agent's setup Details on Discord, Slack or Teams. The preview
+lists unsupported skills, connectors and capabilities, shared-thread limits,
+and known list prices before confirmation. Apply rereads the agent and checks
+the current admin role, tenant allowlist and preview revision through the shared
+backend service. The selection applies to new threads; existing threads retain
+their backend. Disabled settings add no controls or selection reads.
+
+The MCP `create_routine` tool can require an explicit destination when
+`DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. Missing destinations are
+refused after authentication and destination-pair validation, before agent
+lookup or creation. This option defaults to `false`; existing routines and
+routine updates retain their current behavior.
+
 Daimon is built on
 [Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/quickstart).
 Managed Agents (MA) owns the agent, its sandbox, its skills and the session
@@ -88,10 +123,10 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
-| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`. See [its README](https://github.com/pymc-labs/daimon/blob/main/packages/mux/README.md). |
+| `mux` | `packages/mux/` | A separate namespace, not part of `daimon`: the provider-neutral managed-agent contract. Not called by Daimon yet. See [mux.md](mux.md). |
 | `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that talk to Daimon over HTTP only. |
 
-None of that is convention. Eight `import-linter` contracts in the root
+None of that is convention. Twelve `import-linter` contracts in the root
 `pyproject.toml` are the authority, run as `uv run lint-imports` in pre-commit
 and CI:
 
@@ -103,6 +138,8 @@ and CI:
 | Core must not import testing | `daimon.core` → `daimon.testing` |
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
 | Mux must not import daimon | `mux` → `daimon` |
+| Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors` → a provider SDK or `mux.drivers` |
+| Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver |
 | notebook-host must not import daimon | `notebook_host` → `daimon` |
 | report-host must not import daimon | `report_host` → `daimon` |
 
@@ -121,6 +158,12 @@ cannot import `daimon` cannot hold the Anthropic key or a database
 credential, whatever a future contributor is tempted to do inside it.
 
 ## MCP browser pages
+
+Discord, Slack and Teams share the native message draft reducer in
+`daimon.core.turn.provider_events`; each lifecycle keeps its own draft state.
+Core bundles the Inter faces used by Discord table images and MCP browser
+pages. The MCP static mount searches those packaged assets at the existing
+`/web/Inter-*.ttf` URLs.
 
 The MCP adapter renders its GitHub, Slack, personal link, MCP connection, and
 billing pages through `web_shell.render_page`. The shell owns the Daimon mark,
@@ -146,6 +189,13 @@ runtime image. The notebook and report hosts have their own page shells.
 Discord, Slack and Teams run the same two-stage chokepoint in `daimon.core.turn`.
 The staging is deliberate — neither stage returns a boolean, both raise typed
 errors, so an adapter cannot forget a gate.
+
+Discord displays non-Anthropic message snapshots and preview fragments through
+the optional `on_provider_event` lifecycle tap. It updates local draft state;
+the render task posts progress and the existing terminal callbacks retire the
+card and deliver the final answer. Anthropic keeps its native event tap.
+Alternate-provider usage does not become an Anthropic meter; an unverified
+display cost is omitted.
 
 **Stage one, `admit()` — `packages/core/daimon/core/turn/admission.py`.** One
 call does identity resolution, config resolution, and every pre-turn gate, and
@@ -230,6 +280,15 @@ platform rejection, or "Something went wrong on our side." A small third line,
 JSON, exception bodies and tool details stay out of failure copy. A failed
 reply can still be followed by files created during the turn. The output sweep suppresses an oversize notice when
 the same filename and size were already attached by Daimon in that turn.
+
+With `DAIMON_DISCORD__WRITERS_NONE_NOTICE=true`, the single posting owner may
+add one ⛔ reaction to an explicit bot mention refused by a confirmed
+`writers=none` rule. This host signal sends no text or DM and starts no agent
+turn. The default is off; unreadable protection and unresolved categories
+remain silent. Attempts are limited to one per requester in a parent channel
+per five minutes, one per parent channel per 30 seconds, and ten per minute
+across the posting process. Failed attempts consume the cooldown; no fallback
+message is sent. Limits are process-local and reset on restart.
 
 Discord starts a turn on a direct bot mention or a reply to a recorded bot or
 application-owned webhook post in the same tenant and channel. Recorded posts
@@ -1236,6 +1295,14 @@ after Stop never runs anything. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
 
+With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
+an active chat admin can request an agent backend change through that same
+confirmation hook. The card shows the server's current compatibility and cost
+preview. Confirm rechecks the requester and current admin permission, then
+applies the bound revision and preview digest by compare-and-set. Native
+sessions without verified approval remain refused. Invalid prompt inputs are
+denied inside the existing card boundary; sibling decisions continue.
+
 ### How a turn ended
 
 `packages/core/daimon/core/turn/termination.py` defines `TerminationReason`,
@@ -1492,6 +1559,21 @@ agent code execution or a redirected connector through a key value or name.
 
 ## Sessions and Managed Agents
 
+Discord credential-card expiry is separately opt-in through
+`DiscordSettings.credential_form_expiry` (default false) and the existing
+single posting-owner switch. `core/credential_form_expiry.py` exposes
+`poll_credential_form_expiries_once(sessionmaker, now=..., edit=...)` for
+production and clocked offline execution. The store atomically retires a
+bounded batch with `used_at IS NULL`, recording `expired_card_pending` in
+the existing outcome column; a consume or supersede that won first is left
+alone. That transaction commits before Discord HTTP. The result-returning
+`edit_expired_posted_card` verifies the persisted tenant/thread/message and
+forbids webhook replacement; an acknowledged edit CAS changes the outcome
+to `expired_card_updated`. Failures remain pending and a bounded cursor
+allows later cards to progress before retries. These outcomes never mean
+credential application. The click helper, default TTL, token-consumption
+predicates and other platform paths are unchanged; no migration is needed.
+
 A turn does not create a session per message. `thread_sessions` maps
 `(tenant, platform, thread)` to one MA session id, and its `status` column
 carries the lifecycle: `live` is the caller's current session, `dead` is one MA
@@ -1499,6 +1581,12 @@ no longer has, `superseded` points at the successor that carries its work
 through `replaced_by_id`, and `retired` is an explicit fresh start. That
 lineage is why a thread can survive a session replacement with its context
 intact.
+
+Each caller has their own row per thread. A channel configured for shared
+threads (`thread_mode="shared"`, with `DAIMON_TURN__CHANNEL_BACKENDS` on)
+instead keys the row on an owner derived from the thread, so everyone in it
+uses one session with the agent's own credentials, and records the binding
+in the state store (`packages/core/daimon/core/shared_threads.py`).
 
 What MA holds is the agent, the environment, the skills and the session
 transcript. What Postgres holds is metadata: identity, the mapping above, the
@@ -1508,6 +1596,20 @@ executes — the mapping row stores a `SessionSnapshot` of the configuration the
 session is actually running (`packages/core/daimon/core/session_snapshot.py`),
 and that snapshot, not the current spec, is what later turns compare and bill
 against.
+
+### Worker fleets
+
+A fleet run is an orchestrator turn's durable fan-out
+(`packages/core/daimon/core/fleet.py`, rows in `fleet_run` and `fleet_worker`).
+Each worker gets a private binding slot of its own in the state store, under the
+orchestrator's channel and account. Its session, fenced lease, idempotent spawn
+operation, journal and usage are the store's existing ones. A worker's result is
+one entry in its own journal; the worker row keeps only a pointer to it, with its
+digest and a short excerpt. Every status change is a compare-and-swap on the
+row's version. Worker turns have a concurrency pool of their own, counted from
+these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
+per process, so a fan-out never takes the chat turns' slots. Fleets are off by
+default (`DAIMON_FLEET__ENABLED`).
 
 ### Same-thread handoff
 
@@ -2041,8 +2143,9 @@ code fences remain literal examples. Other adapters need no renderer changes.
 
 `turn_outcomes` stores one content-free terminal record per logical turn. A UUID
 follows admission, session binding and execution; a dead-session recovery remains
-one turn. Discord, Slack, their continuation/wizard paths, headless routines and
-CLI runs use the same recorder. Admission and concurrency refusals are recorded
+one turn. Discord, Slack, their continuation/wizard paths, headless routines,
+fleet workers and CLI runs use the same recorder. Fleet workers retain their own
+`worker` origin; their diagnostic never masquerades as an orchestrator or routine. Admission and concurrency refusals are recorded
 even when no model runs. The row contains tenant/account and agent identifiers,
 platform/channel/thread identifiers, the shared `TerminationReason`, UTC start/end
 and monotonic duration, recovery status, exception class, package release and
@@ -2313,6 +2416,26 @@ cards, cancellation controls, and moving Slack thread replies are deferred; Slac
 slash command carries recent channel messages. Run `/dm` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
 
+Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
+
+Teams consumes neutral snapshots and draft fragments through the optional lifecycle tap for alternate providers. Terminal callbacks retire the progress card and deliver authoritative answers; unprompted drafts remain silent. Unknown alternate-provider cost stays absent from the summary instead of becoming an Anthropic usage meter.
+
+### Typed provider-action cards
+
+Discord attaches the typed provider-action callback only to prepared non-Anthropic sessions. Browser-origin cards return the supplied approve, deny or cancel response; authentication cards offer completion only when the provider supplies a verified response. Requester and destination checks precede selection, and expiry or Stop retires the controls without granting permission. Native action payloads stay out of cards.
+
+Slack attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+Teams attaches the scoped provider-action callback only for prepared alternate-provider sessions. Browser-origin permission offers Approve, Deny and Cancel; authentication offers Cancel and includes completion only when core supplies that response. Cards bind the requester and destination, return the offered native response object unchanged and retire on expiry or Stop. Native payloads remain hidden; default Anthropic calls attach no new callback.
+
+### Neutral output upload edges
+
+Discord, Slack and Teams output-delivery modules accept verified `DeliverableFile`
+bytes through `deliver_provider_output`. The caller owns admitted tenant/session/root
+validation. Uploads reuse answer attachment edits, Slack's external upload flow,
+and Teams Graph or requester-bound consent with SharePoint PUT. These edges
+perform no provider selection, native payload parsing or artifact deletion.
+
 Discord passes through only explicitly audited `UserFacingError` guidance. Raise
 that marker with deliberate copy, never exception text, provider bodies, secrets
 or internal identifiers. Known domain errors map to fixed next steps; unmarked
@@ -2322,3 +2445,12 @@ agent copying. Shared setup-responder, agent-visibility and DM routing refusals
 mark their fixed guidance explicitly. Terminal
 failure cards retain audited guidance as their next step, including an expired
 setup context encountered during reconnection.
+
+### Opt-in Discord waiting cards
+
+`discord.tenant_cap_waiting_card` defaults to false. When enabled, an initial
+mention's admitted ticket shows “Queued — waiting for a free slot…” on its
+existing progress card while it waits behind the tenant cap. The same card
+returns to ordinary progress when the slot is granted. Stop, queue limits and
+FIFO admission are unchanged, and the card displays no tenant identities or
+queue counts. Drained follow-up turns keep their existing card wording.

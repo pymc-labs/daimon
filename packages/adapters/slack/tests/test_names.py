@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from daimon.core.platform_names import KnownName
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
@@ -91,7 +93,7 @@ async def test_on_request_remembers_after_the_ack_and_a_failure_never_reaches_it
             billing_config=None,
             http_client=MagicMock(spec=httpx.AsyncClient),
             resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub
-            turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub
+            turn_deps=replace(deps_for(), turn_path=None),  # stub
         )
     )
     client = _FakeSocketClient()

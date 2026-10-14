@@ -1,0 +1,25 @@
+id: QA-NEW27-MISTYPED-TOKEN-HEADLESS
+title: 'headless: a rejected MCP token does not consume the credential request'
+friction:
+- D11
+- NEW-27
+set: A
+surface: headless
+tier: weekly
+priority: P1
+est_turns: 0
+notes: Drives credential_modals' MCP submit path in-process with a token the probe
+  rejects. Runner returns typed PENDING until the headless hook lands.
+setup: []
+steps:
+- do: admin
+  tool: headless
+  args:
+    call: credential_submit.mcp_token
+    token: wrong-token-123
+    url: '{env.qa_token_mcp_url}'
+assert:
+- kind: db_check
+  sql: select used_at is null from credential_requests where id = '{headless.request_id}'
+  expect: true
+teardown: []

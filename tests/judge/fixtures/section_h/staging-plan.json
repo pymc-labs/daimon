@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "unit": "H6",
+  "status": "PREPARED_ONLY",
+  "base_sha": "048be92dabfe28cd5ff3db1aac88274ff543d6f2",
+  "execution_authorized": false,
+  "target_environment": "staging",
+  "points_available": 3,
+  "points_earned": 0,
+  "flags_required": {
+    "DAIMON_TURN__PATH": "mux",
+    "DAIMON_TURN__CHANNEL_BACKENDS": true
+  },
+  "unconfigured_default": "anthropic",
+  "model_pins": {
+    "anthropic": "claude-haiku-5-5",
+    "openai": "gpt-6-luna",
+    "gemini": "gemini-3.8-flash"
+  },
+  "attempts_per_cell": 1,
+  "sdk_max_retries": 0,
+  "automatic_rerun": false,
+  "fallback_allowed": false,
+  "serial_cells": true,
+  "case_deadline_seconds_proposed": 900,
+  "cleanup_deadline_seconds_total_proposed": 90,
+  "shared_interfaces": {
+    "N6_setting_preview_mutation_allowlist_audit": "DECLARED_20261012T085041Z_CHANNEL_BACKEND_SOURCE_UNBOUND",
+    "N4_admission_retention_footer": "UNBOUND_OWNER_SOURCE_PIN_REQUIRED",
+    "N7_chat_confirmation": "DECLARED_REQUEST_AGENT_BACKEND_SWITCH_CONFIRMATION_HOOK_SOURCE_UNBOUND",
+    "N5_settings_cli_mcp": "DECLARED_AGENT_SETUP_DETAILS_AND_SET_AGENT_BACKEND_SOURCE_UNBOUND",
+    "N8_whole_run_quote": "LIST_PRICE_PREVIEW_DECLARED_20261012T085031Z_WHOLE_RUN_BOUND_UNBOUND"
+  },
+  "finance": {
+    "fixture_identity": "UNBOUND_H6_PROBEPLAN_NOT_ACCEPTED_ON_BASE",
+    "signed_go": null,
+    "signed_envelope": null,
+    "budget_config_sha256": null,
+    "ledger_id": null,
+    "provider_line_caps_usd": null,
+    "maximum_hold_usd": null,
+    "actual_usd": null,
+    "held_usd": null,
+    "accounting_status": "pending",
+    "reservation_is_not_actual": true,
+    "missing_usage_retains_hold": true
+  },
+  "cells": [
+    {
+      "id": "H6-ANTHROPIC",
+      "target_backend": "anthropic",
+      "target_model": "claude-haiku-5-5",
+      "previous_backend": "gemini",
+      "previous_model": "gemini-3.8-flash",
+      "channel_override": null,
+      "agent_setting_prepared_as": "gemini",
+      "host_turns": [
+        {
+          "phase": "baseline",
+          "thread": "T0",
+          "expected_backend": "gemini",
+          "expected_model": "gemini-3.8-flash"
+        },
+        {
+          "phase": "after_switch_new_thread",
+          "thread": "T1",
+          "expected_backend": "anthropic",
+          "expected_model": "claude-haiku-5-5"
+        },
+        {
+          "phase": "after_switch_existing_thread",
+          "thread": "T0",
+          "expected_backend": "gemini",
+          "expected_model": "gemini-3.8-flash"
+        },
+        {
+          "phase": "after_revert_new_thread",
+          "thread": "T2",
+          "expected_backend": "gemini",
+          "expected_model": "gemini-3.8-flash"
+        },
+        {
+          "phase": "after_revert_existing_thread",
+          "thread": "T1",
+          "expected_backend": "anthropic",
+          "expected_model": "claude-haiku-5-5"
+        }
+      ],
+      "host_turn_count": 5,
+      "fresh_native_sessions_expected": 3,
+      "additional_model_requests": "UNBOUND: actual bootstrap inputs, admin chat/tool loops, automatic titles and other paid operations must be inventoried in N8 quote",
+      "planned_result": "NOT_RUN",
+      "maximum_hold_usd": null,
+      "actual_usd": null,
+      "held_usd": null
+    },
+    {
+      "id": "H6-OPENAI",
+      "target_backend": "openai",
+      "target_model": "gpt-6-luna",
+      "previous_backend": "anthropic",
+      "previous_model": "claude-haiku-5-5",
+      "channel_override": null,
+      "agent_setting_prepared_as": "anthropic",
+      "host_turns": [
+        {
+          "phase": "baseline",
+          "thread": "T0",
+          "expected_backend": "anthropic",
+          "expected_model": "claude-haiku-5-5"
+        },
+        {
+          "phase": "after_switch_new_thread",
+          "thread": "T1",
+          "expected_backend": "openai",
+          "expected_model": "gpt-6-luna"
+        },
+        {
+          "phase": "after_switch_existing_thread",
+          "thread": "T0",
+          "expected_backend": "anthropic",
+          "expected_model": "claude-haiku-5-5"
+        },
+        {
+          "phase": "after_revert_new_thread",
+          "thread": "T2",
+          "expected_backend": "anthropic",
+          "expected_model": "claude-haiku-5-5"
+        },
+        {
+          "phase": "after_revert_existing_thread",
+          "thread": "T1",
+          "expected_backend": "openai",
+          "expected_model": "gpt-6-luna"
+        }
+      ],
+      "host_turn_count": 5,
+      "fresh_native_sessions_expected": 3,
+      "additional_model_requests": "UNBOUND: actual bootstrap inputs, admin chat/tool loops, automatic titles and other paid operations must be inventoried in N8 quote",
+      "planned_result": "NOT_RUN",
+      "maximum_hold_usd": null,
+      "actual_usd": null,
+      "held_usd": null
+    },
+    {
+      "id": "H6-GEMINI",
+      "target_backend": "gemini",
+      "target_model": "gemini-3.8-flash",
+      "previous_backend": "openai",
+      "previous_model": "gpt-6-luna",
+      "channel_override": null,
+      "agent_setting_prepared_as": "openai",
+      "host_turns": [
+        {
+          "phase": "baseline",
+          "thread": "T0",
+          "expected_backend": "openai",
+          "expected_model": "gpt-6-luna"
+        },
+        {
+          "phase": "after_switch_new_thread",
+          "thread": "T1",
+          "expected_backend": "gemini",
+          "expected_model": "gemini-3.8-flash"
+        },
+        {
+          "phase": "after_switch_existing_thread",
+          "thread": "T0",
+          "expected_backend": "openai",
+          "expected_model": "gpt-6-luna"
+        },
+        {
+          "phase": "after_revert_new_thread",
+          "thread": "T2",
+          "expected_backend": "openai",
+          "expected_model": "gpt-6-luna"
+        },
+        {
+          "phase": "after_revert_existing_thread",
+          "thread": "T1",
+          "expected_backend": "gemini",
+          "expected_model": "gemini-3.8-flash"
+        }
+      ],
+      "host_turn_count": 5,
+      "fresh_native_sessions_expected": 3,
+      "additional_model_requests": "UNBOUND: actual bootstrap inputs, admin chat/tool loops, automatic titles and other paid operations must be inventoried in N8 quote",
+      "planned_result": "NOT_RUN",
+      "maximum_hold_usd": null,
+      "actual_usd": null,
+      "held_usd": null
+    }
+  ],
+  "offline_controls_required": [
+    "flags_off_and_unconfigured_goldens",
+    "channel_over_agent_over_anthropic",
+    "non_admin_zero_effects",
+    "disallowed_backend_zero_effects",
+    "foreign_tenant_zero_effects",
+    "stale_revision_and_digest_zero_effects",
+    "expired_card_and_revoked_admin_zero_effects",
+    "concurrent_confirm_single_mutation",
+    "set_clear_revert_audit_parity",
+    "expired_price_or_missing_guard_identity_refuses_before_key_access",
+    "changed_agent_or_policy_preview_refuses",
+    "manifest_in_bounds_revision_and_out_of_bounds_refusal",
+    "existing_cert_receipts_remain_valid"
+  ],
+  "receipts_required": [
+    "go_and_financial_pins",
+    "owned_resource_manifest",
+    "before_setting_allowlist_revision",
+    "compatibility_preview_digest_and_rendered_card",
+    "current_admin_click_and_cas",
+    "setting_and_audit_readback",
+    "native_turn_session_provider_model_join",
+    "actual_platform_messages_and_footer",
+    "revert_revision_and_audit_readback",
+    "request_usage_runtime_and_settlement",
+    "owned_cleanup_and_revoke",
+    "scored_result_and_signed_evidence_manifest"
+  ],
+  "hard_stops": [
+    "missing_owner_binding",
+    "no_separate_staging_go",
+    "model_or_provider_mismatch",
+    "missing_or_expired_dated_price",
+    "insufficient_line_room",
+    "unknown_or_overrun_cost_before_next_dispatch",
+    "unowned_resource_or_foreign_scope",
+    "missing_native_or_visible_evidence"
+  ],
+  "declared_interface": {
+    "note": "20261012T084539Z-N6-ALL-H1-SHARED-INTERFACE-NOTE.md",
+    "superseding_decisions": "20261012T084615Z-LEAD-ALL-SECTION-H-SEAM-MAP-AND-DECISIONS.md",
+    "final_import_path": "daimon.core.channel_backend",
+    "settings_surface": "/agent-setup details",
+    "tenant_allowlist_field": "TenantAccessPolicy.enabled_backends",
+    "tenant_allowlist_default": [
+      "anthropic"
+    ],
+    "resolver": "channel revision > noncleared agent setting > anthropic",
+    "channel_clear_semantics": "explicit anthropic override",
+    "revision_revert_semantics": "append new revision restoring previous setting; never rewind/delete",
+    "direct_mcp_tool": "set_agent_backend",
+    "chat_request_tool": "request_agent_backend_switch",
+    "confirmation_gate": "ConfirmationHook, requester-bound plus admin=True and current-admin recheck",
+    "service_calls": [
+      "current",
+      "tenant_policy",
+      "preview",
+      "set_backend",
+      "clear_backend",
+      "revert",
+      "audit",
+      "revision"
+    ],
+    "manifest_authorization": "tenant/backend/account plus allowed configuration-field bounds; changed in-bounds digest permitted, out-of-bounds refused",
+    "source_merged": false,
+    "reshape_note": "20261012T085041Z-N6-ALL-BACKEND-INTERFACE-RESHAPE-NOTE.md",
+    "policy_revision_type": "str: deterministic existing allowlist policy digest",
+    "audit_readback": "SecurityAuditRow, tool_name=agent_backend, reason=completed, scope=agent_backend:<agent_uuid>:<local>; setting facts via current/revision",
+    "trusted_agent_loader": "load_backend_agent(anthropic, sessionmaker, *, tenant_id, agent_name, resource_host=None)",
+    "cost_preview": "daimon.core.pricing.list_price_preview(model, *, price=None)",
+    "legacy_manifest_rule": "no ConfigurationGrant => exact config_digest required"
+  }
+}

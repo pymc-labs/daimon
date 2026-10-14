@@ -13,6 +13,7 @@ real ``AsyncAnthropic`` over ``MARouter`` (transport-level fake — never
 from __future__ import annotations
 
 import dataclasses
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -20,23 +21,29 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.mcp.tools.routines as _routines_mod
+import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role, RoutineRow
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.teams_graph import GraphUnavailable
 from daimon.testing import ma_agent, ma_model_config
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, call_mcp_tool
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.exceptions import ToolError
+from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _create_routine_impl = _routines_mod._create_routine_impl  # pyright: ignore[reportPrivateUsage]
@@ -79,11 +86,14 @@ def _runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     client: AsyncAnthropic | None = None,
+    require_destination: bool = False,
 ) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
         client=client if client is not None else MagicMock(),  # type: ignore[arg-type]
-        settings=MagicMock(),  # type: ignore[arg-type]
+        settings=MagicMock(  # type: ignore[arg-type]
+            mcp=McpSettings(require_routine_destination=require_destination)
+        ),
         deployment_default=DeploymentDefault(),
     )
 
@@ -975,6 +985,7 @@ async def _create(
     kind: str,
     destination_id: str,
     policy: object | None = None,
+    require_destination: bool = False,
 ) -> object:
     from daimon.core.stores.access_policy import set_access_policy
 
@@ -986,7 +997,7 @@ async def _create(
         [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
     )
     return await _create_routine_impl(
-        _runtime(committing_sessionmaker, client=client),
+        _runtime(committing_sessionmaker, client=client, require_destination=require_destination),
         _auth_identity(
             tenant_id=tenant.id,
             platform=platform,
@@ -1002,10 +1013,12 @@ async def _create(
     )
 
 
+@pytest.mark.parametrize("require_destination", [False, True])
 async def test_create_routine_saves_a_reachable_destination_in_this_guild(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    require_destination: bool,
 ) -> None:
     _discord_channels(monkeypatch, {1234: _text_channel()})
     row = await _create(
@@ -1014,6 +1027,7 @@ async def test_create_routine_saves_a_reachable_destination_in_this_guild(
         platform="discord",
         kind="channel",
         destination_id="1234",
+        require_destination=require_destination,
     )
     assert (row.destination_kind, row.destination_id) == ("channel", "1234")  # type: ignore[attr-defined]
 
@@ -1027,6 +1041,7 @@ async def test_create_routine_saves_a_reachable_destination_in_this_guild(
         ({1234: "text"}, "1234", "thread", "use destination_kind=channel"),
     ],
 )
+@pytest.mark.parametrize("require_destination", [False, True])
 async def test_create_routine_refuses_an_unusable_discord_destination(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
@@ -1035,6 +1050,7 @@ async def test_create_routine_refuses_an_unusable_discord_destination(
     destination_id: str,
     kind: str,
     message: str,
+    require_destination: bool,
 ) -> None:
     built = {
         cid: _text_channel(guild_id="999" if what == "other-guild" else _GUILD)
@@ -1048,13 +1064,16 @@ async def test_create_routine_refuses_an_unusable_discord_destination(
             platform="discord",
             kind=kind,
             destination_id=destination_id,
+            require_destination=require_destination,
         )
 
 
+@pytest.mark.parametrize("require_destination", [False, True])
 async def test_create_routine_refuses_a_channel_in_a_protected_category(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    require_destination: bool,
 ) -> None:
     from daimon.core.access_policy import TenantAccessPolicy
 
@@ -1067,6 +1086,7 @@ async def test_create_routine_refuses_a_channel_in_a_protected_category(
             kind="channel",
             destination_id="1234",
             policy=TenantAccessPolicy(protected_category_ids=("77",)),
+            require_destination=require_destination,
         )
 
 
@@ -1191,10 +1211,12 @@ async def test_create_routine_needs_both_destination_fields(
         )
 
 
+@pytest.mark.parametrize("require_destination", [False, True])
 async def test_update_routine_sets_and_clears_a_destination(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    require_destination: bool,
 ) -> None:
     _discord_channels(monkeypatch, {55: _text_channel()})
     tenant = await make_tenant(db_session)
@@ -1209,7 +1231,7 @@ async def test_update_routine_sets_and_clears_a_destination(
         trigger_message="orig",
     )
     await db_session.commit()
-    runtime = _runtime(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, require_destination=require_destination)
     auth = _auth_identity(tenant_id=tenant.id, external_id=_GUILD, talking_to="agent_a")
 
     set_ = await _update_routine_impl(
@@ -1712,3 +1734,152 @@ async def test_an_empty_name_pin_does_not_pin_a_routine_on_create_or_update(
         runtime, auth, routine_id=created.id, trigger_message="report, but more"
     )
     assert updated.trigger_message == "report, but more"
+
+
+_ROUTINE_DESTINATION_WARNING = (
+    "No destination was supplied. This routine won't post, so nothing was created. "
+    "Where should results be delivered?"
+)
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_required_destination_refuses_before_database_and_agent_lookup(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    factory = MagicMock(side_effect=AssertionError("must not open a database session"))
+    lookup = AsyncMock(side_effect=AssertionError("must not look up an agent"))
+    monkeypatch.setattr(_routines_mod, "find_agent_by_daimon_tag", lookup)
+    runtime = _runtime(factory, require_destination=True)
+
+    with pytest.raises(ToolError) as refused:
+        await _create_routine_impl(
+            runtime,
+            _auth_identity(platform=platform),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="ROUTINE-PING",
+        )
+
+    assert str(refused.value) == _ROUTINE_DESTINATION_WARNING
+    factory.assert_not_called()
+    lookup.assert_not_awaited()
+
+
+@pytest.mark.parametrize("require_destination", [False, True])
+@pytest.mark.parametrize(("kind", "destination_id"), [("channel", None), (None, "1234")])
+async def test_destination_pair_validation_precedes_opt_in_warning(
+    require_destination: bool, kind: str | None, destination_id: str | None
+) -> None:
+    factory = MagicMock(side_effect=AssertionError("must not open a database session"))
+    with pytest.raises(
+        ToolError, match="^destination_kind and destination_id must be given together$"
+    ):
+        await _create_routine_impl(
+            _runtime(factory, require_destination=require_destination),
+            _auth_identity(),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="ping",
+            destination_kind=kind,  # type: ignore[arg-type]
+            destination_id=destination_id,
+        )
+    factory.assert_not_called()
+
+
+async def test_required_destination_preserves_platform_identity_refusal() -> None:
+    factory = MagicMock(side_effect=AssertionError("must not open a database session"))
+    with pytest.raises(ToolError, match="^creating a routine requires a platform user identity$"):
+        await _create_routine_impl(
+            _runtime(factory, require_destination=True),
+            _auth_identity(platform_user_id=None),
+            agent_name="daimon",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="ping",
+        )
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("valid_token", [False, True])
+async def test_required_destination_on_authenticated_public_mcp_surface(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_token: bool,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="requester", tenant=tenant, account=account
+    )
+    await db_session.commit()
+    lookup = AsyncMock(side_effect=AssertionError("must not look up an agent"))
+    monkeypatch.setattr(_routines_mod, "find_agent_by_daimon_tag", lookup)
+    requests: list[httpx.Request] = []
+
+    def unexpected_native(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("must not make a native request")
+
+    secret = b"synthetic-routine-test-signing-key"
+    async with build_fake_anthropic(unexpected_native) as client:
+        app = create_mcp_app(
+            settings=Settings(
+                database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://unused/db")),
+                anthropic=AnthropicSettings(api_key=SecretStr("synthetic-test-key")),
+                mcp=McpSettings(
+                    jwt_secret=SecretStr(secret.decode()),
+                    public_url=HttpUrl("https://mcp.test.invalid/mcp"),
+                    require_routine_destination=True,
+                ),
+                _env_file=None,  # type: ignore[call-arg]
+            ),
+            sessionmaker=committing_sessionmaker,
+            anthropic=client,
+        )
+        token = mint_jwt(
+            account_id=account.id,
+            secret=secret if valid_token else b"different-synthetic-signing-key",
+            now=datetime.now(UTC),
+        )
+        if valid_token:
+            response = await call_mcp_tool(
+                app,
+                token=token,
+                name="create_routine",
+                arguments={
+                    "agent_name": "daimon",
+                    "cron_expr": "* * * * *",
+                    "timezone": "UTC",
+                    "trigger_message": "ROUTINE-PING",
+                },
+            )
+            result = response["result"]
+            assert isinstance(result, dict)
+            assert result["isError"] is True
+            assert result["content"] == [{"type": "text", "text": _ROUTINE_DESTINATION_WARNING}]
+            # This is a real authenticated tool error, not yet a visible model reply.
+            assert re.search(
+                r"(?i)won'?t (post|be delivered)|no destination|where should",
+                _ROUTINE_DESTINATION_WARNING,
+            )
+        else:
+            async with (
+                asgi_lifespan(app),
+                httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://test",
+                    trust_env=False,
+                ) as http,
+            ):
+                headers = {**INIT_HEADERS, "Authorization": f"Bearer {token}"}
+                response = await http.post("/mcp", json=INIT_BODY, headers=headers)
+                assert response.status_code == 401
+                assert _ROUTINE_DESTINATION_WARNING not in response.text
+
+    lookup.assert_not_awaited()
+    assert requests == []
+    async with committing_sessionmaker() as session:
+        assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []

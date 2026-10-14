@@ -1,0 +1,25 @@
+id: QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM
+title: a wrong MCP token in a private form is rejected without using up the form or
+  freezing the card
+friction:
+- D11
+- NEW-27
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 1
+notes: 'MCP-token path only; the GitHub repo/PAT path is qa-cred''s QA-NEW-CRED-REJECT-RETRY
+  / QA-NEW-CRED-SAVE-HEADLESS. Headless twin: QA-NEW27-MISTYPED-TOKEN-HEADLESS.'
+setup: []
+steps: []
+assert: []
+human:
+- click: '@mention: ''connect the MCP server {env.qa_token_mcp_url} with my token''.
+    Click the form button, paste `wrong-token-123`, submit.'
+  expect: "Private error naming the problem. The public card does NOT say 'Received.\
+    \ Saving\u2026'."
+- click: Click the same form button again and paste the right token.
+  expect: "The form opens (not 'already used \u2014 ask again') and the connection\
+    \ is saved."
+teardown: []

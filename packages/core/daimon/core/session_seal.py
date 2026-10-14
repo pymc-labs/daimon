@@ -26,6 +26,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SEALED,
     MA_METADATA_KEY_THREAD,
 )
+from daimon.core.session_ports_compat import retrieve_session_record
+from mux.contracts.ids import Scope
 
 __all__ = [
     "format_seal_ids",
@@ -122,6 +124,7 @@ async def inherited_seal_ids(
     predecessor_session_id: str,
     own_thread_id: str,
     tenant_seals_anything: bool,
+    scope: Scope | None = None,
 ) -> frozenset[str]:
     """The seal a successor of `predecessor_session_id` must carry.
 
@@ -131,8 +134,9 @@ async def inherited_seal_ids(
     sealed to this thread while the tenant seals anything. A predecessor that
     can't be read at all seals the successor to its own thread.
     """
+    scope = scope or Scope.legacy_host_authorized(call_site="session_seal:inherited_seal_ids")
     try:
-        predecessor = await anthropic.beta.sessions.retrieve(predecessor_session_id)
+        predecessor = await retrieve_session_record(anthropic, predecessor_session_id, scope=scope)
     except anthropic_pkg.APIError as error:
         log.warning(
             "session_seal.predecessor_unreadable",

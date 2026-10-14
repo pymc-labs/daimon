@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+  "scenario_sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

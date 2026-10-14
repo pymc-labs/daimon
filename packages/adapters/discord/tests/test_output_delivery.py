@@ -19,12 +19,13 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.output_delivery import (
     MAX_ATTACHMENTS_PER_MESSAGE,
     AnswerMessage,
+    deliver_provider_output,
     deliver_session_outputs,
     upload_limit,
 )
 from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
@@ -917,3 +918,59 @@ async def test_a_same_named_file_with_other_bytes_on_the_answer_does_not_count()
     assert thread.send.await_args.kwargs["file"].filename == "a.pdf"
     assert deleted_at_post == [[]], "the listing entry outlives the fallback post"
     assert deleted == ["file_a"]
+
+
+async def test_neutral_bytes_edit_answer_preserving_existing_attachment() -> None:
+    content = b"\x89PNG\r\n\x1a\n\x00real-provider-bytes"
+    existing = _attachment("earlier.pdf", b"existing")
+    server = _ServerAnswer([])
+    server.attachments = [existing]
+    thread = _answer_thread(server.message())
+    assert await deliver_provider_output(
+        DeliverableFile("neutral:openai:root:image", "chart", "image/png", len(content), content),
+        thread,
+        session_id="session-openai",
+        may_post=_allowed,
+        answer=AnswerMessage(message_id=_ANSWER_ID, edit=server.edit),
+    )
+    assert len(server.attachments) == 2
+    assert server.attachments[0] is existing
+    attachment = server.attachments[1]
+    assert isinstance(attachment, discord.Attachment)
+    assert attachment.filename == "chart.png"
+    assert await attachment.read() == content
+    thread.send.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("size,limit,allowed", [(1, 100, True), (3, 2, True), (3, 100, False)])
+async def test_neutral_invalid_oversize_or_protected_bytes_never_upload(
+    size: int, limit: int, allowed: bool
+) -> None:
+    thread = _thread(limit)
+
+    async def may_post() -> bool:
+        return allowed
+
+    assert not await deliver_provider_output(
+        DeliverableFile("neutral:gemini:root:image", "chart.png", "image/png", size, b"png"),
+        thread,
+        session_id="session-gemini",
+        may_post=may_post,
+    )
+    thread.send.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_neutral_answer_full_falls_back_to_real_discord_file() -> None:
+    thread = _answer_thread(_answer_message([_attachment("old.txt") for _ in range(10)]))
+    answer, edits = _recording_edit([])
+    assert await deliver_provider_output(
+        DeliverableFile("neutral:gemini:root:file", "report", "text/plain", 4, b"data"),
+        thread,
+        session_id="session-gemini",
+        may_post=_allowed,
+        answer=answer,
+    )
+    assert not edits
+    file = thread.send.call_args.kwargs["file"]  # type: ignore[attr-defined]
+    assert isinstance(file, discord.File)
+    assert (file.filename, file.fp.read()) == ("report.txt", b"data")

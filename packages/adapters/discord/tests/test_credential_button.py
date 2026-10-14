@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -47,6 +48,7 @@ from daimon.core.stores.domain import CredentialRequestRow
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic, list_response
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -728,7 +730,7 @@ async def test_callback_mcp_oauth_kind_spends_the_request_and_sends_a_private_si
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))
         ),
-        turn_deps=SimpleNamespace(fernet=make_fernet()),
+        turn_deps=replace(deps_for(None, None), fernet=make_fernet(), turn_path=None),
     )
     bot = SimpleNamespace(runtime=runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot)
@@ -785,7 +787,7 @@ async def test_callback_mcp_oauth_kind_refuses_the_click_when_the_deployment_has
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))
         ),
-        turn_deps=SimpleNamespace(fernet=None),
+        turn_deps=replace(deps_for(None, None), fernet=None, turn_path=None),
     )
     interaction = _interaction(user_id=_REQUESTER_ID, client=SimpleNamespace(runtime=runtime))
     interaction.response.defer = AsyncMock()

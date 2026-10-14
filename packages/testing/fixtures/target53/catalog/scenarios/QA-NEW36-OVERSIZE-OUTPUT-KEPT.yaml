@@ -1,0 +1,33 @@
+id: QA-NEW36-OVERSIZE-OUTPUT-KEPT
+title: an output over the Discord cap is reported plainly and stays available to the
+  agent
+friction:
+- D28
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 2
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Create a 12 MB file qa_big_out.bin in an outputs folder (head -c 12M /dev/urandom)
+    and attach it to your answer.
+- do: wait_done
+  timeout_s: 180
+- do: thread_reply
+  mention: true
+  text: Run `ls -l outputs/qa_big_out.bin` and reply with only SIZE=<bytes> or SIZE=MISSING
+- do: wait_done
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 30
+- kind: text_present
+  turn: 1
+  pattern: (?i)too (big|large)|over the .{0,20}limit|link
+- kind: text_present
+  turn: 2
+  pattern: SIZE=\d{7,}
+teardown: []

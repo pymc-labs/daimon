@@ -974,3 +974,31 @@ def test_feedback_to_support_is_off_by_default_and_reads_a_per_tenant_map(monkey
     monkeypatch.setenv("DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT", '{"typo": true}')
     with pytest.raises(ValidationError):
         load_settings(_env_file=None)
+
+
+@pytest.mark.parametrize("configured", [None, "false", "true"])
+def test_routine_destination_is_required_only_by_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch, configured: str | None
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://unused/db")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "synthetic-test-key")
+    monkeypatch.delenv("DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION", raising=False)
+    if configured is not None:
+        monkeypatch.setenv("DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION", configured)
+    assert McpSettings().require_routine_destination is False
+    assert load_settings(_env_file=None).mcp.require_routine_destination is (configured == "true")
+
+
+@pytest.mark.parametrize("configured", [None, "false", "true"])
+def test_discord_credential_expiry_requires_explicit_opt_in(monkeypatch, configured) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://unused/db")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "synthetic-test-key")
+    monkeypatch.setenv("DAIMON_DISCORD__BOT_TOKEN", "synthetic-bot-token")
+    monkeypatch.delenv("DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY", raising=False)
+    if configured is not None:
+        monkeypatch.setenv("DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY", configured)
+    assert (
+        DiscordSettings(bot_token=SecretStr("synthetic-bot-token")).credential_form_expiry is False
+    )
+    actual = load_settings(_env_file=None).discord
+    assert actual is not None and actual.credential_form_expiry is (configured == "true")

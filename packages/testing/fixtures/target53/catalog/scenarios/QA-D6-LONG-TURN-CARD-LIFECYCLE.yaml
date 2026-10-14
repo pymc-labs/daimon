@@ -1,0 +1,42 @@
+id: QA-D6-LONG-TURN-CARD-LIFECYCLE
+title: a 45 s turn shows progress while running and its card is finalized at the end
+friction:
+- D1
+- D27
+set: A
+surface: discord
+tier: full
+priority: P1
+est_turns: 1
+notes: 'Long enough to get several 10 s progress ticks, so the tick/final-edit race
+  (D6) has room to fire. card_edits_min catches the frozen timer during a long tool
+  call (surfaces #7).'
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: 'QA long turn. Run `sleep 45` with bash, then reply with only: SLEPT'
+- do: wait_done
+  timeout_s: 180
+- do: wait
+  s: 15
+assert:
+- kind: reply_within_s
+  turn: 1
+  max: 10
+- kind: progress_seen
+  turn: 1
+  within_s: 30
+- kind: card_edits_min
+  turn: 1
+  min: 3
+  during: running
+- kind: text_present
+  turn: 1
+  pattern: SLEPT
+- kind: card_finalized
+  turn: 1
+- kind: done_within_s
+  turn: 1
+  max: 120
+teardown: []

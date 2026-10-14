@@ -158,9 +158,9 @@ def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
     # (the billed send is covered in test_agent_chat_billing.py).
     real_send = agent_chat._send_billed  # pyright: ignore[reportPrivateUsage]
 
-    async def send(runtime: Any, session_id: str, message: str) -> str:
+    async def send(runtime: Any, session_id: str, message: str, *, scope: Any) -> str:
         if not isinstance(runtime.session_factory, MagicMock):
-            return await real_send(runtime, session_id, message)
+            return await real_send(runtime, session_id, message, scope=scope)
         sent = await runtime.client.beta.sessions.events.send(
             session_id,
             events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],

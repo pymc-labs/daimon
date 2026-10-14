@@ -35,6 +35,9 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
+from mux.contracts.events import Event, TurnEndedPayload
+from mux.contracts.receipts import StopObservation
+from mux.errors import ProviderError
 
 __all__ = ["TerminationReason", "denial_termination_reason", "termination_reason"]
 
@@ -105,6 +108,35 @@ class TerminationReason(StrEnum):
 
 _NOT_FAILURES = frozenset({TerminationReason.COMPLETED, TerminationReason.INTERRUPTED})
 
+
+class ProviderTerminalFailure(ProviderError):
+    """An accepted foreign root failed before its display frame could be delivered.
+
+    Remains a nonretryable upstream refusal for billing and recovery callers,
+    while carrying the authoritative terminal distinction to host persistence.
+    """
+
+    def __init__(self, reason: TerminationReason) -> None:
+        if reason not in {TerminationReason.UPSTREAM, TerminationReason.SESSION_TERMINATED}:
+            raise ValueError("provider terminal failure requires a failed root outcome")
+        super().__init__("upstream", retryable=False, native_code="host_root_failed")
+        self.reason = reason
+
+
+def stop_termination_reason(stop: StopObservation) -> TerminationReason:
+    """Map observed root truth; a receipt or missing outcome is not completion."""
+    if not stop.stopped:
+        return TerminationReason.INTERRUPT_TIMEOUT
+    if stop.outcome is None:
+        return TerminationReason.UNKNOWN
+    return {
+        "completed": TerminationReason.COMPLETED,
+        "interrupted": TerminationReason.INTERRUPTED,
+        "errored": TerminationReason.UPSTREAM,
+        "terminated": TerminationReason.SESSION_TERMINATED,
+    }.get(stop.outcome, TerminationReason.UNKNOWN)
+
+
 _BY_VALUE: dict[str, TerminationReason] = {m.value: m for m in TerminationReason}
 
 _BY_DENIAL: dict[str, TerminationReason] = {
@@ -137,6 +169,8 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
     match err:
         case None:
             return TerminationReason.COMPLETED
+        case ProviderTerminalFailure():
+            return err.reason
         case TurnError():
             return _BY_VALUE.get(str(err.kind), TerminationReason.UNKNOWN)
         case AdmissionDenied():
@@ -153,3 +187,32 @@ def termination_reason(err: BaseException | None) -> TerminationReason:
             return TerminationReason.SESSION_AGENT_MISMATCH
         case _:
             return TerminationReason.UNKNOWN
+
+
+def normalized_stop_reason(event: Event) -> str | None:
+    """Only authoritative root boundaries stop the neutral live consume loop."""
+    if event.authority not in {"record", "reconciled"}:
+        return None
+    if event.type == "session.requires_action":
+        return "requires_action"
+    if event.type == "session.turn_ended":
+        payload = TurnEndedPayload.model_validate(event.payload)
+        return payload.native_reason or payload.outcome
+    return None
+
+
+def normalized_termination_reason(event: Event) -> TerminationReason | None:
+    """Map the neutral root outcome; host failure refinements still take precedence."""
+    if event.authority not in {"record", "reconciled"}:
+        return None
+    if event.type == "session.status_terminated":
+        return TerminationReason.SESSION_TERMINATED
+    if event.type != "session.turn_ended":
+        return None
+    payload = TurnEndedPayload.model_validate(event.payload)
+    return {
+        "completed": TerminationReason.COMPLETED,
+        "interrupted": TerminationReason.INTERRUPTED,
+        "errored": TerminationReason.UPSTREAM,
+        "terminated": TerminationReason.SESSION_TERMINATED,
+    }[payload.outcome]

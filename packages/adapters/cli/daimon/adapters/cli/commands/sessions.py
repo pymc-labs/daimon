@@ -2,7 +2,7 @@
 
 `create` composes adapter preconditions, name resolution, and
 `daimon.core.sessions.create_session` (ephemeral MA session). `get` is a
-thin proxy around `client.beta.sessions.retrieve`.
+thin proxy through the session port under CLI operator authority.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from daimon.adapters.cli.sessions_bootstrap import (
 from daimon.adapters.cli.tenant import discover_tenant
 from daimon.core.config import load_settings
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import platform_scope
+from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.sessions import create_session
 from daimon.core.stores.identity import get_or_create_cli_principal
 from rich.console import Console
@@ -139,7 +141,11 @@ def sessions_get_command(
 
 async def sessions_get(*, rt: CliRuntime, console: Console, session_id: str, as_json: bool) -> None:
     configure_admin_logging()
-    session = await rt.anthropic.beta.sessions.retrieve(session_id)
+    session = await retrieve_session_record(
+        rt.anthropic,
+        session_id,
+        scope=platform_scope("CLI operator raw session inspection"),
+    )
     emit_rows(
         console,
         [session],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -22,6 +23,7 @@ from daimon.core.specs import AgentSpec
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.turn_fakes import deps_for
 from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -73,7 +75,7 @@ async def test_load_agent_inline_pat_returns_none_when_crypto_unconfigured() -> 
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
     result = await write_mod.load_agent_inline_pat(runtime, agent_id=agent_id)
@@ -102,7 +104,7 @@ async def test_load_agent_inline_pat_returns_stored_pat(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
     agent_id = uuid.uuid4()
@@ -132,7 +134,7 @@ def _runtime_with_settings(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
 

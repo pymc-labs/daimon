@@ -1,0 +1,1853 @@
+{
+  "version": 1,
+  "target_sha256": "fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4",
+  "provenance": "authored-sdk-wire",
+  "sdk_distribution": "anthropic",
+  "sdk_version": "0.117.0",
+  "codec": {
+    "path": "packages/mux/mux/drivers/anthropic/transport.py",
+    "sha256": "34a56b293e3cfbe641125c37e142eebda5df1ab1859ba94da609c4e0afcdd457"
+  },
+  "codec_commit": "ac1b72f0adb1aba7b5ed99b879bcab51f359e777",
+  "authoring": {
+    "path": "scripts/qa_anthropic_fixtures.py",
+    "sha256": "0c0ba1dbdd5918a67175ba9798506e66a60a7d983ef8605555afe70d4f5009d7"
+  },
+  "input_index": {
+    "path": "index.json",
+    "sha256": "3ebaa2d4c6d45b7367ef8797d0d2354acaabbed77011c05ca19d89fbab4039ab"
+  },
+  "entries": [
+    {
+      "scenario_id": "QA-D11-FOOTER-COST-MATCHES-LEDGER",
+      "replay": {
+        "path": "QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
+        "sha256": "01ab79ef83770aa6f79bc5630e2b21b336a0a4fdd2ae6b9715f4e403177d3bed"
+      },
+      "input": {
+        "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
+        "sha256": "a0aebcb91114a3e84c98e829a9360d2ee3e5b4682c3612b3a9c1c52405f38896"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-1229744d86e4438d",
+          "root_id": "qa-anthropic:1229744d86e4438d-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "scenario_id": "QA-D12-PDF-CLAIM-HAS-PDF",
+      "replay": {
+        "path": "QA-D12-PDF-CLAIM-HAS-PDF.json",
+        "sha256": "c2692f32c1c65ede795789099a9d6902a41fe65b3959f93c6f3bdfd0bf8b20f4"
+      },
+      "input": {
+        "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
+        "sha256": "a92b233e6b34c29da36dfc5cda9c98c8ea5bbff7a7aa4c76047735ffea200652"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-bb70a7bec4f0c521",
+          "root_id": "qa-anthropic:bb70a7bec4f0c521-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Authored command/result is not remote file creation, download or platform delivery."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+      "replay": {
+        "path": "QA-D13-FILES-NOT-REPOSTED.json",
+        "sha256": "a97b9c2c976fe22a7357a418d55775560c6adfb976a12023e85e5e356aa7693e"
+      },
+      "input": {
+        "path": "native/QA-D13-FILES-NOT-REPOSTED.json",
+        "sha256": "04d1f0c50468906f4a5d1aa6416386155d52020163b3069f2bc3cfcd68bc26e8"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-07ec2f0b59796091",
+          "root_id": "qa-anthropic:07ec2f0b59796091-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "session_id": "qa-session-07ec2f0b59796091",
+          "root_id": "qa-anthropic:07ec2f0b59796091-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Authored command/result is not remote file creation, download or platform delivery."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Authored command/result is not remote file creation, download or platform delivery."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+      "replay": {
+        "path": "QA-D14-FORK-KEEPS-SKILLS.json",
+        "sha256": "3b07d5c87366a452ebe1485eaf820300e498a7c81359993a6c3434bd514a956a"
+      },
+      "input": {
+        "path": "native/QA-D14-FORK-KEEPS-SKILLS.json",
+        "sha256": "d36284f0e3c0b3a9f1c6a84d5f0d9892321b44f54ad099534fb8c1e3049de2ca"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D1-CANARY-TWO-TURN",
+      "replay": {
+        "path": "QA-D1-CANARY-TWO-TURN.json",
+        "sha256": "62565bc77b3b0abba78c560f7a6a5bd29ebf79aa903d4af5e8eefb9b84aaebe8"
+      },
+      "input": {
+        "path": "native/QA-D1-CANARY-TWO-TURN.json",
+        "sha256": "9524892df943c28d10c738e92d90053d62cf95f4e3a24865d3153f8626f5fd70"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-f9a8a68cd096bd45",
+          "root_id": "qa-anthropic:f9a8a68cd096bd45-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "session_id": "qa-session-f9a8a68cd096bd45",
+          "root_id": "qa-anthropic:f9a8a68cd096bd45-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+      "replay": {
+        "path": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
+        "sha256": "177e6864defb52ce6f825bc954253a14ee74a66a6650ed7c073cde84fb3a3b2e"
+      },
+      "input": {
+        "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
+        "sha256": "72353dc725df0df7f0274ba2dc04745149c109859f8a7871a0b8406239eae4d0"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-f7caeff77b93abf8",
+          "root_id": "qa-anthropic:f7caeff77b93abf8-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[4]",
+          "session_id": "qa-session-f7caeff77b93abf8",
+          "root_id": "qa-anthropic:f7caeff77b93abf8-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[4]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D1-SLACK-FOLLOWUP",
+      "replay": {
+        "path": "QA-D1-SLACK-FOLLOWUP.json",
+        "sha256": "ed4c277eff579c7215a1922cce0d248963a7803ddd4a480e70848dd68e321a6a"
+      },
+      "input": {
+        "path": "native/QA-D1-SLACK-FOLLOWUP.json",
+        "sha256": "f99d68626f2b4b96393cdc41c9372a89f3ebed511f4abbd6ef0aa7adfd5a4429"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D22-WHO-ANSWERS-HERE",
+      "replay": {
+        "path": "QA-D22-WHO-ANSWERS-HERE.json",
+        "sha256": "55b45a08968a133ce85022a4239058a87e013cbd94fd74db8f00be5e5abef923"
+      },
+      "input": {
+        "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
+        "sha256": "c989f91454bc90628b76509c261560ed88f4a6573273299d7fb9ae34e372cb6e"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-6fa51e21abf64e0a",
+          "root_id": "qa-anthropic:6fa51e21abf64e0a-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 3,
+          "location": "steps[4]",
+          "session_id": "qa-session-e02fc4ecdf4c906f",
+          "root_id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+      "replay": {
+        "path": "QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
+        "sha256": "455eb46563695e4196f7986d49311165fa48ea81676a52a5d07f5635f4d3a003"
+      },
+      "input": {
+        "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
+        "sha256": "d39ed1f18649841b402546190f09de99d4dafd48dc95dcb1e4421033986d2f9f"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+      "replay": {
+        "path": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
+        "sha256": "5af4acd43c90f87c7314fc8076720f57005620c07add918454784eb5a054f58c"
+      },
+      "input": {
+        "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
+        "sha256": "07ba3505a5aa38e597d9dd3ebe0c2260804d7b8f419dfc9690844655247dfb18"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-376437ddfa0dbb12",
+          "root_id": "qa-anthropic:376437ddfa0dbb12-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "setup[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+      "replay": {
+        "path": "QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
+        "sha256": "086f13cc2843dbc86a303028ea1429eae56947454e3af034906763e6ac1d930c"
+      },
+      "input": {
+        "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
+        "sha256": "21150828ecdb76383c0517509e27de98556af470ef12d6a8f9a8bb4659c3a459"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-5b45cb3d26fafc82",
+          "root_id": "qa-anthropic:5b45cb3d26fafc82-turn-1:input",
+          "completion_gate": "turn.1.tool.finished"
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must gate completion with its clock/concurrency hook."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+      "replay": {
+        "path": "QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
+        "sha256": "3ffb62c124a0cdf0a5945a17c1dc20459e1715d7f58409bdd7f2291a89dce136"
+      },
+      "input": {
+        "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
+        "sha256": "2c316b91c1a14dc228f4da6444b37520c022a2668ed1c86983f88a4a568fb2fe"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-41b2175092a471b8",
+          "root_id": "qa-anthropic:41b2175092a471b8-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[4]",
+          "session_id": "qa-session-41b2175092a471b8",
+          "root_id": "qa-anthropic:41b2175092a471b8-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-CONNECT-OFFERED",
+      "replay": {
+        "path": "QA-D8-GITHUB-CONNECT-OFFERED.json",
+        "sha256": "5ec1277ed43369404fc7abeb941353f254568d525304c8d46631558f0cb65551"
+      },
+      "input": {
+        "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
+        "sha256": "4d2ece5582df49ed5df6499cb6cc65052115e686cbd9f79a64f28757a5c6536f"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[2]",
+          "session_id": "qa-session-9620ef55ecd7b3d4",
+          "root_id": "qa-anthropic:9620ef55ecd7b3d4-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+      "replay": {
+        "path": "QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
+        "sha256": "33de63f1fc349e8ab737047ceff9787f811253c2fc96797b90641232d34b05bc"
+      },
+      "input": {
+        "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
+        "sha256": "c7dc10dd65f076a8db0645be292f13bbe497df26d59d084cfa2d0e300379b859"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+      "replay": {
+        "path": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
+        "sha256": "f1b97ba66e78fd11c02ad0a99036b98fb673a1c1191b8c1712660ede1a3d7573"
+      },
+      "input": {
+        "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
+        "sha256": "0625d11866eaf4320e75c7134486c896579006ac66750e921a541b667491ef97"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-998aadb0e741be99",
+          "root_id": "qa-anthropic:998aadb0e741be99-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-I6-BARE-MENTION-THREAD-TITLE",
+      "replay": {
+        "path": "QA-I6-BARE-MENTION-THREAD-TITLE.json",
+        "sha256": "ed6e08fe0a00517b1519c3ac4818cb229c5bf1803340c3c0a8dadcaa4a93dcb5"
+      },
+      "input": {
+        "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
+        "sha256": "a4abcc9f863ee9b4175a3a8e00c0b2b1da6fc5b9f5189fd6a75f71ec0e4bad07"
+      },
+      "bindings": [
+        {
+          "turn": 2,
+          "location": "steps[2]",
+          "session_id": "qa-session-9617bf53af7c46d6",
+          "root_id": "qa-anthropic:9617bf53af7c46d6-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-I7-MCP-OAUTH-DISCOVERY",
+      "replay": {
+        "path": "QA-I7-MCP-OAUTH-DISCOVERY.json",
+        "sha256": "cdf55074b109307463a362f939d3fc75945652aef73efae5e69feeee35b8778e"
+      },
+      "input": {
+        "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
+        "sha256": "f2a4753df51c357a9c24228be397fabb39a8933b18fe286385ba4722dbf99ee5"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+      "replay": {
+        "path": "QA-ISO-TEAM-CHANNEL-ISOLATION.json",
+        "sha256": "61d5ba7c00a74e02ca3018517ce9aa2c81fd1d3cc5f30c5e7a31035ccee5faed"
+      },
+      "input": {
+        "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
+        "sha256": "f18271a575fbd9447d3fd29576cf41e8627d450bdb362af860276369714ff54a"
+      },
+      "bindings": [
+        {
+          "turn": 2,
+          "location": "steps[5]",
+          "session_id": "qa-session-3ec46d2611c9f331",
+          "root_id": "qa-anthropic:3ec46d2611c9f331-turn-2:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 3,
+          "location": "steps[7]",
+          "session_id": "qa-session-7d74e1a82527b0dd",
+          "root_id": "qa-anthropic:7d74e1a82527b0dd-turn-3:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 4,
+          "location": "steps[9]",
+          "session_id": "qa-session-7d74e1a82527b0dd",
+          "root_id": "qa-anthropic:7d74e1a82527b0dd-turn-4:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[4]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+      "replay": {
+        "path": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
+        "sha256": "a144c419cda567c30a0f25b3c9769583b052dfb8ec9047a59435aee8b13d32c8"
+      },
+      "input": {
+        "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
+        "sha256": "0b74f2813d532f0b2fda07526dacb75a8376b41a7954ec5888a86b71354f0dc9"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-8b917e5a82fee069",
+          "root_id": "qa-anthropic:8b917e5a82fee069-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "session_id": "qa-session-8b917e5a82fee069",
+          "root_id": "qa-anthropic:8b917e5a82fee069-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "scenario_id": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY",
+      "replay": {
+        "path": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
+        "sha256": "d5a2484b22bdb39c59561fe0adaff2fdcd93db3c4cc0c32aa90f2dfb7fc25b65"
+      },
+      "input": {
+        "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
+        "sha256": "11a820f417cf1adc5c3be7ea678b7a591e2f84018d6bb9f8b9cd96d5f0bb725e"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-8acb81896bfc6edd",
+          "root_id": "qa-anthropic:8acb81896bfc6edd-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[4]",
+          "session_id": "qa-session-8acb81896bfc6edd",
+          "root_id": "qa-anthropic:8acb81896bfc6edd-turn-2:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 3,
+          "location": "steps[6]",
+          "session_id": "qa-session-8acb81896bfc6edd",
+          "root_id": "qa-anthropic:8acb81896bfc6edd-turn-3:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 4,
+          "location": "steps[8]",
+          "session_id": "qa-session-8acb81896bfc6edd",
+          "root_id": "qa-anthropic:8acb81896bfc6edd-turn-4:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW13-WRITERS-NONE-NOT-SILENT",
+      "replay": {
+        "path": "QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
+        "sha256": "6ee6a5c5537921824a537bbed7ac40911de3cdd0c15b0d35dbd81eeeaf0972b3"
+      },
+      "input": {
+        "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
+        "sha256": "df8324730566433a363639c74e6d5ed1b5283ffc3768e4b5d4cea97077be6eb6"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[2]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+      "replay": {
+        "path": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
+        "sha256": "a2770b2b942106bb0391fb644e33b7d949c4365c8d2ecedb052e4d67d52e7060"
+      },
+      "input": {
+        "path": "native/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
+        "sha256": "3354b305dda13e728afc2dfedcfb4c312cb8f7fc2be0f7782315c4f20faa3495"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[2]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED",
+      "replay": {
+        "path": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
+        "sha256": "96342b35aa4b2346f1f674e12e87ecd49a83b240243fe2735561d00683c9fd20"
+      },
+      "input": {
+        "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
+        "sha256": "4afac2b2f341c6ca133f1c80574c3fadc8086f8bf3d239aa2f16153a8210aca9"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[2]",
+          "session_id": "qa-session-7499b533378f4159",
+          "root_id": "qa-anthropic:7499b533378f4159-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[5]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[4]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+      "replay": {
+        "path": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
+        "sha256": "e323d0a60af5caa1eb00802ea6cc6faefcc2f917e9d897a0cae35b85d9c6cfbe"
+      },
+      "input": {
+        "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
+        "sha256": "c2871be656479874ccbfdc11f5bc2faf9fa6b6cb659a881ce88880dac5aad4ab"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "setup[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[1]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+      "replay": {
+        "path": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
+        "sha256": "d359b91f02e839f1bfc571a5f8324b4f66ca4027c5e14e4cb34644cf47a418d4"
+      },
+      "input": {
+        "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
+        "sha256": "507ebc49dcdd3afa3e967ad92afdb2009e8ae04bcefe69107202e3ac46f8a907"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[3]",
+          "session_id": "qa-session-380e24608b9bbbad",
+          "root_id": "qa-anthropic:380e24608b9bbbad-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[6]",
+          "session_id": "qa-session-380e24608b9bbbad",
+          "root_id": "qa-anthropic:380e24608b9bbbad-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[5]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "EXTERNAL_TOOL_SCHEMA_UNBOUND",
+          "location": "deepwiki",
+          "reason": "Deepwiki arguments are authored offline, not captured discovery. Validate discovery before claiming execution. Mixed public/auth production preparation remains a runner binding."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+      "replay": {
+        "path": "QA-NEW18-SKILL-ADD-YES-PLEASE.json",
+        "sha256": "4ac8912d4f3937bdd8587927821d25757eb1be6653c203883251917ae047f821"
+      },
+      "input": {
+        "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
+        "sha256": "4feda6b493e056b5f8bf8b6f66d1c1a58b8702ad90bf1f8d835016f357e2be53"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[3]",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-anthropic:7b73cebe501933bd-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[5]",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-anthropic:7b73cebe501933bd-turn-2:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 3,
+          "location": "steps[7]",
+          "session_id": "qa-session-7b73cebe501933bd",
+          "root_id": "qa-anthropic:7b73cebe501933bd-turn-3:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED",
+      "replay": {
+        "path": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
+        "sha256": "28e858e646146e774ed8f11be461246ab3abd333c9e29a3f7e6e0acadfa48576"
+      },
+      "input": {
+        "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
+        "sha256": "946e673cb103ca7fd0354c824db40d0f67c7d8036ef2f77da49840ccd89cd2eb"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[4]",
+          "session_id": "qa-session-71de48deaa3ebd66",
+          "root_id": "qa-anthropic:71de48deaa3ebd66-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+      "replay": {
+        "path": "QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
+        "sha256": "4348949d921be01fc54de6445514889c94eb98548b68108c0630f585e8ed5f9a"
+      },
+      "input": {
+        "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
+        "sha256": "0eb5dbe59ef831b30dda9b6f47d0fa99e36b669115021882540272d5487353e2"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-1d435f74e175aa03",
+          "root_id": "qa-anthropic:1d435f74e175aa03-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+      "replay": {
+        "path": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
+        "sha256": "22013f78934a67a6b33a6659deb586c6fd80f786206264151c0f43259578b431"
+      },
+      "input": {
+        "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
+        "sha256": "89b73bee902e92a3ddd767137f5f6d68f0181d1626765f5fcd6b88e7d2b3c89a"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-304ef46a331ab3ba",
+          "root_id": "qa-anthropic:304ef46a331ab3ba-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+      "replay": {
+        "path": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
+        "sha256": "c1b9364a0588c1324427ad12d91649207a70bd144c86ffc500e4ef038c70305f"
+      },
+      "input": {
+        "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
+        "sha256": "4d181032358a197a55739f73d81703b74872296f9b18e71e82ee185814f64cae"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-2d7241d73b896ac5",
+          "root_id": "qa-anthropic:2d7241d73b896ac5-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION",
+      "replay": {
+        "path": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
+        "sha256": "d61b9c3134dab6bcd4adc3a2c660c39fc2ad5703dc98f4a52c4b2fc6eec16198"
+      },
+      "input": {
+        "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
+        "sha256": "39e8af4626224509e275c54a8845d604fa90c1787f685aeecc5bd2c37772cd44"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-c01b49d1a365c226",
+          "root_id": "qa-anthropic:c01b49d1a365c226-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+      "replay": {
+        "path": "QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
+        "sha256": "b3a33640e7bcb1943ad553e77e23956ef101e269a461bd37a7981c45b5b52bc1"
+      },
+      "input": {
+        "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
+        "sha256": "d8888eab27cd117581122c446670310846effe8e157536e7fbd556e0c3328fbb"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW25-DM-NOT-SILENT",
+      "replay": {
+        "path": "QA-NEW25-DM-NOT-SILENT.json",
+        "sha256": "23c978344afb88939845b86b80aae6151106d1e2392451baf17f7736d34fa85e"
+      },
+      "input": {
+        "path": "native/QA-NEW25-DM-NOT-SILENT.json",
+        "sha256": "eaf585349c58cada5e4be9e9c2fcd7b4bf77bab083de01b227126e388f397b57"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+      "replay": {
+        "path": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
+        "sha256": "bb6576d20cf4fc3f8092a66ae749f4a6e0a7b4c132b0ed81aa9f8a3e787f2e93"
+      },
+      "input": {
+        "path": "native/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
+        "sha256": "d74ffc02441050ff9ac3885aa9fb09a3c9b3a885cf4f2d34624399ff35cf4439"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+      "replay": {
+        "path": "QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
+        "sha256": "b06a5876a2ece4ec49c5002f7a4819829227265a6ec59af05e6c26a80379b16f"
+      },
+      "input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
+        "sha256": "009c01539ac6021bd4f3ed8050b42bc90778075a02807b0274741a2f0d8d9827"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "ADMIN_READBACK_ONLY",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+      "replay": {
+        "path": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
+        "sha256": "a615dc4534df26f394d7e320fcfbcde8aff262a477804f60511c2dbc2715ffaf"
+      },
+      "input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
+        "sha256": "68a1c9c3110255a71e20461c652a890e5af6fe9b1ecb9a803c95726743a86675"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+      "replay": {
+        "path": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
+        "sha256": "d09d4f7116c901345577da9ed0f842d1d7a1bf5eec9805f0417e18e5ab15c2d1"
+      },
+      "input": {
+        "path": "native/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
+        "sha256": "bbeac7a3574729efac78f8789bf8296876b58569fcd8fbd81b96f8bcf7bf16f2"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW29-DM-CONVERSATION-FORM",
+      "replay": {
+        "path": "QA-NEW29-DM-CONVERSATION-FORM.json",
+        "sha256": "160ab96c0b67857158308650d528805e9bd25f0e3744a3e7a62a34675192c299"
+      },
+      "input": {
+        "path": "native/QA-NEW29-DM-CONVERSATION-FORM.json",
+        "sha256": "a4524493a1e3d2e19136604e7ac7fa855908f9d23d36c1464a179f14f1cadadd"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW2-CSV-ATTACHMENT-READ",
+      "replay": {
+        "path": "QA-NEW2-CSV-ATTACHMENT-READ.json",
+        "sha256": "c621afd9ba54d980d4c99b6b860a0f415258173016b7ac9d491f0582775cb424"
+      },
+      "input": {
+        "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
+        "sha256": "203d6e85a1bbfd9260f7c1e37fd642c1597e77b9136950b4e8fd24c51673e254"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-a200163f1a16507f",
+          "root_id": "qa-anthropic:a200163f1a16507f-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must bind the preserved operation or asset."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW30-APPROVE-AFTER-RESTART",
+      "replay": {
+        "path": "QA-NEW30-APPROVE-AFTER-RESTART.json",
+        "sha256": "913c835a50d65c575d5fe05cb74fc31c5ea1110ef26134a687843b8529fc4e00"
+      },
+      "input": {
+        "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
+        "sha256": "a78f19bffe7284d360c7edff3f7f478d009b89927c865b787e132525b355f1b7"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW31-PANELS-AFTER-RESTART",
+      "replay": {
+        "path": "QA-NEW31-PANELS-AFTER-RESTART.json",
+        "sha256": "bb97028e01f005be3fa23dbd5bb96628143686b18fa9aecb39682d6530a141c0"
+      },
+      "input": {
+        "path": "native/QA-NEW31-PANELS-AFTER-RESTART.json",
+        "sha256": "34e870a3ab37fe3639721bee42a71f6b3ae71978afbbb69e860c674835a946d7"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW32-ADD-SKILL-ON-BUILTIN",
+      "replay": {
+        "path": "QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
+        "sha256": "1f61e11550a957d8be46ece1f848867dcfcab2b5e02034586045ce1899df05b0"
+      },
+      "input": {
+        "path": "native/QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
+        "sha256": "6d3e5d4a15c9e523270556e5c7e44d83e57cc784b282e1e7c409e0375004a39a"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+      "replay": {
+        "path": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
+        "sha256": "27a8b00aaf69e65a446d6cbd540a4932bee50bac0945eaaa6d09c78f40c55032"
+      },
+      "input": {
+        "path": "native/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
+        "sha256": "934e69ca863517bbfb01bc8edfb1a1ddca7571658d728d858e7036f085be6499"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY",
+      "replay": {
+        "path": "QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
+        "sha256": "2a33737da9f8b58ed35cfbea84779b834aff4c611243a0a80a216709f946905b"
+      },
+      "input": {
+        "path": "native/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
+        "sha256": "d2c9497213a4d368804d74186e34433cc72ceee3c649302453ae25c27054a196"
+      },
+      "bindings": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+      "replay": {
+        "path": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
+        "sha256": "b7e4ce246a429f915c57c2987cc33f6d6f954569602adde1fd9899a1a5d82090"
+      },
+      "input": {
+        "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
+        "sha256": "4278c64a62c86a599c3fa1db1c16430582f116e33f2e5da1884fc5248958602b"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-1aadab7f1469bcef",
+          "root_id": "qa-anthropic:1aadab7f1469bcef-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "mcp",
+          "reason": "Authored outputs do not execute permissions/mutations, approvals/forms, skills, routine dispatch or delivery. Bind actual owned host effects; no scenario PASS follows from this recipe."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW36-OVERSIZE-OUTPUT-KEPT",
+      "replay": {
+        "path": "QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
+        "sha256": "263cda0c7537a65138a2d74653fa7862eb7504436ac8c89b4990a379a7b71eff"
+      },
+      "input": {
+        "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
+        "sha256": "b023c5378713071f1a75cea3da7eacfd3f9bd3601d7932a84a2550d9c55bd179"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-8ef93b0c3f349333",
+          "root_id": "qa-anthropic:8ef93b0c3f349333-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "session_id": "qa-session-8ef93b0c3f349333",
+          "root_id": "qa-anthropic:8ef93b0c3f349333-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Authored command/result is not remote file creation, download or platform delivery."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[3]",
+          "reason": "Authored command/result is not remote file creation, download or platform delivery."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+      "replay": {
+        "path": "QA-NEW37-MARKDOWN-TABLE-READABLE.json",
+        "sha256": "c97b15810b705a4d0f976bbaa2f09932eaa57d58d79b20bd2ffc36d91ed42a64"
+      },
+      "input": {
+        "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
+        "sha256": "ce6f6b35576ed8665edec7f4c48a371d399a512a3a2558a3231c852710d84f5c"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-a9b0200e71fa76d2",
+          "root_id": "qa-anthropic:a9b0200e71fa76d2-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "scenario_id": "QA-NEW3-BURST-CHANNEL-MENTIONS",
+      "replay": {
+        "path": "QA-NEW3-BURST-CHANNEL-MENTIONS.json",
+        "sha256": "59c2552d63724aedb758841a2da98cad79e4b312804900e65bbd3e8866fe7aaa"
+      },
+      "input": {
+        "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
+        "sha256": "b5f9a7a8c246ea93a139ecebe2f739bbf87ddba66098b341eb7b8c579560c4eb"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1].texts[0]",
+          "session_id": "qa-session-1527d57e944e01dd",
+          "root_id": "qa-anthropic:1527d57e944e01dd-turn-1:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 2,
+          "location": "steps[1].texts[1]",
+          "session_id": "qa-session-7ce01c01329f21a7",
+          "root_id": "qa-anthropic:7ce01c01329f21a7-turn-2:input",
+          "completion_gate": null
+        },
+        {
+          "turn": 3,
+          "location": "steps[1].texts[2]",
+          "session_id": "qa-session-89c41cdecb884d7c",
+          "root_id": "qa-anthropic:89c41cdecb884d7c-turn-3:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[1]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[2]",
+          "reason": "Burst requires actual overlap/routing."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+      "replay": {
+        "path": "QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
+        "sha256": "e8bcbadc6f7e754dd5518e64db7848b91acd19a580bb292f95f9e501e9a1bb0c"
+      },
+      "input": {
+        "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
+        "sha256": "d6fc4b0cea9cfd967f5037401b55480cce4c3f9528fa7c3018de416a4fc38c4d"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1].texts[0]",
+          "session_id": "qa-session-bfa6aa2aa5f315f5",
+          "root_id": "qa-anthropic:bfa6aa2aa5f315f5-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "HOST_GATE",
+          "location": "steps[1].texts[1]",
+          "reason": "Host must reject/dedupe before dispatch; no provider reply."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW5-THREAD-QUEUE-WHILE-BUSY",
+      "replay": {
+        "path": "QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
+        "sha256": "0369d0fb47ea4079304f8753b0bde079d4d0456b8355e1baee3f747911f2e524"
+      },
+      "input": {
+        "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
+        "sha256": "e2cc10b5adf572e247b3a89031b2f6f67063e8728c3f293163a08db79374aa95"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-48fce284834396a7",
+          "root_id": "qa-anthropic:48fce284834396a7-turn-1:input",
+          "completion_gate": "turn.1.tool.finished"
+        },
+        {
+          "turn": 2,
+          "location": "steps[3]",
+          "session_id": "qa-session-48fce284834396a7",
+          "root_id": "qa-anthropic:48fce284834396a7-turn-2:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[2]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1]",
+          "reason": "Runner must gate completion with its clock/concurrency hook."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW6-TENANT-CAP-QUEUE",
+      "replay": {
+        "path": "QA-NEW6-TENANT-CAP-QUEUE.json",
+        "sha256": "c6ef09da9003a32980a604ce0924136f5722ba0ff5657348210596458f08e41a"
+      },
+      "input": {
+        "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
+        "sha256": "3948a3cfd1cc029e21185724d20d7f9bf8b40df9fec3e29f3a8b52dd0904a5a7"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1].texts[0]",
+          "session_id": "qa-session-ed81866d9c28d358",
+          "root_id": "qa-anthropic:ed81866d9c28d358-turn-1:input",
+          "completion_gate": "turn.1.tool.finished"
+        },
+        {
+          "turn": 2,
+          "location": "steps[1].texts[1]",
+          "session_id": "qa-session-7f8e5fe06ed4d32e",
+          "root_id": "qa-anthropic:7f8e5fe06ed4d32e-turn-2:input",
+          "completion_gate": "turn.2.tool.finished"
+        },
+        {
+          "turn": 3,
+          "location": "steps[1].texts[2]",
+          "session_id": "qa-session-473d1059c243a682",
+          "root_id": "qa-anthropic:473d1059c243a682-turn-3:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "setup[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "teardown[0]",
+          "reason": "Runner must bind the preserved operation or asset."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Runner must gate completion with its clock/concurrency hook."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[0]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[1]",
+          "reason": "Remote tool/workspace effects remain uncaptured."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[1]",
+          "reason": "Runner must gate completion with its clock/concurrency hook."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[1]",
+          "reason": "Burst requires actual overlap/routing."
+        },
+        {
+          "status": "BLOCKED",
+          "code": "RUNNER_HOOK",
+          "location": "steps[1].texts[2]",
+          "reason": "Burst requires actual overlap/routing."
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+      "replay": {
+        "path": "QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
+        "sha256": "13b5f091518894372cefe7ad8f2712a579c6daf595fa58699dacf5f31e2cc9c1"
+      },
+      "input": {
+        "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
+        "sha256": "1cdfc70183b4e30fc7503dab48efef09adff55a14759247d90951032e6a53804"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-b5288bdc4e1ec9a0",
+          "root_id": "qa-anthropic:b5288bdc4e1ec9a0-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+      "replay": {
+        "path": "QA-NEW9-NO-INTERNAL-PLUMBING.json",
+        "sha256": "097337d9db4344ec133ae11f2e02acd069872cd8cdf98af386aedfbc53360225"
+      },
+      "input": {
+        "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
+        "sha256": "8bbe2b99b563c0092a63cfdccb40066a345508853550c5e645ae484f8e1b635b"
+      },
+      "bindings": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "session_id": "qa-session-666063e1711a65f8",
+          "root_id": "qa-anthropic:666063e1711a65f8-turn-1:input",
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    }
+  ]
+}

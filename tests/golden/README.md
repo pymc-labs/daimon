@@ -1,0 +1,103 @@
+# Neutral-core turn-path oracle
+
+These 33 offline scenarios run existing tests and four boundary scenarios against the current production path. The initial recordings came from integration `546ed15c7765d270a228beb730258002dbe09e98`; the canonical files now include SYNC-2 and the SYNC-3 merge of integration `5b32481bc5c30fc41d1dfbe490c3bb5dc9a227e8` and main `a1bad886f59b05b53b82335545905eaf8c9c1b7a`. The signed SYNC-3 recordings are also checked after reconciling integration `f6de8d70242acc7586b2eff8b42a258490035510`; [MERGE-SYNC-3.md](MERGE-SYNC-3.md) distinguishes the two verification heads. No production module changed while recording. [RERECORD-20261009.md](RERECORD-20261009.md) attributes every updated file to its main PR. The pytest test in `tests/parity/test_ma_goldens.py` replays every scenario and compares its entire transcript. Failure of the original scenario test is also a failure of the oracle.
+
+Mux cases explicitly skip as a group until the public N4 driver exposes all four controls (`path`, `backend`, `scope`, `session_ref`). An unwired flag is not a parity pass. After that seam lands, all 33 mux comparisons and all four mux mutation probes run; no scenario-specific skips or separate mux golden files are allowed. This pending matrix does not certify M0 until the mux comparisons actually pass.
+
+
+Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test database before running. N3 uses `daimon_test_nc_n3`. Do not use the shared `daimon_test` or live provider credentials.
+
+The SYNC-5 fixture supports main #824 (`0733181847dc775bda444d51c2467016780b8d5d`): `build_turn_router` serves the session's previously scripted stream events through `GET /v1/sessions/{id}/events`. History reads preserve event IDs, timestamps and usage, apply the catch-up's type/time/order filters, and return the native `{data, next_page}` page. An unstreamed session has empty history; reads never generate a new span. The same session constraint covers send, stream and history routes, and unsupported history queries still fail closed. Catch-up HTTP requests remain in the complete golden capture. [SYNC-5 provenance](RERECORD-SYNC5.md) accounts for changed records.
+
+That fixture route claims only `beta=true`, `order=asc`, `limit=100`, and exactly `types[]=span.model_request_end`, with the optional catch-up date bounds. Generic transcript or idle-detection reads fall through to later caller-owned routes via `NotHandled`; exhausted routes still raise the original unscripted-request assertion. The six SYNC-5 composition regressions exposed why this query boundary is required.
+
+Fixture setup obtains mapped metadata through the public `daimon.testing.effect_recorder.database_metadata()` helper. It pins defaults on the actual mapped tables, including Python UUID/time defaults that database reflection would omit, without importing private core models from the test tree.
+
+UUID defaults on the nine additive tables from `0077_neutral_state` use a separate deterministic sequence starting at UUID integer `(1 << 120) + 1`, reset for each scenario. Host-table defaults and application UUIDs keep their original sequence, so optional lease/journal persistence cannot shift later turn controls or continuation owners. Existing tenant references and explicitly supplied binding/operation/journal keys retain their supplied values. Regression probes insert zero, one and three lease rows between host allocations against real Postgres; canonical golden files stay unchanged.
+
+Ordinary pytest collection sends each UUID probe through the existing child replay runner. The child loads the oracle plugin and executes the same assertions under its deterministic UUID hooks; the parent suite keeps its own clock and UUID behavior.
+
+```bash
+uv run pytest -n 2 -q tests/parity/test_ma_goldens.py tests/parity/test_ma_call_ratchet.py
+uv run python tests/golden/runner.py plain_discord approval_card
+uv run python tests/golden/runner.py --turn-path both
+# A mux-only invocation fails clearly while its bridge is pending.
+uv run python tests/golden/runner.py --turn-path mux plain_turn
+# Only N3 may record from unchanged integration; forbidden in extraction lanes.
+uv run python tests/golden/runner.py --turn-path legacy --regen
+```
+
+The runner starts one fresh pytest process per scenario and selected path, pinning `DAIMON_TURN__PATH` independently of the parent environment. Both CLI and API regeneration accept only the unmutated legacy path. `--turn-path both` reports every pending mux case as skipped; a mux-only invocation fails before replay when the bridge is absent.
+
+After normal oracle/fixture setup, `turn_path_plugin.py` applies the same explicit path to real driver calls and their imported aliases. A caller's conflicting explicit path fails instead of producing a false match. Mux direct-driver fixtures receive an explicit offline Scope when none was supplied; existing caller Scope/backend/session_ref values remain intact. Mux absolute deadlines share the host's frozen clock. Mocked `run_turn` records omit only the four internal controls above; actual calls still receive them and all semantic kwargs remain recorded. Real SDK HTTP/SSE, request bodies/query/beta headers, platform effects and legacy DB facts retain the same comparison boundary on both paths.
+
+The instrumentation observes the real SDK over existing MockTransport/MARouter/stateful resource fakes and ScriptedTransport, existing Discord/Slack fake clients, lifecycle callbacks, confirmation prompt/card posts and edits, CLI JSON output, DM turns, and scheduler execution/billing bindings. It captures `usage_events`, `tenant_ledger`, `turn_outcomes`, `thread_sessions`, and `task_continuations`, including rows still in the test fixture's transaction, after draining background writes. No domain rules are copied into a new scenario implementation.
+
+`LEGACY_DB_COLUMNS` in the effect recorder pins every column present in those five tables at integration `4d61c7391a5098f8ae1cffd7ca1a80fb077af326`. Do not regenerate or extend that list when schema fields are added. Missing legacy columns fail recording. Additional mapped columns, including NULL values and columns in empty tables, are captured separately: `EffectRecorder.database()` returns a labelled `non_legacy_columns` section, and the full replay transcript exposes it as the root `database_extensions` section. Each table lists its additional columns and rows containing `legacy_row_index` (the index in that table's sorted legacy rows) and exact `values`. Additive values stay literal and cannot alter legacy row sorting, runtime-id numbering or timestamp normalization.
+
+Golden comparison and `--regen` omit only the root `database_extensions` section; all existing database fields, platform effects, requests and other root sections remain exact. The raw `runner.replay(name)` transcript retains the section for assertions about new binding metadata. Regeneration therefore keeps the existing 33 golden files byte-identical after additive schema changes; it does not certify the correctness of new fields. N2's binding tests assert those fields separately. SYNC-3 replays the combined schema with neutral migrations `0077_neutral_state` and `0078_usage_observation_revision`, following main's unchanged `0076_github_connect_followup`.
+
+The transport recorder regression keeps exact checks on the five legacy table keys and separately validates additive column names, row association, and empty-table captures. It also requires the additive section to be absent when the mapped schema contains only legacy columns.
+
+Provider handles are assigned aliases on first appearance in the ordered capture (effects, then database snapshots and standalone requests), independent of fixture generation order or lexical ID order. Explicit SDK ID fields, pagination cursors, provider URL paths and deduplication keys reuse the same aliases. Encoded SSE data and the JSON in `<turn_controls>` also reuse those aliases; only ID string tokens change, preserving wire whitespace, escapes, numbers, timestamps, caller fields, text and instructions.
+
+Only an MA HTTP effect's transport payload or a standalone recorded provider request owns an API path/query. Known SDK collection resource-ID slots are normalized; nested body paths, repository URLs, configured MCP URLs, vault secret names and unknown collection paths stay literal. A literal value does not become a provider route because it contains `/v1/` or a collected handle. Full-recorder mutation tests keep these literal changes visible while the actual provider routes and IDs remain stable.
+
+Session fingerprints are verified against the original effective configuration before their recorded digest is recomputed from the normalized snapshot. A wrong stored fingerprint fails recording, and meaningful configuration changes still change the digest. Provider handles and their derived digests do not sort database rows; the remaining configuration and legacy values do. Additive-column capture remains literal. See [PROVIDER-ID-AUDIT.md](PROVIDER-ID-AUDIT.md) for the 33-scenario audit and normalization-only re-recording provenance.
+
+Requests and platform effects keep their original order; database rowsets sort by semantic identity before normalizing runtime PKs. Money, caller/account/tenant identities, model names, errors and continuity data remain literal. The application clock, SQL timestamp defaults and SQL now()/current_timestamp expressions are fixed before fixtures run. Observed timestamps retain whole-second offsets from the frozen epoch; scheduled timestamps retain whole-second offsets from their record anchor (or explicit scenario epoch). This golden-specific normalizer preserves ledger dating as well as timer/expiry durations. PR2’s real-clock recorder still normalizes observed times opaquely for commit jitter. Cold billed turns have provider processed_at at epoch −90s, distinct from application receipt time at epoch zero. UUID and fake resource token fixtures are pinned before collection as well as fixture setup; wall time and adapter display clocks are fixed, and fake channel names are concrete strings, so literal caller IDs stay stable. JSON request bodies stay readable; multipart bodies retain filenames, field order and exact bytes without their random wire boundary. Serialization errors and swallowed MA script assertions fail recording. The dead-session fixture has an explicit scripted 404 for the expired session’s history endpoint, which its existing router leaves unregistered; this uses PR2’s ScriptedTransport rather than treating an unscripted request as a connection error. The existing Discord sent-message receipt also gets its missing async reaction method, so feedback reactions are captured instead of producing a fixture-only TypeError.
+
+The scenario clock does not advance periodic render ticks. Forced final renders, SSE/lifecycle order, scripted retry behavior and existing scenario assertions still run. Short cancellation/approval triggers wait on actual stream/card events. This oracle therefore records deterministic terminal rendering; the existing turn tests cover periodic rendering separately. Turn duration uses a frozen observation clock. Existing scenario fakes choose their SDK retry policy; these fixtures do not certify production's eight-retry budget or wall-clock latency. PR2's scripted client supports `max_retries=8` for explicit retry scripts.
+
+DM core coverage runs two admitted and billed private turns through real core/HTTP fakes, reuses the session, replays history, and deduplicates a repeated delivery. The additional `dm_delivery` scenario drives the actual Discord DM listener through real core/HTTP fakes and records both reply payloads and mention suppression at the platform boundary; repeated delivery produces no third reply. Scheduler goldens capture the host's existing run-turn boundary and exact billing bindings; their existing tests replace session execution with a fake. Billed Discord/Slack goldens exercise full current turn execution and real ledger/outcome writes. The approval platform cases reuse the existing posted-controls equivalence tests; instrumentation records the current adapter's card path while the tests independently compare it with the frozen pre-refactor handler.
+
+The nine turn fixture scenarios (`plain_turn`, `tool_use`, `approval_card`, `cancel_mid_stream`, `reconnect`, `rate_limit`, `mcp_degraded`, `ceiling`, `billing_replay`) now use their existing scripts behind real SDK HTTP serialization and SSE parsing. `http_turn.py` preserves original fake counters, interruptions and source assertions, while ScriptedTransport records request body/query/beta headers. Method-level FakeEventsResource records are replaced by HTTP records so future drivers can share the parity boundary. The ceiling scenario waits for the real SDK HTTP stream’s first body read before advancing a fake deadline clock and cancelling/draining the production pump. The old millisecond wall-clock deadline raced SDK setup on unchanged code. This controlled timeout retains exact deadline calculation, ceiling classification/message, initial-send, stream closure and task-cleanup assertions while making the HTTP order repeatable. The original driver ceiling tests still cover real asyncio deadlines. Run the explicit stress target with `uv run pytest -n 2 -q tests/golden/test_ceiling_stress.py`: it checks the complete ceiling and cancellation transcripts twenty times each across two workers; it is outside default collection. The cancellation fixture’s original 20ms sleep similarly raced SDK setup, so its timer now waits until the first SSE event was consumed before interrupting. Its original partial-content and clean-ack assertions still run unchanged.
+
+Slack Web API capture includes params (reaction name, channel/timestamp, users.info caller and history targeting) and safe content-type/accept headers. Authorization is excluded. Cold-thread Discord/Slack scenarios enable completion notifications and create their session through actual core SDK calls. **Current order is deliberately frozen:** Slack eyes reaction and status post precede POST /v1/sessions; Discord status post precedes session creation, while 👀 follows POST initial events because the driver acknowledges accepted delivery after that POST succeeds. Completion reactions and removals are also recorded. Moving Discord 👀 before creation would change current behavior and is outside oracle recording; the lead confirmed the existing order.
+
+Four checked-in production-code mutation probes run in isolated child processes and require their source scenario to pass but their complete golden transcript to differ: Slack eyes → hourglass, Discord 👀 → 👁, ledger occurred_at=event.processed_at → None, and altered DM reply text. They edit only loaded function code and restore it at exit; production files remain unchanged. Normal golden pytest collection runs all four. To inspect an expected failure directly:
+
+```bash
+uv run python tests/golden/runner.py plain_slack --mutation slack_eyes
+uv run python tests/golden/runner.py cold_discord --mutation discord_eyes
+uv run python tests/golden/runner.py cold_discord --mutation ledger_dating
+uv run python tests/golden/runner.py dm_delivery --mutation dm_delivery
+```
+
+Opaque dependency objects and credential-bearing scheduler configuration use fixture-type markers; credentials are never recorded. Billing callback bindings include exact markup/pricing and caller/channel attribution. No paid API calls are needed. The [timing audit](TIMING-AUDIT.md) covers all 33 scenarios and documents the explicit five-pass regeneration proof under two-worker load. Approval-card polling now waits on the real confirmation callback instead of its original one-second cap; the source assertions are unchanged.
+
+| Scenario | Existing offline test |
+| --- | --- |
+| `timer` | `packages/core/tests/continuity/test_timers.py::test_a_fired_timer_dispatches_its_note_even_after_newer_messages` |
+| `env_mount_failure` | `packages/core/tests/test_session_update_ops.py::test_env_replacement_clears_the_recorded_env_when_the_add_fails_after_the_delete` |
+| `plain_turn` | `packages/core/tests/turn/test_driver.py::test_run_turn_folds_full_stream_and_returns_terminal_state` |
+| `tool_use` | `packages/core/tests/turn/test_driver_policy_approval.py::test_chat_read_runs_without_a_card` |
+| `approval_card` | `packages/core/tests/turn/test_driver_policy_approval.py::test_chat_write_shows_a_card_and_runs_only_after_confirm` |
+| `approval_card_discord` | `tests/test_posted_controls_equivalence.py::test_confirmation_base_and_new[approve-discord]` |
+| `approval_card_slack` | `tests/test_posted_controls_equivalence.py::test_confirmation_base_and_new[approve-slack]` |
+| `cancel_mid_stream` | `packages/core/tests/turn/test_driver.py::test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack` |
+| `reconnect` | `packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_reconnect_on_connection_drop` |
+| `rate_limit` | `packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_rate_limited_with_until_before_sleep` |
+| `mcp_degraded` | `packages/core/tests/turn/test_driver.py::test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure` |
+| `ceiling` | `tests/golden/test_boundary_scenarios.py::test_ceiling_after_http_setup_closes_stream` |
+| `billing_replay` | `packages/core/tests/turn/test_driver_replay_billing.py::test_replayed_call_is_debited_with_the_turns_attribution` |
+| `cold_discord` | `tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[discord]` |
+| `cold_slack` | `tests/golden/test_boundary_scenarios.py::test_cold_thread_feedback_before_session_create[slack]` |
+| `dm_delivery` | `tests/golden/test_boundary_scenarios.py::test_dm_reply_delivery_and_deduplication` |
+| `plain_discord` | `tests/parity/test_turn_billed.py::test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit[discord]` |
+| `plain_slack` | `tests/parity/test_turn_billed.py::test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit[slack]` |
+| `blocked_balance` | `tests/parity/test_turn_blocked_balance.py::test_turn_blocked_when_over_balance_writes_no_usage_and_no_ledger_row[discord]` |
+| `blocked_cap` | `tests/parity/test_turn_blocked_cap.py::test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row[slack]` |
+| `dead_session` | `tests/parity/test_dead_session.py::test_dead_session_recreates_marks_old_row_dead_and_bills_new_session[discord]` |
+| `handoff_full` | `packages/core/tests/test_workspace_transfer.py::test_transfer_rehosts_the_bundle_and_enqueues_its_deletion` |
+| `handoff_transcript` | `packages/core/tests/test_workspace_transfer.py::test_transfer_degrades_to_transcript_when_the_old_session_is_archived` |
+| `handoff_history` | `packages/core/tests/test_workspace_transfer.py::test_transfer_returns_history_only_when_the_session_log_is_gone` |
+| `wake_continuation` | `tests/parity/test_private_input_dispatch.py::test_private_input_continuation_dispatches_exactly_one_follow_up_turn[discord]` |
+| `handoff_continuation` | `tests/parity/test_handoff_dispatch.py::test_handoff_continuation_dispatches_exactly_one_follow_up_turn[discord]` |
+| `dm_turn` | `tests/integration/test_direct_messages.py::test_dm_scope_reuses_session_replays_history_bills_and_deduplicates[discord]` |
+| `sealed_channel` | `packages/adapters/scheduler/tests/test_main.py::test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session` |
+| `scheduler_run` | `packages/adapters/scheduler/tests/test_main.py::test_fire_runs_in_the_routine_channels_environment[channel]` |
+| `mcp_start_turn` | `packages/adapters/mcp/tests/tools/test_agent_chat.py::test_start_turn_returns_the_accepted_events_boundary` |
+| `mcp_continue_turn` | `packages/adapters/mcp/tests/tools/test_agent_chat.py::test_continue_turn_returns_boundary_from_its_own_send` |
+| `mcp_cancel_turn` | `packages/adapters/mcp/tests/tools/test_agent_chat.py::test_cancel_turn_sends_exactly_one_user_interrupt_event` |
+| `cli_session_get` | `packages/adapters/cli/tests/commands/test_sessions.py::test_sessions_get_json_prints_session_body` |

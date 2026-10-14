@@ -11,16 +11,29 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.mux_compat import update_agent
+from mux.contracts.ids import Scope
 
 
 async def guarded_agent_update(
     client: AsyncAnthropic,
     _scope: object,
     fresh: BetaManagedAgentsAgent,
+    *,
+    backend_scope: Scope | None = None,
     **fields: Any,  # noqa: ANN401
 ) -> BetaManagedAgentsAgent:
-    """`agents.update(fresh.id, version=fresh.version, **fields)`; `_scope` is ignored."""
-    return await client.beta.agents.update(fresh.id, version=fresh.version, **fields)
+    """Update `fresh` to `fields` at `fresh.version`; `_scope` is ignored.
+
+    `backend_scope` is the tenant scope of the update; without it the update
+    runs under the legacy host scope.
+    """
+    backend = backend_scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.skills.reference_lock:guarded_agent_update"
+    )
+    return await update_agent(
+        client, fresh.id, version=fresh.version, payload=fields, scope=backend
+    )
 
 
 __all__ = ["guarded_agent_update"]

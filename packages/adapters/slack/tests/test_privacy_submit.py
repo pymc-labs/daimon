@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +29,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -242,7 +244,7 @@ async def test_run_purge_and_update_deletes_account_rows_and_calls_views_update(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
     await run_purge_and_update(
@@ -299,7 +301,7 @@ async def test_run_purge_and_update_aborts_when_account_does_not_match_submitter
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
     # Submitter U_SUB_03 resolves to `account`, but metadata claims a foreign id.

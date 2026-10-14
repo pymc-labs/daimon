@@ -34,6 +34,8 @@ from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import
     BetaManagedAgentsMemoryStoreResourceParam,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_memory_store, create_memory_store, delete_memory_store
 from daimon.core.stores.agent_memory_stores import (
     clear_memory_store,
     clear_personal_memory_store,
@@ -46,6 +48,8 @@ from daimon.core.stores.agent_memory_stores import (
     list_personal_memory_stores_for_agent,
     mark_personal_memory_store_archived,
 )
+from mux.contracts.ids import Scope
+from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -120,6 +124,7 @@ async def _ensure_store(
     anthropic: AsyncAnthropic,
     session_factory: async_sessionmaker[AsyncSession],
     *,
+    scope: Scope,
     read_binding: Callable[[AsyncSession], Awaitable[str | None]],
     insert_binding: Callable[[AsyncSession, str], Awaitable[str]],
     name: str,
@@ -137,8 +142,10 @@ async def _ensure_store(
     if store_id is not None:
         return store_id
 
-    created = await anthropic.beta.memory_stores.create(
-        name=name, description=description, metadata=metadata
+    created = await create_memory_store(
+        anthropic,
+        {"name": name, "description": description, "metadata": metadata},
+        scope=scope,
     )
     try:
         async with session_factory() as session, session.begin():
@@ -148,7 +155,7 @@ async def _ensure_store(
         # just created — delete it, or a DB outage mints one unreferenced
         # active store per session attempt.
         try:
-            await anthropic.beta.memory_stores.delete(created.id)
+            await delete_memory_store(anthropic, created.id, scope=scope)
         except anthropic_errors.APIError:
             _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
         raise
@@ -156,12 +163,31 @@ async def _ensure_store(
         # Lost the provisioning race — discard the orphan store.
         _log.info("memory_store.race_lost", orphan=created.id, winner=store_id)
         try:
-            await anthropic.beta.memory_stores.delete(created.id)
+            await delete_memory_store(anthropic, created.id, scope=scope)
         except anthropic_errors.APIError:
             _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
     else:
         _log.info("memory_store.provisioned", memory_store_id=store_id, name=name)
     return store_id
+
+
+def memory_instructions(*, read_only: bool, personal_mounted: bool = False) -> str:
+    """The shared mount's instructions; writable ones depend on a personal mount beside it."""
+    if read_only:
+        return READ_ONLY_MEMORY_INSTRUCTIONS
+    return MEMORY_INSTRUCTIONS if personal_mounted else SHARED_ONLY_MEMORY_INSTRUCTIONS
+
+
+def memory_mount(
+    store_id: str, *, read_only: bool, personal_mounted: bool = False
+) -> BetaManagedAgentsMemoryStoreResourceParam:
+    """The same mount intent applies before and after lazy provisioning."""
+    return {
+        "type": "memory_store",
+        "memory_store_id": store_id,
+        "access": "read_only" if read_only else "read_write",
+        "instructions": memory_instructions(read_only=read_only, personal_mounted=personal_mounted),
+    }
 
 
 async def ensure_memory_store_and_mount(
@@ -173,6 +199,7 @@ async def ensure_memory_store_and_mount(
     agent_name: str,
     read_only: bool = False,
     personal_mounted: bool = False,
+    expected_memory_store_id: str | None = None,
 ) -> BetaManagedAgentsMemoryStoreResourceParam:
     """Return the shared memory-store session resource, provisioning on first use.
 
@@ -181,10 +208,16 @@ async def ensure_memory_store_and_mount(
     and otherwise forbid recording them at all. Instructions are per attachment
     and frozen at session creation, so a wording change reaches only new
     sessions and never makes a live one read as drifted.
+    An expected ID requires that exact warm binding, without provisioning.
     """
 
     async def read(session: AsyncSession) -> str | None:
-        return await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
+        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
+        if expected_memory_store_id is not None and (
+            not expected_memory_store_id or store_id != expected_memory_store_id
+        ):
+            raise ScopeViolation("memory-store", "captured warm binding differs")
+        return store_id
 
     async def insert(session: AsyncSession, store_id: str) -> str:
         return await insert_memory_store(
@@ -194,6 +227,7 @@ async def ensure_memory_store_and_mount(
     store_id = await _ensure_store(
         anthropic,
         session_factory,
+        scope=resource_scope(tenant_id=str(tenant_id)),
         read_binding=read,
         insert_binding=insert,
         name=f"daimon {agent_name} {tenant_id}",
@@ -203,18 +237,7 @@ async def ensure_memory_store_and_mount(
             MA_METADATA_KEY_AGENT: str(agent_id),
         },
     )
-    if read_only:
-        instructions = READ_ONLY_MEMORY_INSTRUCTIONS
-    elif personal_mounted:
-        instructions = MEMORY_INSTRUCTIONS
-    else:
-        instructions = SHARED_ONLY_MEMORY_INSTRUCTIONS
-    return {
-        "type": "memory_store",
-        "memory_store_id": store_id,
-        "access": "read_only" if read_only else "read_write",
-        "instructions": instructions,
-    }
+    return memory_mount(store_id, read_only=read_only, personal_mounted=personal_mounted)
 
 
 async def ensure_personal_memory_store_and_mount(
@@ -253,6 +276,7 @@ async def ensure_personal_memory_store_and_mount(
     store_id = await _ensure_store(
         anthropic,
         session_factory,
+        scope=resource_scope(tenant_id=str(tenant_id)),
         read_binding=read,
         insert_binding=insert,
         name=f"personal {account_id}",
@@ -293,6 +317,7 @@ async def archive_memory_store_for_agent(
     Idempotent: unbound agent → no-op; already-archived/missing store on the
     MA side → binding still retired.
     """
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     async with session_factory() as session:
         store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_id)
         personal = await list_personal_memory_stores_for_agent(
@@ -301,7 +326,7 @@ async def archive_memory_store_for_agent(
     failure: anthropic_errors.APIError | None = None
     for account_id, personal_id in personal:
         try:
-            await anthropic.beta.memory_stores.archive(personal_id)
+            await archive_memory_store(anthropic, personal_id, scope=backend_scope)
         except anthropic_errors.NotFoundError:
             _log.info("memory_store.archive_missing", memory_store_id=personal_id)
         except anthropic_errors.APIError as error:
@@ -320,7 +345,7 @@ async def archive_memory_store_for_agent(
     if store_id is not None:
         shared_archived = True
         try:
-            await anthropic.beta.memory_stores.archive(store_id)
+            await archive_memory_store(anthropic, store_id, scope=backend_scope)
         except anthropic_errors.NotFoundError:
             _log.info("memory_store.archive_missing", memory_store_id=store_id)
         except anthropic_errors.APIError as error:
@@ -354,7 +379,9 @@ async def delete_personal_memory_stores_for_account(
     complete = True
     for tenant_id, agent_id, store_id in bound:
         try:
-            await anthropic.beta.memory_stores.delete(store_id)
+            await delete_memory_store(
+                anthropic, store_id, scope=resource_scope(tenant_id=str(tenant_id))
+            )
         except anthropic_errors.NotFoundError:
             pass
         except anthropic_errors.APIError as error:

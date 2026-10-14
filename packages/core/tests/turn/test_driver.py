@@ -667,10 +667,19 @@ async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack(
         [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
     ]
     cancel = asyncio.Event()
-    lc = RecordingLifecycle()
+    partial_consumed = asyncio.Event()
+
+    class ConsumingLifecycle(RecordingLifecycle):
+        async def on_sse_event(self, event) -> None:
+            await super().on_sse_event(event)
+            partial_consumed.set()
+
+    lc = ConsumingLifecycle()
 
     async def _cancel_soon() -> None:
-        await asyncio.sleep(0.02)
+        # The case is cancellation during consumption, so wait for evidence
+        # of consumption instead of racing initial send on a loaded host.
+        await asyncio.wait_for(partial_consumed.wait(), timeout=5)
         cancel.set()
 
     async with asyncio.TaskGroup() as tg:

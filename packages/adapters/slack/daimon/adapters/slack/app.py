@@ -153,6 +153,8 @@ from daimon.adapters.slack.privacy_panel.submit import (
     evaluate_delete_submission,
     run_purge_and_update,
 )
+from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
+from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
@@ -217,6 +219,8 @@ from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.routine_delivery import run_delivery_poller
@@ -281,6 +285,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.core.turn_queue import TurnQueue
+from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -421,6 +426,7 @@ class SlackApp:
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
+        self._provider_actions = SlackProviderActions()
         # Output-delivery notice dedup per thread and warning log dedup per workspace.
         self._delivery_notice_keys = NoticeKeys()
         # Oversize outputs stay listed; each is announced once, not every sweep.
@@ -1262,6 +1268,8 @@ class SlackApp:
                     self._spawn(handle_feedback_details_click(self.runtime, payload))
                 elif action_id == ASK_HUMAN_ACTION_ID:
                     self._spawn(handle_ask_human_click(self.runtime, payload))
+                elif action_id.startswith(PROVIDER_ACTION_PREFIX):
+                    self._spawn(self._provider_actions.handle_click(payload))
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
                     self._spawn(self._confirmations.handle_click(payload))
                 elif action_id == HAND_OVER_ACTION_ID:
@@ -2399,11 +2407,13 @@ class SlackApp:
                 # failing the whole explanation.
                 owner_name = "the previous agent"
                 try:
-                    owner_agent = await self.runtime.anthropic.beta.agents.retrieve(
-                        error.source_agent_id
+                    owner_agent = await retrieve_agent(
+                        self.runtime.anthropic,
+                        error.source_agent_id,
+                        scope=resource_scope(tenant_id=str(tenant_id)),
                     )
                     owner_name = owner_agent.name
-                except anthropic.APIStatusError:
+                except (anthropic.APIStatusError, ScopeViolation):
                     pass
                 explanation = render_responder_changed_without_handoff(
                     new_responder=admission.agent.name,
@@ -2812,10 +2822,23 @@ class SlackApp:
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
                             web_client,
+                            runtime=self.runtime,
+                            tenant_id=tenant_id,
+                            account_id=admission.account_id,
                             channel=channel,
                             thread_ts=thread_id,
                             identity=turn_identity,
                             record_post=lifecycle.record_post,
+                        ),
+                        **provider_action_options(
+                            prepared,
+                            lambda: self._provider_actions.hook(
+                                web_client,
+                                channel=channel,
+                                thread_ts=thread_id,
+                                identity=turn_identity,
+                                record_post=lifecycle.record_post,
+                            ),
                         ),
                     )
                     intent_terminal = lifecycle_holder[0].final_ts is not None
@@ -3339,10 +3362,23 @@ class SlackApp:
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
                         web_client,
+                        runtime=self.runtime,
+                        tenant_id=tenant_id,
+                        account_id=follow_admission.account_id,
                         channel=channel,
                         thread_ts=thread_id,
                         identity=follow_identity,
                         record_post=follow_lifecycle.record_post,
+                    ),
+                    **provider_action_options(
+                        follow_prepared,
+                        lambda: self._provider_actions.hook(
+                            web_client,
+                            channel=channel,
+                            thread_ts=thread_id,
+                            identity=follow_identity,
+                            record_post=follow_lifecycle.record_post,
+                        ),
                     ),
                 )
         finally:

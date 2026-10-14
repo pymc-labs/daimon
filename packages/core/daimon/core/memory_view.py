@@ -29,6 +29,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_compat import delete_memory, list_memory_entries, read_memory
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
@@ -39,6 +40,7 @@ from daimon.core.stores.agent_memory_stores import (
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -211,9 +213,14 @@ class MemoryRecord:
     content_sha256: str
 
 
-async def list_memory_records(anthropic: AsyncAnthropic, store_id: str) -> list[MemoryRecord]:
+async def list_memory_records(
+    anthropic: AsyncAnthropic, store_id: str, *, scope: Scope | None = None
+) -> list[MemoryRecord]:
     """Every memory in the store, sorted by path, with its id and content hash."""
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.memory_view:list_memory_records"
+    )
+    page = list_memory_entries(anthropic, store_id, path_prefix="/", scope=backend_scope)
     records = [
         MemoryRecord(id=item.id, path=item.path, content_sha256=item.content_sha256)
         async for item in page
@@ -255,18 +262,20 @@ async def personal_memory_reply(
     store_id: str | None,
     request: MemoryRequest,
     command: str,
+    scope: Scope | None = None,
 ) -> PersonalMemoryReply:
     """Answer a `mine` or `forget-mine` request against the caller's own store.
 
     `store_id` must be the caller's own (`get_own_personal_memory_store`).
     `command` is how the platform spells the command (`/memory`, `memory`).
+    `scope` is the caller's tenant scope for the provider reads and deletes.
     """
     empty = PersonalMemoryReply(f"You have no personal memory with {agent_name}.")
     if store_id is None:
         return empty
     if request.kind == "mine_show":
         path = request.arg or ""
-        content = await get_memory_content(anthropic, store_id, path)
+        content = await get_memory_content(anthropic, store_id, path, scope=scope)
         if content is None:
             return PersonalMemoryReply(
                 f"No file called {path} in your personal memory.",
@@ -275,7 +284,7 @@ async def personal_memory_reply(
         return PersonalMemoryReply(path, content=content)
     # Listed once: a forget confirmation is checked against, and deletes only,
     # exactly this snapshot.
-    records = await list_memory_records(anthropic, store_id)
+    records = await list_memory_records(anthropic, store_id, scope=scope)
     paths = [record.path for record in records]
     if request.kind == "mine_list":
         if not paths:
@@ -302,8 +311,8 @@ async def personal_memory_reply(
             "Nothing was deleted: that code doesn't match your personal memory as it is now.",
             hint=f"Run {command} {FORGET_MINE} to get a new code.",
         )
-    deleted = await delete_memory_records(anthropic, store_id, records)
-    kept = len(await list_memory_records(anthropic, store_id))
+    deleted = await delete_memory_records(anthropic, store_id, records, scope=scope)
+    kept = len(await list_memory_records(anthropic, store_id, scope=scope))
     title = f"Deleted {_files(deleted)} from your personal memory with {agent_name}."
     if kept:
         title += (
@@ -314,7 +323,11 @@ async def personal_memory_reply(
 
 
 async def delete_memory_records(
-    anthropic: AsyncAnthropic, store_id: str, records: list[MemoryRecord]
+    anthropic: AsyncAnthropic,
+    store_id: str,
+    records: list[MemoryRecord],
+    *,
+    scope: Scope | None = None,
 ) -> int:
     """Delete exactly `records`, each only while its content is still what was listed.
 
@@ -323,13 +336,18 @@ async def delete_memory_records(
     `expected_content_sha256` precondition and stays too. The store and its
     binding stay. Returns how many were deleted.
     """
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.memory_view:delete_memory_records"
+    )
     deleted = 0
     for record in records:
         try:
-            await anthropic.beta.memory_stores.memories.delete(
+            await delete_memory(
+                anthropic,
+                store_id,
                 record.id,
-                memory_store_id=store_id,
                 expected_content_sha256=record.content_sha256,
+                scope=backend_scope,
             )
         except anthropic_errors.APIStatusError as error:
             # 404: already gone. 409/412: changed since the preview, so kept.
@@ -340,17 +358,22 @@ async def delete_memory_records(
     return deleted
 
 
-async def list_memory_paths(anthropic: AsyncAnthropic, store_id: str) -> list[str]:
+async def list_memory_paths(
+    anthropic: AsyncAnthropic, store_id: str, *, scope: Scope | None = None
+) -> list[str]:
     """Every memory path in the store, sorted."""
-    return [record.path for record in await list_memory_records(anthropic, store_id)]
+    return [record.path for record in await list_memory_records(anthropic, store_id, scope=scope)]
 
 
-async def get_memory_content(anthropic: AsyncAnthropic, store_id: str, path: str) -> str | None:
+async def get_memory_content(
+    anthropic: AsyncAnthropic, store_id: str, path: str, *, scope: Scope | None = None
+) -> str | None:
     """The memory at exactly `path`, or None when there is none."""
-    for record in await list_memory_records(anthropic, store_id):
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.memory_view:get_memory_content"
+    )
+    for record in await list_memory_records(anthropic, store_id, scope=backend_scope):
         if record.path == path:
-            memory = await anthropic.beta.memory_stores.memories.retrieve(
-                record.id, memory_store_id=store_id, view="full"
-            )
+            memory = await read_memory(anthropic, store_id, record.id, scope=backend_scope)
             return memory.content or ""
     return None

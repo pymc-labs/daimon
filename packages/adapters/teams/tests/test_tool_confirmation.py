@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.teams.tool_confirmation import (
@@ -259,3 +260,140 @@ async def test_a_transient_send_failure_on_the_answered_card_is_retried(
             break
         await asyncio.sleep(0)
     assert "Denied" in _json(sender, len(sender.sent) - 1), "the retry landed the answer"
+
+
+async def test_admin_confirmation_rechecks_each_click_before_settlement() -> None:
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    prompt = _prompt().model_copy(update={"admin": True})
+    prepare = AsyncMock(
+        return_value=prompt.model_copy(update={"detail_lines": ("List price: verified",)})
+    )
+    check = AsyncMock(return_value="Current admin permission required.")
+    waiting = asyncio.create_task(
+        cards.hook(
+            conversation_id=CONVERSATION_ID,
+            service_url=SERVICE_URL,
+            prepare_admin=prepare,
+            check_admin=check,
+        )(prompt)
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not sender.sent:
+                await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        body = _json(sender, 0)
+        assert '"title":"Confirm"' in body
+        assert "List price: verified" in body
+        token = re.search(r'"token":"([^"]+)"', body)
+        assert token is not None
+        denied = await cards.on_action(_click(token.group(1), "approve", AAD_OBJECT_ID))
+        assert denied.value == "Current admin permission required."
+        assert len(sender.sent) == 1
+        assert not waiting.done()
+        check.return_value = None
+        await cards.on_action(_click(token.group(1), "approve", AAD_OBJECT_ID))
+        assert isinstance(await asyncio.wait_for(waiting, timeout=1), ApprovedConfirmation)
+        assert check.await_count == 2
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_admin_confirmation_without_a_verifier_posts_nothing() -> None:
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    prompt = _prompt().model_copy(update={"admin": True})
+    assert (
+        await cards.hook(conversation_id=CONVERSATION_ID, service_url=SERVICE_URL)(prompt)
+        == "denied"
+    )
+    assert not sender.sent
+
+
+@pytest.mark.parametrize("case", ["expired", "exception", "wrong_requester", "legacy"])
+async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.posted_controls import lifecycle
+
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    prompt = _prompt().model_copy(update={"admin": case != "legacy"})
+
+    async def verify(*args: object) -> None:
+        await asyncio.sleep(0)
+        if case == "exception":
+            raise RuntimeError("role lookup unavailable")
+        if case == "expired":
+            clock = MagicMock()
+            clock.now.return_value = prompt.expires_at
+            monkeypatch.setattr(lifecycle, "datetime", clock)
+
+    check = AsyncMock(side_effect=verify)
+    waiting = asyncio.create_task(
+        cards.hook(
+            conversation_id=CONVERSATION_ID,
+            service_url=SERVICE_URL,
+            prepare_admin=AsyncMock(return_value=prompt),
+            check_admin=check,
+        )(prompt)
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not sender.sent:
+                await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
+        assert token is not None
+        response = await cards.on_action(
+            _click(
+                token.group(1),
+                "approve",
+                "5c3f4a3b-4485-43d2-a79c-5a339949241a"
+                if case == "wrong_requester"
+                else AAD_OBJECT_ID,
+            )
+        )
+        if case == "legacy":
+            assert isinstance(await asyncio.wait_for(waiting, 1), ApprovedConfirmation)
+            check.assert_not_awaited()
+        else:
+            assert response.value
+            assert len(sender.sent) == 1
+            assert not waiting.done()
+            if case == "wrong_requester":
+                check.assert_not_awaited()
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_runtime_hook_rechecks_current_configured_admins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.teams.admin_user_ids = (AAD_OBJECT_ID,)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    TeamsConfirmationCards(FakeSender()).hook(
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        runtime=runtime,
+        tenant_id=tenant,
+        account_id=account,
+    )
+    kwargs = factory.call_args.kwargs
+    assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
+    check = kwargs["current_admin"]
+    assert await check(AAD_OBJECT_ID) is True
+    runtime.settings.teams.admin_user_ids = ()
+    assert await check(AAD_OBJECT_ID) is False

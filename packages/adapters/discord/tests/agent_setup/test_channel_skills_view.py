@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,6 +25,7 @@ from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -47,6 +49,8 @@ def _runtime(sessionmaker: object) -> DiscordRuntime:
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/skills/skill_lib":  # the attach's existence check
+            return httpx.Response(200, json=skill)
         rows = [skill] if request.url.path == "/v1/skills" else []
         return httpx.Response(200, json={"data": rows, "next_page": None})
 
@@ -58,7 +62,7 @@ def _runtime(sessionmaker: object) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=replace(deps_for(), turn_path=None),
     )
 
 

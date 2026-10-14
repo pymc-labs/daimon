@@ -185,7 +185,9 @@ class AnthropicSkillVersions:
     async def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]:
         """Preserve main's lazy list and partial native version rows."""
         authorize(self._authorization, scope, "skill", skill_id)
-        async for item in provider_iter(self._client.beta.skills.versions.list(skill_id=skill_id)):
+        async for item in provider_iter(
+            self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
+        ):
             yield cast(dict[str, JsonValue], item.model_dump(mode="json", exclude_unset=True))
 
     async def download_by_id(

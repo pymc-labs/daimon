@@ -102,12 +102,23 @@ async def retire_turn_card_intent(
     *,
     id: uuid.UUID,
     expected_message_id: str | None,
+    keep_fleet_root: bool = False,
 ) -> bool:
     """Retire only the active intent whose stored message ID matches the read.
 
     `None` matches only a still-prepared intent with no recorded message ID.
     Choosing when that is safe belongs to the adapter recovery policy.
     """
+    if keep_fleet_root:
+        from daimon.core.stores.mux_state import database_clock, fleet_root_context_deadline
+
+        if (
+            await fleet_root_context_deadline(
+                session, intent_id=id, now=await database_clock(session)
+            )
+            is not None
+        ):
+            return False
     result = await session.execute(
         update(TurnCardIntent)
         .where(

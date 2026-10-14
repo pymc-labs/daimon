@@ -1,0 +1,42 @@
+id: QA-NEW15-CHANNEL-BUDGET-EXHAUSTED
+title: an exhausted channel budget refuses the next turn visibly, with no second debit
+friction:
+- D17
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: cli
+  args: daimon channels budget set discord {guild_id} {channel_id} 0.01 --window total
+- do: mention
+  text: 'QA budget 1: reply with only TINY-OK. No tools.'
+- do: wait_done
+- do: mention
+  text: 'QA budget 2: reply with only TINY-AGAIN. No tools.'
+- do: wait
+  s: 20
+assert:
+- kind: text_present
+  turn: 1
+  pattern: TINY-OK
+- kind: no_silent_drop
+  turn: 2
+  max: 15
+- kind: text_present
+  turn: 2
+  pattern: (?i)spending budget|budget
+- kind: text_absent
+  turn: 2
+  pattern: TINY-AGAIN
+- kind: ledger_debits
+  channel: '{channel_id}'
+  count: 1
+teardown:
+- do: admin
+  tool: cli
+  args: daimon channels budget clear discord {guild_id} {channel_id}

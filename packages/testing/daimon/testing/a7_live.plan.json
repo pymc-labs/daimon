@@ -1,0 +1,21 @@
+{
+  "package": "A7",
+  "provider": "anthropic",
+  "model": "claude-haiku-5-5",
+  "entry_point": "daimon.testing.anthropic_live_cases.a7_pair",
+  "prompt": "Reply with exactly a7-paired-probe-ok. Do not use tools or delegate.",
+  "session_order": [
+    "legacy",
+    "mux"
+  ],
+  "sessions": 2,
+  "attempts_per_session": 1,
+  "sdk_max_retries": 0,
+  "wall_clock_deadline_seconds_total": 300,
+  "cleanup_margin_seconds": 15,
+  "stream_stop_usd": ".28",
+  "native_budget_sent": false,
+  "provider_token_limits_enforced": false,
+  "quiet_host_latency_certificate": false,
+  "full_33_recipe_certificate": false
+}

@@ -1,0 +1,3037 @@
+{
+  "consumer": {
+    "path": "tests/judge/catalog_product_context.py",
+    "sha256": "bccde325a234fb9ae5ff09f5f0f42aaf4e2eeb603e0dcc1990b7a4ede7aa8286"
+  },
+  "publisher": {
+    "path": "tests/judge/product_preparation_fixtures.py",
+    "sha256": "ed3501de9be42b844738015fbdc25ff1168cb87013e3169dff8a3a04a6ecb60c"
+  },
+  "native_index": {
+    "path": "packages/testing/fixtures/target53/anthropic/index.json",
+    "sha256": "82fc238160de1b8f2f628a6cb9318e8225419abc3d90d5083e1f7b41c54cf0f8"
+  },
+  "cells": [
+    {
+      "scenario_id": "QA-D11-FOOTER-COST-MATCHES-LEDGER",
+      "backend": "anthropic",
+      "status": "AVAILABLE",
+      "reason": "first turn has pinned native input and an empty authored setup",
+      "source": {
+        "path": "scenarios/QA-D11-FOOTER-COST-MATCHES-LEDGER.yaml",
+        "sha256": "15a97c69f45a517986da8b0e29d42acd767ba8639c01038e3d4dc860625a52fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D11-FOOTER-COST-MATCHES-LEDGER.yaml",
+        "sha256": "93db7a7294634041c2947c8452f7e431c75209069e2b363d907f39e48b86fe39"
+      },
+      "native_input": {
+        "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
+        "sha256": "a0aebcb91114a3e84c98e829a9360d2ee3e5b4682c3612b3a9c1c52405f38896"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D11-FOOTER-COST-MATCHES-LEDGER",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D11-FOOTER-COST-MATCHES-LEDGER.yaml",
+        "sha256": "15a97c69f45a517986da8b0e29d42acd767ba8639c01038e3d4dc860625a52fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D11-FOOTER-COST-MATCHES-LEDGER.yaml",
+        "sha256": "93db7a7294634041c2947c8452f7e431c75209069e2b363d907f39e48b86fe39"
+      },
+      "native_input": {
+        "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
+        "sha256": "a0aebcb91114a3e84c98e829a9360d2ee3e5b4682c3612b3a9c1c52405f38896"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D11-FOOTER-COST-MATCHES-LEDGER",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D11-FOOTER-COST-MATCHES-LEDGER.yaml",
+        "sha256": "15a97c69f45a517986da8b0e29d42acd767ba8639c01038e3d4dc860625a52fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D11-FOOTER-COST-MATCHES-LEDGER.yaml",
+        "sha256": "93db7a7294634041c2947c8452f7e431c75209069e2b363d907f39e48b86fe39"
+      },
+      "native_input": {
+        "path": "native/QA-D11-FOOTER-COST-MATCHES-LEDGER.json",
+        "sha256": "a0aebcb91114a3e84c98e829a9360d2ee3e5b4682c3612b3a9c1c52405f38896"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D12-PDF-CLAIM-HAS-PDF",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-D12-PDF-CLAIM-HAS-PDF.yaml",
+        "sha256": "7f8dcd3744e87aade2f151d698b301ee3cac1894c117c019dc399c575243e9fb"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D12-PDF-CLAIM-HAS-PDF.yaml",
+        "sha256": "06c490405407844e71410377067d3356f5002e84fc767edf10b26b13a7beedd0"
+      },
+      "native_input": {
+        "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
+        "sha256": "a92b233e6b34c29da36dfc5cda9c98c8ea5bbff7a7aa4c76047735ffea200652"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D12-PDF-CLAIM-HAS-PDF",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D12-PDF-CLAIM-HAS-PDF.yaml",
+        "sha256": "7f8dcd3744e87aade2f151d698b301ee3cac1894c117c019dc399c575243e9fb"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D12-PDF-CLAIM-HAS-PDF.yaml",
+        "sha256": "06c490405407844e71410377067d3356f5002e84fc767edf10b26b13a7beedd0"
+      },
+      "native_input": {
+        "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
+        "sha256": "a92b233e6b34c29da36dfc5cda9c98c8ea5bbff7a7aa4c76047735ffea200652"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D12-PDF-CLAIM-HAS-PDF",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D12-PDF-CLAIM-HAS-PDF.yaml",
+        "sha256": "7f8dcd3744e87aade2f151d698b301ee3cac1894c117c019dc399c575243e9fb"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D12-PDF-CLAIM-HAS-PDF.yaml",
+        "sha256": "06c490405407844e71410377067d3356f5002e84fc767edf10b26b13a7beedd0"
+      },
+      "native_input": {
+        "path": "native/QA-D12-PDF-CLAIM-HAS-PDF.json",
+        "sha256": "a92b233e6b34c29da36dfc5cda9c98c8ea5bbff7a7aa4c76047735ffea200652"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+        "sha256": "715549d98919620893be08f7d68754023eb6400bf92214c38bd9c9c58fd63b5c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+        "sha256": "af23998ac1b11962b18be8817a9ff84a57d05345a00db13cacc3bf0ec649d496"
+      },
+      "native_input": {
+        "path": "native/QA-D13-FILES-NOT-REPOSTED.json",
+        "sha256": "04d1f0c50468906f4a5d1aa6416386155d52020163b3069f2bc3cfcd68bc26e8"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+        "sha256": "715549d98919620893be08f7d68754023eb6400bf92214c38bd9c9c58fd63b5c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+        "sha256": "af23998ac1b11962b18be8817a9ff84a57d05345a00db13cacc3bf0ec649d496"
+      },
+      "native_input": {
+        "path": "native/QA-D13-FILES-NOT-REPOSTED.json",
+        "sha256": "04d1f0c50468906f4a5d1aa6416386155d52020163b3069f2bc3cfcd68bc26e8"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D13-FILES-NOT-REPOSTED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+        "sha256": "715549d98919620893be08f7d68754023eb6400bf92214c38bd9c9c58fd63b5c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D13-FILES-NOT-REPOSTED.yaml",
+        "sha256": "af23998ac1b11962b18be8817a9ff84a57d05345a00db13cacc3bf0ec649d496"
+      },
+      "native_input": {
+        "path": "native/QA-D13-FILES-NOT-REPOSTED.json",
+        "sha256": "04d1f0c50468906f4a5d1aa6416386155d52020163b3069f2bc3cfcd68bc26e8"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+        "sha256": "ef8e4a9de2a560edb89eef5b646861fc1f83e1e7eb1fe78ab7966dd488d17f00"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+        "sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0"
+      },
+      "native_input": {
+        "path": "native/QA-D14-FORK-KEEPS-SKILLS.json",
+        "sha256": "d36284f0e3c0b3a9f1c6a84d5f0d9892321b44f54ad099534fb8c1e3049de2ca"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+        "sha256": "ef8e4a9de2a560edb89eef5b646861fc1f83e1e7eb1fe78ab7966dd488d17f00"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+        "sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0"
+      },
+      "native_input": {
+        "path": "native/QA-D14-FORK-KEEPS-SKILLS.json",
+        "sha256": "d36284f0e3c0b3a9f1c6a84d5f0d9892321b44f54ad099534fb8c1e3049de2ca"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+        "sha256": "ef8e4a9de2a560edb89eef5b646861fc1f83e1e7eb1fe78ab7966dd488d17f00"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D14-FORK-KEEPS-SKILLS.yaml",
+        "sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0"
+      },
+      "native_input": {
+        "path": "native/QA-D14-FORK-KEEPS-SKILLS.json",
+        "sha256": "d36284f0e3c0b3a9f1c6a84d5f0d9892321b44f54ad099534fb8c1e3049de2ca"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D1-CANARY-TWO-TURN",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+        "sha256": "f530be73b1f9afa75e342b4162720e6c2add1e42fc264d09aeb5ed472b78e04d"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+        "sha256": "f27cb01435d171ed9ae253d7cbbc0ba58ca61815a5970c53832d1aed5cfd34f1"
+      },
+      "native_input": {
+        "path": "native/QA-D1-CANARY-TWO-TURN.json",
+        "sha256": "9524892df943c28d10c738e92d90053d62cf95f4e3a24865d3153f8626f5fd70"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D1-CANARY-TWO-TURN",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+        "sha256": "f530be73b1f9afa75e342b4162720e6c2add1e42fc264d09aeb5ed472b78e04d"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+        "sha256": "f27cb01435d171ed9ae253d7cbbc0ba58ca61815a5970c53832d1aed5cfd34f1"
+      },
+      "native_input": {
+        "path": "native/QA-D1-CANARY-TWO-TURN.json",
+        "sha256": "9524892df943c28d10c738e92d90053d62cf95f4e3a24865d3153f8626f5fd70"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D1-CANARY-TWO-TURN",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+        "sha256": "f530be73b1f9afa75e342b4162720e6c2add1e42fc264d09aeb5ed472b78e04d"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-CANARY-TWO-TURN.yaml",
+        "sha256": "f27cb01435d171ed9ae253d7cbbc0ba58ca61815a5970c53832d1aed5cfd34f1"
+      },
+      "native_input": {
+        "path": "native/QA-D1-CANARY-TWO-TURN.json",
+        "sha256": "9524892df943c28d10c738e92d90053d62cf95f4e3a24865d3153f8626f5fd70"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+        "sha256": "3bd7f3d2eff068d249dc6688772e81e25a62a360a13967760cab276d1707b5be"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+        "sha256": "44d8dc0c95f90ed25961edf407844a2056bbea6f310a9cc676148e83b67ac348"
+      },
+      "native_input": {
+        "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
+        "sha256": "72353dc725df0df7f0274ba2dc04745149c109859f8a7871a0b8406239eae4d0"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+        "sha256": "3bd7f3d2eff068d249dc6688772e81e25a62a360a13967760cab276d1707b5be"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+        "sha256": "44d8dc0c95f90ed25961edf407844a2056bbea6f310a9cc676148e83b67ac348"
+      },
+      "native_input": {
+        "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
+        "sha256": "72353dc725df0df7f0274ba2dc04745149c109859f8a7871a0b8406239eae4d0"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+        "sha256": "3bd7f3d2eff068d249dc6688772e81e25a62a360a13967760cab276d1707b5be"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.yaml",
+        "sha256": "44d8dc0c95f90ed25961edf407844a2056bbea6f310a9cc676148e83b67ac348"
+      },
+      "native_input": {
+        "path": "native/QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS.json",
+        "sha256": "72353dc725df0df7f0274ba2dc04745149c109859f8a7871a0b8406239eae4d0"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D1-SLACK-FOLLOWUP",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-D1-SLACK-FOLLOWUP.yaml",
+        "sha256": "f69c410a7829eec32a911b720d8d6674fbb82099fddf10a950b8926ad186222c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-SLACK-FOLLOWUP.yaml",
+        "sha256": "c8763338a57830bec4071e7567d407e7a45ae4b395e48b71e488e33e74f97e87"
+      },
+      "native_input": {
+        "path": "native/QA-D1-SLACK-FOLLOWUP.json",
+        "sha256": "f99d68626f2b4b96393cdc41c9372a89f3ebed511f4abbd6ef0aa7adfd5a4429"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D1-SLACK-FOLLOWUP",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D1-SLACK-FOLLOWUP.yaml",
+        "sha256": "f69c410a7829eec32a911b720d8d6674fbb82099fddf10a950b8926ad186222c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-SLACK-FOLLOWUP.yaml",
+        "sha256": "c8763338a57830bec4071e7567d407e7a45ae4b395e48b71e488e33e74f97e87"
+      },
+      "native_input": {
+        "path": "native/QA-D1-SLACK-FOLLOWUP.json",
+        "sha256": "f99d68626f2b4b96393cdc41c9372a89f3ebed511f4abbd6ef0aa7adfd5a4429"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D1-SLACK-FOLLOWUP",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D1-SLACK-FOLLOWUP.yaml",
+        "sha256": "f69c410a7829eec32a911b720d8d6674fbb82099fddf10a950b8926ad186222c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D1-SLACK-FOLLOWUP.yaml",
+        "sha256": "c8763338a57830bec4071e7567d407e7a45ae4b395e48b71e488e33e74f97e87"
+      },
+      "native_input": {
+        "path": "native/QA-D1-SLACK-FOLLOWUP.json",
+        "sha256": "f99d68626f2b4b96393cdc41c9372a89f3ebed511f4abbd6ef0aa7adfd5a4429"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D22-WHO-ANSWERS-HERE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-D22-WHO-ANSWERS-HERE.yaml",
+        "sha256": "26f7b60149c3b8bd66d2e7b7a583d937ddcf2261c828e197bc35ed53aa99a6e7"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D22-WHO-ANSWERS-HERE.yaml",
+        "sha256": "6f417f2975dd34ad8b8285046f2c83f69e798b217322b295d9bfc84cde130da5"
+      },
+      "native_input": {
+        "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
+        "sha256": "c989f91454bc90628b76509c261560ed88f4a6573273299d7fb9ae34e372cb6e"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D22-WHO-ANSWERS-HERE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D22-WHO-ANSWERS-HERE.yaml",
+        "sha256": "26f7b60149c3b8bd66d2e7b7a583d937ddcf2261c828e197bc35ed53aa99a6e7"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D22-WHO-ANSWERS-HERE.yaml",
+        "sha256": "6f417f2975dd34ad8b8285046f2c83f69e798b217322b295d9bfc84cde130da5"
+      },
+      "native_input": {
+        "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
+        "sha256": "c989f91454bc90628b76509c261560ed88f4a6573273299d7fb9ae34e372cb6e"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D22-WHO-ANSWERS-HERE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D22-WHO-ANSWERS-HERE.yaml",
+        "sha256": "26f7b60149c3b8bd66d2e7b7a583d937ddcf2261c828e197bc35ed53aa99a6e7"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D22-WHO-ANSWERS-HERE.yaml",
+        "sha256": "6f417f2975dd34ad8b8285046f2c83f69e798b217322b295d9bfc84cde130da5"
+      },
+      "native_input": {
+        "path": "native/QA-D22-WHO-ANSWERS-HERE.json",
+        "sha256": "c989f91454bc90628b76509c261560ed88f4a6573273299d7fb9ae34e372cb6e"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+        "sha256": "3ef39d682d15cbb08b96ab5978976dd720ec554556682862201c3260d8457108"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+        "sha256": "b01e2ff21751d896972b3bdd8053182f14667dd3993573e30fd87638711d6e34"
+      },
+      "native_input": {
+        "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
+        "sha256": "d39ed1f18649841b402546190f09de99d4dafd48dc95dcb1e4421033986d2f9f"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+        "sha256": "3ef39d682d15cbb08b96ab5978976dd720ec554556682862201c3260d8457108"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+        "sha256": "b01e2ff21751d896972b3bdd8053182f14667dd3993573e30fd87638711d6e34"
+      },
+      "native_input": {
+        "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
+        "sha256": "d39ed1f18649841b402546190f09de99d4dafd48dc95dcb1e4421033986d2f9f"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D3-TEAMS-ANSWER-NOT-REPLACED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+        "sha256": "3ef39d682d15cbb08b96ab5978976dd720ec554556682862201c3260d8457108"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D3-TEAMS-ANSWER-NOT-REPLACED.yaml",
+        "sha256": "b01e2ff21751d896972b3bdd8053182f14667dd3993573e30fd87638711d6e34"
+      },
+      "native_input": {
+        "path": "native/QA-D3-TEAMS-ANSWER-NOT-REPLACED.json",
+        "sha256": "d39ed1f18649841b402546190f09de99d4dafd48dc95dcb1e4421033986d2f9f"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored setup needs a separately bound admin/resource recipe",
+      "source": {
+        "path": "scenarios/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.yaml",
+        "sha256": "ebac793f11c6da663d1adfc7be23fc835dbabe09da1b64f5d5404277846b88a2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.yaml",
+        "sha256": "4323ee270fa53d2f44f41c5c37d15ba0ae9b6ad02054a8887fbb9f4a4e76b52c"
+      },
+      "native_input": {
+        "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
+        "sha256": "07ba3505a5aa38e597d9dd3ebe0c2260804d7b8f419dfc9690844655247dfb18"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.yaml",
+        "sha256": "ebac793f11c6da663d1adfc7be23fc835dbabe09da1b64f5d5404277846b88a2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.yaml",
+        "sha256": "4323ee270fa53d2f44f41c5c37d15ba0ae9b6ad02054a8887fbb9f4a4e76b52c"
+      },
+      "native_input": {
+        "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
+        "sha256": "07ba3505a5aa38e597d9dd3ebe0c2260804d7b8f419dfc9690844655247dfb18"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.yaml",
+        "sha256": "ebac793f11c6da663d1adfc7be23fc835dbabe09da1b64f5d5404277846b88a2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.yaml",
+        "sha256": "4323ee270fa53d2f44f41c5c37d15ba0ae9b6ad02054a8887fbb9f4a4e76b52c"
+      },
+      "native_input": {
+        "path": "native/QA-D5-UNBOUND-AGENT-EDIT-REFUSED.json",
+        "sha256": "07ba3505a5aa38e597d9dd3ebe0c2260804d7b8f419dfc9690844655247dfb18"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+        "sha256": "6b8be2415b9309c7a578670cb374f1f37d186499d14e7be15a90c38df97b9641"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+        "sha256": "f9bd441447f2635b89d2c662f3d0a3f442c6fd845bfe03b2049ab1861cfef0e4"
+      },
+      "native_input": {
+        "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
+        "sha256": "21150828ecdb76383c0517509e27de98556af470ef12d6a8f9a8bb4659c3a459"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+        "sha256": "6b8be2415b9309c7a578670cb374f1f37d186499d14e7be15a90c38df97b9641"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+        "sha256": "f9bd441447f2635b89d2c662f3d0a3f442c6fd845bfe03b2049ab1861cfef0e4"
+      },
+      "native_input": {
+        "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
+        "sha256": "21150828ecdb76383c0517509e27de98556af470ef12d6a8f9a8bb4659c3a459"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D6-LONG-TURN-CARD-LIFECYCLE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+        "sha256": "6b8be2415b9309c7a578670cb374f1f37d186499d14e7be15a90c38df97b9641"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D6-LONG-TURN-CARD-LIFECYCLE.yaml",
+        "sha256": "f9bd441447f2635b89d2c662f3d0a3f442c6fd845bfe03b2049ab1861cfef0e4"
+      },
+      "native_input": {
+        "path": "native/QA-D6-LONG-TURN-CARD-LIFECYCLE.json",
+        "sha256": "21150828ecdb76383c0517509e27de98556af470ef12d6a8f9a8bb4659c3a459"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-D7-BIG-WORKSPACE-CHECKPOINT.yaml",
+        "sha256": "ae66c5343aa5890082d042e1cb5217af5c73b6b91138f92ffd82a583f300e512"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D7-BIG-WORKSPACE-CHECKPOINT.yaml",
+        "sha256": "b44930e88ec880aa25b198748b1c99f5b143c4aac2db329c71a913149849d8f3"
+      },
+      "native_input": {
+        "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
+        "sha256": "2c316b91c1a14dc228f4da6444b37520c022a2668ed1c86983f88a4a568fb2fe"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D7-BIG-WORKSPACE-CHECKPOINT.yaml",
+        "sha256": "ae66c5343aa5890082d042e1cb5217af5c73b6b91138f92ffd82a583f300e512"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D7-BIG-WORKSPACE-CHECKPOINT.yaml",
+        "sha256": "b44930e88ec880aa25b198748b1c99f5b143c4aac2db329c71a913149849d8f3"
+      },
+      "native_input": {
+        "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
+        "sha256": "2c316b91c1a14dc228f4da6444b37520c022a2668ed1c86983f88a4a568fb2fe"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D7-BIG-WORKSPACE-CHECKPOINT.yaml",
+        "sha256": "ae66c5343aa5890082d042e1cb5217af5c73b6b91138f92ffd82a583f300e512"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D7-BIG-WORKSPACE-CHECKPOINT.yaml",
+        "sha256": "b44930e88ec880aa25b198748b1c99f5b143c4aac2db329c71a913149849d8f3"
+      },
+      "native_input": {
+        "path": "native/QA-D7-BIG-WORKSPACE-CHECKPOINT.json",
+        "sha256": "2c316b91c1a14dc228f4da6444b37520c022a2668ed1c86983f88a4a568fb2fe"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-CONNECT-OFFERED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-D8-GITHUB-CONNECT-OFFERED.yaml",
+        "sha256": "3b15f7c73ceee815e06c87b8d3582096aba7c4fa2407d3d1fda67fc5021f5d8c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D8-GITHUB-CONNECT-OFFERED.yaml",
+        "sha256": "0d774eaef640bcb864becc1212a1708911ce091b73fc92bf87b22efaa1e8285a"
+      },
+      "native_input": {
+        "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
+        "sha256": "4d2ece5582df49ed5df6499cb6cc65052115e686cbd9f79a64f28757a5c6536f"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-CONNECT-OFFERED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D8-GITHUB-CONNECT-OFFERED.yaml",
+        "sha256": "3b15f7c73ceee815e06c87b8d3582096aba7c4fa2407d3d1fda67fc5021f5d8c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D8-GITHUB-CONNECT-OFFERED.yaml",
+        "sha256": "0d774eaef640bcb864becc1212a1708911ce091b73fc92bf87b22efaa1e8285a"
+      },
+      "native_input": {
+        "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
+        "sha256": "4d2ece5582df49ed5df6499cb6cc65052115e686cbd9f79a64f28757a5c6536f"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-CONNECT-OFFERED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D8-GITHUB-CONNECT-OFFERED.yaml",
+        "sha256": "3b15f7c73ceee815e06c87b8d3582096aba7c4fa2407d3d1fda67fc5021f5d8c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D8-GITHUB-CONNECT-OFFERED.yaml",
+        "sha256": "0d774eaef640bcb864becc1212a1708911ce091b73fc92bf87b22efaa1e8285a"
+      },
+      "native_input": {
+        "path": "native/QA-D8-GITHUB-CONNECT-OFFERED.json",
+        "sha256": "4d2ece5582df49ed5df6499cb6cc65052115e686cbd9f79a64f28757a5c6536f"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+        "sha256": "897a57bd5fb3bb9a57e7870e4c5bc8f20de3a05a69c0ee98c4f0e1de83d4ce1d"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+        "sha256": "b69bbbfa18136846c9616b331c60052bf35ef72886ff241fed6e9177062aa6b2"
+      },
+      "native_input": {
+        "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
+        "sha256": "c7dc10dd65f076a8db0645be292f13bbe497df26d59d084cfa2d0e300379b859"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+        "sha256": "897a57bd5fb3bb9a57e7870e4c5bc8f20de3a05a69c0ee98c4f0e1de83d4ce1d"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+        "sha256": "b69bbbfa18136846c9616b331c60052bf35ef72886ff241fed6e9177062aa6b2"
+      },
+      "native_input": {
+        "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
+        "sha256": "c7dc10dd65f076a8db0645be292f13bbe497df26d59d084cfa2d0e300379b859"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-SAVED-KEY-SWITCH",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+        "sha256": "897a57bd5fb3bb9a57e7870e4c5bc8f20de3a05a69c0ee98c4f0e1de83d4ce1d"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-D8-GITHUB-SAVED-KEY-SWITCH.yaml",
+        "sha256": "b69bbbfa18136846c9616b331c60052bf35ef72886ff241fed6e9177062aa6b2"
+      },
+      "native_input": {
+        "path": "native/QA-D8-GITHUB-SAVED-KEY-SWITCH.json",
+        "sha256": "c7dc10dd65f076a8db0645be292f13bbe497df26d59d084cfa2d0e300379b859"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+        "sha256": "35396c8cc0bd2e0e2b85c94bd2614ca500f3d91244705efca9d596a7611c77a9"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+        "sha256": "ce22c80b0b6a8ec1f580f87ea22861a089ab8bc227feb999ab25bea0dc604199"
+      },
+      "native_input": {
+        "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
+        "sha256": "0625d11866eaf4320e75c7134486c896579006ac66750e921a541b667491ef97"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+        "sha256": "35396c8cc0bd2e0e2b85c94bd2614ca500f3d91244705efca9d596a7611c77a9"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+        "sha256": "ce22c80b0b6a8ec1f580f87ea22861a089ab8bc227feb999ab25bea0dc604199"
+      },
+      "native_input": {
+        "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
+        "sha256": "0625d11866eaf4320e75c7134486c896579006ac66750e921a541b667491ef97"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+        "sha256": "35396c8cc0bd2e0e2b85c94bd2614ca500f3d91244705efca9d596a7611c77a9"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.yaml",
+        "sha256": "ce22c80b0b6a8ec1f580f87ea22861a089ab8bc227feb999ab25bea0dc604199"
+      },
+      "native_input": {
+        "path": "native/QA-I3-TOOL-ONLY-NO-EMPTY-RESPONSE.json",
+        "sha256": "0625d11866eaf4320e75c7134486c896579006ac66750e921a541b667491ef97"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-I6-BARE-MENTION-THREAD-TITLE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first trigger requires an ingress/routing hook",
+      "source": {
+        "path": "scenarios/QA-I6-BARE-MENTION-THREAD-TITLE.yaml",
+        "sha256": "6fcc0049dc826ea8ea2079427a512405dfec9fcbb6382e0af0530da19011cda1"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I6-BARE-MENTION-THREAD-TITLE.yaml",
+        "sha256": "a97d081ec0ed214e77c4869f2bb3e73f1899906aca3f7b5a4b6496a793ffb082"
+      },
+      "native_input": {
+        "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
+        "sha256": "a4abcc9f863ee9b4175a3a8e00c0b2b1da6fc5b9f5189fd6a75f71ec0e4bad07"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-I6-BARE-MENTION-THREAD-TITLE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-I6-BARE-MENTION-THREAD-TITLE.yaml",
+        "sha256": "6fcc0049dc826ea8ea2079427a512405dfec9fcbb6382e0af0530da19011cda1"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I6-BARE-MENTION-THREAD-TITLE.yaml",
+        "sha256": "a97d081ec0ed214e77c4869f2bb3e73f1899906aca3f7b5a4b6496a793ffb082"
+      },
+      "native_input": {
+        "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
+        "sha256": "a4abcc9f863ee9b4175a3a8e00c0b2b1da6fc5b9f5189fd6a75f71ec0e4bad07"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-I6-BARE-MENTION-THREAD-TITLE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-I6-BARE-MENTION-THREAD-TITLE.yaml",
+        "sha256": "6fcc0049dc826ea8ea2079427a512405dfec9fcbb6382e0af0530da19011cda1"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I6-BARE-MENTION-THREAD-TITLE.yaml",
+        "sha256": "a97d081ec0ed214e77c4869f2bb3e73f1899906aca3f7b5a4b6496a793ffb082"
+      },
+      "native_input": {
+        "path": "native/QA-I6-BARE-MENTION-THREAD-TITLE.json",
+        "sha256": "a4abcc9f863ee9b4175a3a8e00c0b2b1da6fc5b9f5189fd6a75f71ec0e4bad07"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-I7-MCP-OAUTH-DISCOVERY",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+        "sha256": "53b8316ce89969d0a7d366952368a0138bab3c80d19dbb8378227d65204126fe"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+        "sha256": "85ae51df972c745edccfa895c7310ef3bcf5e368bd6fb7db948d70addd4e316d"
+      },
+      "native_input": {
+        "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
+        "sha256": "f2a4753df51c357a9c24228be397fabb39a8933b18fe286385ba4722dbf99ee5"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-I7-MCP-OAUTH-DISCOVERY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+        "sha256": "53b8316ce89969d0a7d366952368a0138bab3c80d19dbb8378227d65204126fe"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+        "sha256": "85ae51df972c745edccfa895c7310ef3bcf5e368bd6fb7db948d70addd4e316d"
+      },
+      "native_input": {
+        "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
+        "sha256": "f2a4753df51c357a9c24228be397fabb39a8933b18fe286385ba4722dbf99ee5"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-I7-MCP-OAUTH-DISCOVERY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+        "sha256": "53b8316ce89969d0a7d366952368a0138bab3c80d19dbb8378227d65204126fe"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-I7-MCP-OAUTH-DISCOVERY.yaml",
+        "sha256": "85ae51df972c745edccfa895c7310ef3bcf5e368bd6fb7db948d70addd4e316d"
+      },
+      "native_input": {
+        "path": "native/QA-I7-MCP-OAUTH-DISCOVERY.json",
+        "sha256": "f2a4753df51c357a9c24228be397fabb39a8933b18fe286385ba4722dbf99ee5"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-ISO-TEAM-CHANNEL-ISOLATION.yaml",
+        "sha256": "71bb9eaa942150ca210cf058b135ae661ccf8efea9b7b240d20689589fc5f03b"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-ISO-TEAM-CHANNEL-ISOLATION.yaml",
+        "sha256": "86d7c3fc054d0b06644c9259dd2cc5067250099ae057cf8fcada7a44d132804e"
+      },
+      "native_input": {
+        "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
+        "sha256": "f18271a575fbd9447d3fd29576cf41e8627d450bdb362af860276369714ff54a"
+      },
+      "location": "steps[5]"
+    },
+    {
+      "scenario_id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-ISO-TEAM-CHANNEL-ISOLATION.yaml",
+        "sha256": "71bb9eaa942150ca210cf058b135ae661ccf8efea9b7b240d20689589fc5f03b"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-ISO-TEAM-CHANNEL-ISOLATION.yaml",
+        "sha256": "86d7c3fc054d0b06644c9259dd2cc5067250099ae057cf8fcada7a44d132804e"
+      },
+      "native_input": {
+        "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
+        "sha256": "f18271a575fbd9447d3fd29576cf41e8627d450bdb362af860276369714ff54a"
+      },
+      "location": "steps[5]"
+    },
+    {
+      "scenario_id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-ISO-TEAM-CHANNEL-ISOLATION.yaml",
+        "sha256": "71bb9eaa942150ca210cf058b135ae661ccf8efea9b7b240d20689589fc5f03b"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-ISO-TEAM-CHANNEL-ISOLATION.yaml",
+        "sha256": "86d7c3fc054d0b06644c9259dd2cc5067250099ae057cf8fcada7a44d132804e"
+      },
+      "native_input": {
+        "path": "native/QA-ISO-TEAM-CHANNEL-ISOLATION.json",
+        "sha256": "f18271a575fbd9447d3fd29576cf41e8627d450bdb362af860276369714ff54a"
+      },
+      "location": "steps[5]"
+    },
+    {
+      "scenario_id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+      "backend": "anthropic",
+      "status": "AVAILABLE",
+      "reason": "first turn has pinned native input and an empty authored setup",
+      "source": {
+        "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+        "sha256": "7d12d48be56b679440aae77680ed243336efcef3264f4e7907d88e9d230b8550"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+        "sha256": "eb04c8d43a4dd17c481abf5dc5f2caa024d359a39fcee952377af6a7cf68d853"
+      },
+      "native_input": {
+        "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
+        "sha256": "0b74f2813d532f0b2fda07526dacb75a8376b41a7954ec5888a86b71354f0dc9"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+        "sha256": "7d12d48be56b679440aae77680ed243336efcef3264f4e7907d88e9d230b8550"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+        "sha256": "eb04c8d43a4dd17c481abf5dc5f2caa024d359a39fcee952377af6a7cf68d853"
+      },
+      "native_input": {
+        "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
+        "sha256": "0b74f2813d532f0b2fda07526dacb75a8376b41a7954ec5888a86b71354f0dc9"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+        "sha256": "7d12d48be56b679440aae77680ed243336efcef3264f4e7907d88e9d230b8550"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.yaml",
+        "sha256": "eb04c8d43a4dd17c481abf5dc5f2caa024d359a39fcee952377af6a7cf68d853"
+      },
+      "native_input": {
+        "path": "native/QA-NEW10-SPLIT-ANSWER-AND-CHUNK-REPLY.json",
+        "sha256": "0b74f2813d532f0b2fda07526dacb75a8376b41a7954ec5888a86b71354f0dc9"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.yaml",
+        "sha256": "e8bced529f5e0b82a4b81adee03d6c6a0db8bba7d4dec592e80c7e2ccae30d54"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.yaml",
+        "sha256": "0131ddee78102fde9cf163193b6603b112b0b19b6dc78e2674091b610f7107e7"
+      },
+      "native_input": {
+        "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
+        "sha256": "11a820f417cf1adc5c3be7ea678b7a591e2f84018d6bb9f8b9cd96d5f0bb725e"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.yaml",
+        "sha256": "e8bced529f5e0b82a4b81adee03d6c6a0db8bba7d4dec592e80c7e2ccae30d54"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.yaml",
+        "sha256": "0131ddee78102fde9cf163193b6603b112b0b19b6dc78e2674091b610f7107e7"
+      },
+      "native_input": {
+        "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
+        "sha256": "11a820f417cf1adc5c3be7ea678b7a591e2f84018d6bb9f8b9cd96d5f0bb725e"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.yaml",
+        "sha256": "e8bced529f5e0b82a4b81adee03d6c6a0db8bba7d4dec592e80c7e2ccae30d54"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.yaml",
+        "sha256": "0131ddee78102fde9cf163193b6603b112b0b19b6dc78e2674091b610f7107e7"
+      },
+      "native_input": {
+        "path": "native/QA-NEW12-AGENT-SWITCH-HANDOFF-COPY.json",
+        "sha256": "11a820f417cf1adc5c3be7ea678b7a591e2f84018d6bb9f8b9cd96d5f0bb725e"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW13-WRITERS-NONE-NOT-SILENT",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW13-WRITERS-NONE-NOT-SILENT.yaml",
+        "sha256": "74f05f5d5ea31528c571fbb16ea1433a3318b34786a9444557ae347e58dc2549"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW13-WRITERS-NONE-NOT-SILENT.yaml",
+        "sha256": "5197fe6b73810622ce644c1969e73bf8a2179bce8cd5df01aedd805ed2b7ddb5"
+      },
+      "native_input": {
+        "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
+        "sha256": "df8324730566433a363639c74e6d5ed1b5283ffc3768e4b5d4cea97077be6eb6"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW13-WRITERS-NONE-NOT-SILENT",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW13-WRITERS-NONE-NOT-SILENT.yaml",
+        "sha256": "74f05f5d5ea31528c571fbb16ea1433a3318b34786a9444557ae347e58dc2549"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW13-WRITERS-NONE-NOT-SILENT.yaml",
+        "sha256": "5197fe6b73810622ce644c1969e73bf8a2179bce8cd5df01aedd805ed2b7ddb5"
+      },
+      "native_input": {
+        "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
+        "sha256": "df8324730566433a363639c74e6d5ed1b5283ffc3768e4b5d4cea97077be6eb6"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW13-WRITERS-NONE-NOT-SILENT",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW13-WRITERS-NONE-NOT-SILENT.yaml",
+        "sha256": "74f05f5d5ea31528c571fbb16ea1433a3318b34786a9444557ae347e58dc2549"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW13-WRITERS-NONE-NOT-SILENT.yaml",
+        "sha256": "5197fe6b73810622ce644c1969e73bf8a2179bce8cd5df01aedd805ed2b7ddb5"
+      },
+      "native_input": {
+        "path": "native/QA-NEW13-WRITERS-NONE-NOT-SILENT.json",
+        "sha256": "df8324730566433a363639c74e6d5ed1b5283ffc3768e4b5d4cea97077be6eb6"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+        "sha256": "a41d54d93815ad8666ce0aa77416132a809c8bbb267f680a53f576f9f33b4bc8"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+        "sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43"
+      },
+      "native_input": {
+        "path": "native/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
+        "sha256": "3354b305dda13e728afc2dfedcfb4c312cb8f7fc2be0f7782315c4f20faa3495"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+        "sha256": "a41d54d93815ad8666ce0aa77416132a809c8bbb267f680a53f576f9f33b4bc8"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+        "sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43"
+      },
+      "native_input": {
+        "path": "native/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
+        "sha256": "3354b305dda13e728afc2dfedcfb4c312cb8f7fc2be0f7782315c4f20faa3495"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+        "sha256": "a41d54d93815ad8666ce0aa77416132a809c8bbb267f680a53f576f9f33b4bc8"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.yaml",
+        "sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43"
+      },
+      "native_input": {
+        "path": "native/QA-NEW14-MISSING-THREAD-PERMISSION-COPY.json",
+        "sha256": "3354b305dda13e728afc2dfedcfb4c312cb8f7fc2be0f7782315c4f20faa3495"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.yaml",
+        "sha256": "a7edaa2d4ddac15a6978619615d17c330f16f6d95b6b631fc3fbcedf07a8f5a2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.yaml",
+        "sha256": "8451c0e49a47642f87149ef65e126412ef38d48ec0d56f1b59b9ca415e9a5e25"
+      },
+      "native_input": {
+        "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
+        "sha256": "4afac2b2f341c6ca133f1c80574c3fadc8086f8bf3d239aa2f16153a8210aca9"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.yaml",
+        "sha256": "a7edaa2d4ddac15a6978619615d17c330f16f6d95b6b631fc3fbcedf07a8f5a2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.yaml",
+        "sha256": "8451c0e49a47642f87149ef65e126412ef38d48ec0d56f1b59b9ca415e9a5e25"
+      },
+      "native_input": {
+        "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
+        "sha256": "4afac2b2f341c6ca133f1c80574c3fadc8086f8bf3d239aa2f16153a8210aca9"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.yaml",
+        "sha256": "a7edaa2d4ddac15a6978619615d17c330f16f6d95b6b631fc3fbcedf07a8f5a2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.yaml",
+        "sha256": "8451c0e49a47642f87149ef65e126412ef38d48ec0d56f1b59b9ca415e9a5e25"
+      },
+      "native_input": {
+        "path": "native/QA-NEW15-CHANNEL-BUDGET-EXHAUSTED.json",
+        "sha256": "4afac2b2f341c6ca133f1c80574c3fadc8086f8bf3d239aa2f16153a8210aca9"
+      },
+      "location": "steps[2]"
+    },
+    {
+      "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored setup needs a separately bound admin/resource recipe",
+      "source": {
+        "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+        "sha256": "cf1b07433a5ddef5c0330df1c89073376964c585b42ce3bf8ac384cb6e32a5a3"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+        "sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa"
+      },
+      "native_input": {
+        "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
+        "sha256": "c2871be656479874ccbfdc11f5bc2faf9fa6b6cb659a881ce88880dac5aad4ab"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+        "sha256": "cf1b07433a5ddef5c0330df1c89073376964c585b42ce3bf8ac384cb6e32a5a3"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+        "sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa"
+      },
+      "native_input": {
+        "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
+        "sha256": "c2871be656479874ccbfdc11f5bc2faf9fa6b6cb659a881ce88880dac5aad4ab"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+        "sha256": "cf1b07433a5ddef5c0330df1c89073376964c585b42ce3bf8ac384cb6e32a5a3"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.yaml",
+        "sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa"
+      },
+      "native_input": {
+        "path": "native/QA-NEW16-TENANT-CREDIT-DEPLETED-COPY.json",
+        "sha256": "c2871be656479874ccbfdc11f5bc2faf9fa6b6cb659a881ce88880dac5aad4ab"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.yaml",
+        "sha256": "c022a2ba7090ddde64702bdcb0225e29eeb2d21465ed233267e821692cfefe5e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.yaml",
+        "sha256": "f493f41c51eb81bb210a167c794aa2e401ca8f2383a6fb6d9feaf04e3e53ff8a"
+      },
+      "native_input": {
+        "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
+        "sha256": "507ebc49dcdd3afa3e967ad92afdb2009e8ae04bcefe69107202e3ac46f8a907"
+      },
+      "location": "steps[3]"
+    },
+    {
+      "scenario_id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.yaml",
+        "sha256": "c022a2ba7090ddde64702bdcb0225e29eeb2d21465ed233267e821692cfefe5e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.yaml",
+        "sha256": "f493f41c51eb81bb210a167c794aa2e401ca8f2383a6fb6d9feaf04e3e53ff8a"
+      },
+      "native_input": {
+        "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
+        "sha256": "507ebc49dcdd3afa3e967ad92afdb2009e8ae04bcefe69107202e3ac46f8a907"
+      },
+      "location": "steps[3]"
+    },
+    {
+      "scenario_id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.yaml",
+        "sha256": "c022a2ba7090ddde64702bdcb0225e29eeb2d21465ed233267e821692cfefe5e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.yaml",
+        "sha256": "f493f41c51eb81bb210a167c794aa2e401ca8f2383a6fb6d9feaf04e3e53ff8a"
+      },
+      "native_input": {
+        "path": "native/QA-NEW17-MCP-USABLE-NEXT-MESSAGE.json",
+        "sha256": "507ebc49dcdd3afa3e967ad92afdb2009e8ae04bcefe69107202e3ac46f8a907"
+      },
+      "location": "steps[3]"
+    },
+    {
+      "scenario_id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW18-SKILL-ADD-YES-PLEASE.yaml",
+        "sha256": "fe2c6802cf2bc37abb2ce0ace4330093ba681890c12c883977b272204f84ae7e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW18-SKILL-ADD-YES-PLEASE.yaml",
+        "sha256": "b01080a8c2f67a74893bf26418671a8069a2961145eeb668e757be38b7d592ac"
+      },
+      "native_input": {
+        "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
+        "sha256": "4feda6b493e056b5f8bf8b6f66d1c1a58b8702ad90bf1f8d835016f357e2be53"
+      },
+      "location": "steps[3]"
+    },
+    {
+      "scenario_id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW18-SKILL-ADD-YES-PLEASE.yaml",
+        "sha256": "fe2c6802cf2bc37abb2ce0ace4330093ba681890c12c883977b272204f84ae7e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW18-SKILL-ADD-YES-PLEASE.yaml",
+        "sha256": "b01080a8c2f67a74893bf26418671a8069a2961145eeb668e757be38b7d592ac"
+      },
+      "native_input": {
+        "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
+        "sha256": "4feda6b493e056b5f8bf8b6f66d1c1a58b8702ad90bf1f8d835016f357e2be53"
+      },
+      "location": "steps[3]"
+    },
+    {
+      "scenario_id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW18-SKILL-ADD-YES-PLEASE.yaml",
+        "sha256": "fe2c6802cf2bc37abb2ce0ace4330093ba681890c12c883977b272204f84ae7e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW18-SKILL-ADD-YES-PLEASE.yaml",
+        "sha256": "b01080a8c2f67a74893bf26418671a8069a2961145eeb668e757be38b7d592ac"
+      },
+      "native_input": {
+        "path": "native/QA-NEW18-SKILL-ADD-YES-PLEASE.json",
+        "sha256": "4feda6b493e056b5f8bf8b6f66d1c1a58b8702ad90bf1f8d835016f357e2be53"
+      },
+      "location": "steps[3]"
+    },
+    {
+      "scenario_id": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.yaml",
+        "sha256": "b40559ff54b0b8cad9fadb53cad122fecf0ace5822238642aa141ef165ff8055"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.yaml",
+        "sha256": "80af642f9a5fdcd284114063036c4ca93be15608e33cc6670fca1745fac9b01d"
+      },
+      "native_input": {
+        "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
+        "sha256": "946e673cb103ca7fd0354c824db40d0f67c7d8036ef2f77da49840ccd89cd2eb"
+      },
+      "location": "steps[4]"
+    },
+    {
+      "scenario_id": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.yaml",
+        "sha256": "b40559ff54b0b8cad9fadb53cad122fecf0ace5822238642aa141ef165ff8055"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.yaml",
+        "sha256": "80af642f9a5fdcd284114063036c4ca93be15608e33cc6670fca1745fac9b01d"
+      },
+      "native_input": {
+        "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
+        "sha256": "946e673cb103ca7fd0354c824db40d0f67c7d8036ef2f77da49840ccd89cd2eb"
+      },
+      "location": "steps[4]"
+    },
+    {
+      "scenario_id": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.yaml",
+        "sha256": "b40559ff54b0b8cad9fadb53cad122fecf0ace5822238642aa141ef165ff8055"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.yaml",
+        "sha256": "80af642f9a5fdcd284114063036c4ca93be15608e33cc6670fca1745fac9b01d"
+      },
+      "native_input": {
+        "path": "native/QA-NEW19-SKILL-DELETE-WHILE-ATTACHED.json",
+        "sha256": "946e673cb103ca7fd0354c824db40d0f67c7d8036ef2f77da49840ccd89cd2eb"
+      },
+      "location": "steps[4]"
+    },
+    {
+      "scenario_id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+        "sha256": "bf8fa8b0efa6d44ef3d8423bc26232b0858c88b931f2ff879e9ca4ecdda426ba"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+        "sha256": "2a27dc919ebf783194c926b2995771b054f7effce7422c76a2df86c477b85b85"
+      },
+      "native_input": {
+        "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
+        "sha256": "0eb5dbe59ef831b30dda9b6f47d0fa99e36b669115021882540272d5487353e2"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+        "sha256": "bf8fa8b0efa6d44ef3d8423bc26232b0858c88b931f2ff879e9ca4ecdda426ba"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+        "sha256": "2a27dc919ebf783194c926b2995771b054f7effce7422c76a2df86c477b85b85"
+      },
+      "native_input": {
+        "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
+        "sha256": "0eb5dbe59ef831b30dda9b6f47d0fa99e36b669115021882540272d5487353e2"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW1-PDF-BARE-MENTION-NO-DROP",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+        "sha256": "bf8fa8b0efa6d44ef3d8423bc26232b0858c88b931f2ff879e9ca4ecdda426ba"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW1-PDF-BARE-MENTION-NO-DROP.yaml",
+        "sha256": "2a27dc919ebf783194c926b2995771b054f7effce7422c76a2df86c477b85b85"
+      },
+      "native_input": {
+        "path": "native/QA-NEW1-PDF-BARE-MENTION-NO-DROP.json",
+        "sha256": "0eb5dbe59ef831b30dda9b6f47d0fa99e36b669115021882540272d5487353e2"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+        "sha256": "fb84615d417dc122fb05997909af84ab26c8d80e8f1da2d90e3671236ef877bd"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+        "sha256": "704bf1ec45d4c86830d6c911e2e7a3bfbb14ff32985861b548d69b64bdb92fee"
+      },
+      "native_input": {
+        "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
+        "sha256": "89b73bee902e92a3ddd767137f5f6d68f0181d1626765f5fcd6b88e7d2b3c89a"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+        "sha256": "fb84615d417dc122fb05997909af84ab26c8d80e8f1da2d90e3671236ef877bd"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+        "sha256": "704bf1ec45d4c86830d6c911e2e7a3bfbb14ff32985861b548d69b64bdb92fee"
+      },
+      "native_input": {
+        "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
+        "sha256": "89b73bee902e92a3ddd767137f5f6d68f0181d1626765f5fcd6b88e7d2b3c89a"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW21-FORM-EXPIRY-UPDATES-CARD",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+        "sha256": "fb84615d417dc122fb05997909af84ab26c8d80e8f1da2d90e3671236ef877bd"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.yaml",
+        "sha256": "704bf1ec45d4c86830d6c911e2e7a3bfbb14ff32985861b548d69b64bdb92fee"
+      },
+      "native_input": {
+        "path": "native/QA-NEW21-FORM-EXPIRY-UPDATES-CARD.json",
+        "sha256": "89b73bee902e92a3ddd767137f5f6d68f0181d1626765f5fcd6b88e7d2b3c89a"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+        "sha256": "5adc9991e6ff9815357a9094a54ef5af0416c49d9a4899736dab6dab80fd848c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+        "sha256": "c1395059f170cfb3a8c2a6478607b8d7b50d3b14a84c01cdd4f798cc110a57cf"
+      },
+      "native_input": {
+        "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
+        "sha256": "4d181032358a197a55739f73d81703b74872296f9b18e71e82ee185814f64cae"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+        "sha256": "5adc9991e6ff9815357a9094a54ef5af0416c49d9a4899736dab6dab80fd848c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+        "sha256": "c1395059f170cfb3a8c2a6478607b8d7b50d3b14a84c01cdd4f798cc110a57cf"
+      },
+      "native_input": {
+        "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
+        "sha256": "4d181032358a197a55739f73d81703b74872296f9b18e71e82ee185814f64cae"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+        "sha256": "5adc9991e6ff9815357a9094a54ef5af0416c49d9a4899736dab6dab80fd848c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.yaml",
+        "sha256": "c1395059f170cfb3a8c2a6478607b8d7b50d3b14a84c01cdd4f798cc110a57cf"
+      },
+      "native_input": {
+        "path": "native/QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED.json",
+        "sha256": "4d181032358a197a55739f73d81703b74872296f9b18e71e82ee185814f64cae"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.yaml",
+        "sha256": "9be8650538081ba382cd637b637d6994adcf2d44e2bf4bed2b214ded21f06538"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.yaml",
+        "sha256": "19f4a996e788a397e0ee78504672da0ce921110cee077afd5796a2b21339f385"
+      },
+      "native_input": {
+        "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
+        "sha256": "39e8af4626224509e275c54a8845d604fa90c1787f685aeecc5bd2c37772cd44"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.yaml",
+        "sha256": "9be8650538081ba382cd637b637d6994adcf2d44e2bf4bed2b214ded21f06538"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.yaml",
+        "sha256": "19f4a996e788a397e0ee78504672da0ce921110cee077afd5796a2b21339f385"
+      },
+      "native_input": {
+        "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
+        "sha256": "39e8af4626224509e275c54a8845d604fa90c1787f685aeecc5bd2c37772cd44"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.yaml",
+        "sha256": "9be8650538081ba382cd637b637d6994adcf2d44e2bf4bed2b214ded21f06538"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.yaml",
+        "sha256": "19f4a996e788a397e0ee78504672da0ce921110cee077afd5796a2b21339f385"
+      },
+      "native_input": {
+        "path": "native/QA-NEW23-ROUTINE-WITHOUT-DESTINATION.json",
+        "sha256": "39e8af4626224509e275c54a8845d604fa90c1787f685aeecc5bd2c37772cd44"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+        "sha256": "fe888733226cf71834accbac70d11d611794031440c6c6b5c2a31e54bd56fc9e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+        "sha256": "8e3c7e0021621387a6a8bfd1ad5c04030e3b450dc506be5f0371da5c70ebf0e0"
+      },
+      "native_input": {
+        "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
+        "sha256": "d8888eab27cd117581122c446670310846effe8e157536e7fbd556e0c3328fbb"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+        "sha256": "fe888733226cf71834accbac70d11d611794031440c6c6b5c2a31e54bd56fc9e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+        "sha256": "8e3c7e0021621387a6a8bfd1ad5c04030e3b450dc506be5f0371da5c70ebf0e0"
+      },
+      "native_input": {
+        "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
+        "sha256": "d8888eab27cd117581122c446670310846effe8e157536e7fbd556e0c3328fbb"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW24-EXPIRED-LINK-HTML-PAGE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+        "sha256": "fe888733226cf71834accbac70d11d611794031440c6c6b5c2a31e54bd56fc9e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW24-EXPIRED-LINK-HTML-PAGE.yaml",
+        "sha256": "8e3c7e0021621387a6a8bfd1ad5c04030e3b450dc506be5f0371da5c70ebf0e0"
+      },
+      "native_input": {
+        "path": "native/QA-NEW24-EXPIRED-LINK-HTML-PAGE.json",
+        "sha256": "d8888eab27cd117581122c446670310846effe8e157536e7fbd556e0c3328fbb"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW25-DM-NOT-SILENT",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW25-DM-NOT-SILENT.yaml",
+        "sha256": "4e88d85ec4d7ba2ecf879143b751b63e1ed851cc64f31529249894ceb8bb6d5f"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW25-DM-NOT-SILENT.yaml",
+        "sha256": "2f67109f5bbd7db25f2bab91dd33c6907b04d8db8ca1122e6f68e9d35d9ccef5"
+      },
+      "native_input": {
+        "path": "native/QA-NEW25-DM-NOT-SILENT.json",
+        "sha256": "eaf585349c58cada5e4be9e9c2fcd7b4bf77bab083de01b227126e388f397b57"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW25-DM-NOT-SILENT",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW25-DM-NOT-SILENT.yaml",
+        "sha256": "4e88d85ec4d7ba2ecf879143b751b63e1ed851cc64f31529249894ceb8bb6d5f"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW25-DM-NOT-SILENT.yaml",
+        "sha256": "2f67109f5bbd7db25f2bab91dd33c6907b04d8db8ca1122e6f68e9d35d9ccef5"
+      },
+      "native_input": {
+        "path": "native/QA-NEW25-DM-NOT-SILENT.json",
+        "sha256": "eaf585349c58cada5e4be9e9c2fcd7b4bf77bab083de01b227126e388f397b57"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW25-DM-NOT-SILENT",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW25-DM-NOT-SILENT.yaml",
+        "sha256": "4e88d85ec4d7ba2ecf879143b751b63e1ed851cc64f31529249894ceb8bb6d5f"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW25-DM-NOT-SILENT.yaml",
+        "sha256": "2f67109f5bbd7db25f2bab91dd33c6907b04d8db8ca1122e6f68e9d35d9ccef5"
+      },
+      "native_input": {
+        "path": "native/QA-NEW25-DM-NOT-SILENT.json",
+        "sha256": "eaf585349c58cada5e4be9e9c2fcd7b4bf77bab083de01b227126e388f397b57"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+        "sha256": "93aacf0d44078f443a1bbddea26cb2446b9d0edcec8d9bac297fa4b2edc79850"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+        "sha256": "2c344afba96bd17810e5debe5aabd7216c3efb6cbeb4ee691da9dc95d5202f88"
+      },
+      "native_input": {
+        "path": "native/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
+        "sha256": "d74ffc02441050ff9ac3885aa9fb09a3c9b3a885cf4f2d34624399ff35cf4439"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+        "sha256": "93aacf0d44078f443a1bbddea26cb2446b9d0edcec8d9bac297fa4b2edc79850"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+        "sha256": "2c344afba96bd17810e5debe5aabd7216c3efb6cbeb4ee691da9dc95d5202f88"
+      },
+      "native_input": {
+        "path": "native/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
+        "sha256": "d74ffc02441050ff9ac3885aa9fb09a3c9b3a885cf4f2d34624399ff35cf4439"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW26-WRITERS-NONE-SELECT-CONFIRM",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+        "sha256": "93aacf0d44078f443a1bbddea26cb2446b9d0edcec8d9bac297fa4b2edc79850"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.yaml",
+        "sha256": "2c344afba96bd17810e5debe5aabd7216c3efb6cbeb4ee691da9dc95d5202f88"
+      },
+      "native_input": {
+        "path": "native/QA-NEW26-WRITERS-NONE-SELECT-CONFIRM.json",
+        "sha256": "d74ffc02441050ff9ac3885aa9fb09a3c9b3a885cf4f2d34624399ff35cf4439"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored resource/admin steps need a separately pinned setup recipe",
+      "source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+        "sha256": "21dbb0f275e8770c69a2896affa7755bf74a118bb91f8a63b8e76bb4f8c3310e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+        "sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd"
+      },
+      "native_input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
+        "sha256": "009c01539ac6021bd4f3ed8050b42bc90778075a02807b0274741a2f0d8d9827"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+        "sha256": "21dbb0f275e8770c69a2896affa7755bf74a118bb91f8a63b8e76bb4f8c3310e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+        "sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd"
+      },
+      "native_input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
+        "sha256": "009c01539ac6021bd4f3ed8050b42bc90778075a02807b0274741a2f0d8d9827"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+        "sha256": "21dbb0f275e8770c69a2896affa7755bf74a118bb91f8a63b8e76bb4f8c3310e"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-HEADLESS.yaml",
+        "sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd"
+      },
+      "native_input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-HEADLESS.json",
+        "sha256": "009c01539ac6021bd4f3ed8050b42bc90778075a02807b0274741a2f0d8d9827"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+        "sha256": "f3f4567a26e316908c98c0fca9198e2d2f912cc086f906b819f100fb729f6fc2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+        "sha256": "4eb9c2a17a743af883fff6020e5346247d9e4c1a74977400fa16c870ffec6bab"
+      },
+      "native_input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
+        "sha256": "68a1c9c3110255a71e20461c652a890e5af6fe9b1ecb9a803c95726743a86675"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+        "sha256": "f3f4567a26e316908c98c0fca9198e2d2f912cc086f906b819f100fb729f6fc2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+        "sha256": "4eb9c2a17a743af883fff6020e5346247d9e4c1a74977400fa16c870ffec6bab"
+      },
+      "native_input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
+        "sha256": "68a1c9c3110255a71e20461c652a890e5af6fe9b1ecb9a803c95726743a86675"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+        "sha256": "f3f4567a26e316908c98c0fca9198e2d2f912cc086f906b819f100fb729f6fc2"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.yaml",
+        "sha256": "4eb9c2a17a743af883fff6020e5346247d9e4c1a74977400fa16c870ffec6bab"
+      },
+      "native_input": {
+        "path": "native/QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM.json",
+        "sha256": "68a1c9c3110255a71e20461c652a890e5af6fe9b1ecb9a803c95726743a86675"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+        "sha256": "35caf0a09150c7c813e059e49c13e94668b50ac46ba7f129a42f59c10357f30c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+        "sha256": "382913b9d9d5c3087ab1a2a9405622049b4569b0b38d4bd5d55d47020a92e288"
+      },
+      "native_input": {
+        "path": "native/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
+        "sha256": "bbeac7a3574729efac78f8789bf8296876b58569fcd8fbd81b96f8bcf7bf16f2"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+        "sha256": "35caf0a09150c7c813e059e49c13e94668b50ac46ba7f129a42f59c10357f30c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+        "sha256": "382913b9d9d5c3087ab1a2a9405622049b4569b0b38d4bd5d55d47020a92e288"
+      },
+      "native_input": {
+        "path": "native/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
+        "sha256": "bbeac7a3574729efac78f8789bf8296876b58569fcd8fbd81b96f8bcf7bf16f2"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW28-OAUTH-ABANDONED-AND-RESUME",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+        "sha256": "35caf0a09150c7c813e059e49c13e94668b50ac46ba7f129a42f59c10357f30c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.yaml",
+        "sha256": "382913b9d9d5c3087ab1a2a9405622049b4569b0b38d4bd5d55d47020a92e288"
+      },
+      "native_input": {
+        "path": "native/QA-NEW28-OAUTH-ABANDONED-AND-RESUME.json",
+        "sha256": "bbeac7a3574729efac78f8789bf8296876b58569fcd8fbd81b96f8bcf7bf16f2"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW29-DM-CONVERSATION-FORM",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+        "sha256": "6da69a60c049506cf9adadd4729c4e522abd1a6ee25a6f745b4a55509a36a75c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+        "sha256": "d6ab4b94d50a03e0a84ed446f0e4233bae1238579ef9fa60264731ef5589fa7b"
+      },
+      "native_input": {
+        "path": "native/QA-NEW29-DM-CONVERSATION-FORM.json",
+        "sha256": "a4524493a1e3d2e19136604e7ac7fa855908f9d23d36c1464a179f14f1cadadd"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW29-DM-CONVERSATION-FORM",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+        "sha256": "6da69a60c049506cf9adadd4729c4e522abd1a6ee25a6f745b4a55509a36a75c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+        "sha256": "d6ab4b94d50a03e0a84ed446f0e4233bae1238579ef9fa60264731ef5589fa7b"
+      },
+      "native_input": {
+        "path": "native/QA-NEW29-DM-CONVERSATION-FORM.json",
+        "sha256": "a4524493a1e3d2e19136604e7ac7fa855908f9d23d36c1464a179f14f1cadadd"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW29-DM-CONVERSATION-FORM",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+        "sha256": "6da69a60c049506cf9adadd4729c4e522abd1a6ee25a6f745b4a55509a36a75c"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW29-DM-CONVERSATION-FORM.yaml",
+        "sha256": "d6ab4b94d50a03e0a84ed446f0e4233bae1238579ef9fa60264731ef5589fa7b"
+      },
+      "native_input": {
+        "path": "native/QA-NEW29-DM-CONVERSATION-FORM.json",
+        "sha256": "a4524493a1e3d2e19136604e7ac7fa855908f9d23d36c1464a179f14f1cadadd"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW2-CSV-ATTACHMENT-READ",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW2-CSV-ATTACHMENT-READ.yaml",
+        "sha256": "020db2e88c35ab3b91c6e277b0dcb0f4224c654053c0f13e299e89dbd2349813"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW2-CSV-ATTACHMENT-READ.yaml",
+        "sha256": "838a1b0109d559bd12b29e40e030d2be470361f989f667bad0916a90743dc249"
+      },
+      "native_input": {
+        "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
+        "sha256": "203d6e85a1bbfd9260f7c1e37fd642c1597e77b9136950b4e8fd24c51673e254"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW2-CSV-ATTACHMENT-READ",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW2-CSV-ATTACHMENT-READ.yaml",
+        "sha256": "020db2e88c35ab3b91c6e277b0dcb0f4224c654053c0f13e299e89dbd2349813"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW2-CSV-ATTACHMENT-READ.yaml",
+        "sha256": "838a1b0109d559bd12b29e40e030d2be470361f989f667bad0916a90743dc249"
+      },
+      "native_input": {
+        "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
+        "sha256": "203d6e85a1bbfd9260f7c1e37fd642c1597e77b9136950b4e8fd24c51673e254"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW2-CSV-ATTACHMENT-READ",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW2-CSV-ATTACHMENT-READ.yaml",
+        "sha256": "020db2e88c35ab3b91c6e277b0dcb0f4224c654053c0f13e299e89dbd2349813"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW2-CSV-ATTACHMENT-READ.yaml",
+        "sha256": "838a1b0109d559bd12b29e40e030d2be470361f989f667bad0916a90743dc249"
+      },
+      "native_input": {
+        "path": "native/QA-NEW2-CSV-ATTACHMENT-READ.json",
+        "sha256": "203d6e85a1bbfd9260f7c1e37fd642c1597e77b9136950b4e8fd24c51673e254"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW30-APPROVE-AFTER-RESTART",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+        "sha256": "cf01acfef84229998d0bdc1456c0f6981cdbf346c4ab92bba3cbed581fb2e24f"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+        "sha256": "fdabed807534a642da88e5cb1a46baac789583a0b7bd62e8a941ff051acacb37"
+      },
+      "native_input": {
+        "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
+        "sha256": "a78f19bffe7284d360c7edff3f7f478d009b89927c865b787e132525b355f1b7"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW30-APPROVE-AFTER-RESTART",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+        "sha256": "cf01acfef84229998d0bdc1456c0f6981cdbf346c4ab92bba3cbed581fb2e24f"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+        "sha256": "fdabed807534a642da88e5cb1a46baac789583a0b7bd62e8a941ff051acacb37"
+      },
+      "native_input": {
+        "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
+        "sha256": "a78f19bffe7284d360c7edff3f7f478d009b89927c865b787e132525b355f1b7"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW30-APPROVE-AFTER-RESTART",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+        "sha256": "cf01acfef84229998d0bdc1456c0f6981cdbf346c4ab92bba3cbed581fb2e24f"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+        "sha256": "fdabed807534a642da88e5cb1a46baac789583a0b7bd62e8a941ff051acacb37"
+      },
+      "native_input": {
+        "path": "native/QA-NEW30-APPROVE-AFTER-RESTART.json",
+        "sha256": "a78f19bffe7284d360c7edff3f7f478d009b89927c865b787e132525b355f1b7"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW31-PANELS-AFTER-RESTART",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW31-PANELS-AFTER-RESTART.yaml",
+        "sha256": "7d30c335867a2e51dc538063e56bfe77b57c6d466afe1493b8262590997f51fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW31-PANELS-AFTER-RESTART.yaml",
+        "sha256": "365e787511f21c7a011599afc373125ce92679aac3f30f25acd5ae355761b9ca"
+      },
+      "native_input": {
+        "path": "native/QA-NEW31-PANELS-AFTER-RESTART.json",
+        "sha256": "34e870a3ab37fe3639721bee42a71f6b3ae71978afbbb69e860c674835a946d7"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW31-PANELS-AFTER-RESTART",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW31-PANELS-AFTER-RESTART.yaml",
+        "sha256": "7d30c335867a2e51dc538063e56bfe77b57c6d466afe1493b8262590997f51fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW31-PANELS-AFTER-RESTART.yaml",
+        "sha256": "365e787511f21c7a011599afc373125ce92679aac3f30f25acd5ae355761b9ca"
+      },
+      "native_input": {
+        "path": "native/QA-NEW31-PANELS-AFTER-RESTART.json",
+        "sha256": "34e870a3ab37fe3639721bee42a71f6b3ae71978afbbb69e860c674835a946d7"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW31-PANELS-AFTER-RESTART",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW31-PANELS-AFTER-RESTART.yaml",
+        "sha256": "7d30c335867a2e51dc538063e56bfe77b57c6d466afe1493b8262590997f51fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW31-PANELS-AFTER-RESTART.yaml",
+        "sha256": "365e787511f21c7a011599afc373125ce92679aac3f30f25acd5ae355761b9ca"
+      },
+      "native_input": {
+        "path": "native/QA-NEW31-PANELS-AFTER-RESTART.json",
+        "sha256": "34e870a3ab37fe3639721bee42a71f6b3ae71978afbbb69e860c674835a946d7"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW32-ADD-SKILL-ON-BUILTIN",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW32-ADD-SKILL-ON-BUILTIN.yaml",
+        "sha256": "0a89bf67568dc6060d4ec1868f86068dae0cdc32ffee23c0147122e9f4febebc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW32-ADD-SKILL-ON-BUILTIN.yaml",
+        "sha256": "b7db3841fad45b0d473f673ff1919695618f1fab48853e1e28f94d477fa66b9f"
+      },
+      "native_input": {
+        "path": "native/QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
+        "sha256": "6d3e5d4a15c9e523270556e5c7e44d83e57cc784b282e1e7c409e0375004a39a"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW32-ADD-SKILL-ON-BUILTIN",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW32-ADD-SKILL-ON-BUILTIN.yaml",
+        "sha256": "0a89bf67568dc6060d4ec1868f86068dae0cdc32ffee23c0147122e9f4febebc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW32-ADD-SKILL-ON-BUILTIN.yaml",
+        "sha256": "b7db3841fad45b0d473f673ff1919695618f1fab48853e1e28f94d477fa66b9f"
+      },
+      "native_input": {
+        "path": "native/QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
+        "sha256": "6d3e5d4a15c9e523270556e5c7e44d83e57cc784b282e1e7c409e0375004a39a"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW32-ADD-SKILL-ON-BUILTIN",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW32-ADD-SKILL-ON-BUILTIN.yaml",
+        "sha256": "0a89bf67568dc6060d4ec1868f86068dae0cdc32ffee23c0147122e9f4febebc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW32-ADD-SKILL-ON-BUILTIN.yaml",
+        "sha256": "b7db3841fad45b0d473f673ff1919695618f1fab48853e1e28f94d477fa66b9f"
+      },
+      "native_input": {
+        "path": "native/QA-NEW32-ADD-SKILL-ON-BUILTIN.json",
+        "sha256": "6d3e5d4a15c9e523270556e5c7e44d83e57cc784b282e1e7c409e0375004a39a"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+        "sha256": "5fb1dc2891ac5a7612f1928c51aeb3ff38d32efe05c403207eb6d3e17e4bb823"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+        "sha256": "3706a81575ed8a7d094c29f0b0d70457e47b99ea45e41bbf7502039e8556b839"
+      },
+      "native_input": {
+        "path": "native/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
+        "sha256": "934e69ca863517bbfb01bc8edfb1a1ddca7571658d728d858e7036f085be6499"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+        "sha256": "5fb1dc2891ac5a7612f1928c51aeb3ff38d32efe05c403207eb6d3e17e4bb823"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+        "sha256": "3706a81575ed8a7d094c29f0b0d70457e47b99ea45e41bbf7502039e8556b839"
+      },
+      "native_input": {
+        "path": "native/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
+        "sha256": "934e69ca863517bbfb01bc8edfb1a1ddca7571658d728d858e7036f085be6499"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+        "sha256": "5fb1dc2891ac5a7612f1928c51aeb3ff38d32efe05c403207eb6d3e17e4bb823"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.yaml",
+        "sha256": "3706a81575ed8a7d094c29f0b0d70457e47b99ea45e41bbf7502039e8556b839"
+      },
+      "native_input": {
+        "path": "native/QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG.json",
+        "sha256": "934e69ca863517bbfb01bc8edfb1a1ddca7571658d728d858e7036f085be6499"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "no authored host turn in this scenario",
+      "source": {
+        "path": "scenarios/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.yaml",
+        "sha256": "406a84ece8a252b587439234d7dd34d949f6b61d423b9d17e74261ff8fe3feff"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.yaml",
+        "sha256": "9824a6c3df2a1dd355b71e4bd07aefc8840d89175d3a4d411920bfcd92c9473c"
+      },
+      "native_input": {
+        "path": "native/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
+        "sha256": "d2c9497213a4d368804d74186e34433cc72ceee3c649302453ae25c27054a196"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.yaml",
+        "sha256": "406a84ece8a252b587439234d7dd34d949f6b61d423b9d17e74261ff8fe3feff"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.yaml",
+        "sha256": "9824a6c3df2a1dd355b71e4bd07aefc8840d89175d3a4d411920bfcd92c9473c"
+      },
+      "native_input": {
+        "path": "native/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
+        "sha256": "d2c9497213a4d368804d74186e34433cc72ceee3c649302453ae25c27054a196"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.yaml",
+        "sha256": "406a84ece8a252b587439234d7dd34d949f6b61d423b9d17e74261ff8fe3feff"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.yaml",
+        "sha256": "9824a6c3df2a1dd355b71e4bd07aefc8840d89175d3a4d411920bfcd92c9473c"
+      },
+      "native_input": {
+        "path": "native/QA-NEW34-SLACK-CREDENTIAL-AND-APPROVAL-PARITY.json",
+        "sha256": "d2c9497213a4d368804d74186e34433cc72ceee3c649302453ae25c27054a196"
+      },
+      "location": null
+    },
+    {
+      "scenario_id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.yaml",
+        "sha256": "36503636ef4abf63aadd86a216849f78802aa72184ff36bd7455273824cdbcc1"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.yaml",
+        "sha256": "11eb9261b0718da078bbc9118430f2963e6c191a23d82e2e51a58ecef278d513"
+      },
+      "native_input": {
+        "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
+        "sha256": "4278c64a62c86a599c3fa1db1c16430582f116e33f2e5da1884fc5248958602b"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.yaml",
+        "sha256": "36503636ef4abf63aadd86a216849f78802aa72184ff36bd7455273824cdbcc1"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.yaml",
+        "sha256": "11eb9261b0718da078bbc9118430f2963e6c191a23d82e2e51a58ecef278d513"
+      },
+      "native_input": {
+        "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
+        "sha256": "4278c64a62c86a599c3fa1db1c16430582f116e33f2e5da1884fc5248958602b"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.yaml",
+        "sha256": "36503636ef4abf63aadd86a216849f78802aa72184ff36bd7455273824cdbcc1"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.yaml",
+        "sha256": "11eb9261b0718da078bbc9118430f2963e6c191a23d82e2e51a58ecef278d513"
+      },
+      "native_input": {
+        "path": "native/QA-NEW35-ROUTINE-FAILURE-IS-REPORTED.json",
+        "sha256": "4278c64a62c86a599c3fa1db1c16430582f116e33f2e5da1884fc5248958602b"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW36-OVERSIZE-OUTPUT-KEPT",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW36-OVERSIZE-OUTPUT-KEPT.yaml",
+        "sha256": "92ebda5695993b43ab8608b539651b2e6b088db3739ad099aa21ae05436c3f09"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW36-OVERSIZE-OUTPUT-KEPT.yaml",
+        "sha256": "a7791538f249164302b78f2571e8ab2526938400a5dd26bb9efcb72e31b595a2"
+      },
+      "native_input": {
+        "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
+        "sha256": "b023c5378713071f1a75cea3da7eacfd3f9bd3601d7932a84a2550d9c55bd179"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW36-OVERSIZE-OUTPUT-KEPT",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW36-OVERSIZE-OUTPUT-KEPT.yaml",
+        "sha256": "92ebda5695993b43ab8608b539651b2e6b088db3739ad099aa21ae05436c3f09"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW36-OVERSIZE-OUTPUT-KEPT.yaml",
+        "sha256": "a7791538f249164302b78f2571e8ab2526938400a5dd26bb9efcb72e31b595a2"
+      },
+      "native_input": {
+        "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
+        "sha256": "b023c5378713071f1a75cea3da7eacfd3f9bd3601d7932a84a2550d9c55bd179"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW36-OVERSIZE-OUTPUT-KEPT",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW36-OVERSIZE-OUTPUT-KEPT.yaml",
+        "sha256": "92ebda5695993b43ab8608b539651b2e6b088db3739ad099aa21ae05436c3f09"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW36-OVERSIZE-OUTPUT-KEPT.yaml",
+        "sha256": "a7791538f249164302b78f2571e8ab2526938400a5dd26bb9efcb72e31b595a2"
+      },
+      "native_input": {
+        "path": "native/QA-NEW36-OVERSIZE-OUTPUT-KEPT.json",
+        "sha256": "b023c5378713071f1a75cea3da7eacfd3f9bd3601d7932a84a2550d9c55bd179"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+      "backend": "anthropic",
+      "status": "AVAILABLE",
+      "reason": "first turn has pinned native input and an empty authored setup",
+      "source": {
+        "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+        "sha256": "894e1627613b87ef4cd61e4a780f6d81fca3f4f910eb5c884ac08921539860c8"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+        "sha256": "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca"
+      },
+      "native_input": {
+        "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
+        "sha256": "ce6f6b35576ed8665edec7f4c48a371d399a512a3a2558a3231c852710d84f5c"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+        "sha256": "894e1627613b87ef4cd61e4a780f6d81fca3f4f910eb5c884ac08921539860c8"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+        "sha256": "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca"
+      },
+      "native_input": {
+        "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
+        "sha256": "ce6f6b35576ed8665edec7f4c48a371d399a512a3a2558a3231c852710d84f5c"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW37-MARKDOWN-TABLE-READABLE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+        "sha256": "894e1627613b87ef4cd61e4a780f6d81fca3f4f910eb5c884ac08921539860c8"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW37-MARKDOWN-TABLE-READABLE.yaml",
+        "sha256": "9f12f8845f03468665c1bc13a86122ff2922fd3bf59dd8d02a0387da7831a2ca"
+      },
+      "native_input": {
+        "path": "native/QA-NEW37-MARKDOWN-TABLE-READABLE.json",
+        "sha256": "ce6f6b35576ed8665edec7f4c48a371d399a512a3a2558a3231c852710d84f5c"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW3-BURST-CHANNEL-MENTIONS",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first trigger requires an ingress/routing hook",
+      "source": {
+        "path": "scenarios/QA-NEW3-BURST-CHANNEL-MENTIONS.yaml",
+        "sha256": "4a87cda4fff0b5652f8bdcc3999a9d794ae0668e178edd62a4eec8efeed12612"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW3-BURST-CHANNEL-MENTIONS.yaml",
+        "sha256": "cdcb84c71265fbd8ef411b5b7efe482ce207cb343db10bea2efda9398fb0e833"
+      },
+      "native_input": {
+        "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
+        "sha256": "b5f9a7a8c246ea93a139ecebe2f739bbf87ddba66098b341eb7b8c579560c4eb"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW3-BURST-CHANNEL-MENTIONS",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW3-BURST-CHANNEL-MENTIONS.yaml",
+        "sha256": "4a87cda4fff0b5652f8bdcc3999a9d794ae0668e178edd62a4eec8efeed12612"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW3-BURST-CHANNEL-MENTIONS.yaml",
+        "sha256": "cdcb84c71265fbd8ef411b5b7efe482ce207cb343db10bea2efda9398fb0e833"
+      },
+      "native_input": {
+        "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
+        "sha256": "b5f9a7a8c246ea93a139ecebe2f739bbf87ddba66098b341eb7b8c579560c4eb"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW3-BURST-CHANNEL-MENTIONS",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW3-BURST-CHANNEL-MENTIONS.yaml",
+        "sha256": "4a87cda4fff0b5652f8bdcc3999a9d794ae0668e178edd62a4eec8efeed12612"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW3-BURST-CHANNEL-MENTIONS.yaml",
+        "sha256": "cdcb84c71265fbd8ef411b5b7efe482ce207cb343db10bea2efda9398fb0e833"
+      },
+      "native_input": {
+        "path": "native/QA-NEW3-BURST-CHANNEL-MENTIONS.json",
+        "sha256": "b5f9a7a8c246ea93a139ecebe2f739bbf87ddba66098b341eb7b8c579560c4eb"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first trigger requires an ingress/routing hook",
+      "source": {
+        "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+        "sha256": "ae31aabcc5405929e6a20b53a09f03162231a1b04e70f31907c332c248da45c4"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+        "sha256": "6078f547156a351a5d1e5ee0ba56f5bb2cd397ab5e54f46920021b0c42de8db1"
+      },
+      "native_input": {
+        "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
+        "sha256": "d6fc4b0cea9cfd967f5037401b55480cce4c3f9528fa7c3018de416a4fc38c4d"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+        "sha256": "ae31aabcc5405929e6a20b53a09f03162231a1b04e70f31907c332c248da45c4"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+        "sha256": "6078f547156a351a5d1e5ee0ba56f5bb2cd397ab5e54f46920021b0c42de8db1"
+      },
+      "native_input": {
+        "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
+        "sha256": "d6fc4b0cea9cfd967f5037401b55480cce4c3f9528fa7c3018de416a4fc38c4d"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW4-DOUBLE-MENTION-DEDUPE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+        "sha256": "ae31aabcc5405929e6a20b53a09f03162231a1b04e70f31907c332c248da45c4"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW4-DOUBLE-MENTION-DEDUPE.yaml",
+        "sha256": "6078f547156a351a5d1e5ee0ba56f5bb2cd397ab5e54f46920021b0c42de8db1"
+      },
+      "native_input": {
+        "path": "native/QA-NEW4-DOUBLE-MENTION-DEDUPE.json",
+        "sha256": "d6fc4b0cea9cfd967f5037401b55480cce4c3f9528fa7c3018de416a4fc38c4d"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW5-THREAD-QUEUE-WHILE-BUSY",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "first native turn has an unresolved fixture effect or completion gate",
+      "source": {
+        "path": "scenarios/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.yaml",
+        "sha256": "ff14919ffd114d5549fd420dbcfb933a78c4fa6d06486fe415c057f523530cdc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.yaml",
+        "sha256": "5f5c970d774ad6dfc4ccd11b90a3b638ca4337bea64c11fc0b83bf70ac1e70bc"
+      },
+      "native_input": {
+        "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
+        "sha256": "e2cc10b5adf572e247b3a89031b2f6f67063e8728c3f293163a08db79374aa95"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW5-THREAD-QUEUE-WHILE-BUSY",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.yaml",
+        "sha256": "ff14919ffd114d5549fd420dbcfb933a78c4fa6d06486fe415c057f523530cdc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.yaml",
+        "sha256": "5f5c970d774ad6dfc4ccd11b90a3b638ca4337bea64c11fc0b83bf70ac1e70bc"
+      },
+      "native_input": {
+        "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
+        "sha256": "e2cc10b5adf572e247b3a89031b2f6f67063e8728c3f293163a08db79374aa95"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW5-THREAD-QUEUE-WHILE-BUSY",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.yaml",
+        "sha256": "ff14919ffd114d5549fd420dbcfb933a78c4fa6d06486fe415c057f523530cdc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.yaml",
+        "sha256": "5f5c970d774ad6dfc4ccd11b90a3b638ca4337bea64c11fc0b83bf70ac1e70bc"
+      },
+      "native_input": {
+        "path": "native/QA-NEW5-THREAD-QUEUE-WHILE-BUSY.json",
+        "sha256": "e2cc10b5adf572e247b3a89031b2f6f67063e8728c3f293163a08db79374aa95"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW6-TENANT-CAP-QUEUE",
+      "backend": "anthropic",
+      "status": "PENDING",
+      "reason": "authored setup needs a separately bound admin/resource recipe",
+      "source": {
+        "path": "scenarios/QA-NEW6-TENANT-CAP-QUEUE.yaml",
+        "sha256": "a007e3309a969e754c940547b74d05b312f7dde93e594f92f5f1ae31fbcd9510"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW6-TENANT-CAP-QUEUE.yaml",
+        "sha256": "7a699ca0cd236b3ebee6ce7729188e4e458a6d77a75489dea137cda77e789ee3"
+      },
+      "native_input": {
+        "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
+        "sha256": "3948a3cfd1cc029e21185724d20d7f9bf8b40df9fec3e29f3a8b52dd0904a5a7"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW6-TENANT-CAP-QUEUE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW6-TENANT-CAP-QUEUE.yaml",
+        "sha256": "a007e3309a969e754c940547b74d05b312f7dde93e594f92f5f1ae31fbcd9510"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW6-TENANT-CAP-QUEUE.yaml",
+        "sha256": "7a699ca0cd236b3ebee6ce7729188e4e458a6d77a75489dea137cda77e789ee3"
+      },
+      "native_input": {
+        "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
+        "sha256": "3948a3cfd1cc029e21185724d20d7f9bf8b40df9fec3e29f3a8b52dd0904a5a7"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW6-TENANT-CAP-QUEUE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW6-TENANT-CAP-QUEUE.yaml",
+        "sha256": "a007e3309a969e754c940547b74d05b312f7dde93e594f92f5f1ae31fbcd9510"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW6-TENANT-CAP-QUEUE.yaml",
+        "sha256": "7a699ca0cd236b3ebee6ce7729188e4e458a6d77a75489dea137cda77e789ee3"
+      },
+      "native_input": {
+        "path": "native/QA-NEW6-TENANT-CAP-QUEUE.json",
+        "sha256": "3948a3cfd1cc029e21185724d20d7f9bf8b40df9fec3e29f3a8b52dd0904a5a7"
+      },
+      "location": "steps[1].texts[0]"
+    },
+    {
+      "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+      "backend": "anthropic",
+      "status": "AVAILABLE",
+      "reason": "first turn has pinned native input and an empty authored setup",
+      "source": {
+        "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+        "sha256": "273af0b4e1addcfe3c66e421e348413eaf5a854d9b452bf775dd9be89a96ea16"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+        "sha256": "9baa102bb4e21b61cac0d139157bad5c1def055846b2e1452c3d9bcfae7f8de0"
+      },
+      "native_input": {
+        "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
+        "sha256": "1cdfc70183b4e30fc7503dab48efef09adff55a14759247d90951032e6a53804"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+        "sha256": "273af0b4e1addcfe3c66e421e348413eaf5a854d9b452bf775dd9be89a96ea16"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+        "sha256": "9baa102bb4e21b61cac0d139157bad5c1def055846b2e1452c3d9bcfae7f8de0"
+      },
+      "native_input": {
+        "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
+        "sha256": "1cdfc70183b4e30fc7503dab48efef09adff55a14759247d90951032e6a53804"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+        "sha256": "273af0b4e1addcfe3c66e421e348413eaf5a854d9b452bf775dd9be89a96ea16"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+        "sha256": "9baa102bb4e21b61cac0d139157bad5c1def055846b2e1452c3d9bcfae7f8de0"
+      },
+      "native_input": {
+        "path": "native/QA-NEW8-LINK-PAGE-THREAD-TITLE.json",
+        "sha256": "1cdfc70183b4e30fc7503dab48efef09adff55a14759247d90951032e6a53804"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+      "backend": "anthropic",
+      "status": "AVAILABLE",
+      "reason": "first turn has pinned native input and an empty authored setup",
+      "source": {
+        "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+        "sha256": "a264f4b6ad8a18262a0efbfa6e20c4dd5f68d132ff40ad9a6ce272b790aa96fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+        "sha256": "8b010f856868254bbaf5c0f39433f9628fafabdeb5295fe648c8f34ce96e5abd"
+      },
+      "native_input": {
+        "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
+        "sha256": "8bbe2b99b563c0092a63cfdccb40066a345508853550c5e645ae484f8e1b635b"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+      "backend": "openai",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+        "sha256": "a264f4b6ad8a18262a0efbfa6e20c4dd5f68d132ff40ad9a6ce272b790aa96fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+        "sha256": "8b010f856868254bbaf5c0f39433f9628fafabdeb5295fe648c8f34ce96e5abd"
+      },
+      "native_input": {
+        "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
+        "sha256": "8bbe2b99b563c0092a63cfdccb40066a345508853550c5e645ae484f8e1b635b"
+      },
+      "location": "steps[1]"
+    },
+    {
+      "scenario_id": "QA-NEW9-NO-INTERNAL-PLUMBING",
+      "backend": "gemini",
+      "status": "PENDING",
+      "reason": "public preparation has no provider-native dispatch",
+      "source": {
+        "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+        "sha256": "a264f4b6ad8a18262a0efbfa6e20c4dd5f68d132ff40ad9a6ce272b790aa96fc"
+      },
+      "authored_source": {
+        "path": "scenarios/QA-NEW9-NO-INTERNAL-PLUMBING.yaml",
+        "sha256": "8b010f856868254bbaf5c0f39433f9628fafabdeb5295fe648c8f34ce96e5abd"
+      },
+      "native_input": {
+        "path": "native/QA-NEW9-NO-INTERNAL-PLUMBING.json",
+        "sha256": "8bbe2b99b563c0092a63cfdccb40066a345508853550c5e645ae484f8e1b635b"
+      },
+      "location": "steps[1]"
+    }
+  ]
+}

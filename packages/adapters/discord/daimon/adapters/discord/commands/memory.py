@@ -27,6 +27,8 @@ from daimon.core.memory_view import (
     parse_memory_args,
     personal_memory_reply,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import list_memory_entries, read_memory
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
@@ -190,6 +192,7 @@ class MemoryCog(commands.Cog):
                     store_id=await get_own_personal_memory_store(runtime.sessionmaker, agent),
                     request=request,
                     command="/memory path:",
+                    scope=resource_scope(tenant_id=str(agent.tenant_id)),
                 )
                 await interaction.followup.send(
                     _personal_text(reply),
@@ -202,13 +205,17 @@ class MemoryCog(commands.Cog):
                 await interaction.followup.send(_EMPTY, ephemeral=True)
                 return
             agent_name, store_id = resolved
+            scope = resource_scope(
+                tenant_id=str(
+                    derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+                )
+            )
 
             if path is None:
                 paths: list[str] = []
-                page = await runtime.anthropic.beta.memory_stores.memories.list(
-                    store_id, path_prefix="/"
-                )
-                async for item in page:
+                async for item in list_memory_entries(
+                    runtime.anthropic, store_id, path_prefix="/", scope=scope
+                ):
                     if item.type == "memory":
                         paths.append(item.path)
                 if not paths:
@@ -223,10 +230,9 @@ class MemoryCog(commands.Cog):
                 return
 
             mem_id: str | None = None
-            page = await runtime.anthropic.beta.memory_stores.memories.list(
-                store_id, path_prefix="/"
-            )
-            async for item in page:
+            async for item in list_memory_entries(
+                runtime.anthropic, store_id, path_prefix="/", scope=scope
+            ):
                 if item.type == "memory" and item.path == path:
                     mem_id = item.id
                     break
@@ -236,9 +242,7 @@ class MemoryCog(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            mem = await runtime.anthropic.beta.memory_stores.memories.retrieve(
-                mem_id, memory_store_id=store_id, view="full"
-            )
+            mem = await read_memory(runtime.anthropic, store_id, mem_id, scope=scope)
             content = mem.content or ""
             await interaction.followup.send(
                 _fenced(f"**`{path}`**", content, _DISCORD_LIMIT),

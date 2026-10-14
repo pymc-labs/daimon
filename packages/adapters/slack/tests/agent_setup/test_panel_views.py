@@ -61,6 +61,7 @@ from daimon.core.access_policy import ChannelRule
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, build_agent_details
 from daimon.core.answering_map import AnsweringMap, build_answering_map
 from daimon.core.channel_rules import ChannelRuleStatus
+from daimon.core.config import TurnSettings
 from daimon.core.github_repo_auth import RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
@@ -550,7 +551,9 @@ async def test_load_details_view_omits_avatar_when_identity_is_off(
         sessionmaker=sessionmaker,
         anthropic=MagicMock(),
         deployment_default=DeploymentDefault(agent_name="daimon"),
-        settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=False)),
+        settings=SimpleNamespace(
+            agent_identity=SimpleNamespace(enabled=False), turn=TurnSettings()
+        ),
     )
     monkeypatch.setattr(setup_actions, "load_panel_roster", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(setup_actions, "load_panel_details", AsyncMock(return_value=_details()))
@@ -582,6 +585,7 @@ async def test_load_details_view_queues_picture_without_generating_in_panel(
         deployment_default=DeploymentDefault(agent_name="daimon"),
         settings=SimpleNamespace(
             agent_identity=SimpleNamespace(enabled=True),
+            turn=TurnSettings(),
             mcp=SimpleNamespace(app_root_url="https://example.test"),
         ),
     )

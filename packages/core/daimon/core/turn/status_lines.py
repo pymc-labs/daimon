@@ -1,6 +1,6 @@
 """Words for the in-progress turn card, shared by the chat adapters.
 
-Pure. Discord and Slack both draw a headline, a code block of tool lines and
+Discord and Slack both draw a headline, a code block of tool lines and
 the latest draft from the same `TurnState`; this module owns the words so the
 two cards cannot drift, and each adapter adds only its own markup. A tool
 line names the tool and never shows its arguments.
@@ -12,7 +12,9 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.state import ContentBlock, ToolUseBlock
+from mux.profiles import get_profile
 
 MAX_TOOL_LINES = 6
 DRAFT_MAX_CHARS = 300
@@ -71,6 +73,14 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {minutes}m"
 
 
+def backend_footer_text() -> str | None:
+    """The current admitted backend, with no default or provider text reflection."""
+    observation = current_outcome.get()
+    if observation is None or observation.backend_profile is None:
+        return None
+    return get_profile(observation.backend_profile).provider
+
+
 def format_summary(
     *, agent_name: str | None, elapsed_seconds: float, cost: str | None, left: str | None
 ) -> str:
@@ -82,8 +92,13 @@ def format_summary(
     fields = [
         agent_name or None,
         format_duration(elapsed_seconds),
-        f"{cost} used" if cost is not None else None,
+        cost
+        if cost in ("Cost unknown", "Cost partial")
+        else f"{cost} used"
+        if cost is not None
+        else None,
         left,
+        backend_footer_text(),
     ]
     return SUMMARY_GAP.join(field for field in fields if field)
 

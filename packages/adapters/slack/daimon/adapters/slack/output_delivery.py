@@ -253,3 +253,21 @@ async def deliver_session_outputs(
                 text=notice,
             )
             notice_keys.add(notice_key)
+
+
+async def deliver_provider_output(
+    file: DeliverableFile,
+    web_client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+) -> bool:
+    """Upload verified neutral bytes through Slack's existing three-request flow."""
+    if (
+        not file.content
+        or file.size_bytes != len(file.content)
+        or file.size_bytes > SLACK_MAX_BYTES_PER_FILE
+    ):
+        return False
+    await _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
+    return True

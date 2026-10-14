@@ -5,10 +5,10 @@ platform-specific runtime type and audit-display helper for their Slack
 equivalents. All core saga/store calls are reused UNCHANGED. No cross-adapter
 imports (import-linter contract).
 
-GitHub OAuth platform-keying (RESEARCH A3): the state row is keyed to
+GitHub OAuth platform-keying: the state row is keyed to
 ``platform="slack"`` with a string Slack user ID (e.g. ``"U123456"``). The
 callback resolver routes via the ``platform`` column — this prevents
-cross-platform state reuse (T-83-09).
+cross-platform state reuse.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ from daimon.core.github_credentials import (
     upsert_credential_encrypted,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent
 from daimon.core.stores.agent_github_binding import set_agent_github_binding
 
 if TYPE_CHECKING:
@@ -91,7 +93,7 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
             f"*{name}* is a built-in agent and cannot be deleted. "
             "Fork it first, then delete the fork."
         )
-    await runtime.anthropic.beta.agents.archive(agent.id)
+    await archive_agent(runtime.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
     await agent_lifecycle.archive_memory_store_best_effort(
         anthropic=runtime.anthropic,
         sessionmaker=runtime.sessionmaker,

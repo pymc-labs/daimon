@@ -101,7 +101,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
-from sqlalchemy import event, select, text
+from sqlalchemy import Connection, event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -691,15 +691,22 @@ async def test_legacy_budget_stamp_does_not_block_independent_writes(
     assert legacy is not None and (legacy.effective_config is None) is missing_snapshot
 
     admitted = "channel-a" if missing_snapshot else "channel-b"
-    second = await asyncio.wait_for(
-        _prepare(
+
+    def bound_lock_wait(connection: Connection) -> None:
+        connection.exec_driver_sql("SET LOCAL lock_timeout = '2s'")
+
+    # A stamp held by preparation must not block a later independent write.
+    # Bound actual database lock waits, rather than healthy I/O under host load.
+    event.listen(db_nullpool_engine.sync_engine, "begin", bound_lock_wait)
+    try:
+        second = await _prepare(
             deps,
             replace(_admission(account=account), budget_channel_id=admitted),
             tenant=tenant,
             account=account,
-        ),
-        timeout=2,
-    )
+        )
+    finally:
+        event.remove(db_nullpool_engine.sync_engine, "begin", bound_lock_wait)
     assert isinstance(second, PreparedTurn)
     assert (second.ma_session_id == first.ma_session_id) is missing_snapshot
     async with factory() as session:
@@ -2404,7 +2411,7 @@ async def test_a_sealed_turn_on_a_reused_session_keeps_its_narrower_seal(
         deps, _sealed(_admission(account=account), seal_id="vault"), tenant=tenant, account=account
     )
     assert isinstance(reused, PreparedTurn) and reused.reused
-    await _stamp_reused_seal(deps, reused, now=lambda: _NOW)
+    await _stamp_reused_seal(deps, reused, tenant_id=tenant.id, now=lambda: _NOW)
     await transport.client().beta.sessions.events.send(
         reused.ma_session_id, events=[{"type": "user.message", "content": []}]
     )
@@ -3101,6 +3108,7 @@ async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_eng
                 deps,
                 first.ma_session_id,
                 replace(first.admission, origin_seal_ids=frozenset({"channel-1", "thread-1"})),
+                tenant_id=tenant.id,
                 now=lambda: _NOW,
             )
         return value

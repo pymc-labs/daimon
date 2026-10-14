@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import json
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -31,6 +32,7 @@ from daimon.core.credential_requests import mint_request_token
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
@@ -60,7 +62,7 @@ def _make_app(sessionmaker: Any = None) -> SlackApp:
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
     return SlackApp(runtime=runtime)
 

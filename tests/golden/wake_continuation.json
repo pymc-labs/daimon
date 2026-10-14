@@ -93,6 +93,7 @@
           "memory_read_only": false,
           "memory_store_id": null,
           "model_id": "claude-sonnet-4-6",
+          "personal_memory_store_id": null,
           "repo_branch": null,
           "repo_mount_path": null,
           "repo_resource_id": null,
@@ -317,6 +318,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -377,6 +382,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -722,7 +731,7 @@
           ],
           [
             "order",
-            "asc"
+            "desc"
           ],
           [
             "types[]",
@@ -841,6 +850,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -901,6 +914,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -1241,16 +1258,12 @@
             "true"
           ],
           [
-            "created_at[gte]",
-            "2026-10-09T00:00:00+00:00"
-          ],
-          [
             "limit",
             "100"
           ],
           [
             "order",
-            "asc"
+            "desc"
           ],
           [
             "types[]",
@@ -1291,54 +1304,6 @@
               "type": "span.model_request_end"
             }
           ],
-          "next_page": null
-        },
-        "status": 200
-      }
-    },
-    {
-      "operation": "request",
-      "payload": {
-        "body": null,
-        "method": "GET",
-        "path": "/v1/sessions/<id:5>/events",
-        "protocol_headers": [
-          [
-            "anthropic-beta",
-            "managed-agents-2026-04-01"
-          ],
-          [
-            "anthropic-version",
-            "2023-06-01"
-          ]
-        ],
-        "query": [
-          [
-            "beta",
-            "true"
-          ],
-          [
-            "created_at[lt]",
-            "2026-10-09T00:00:00+00:00"
-          ],
-          [
-            "limit",
-            "100"
-          ],
-          [
-            "order",
-            "asc"
-          ],
-          [
-            "types[]",
-            "span.model_request_end"
-          ]
-        ]
-      },
-      "platform": "ma_http",
-      "result": {
-        "body": {
-          "data": [],
           "next_page": null
         },
         "status": 200
@@ -1621,16 +1586,12 @@
             "true"
           ],
           [
-            "created_at[gte]",
-            "2026-10-09T00:00:00+00:00"
-          ],
-          [
             "limit",
             "100"
           ],
           [
             "order",
-            "asc"
+            "desc"
           ],
           [
             "types[]",
@@ -1685,54 +1646,6 @@
               "type": "span.model_request_end"
             }
           ],
-          "next_page": null
-        },
-        "status": 200
-      }
-    },
-    {
-      "operation": "request",
-      "payload": {
-        "body": null,
-        "method": "GET",
-        "path": "/v1/sessions/<id:5>/events",
-        "protocol_headers": [
-          [
-            "anthropic-beta",
-            "managed-agents-2026-04-01"
-          ],
-          [
-            "anthropic-version",
-            "2023-06-01"
-          ]
-        ],
-        "query": [
-          [
-            "beta",
-            "true"
-          ],
-          [
-            "created_at[lt]",
-            "2026-10-09T00:00:00+00:00"
-          ],
-          [
-            "limit",
-            "100"
-          ],
-          [
-            "order",
-            "asc"
-          ],
-          [
-            "types[]",
-            "span.model_request_end"
-          ]
-        ]
-      },
-      "platform": "ma_http",
-      "result": {
-        "body": {
-          "data": [],
           "next_page": null
         },
         "status": 200

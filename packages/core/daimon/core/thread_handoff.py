@@ -74,6 +74,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.errors import DaimonError
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.session_seal import session_facts
 from daimon.core.setup_conversations import get_setup_agent
 from daimon.core.stores.access_policy import (
@@ -170,7 +171,15 @@ async def recorded_thread_sessions(
     recorded: list[RecordedSession] = []
     for row in rows:
         try:
-            ma_session = await anthropic.beta.sessions.retrieve(row.ma_session_id)
+            ma_session = await retrieve_session_record(
+                anthropic,
+                row.ma_session_id,
+                scope=session_scope(
+                    tenant_id=tenant_id,
+                    account_id=row.account_id,
+                    call_site="thread_handoff:recorded_thread_sessions",
+                ),
+            )
         except anthropic_pkg.APIError as error:
             log.warning(
                 "thread_handoff.session_unreadable",

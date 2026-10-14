@@ -40,8 +40,10 @@ typo is silent — check the spelling here.
 - [Sentry](#sentry)
 - [Billing Policy](#billing-policy)
 - [Support](#support)
+- [Turn](#turn)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
+- [Fleet](#fleet)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -269,6 +271,15 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
 
+### `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION`
+
+`bool` · optional · default `False`
+
+Require an explicit destination when the MCP create_routine tool is called. When
+enabled, a missing destination is refused before agent lookup or creation, with a
+warning that the routine would not post. Default false preserves record-only routines;
+existing routines and updates are unaffected.
+
 ### `DAIMON_MCP__PUBLIC_URL`
 
 `HttpUrl | None` · **required to run the MCP adapter** · default unset
@@ -437,6 +448,24 @@ Maximum recently active Discord channels and threads scanned per guild on startu
 Maximum recent Discord messages scanned per channel or thread on startup. Current
 message gates and durable admissions prevent duplicate turns.
 
+### `DAIMON_DISCORD__WRITERS_NONE_NOTICE`
+
+`bool` · optional · default `False`
+
+Opt in to one stop reaction on an explicit bot mention refused by a confirmed
+writers=none rule. Only the posting owner reacts, with per-requester, channel and bot-
+wide cooldowns. No text, DM or agent turn is sent. Unknown protection stays silent.
+Limits are process-local and reset on restart.
+
+### `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY`
+
+`bool` · optional · default `False`
+
+Automatically retire expired, unclicked credential cards in place. Requires the existing
+single-posting-process wake poller switch. Default false starts no expiry task and adds
+no database or Discord calls. Failed card edits remain pending for retry; no credentials
+or waiting work are applied.
+
 ### `DAIMON_DISCORD__THREAD_OPEN_NOTICE_AFTER_S`
 
 `float` · optional · default `3.0`
@@ -479,6 +508,15 @@ per person and channel, so a restart allows one more.
 
 Maximum number of agent turns a single tenant (Discord guild) may have in flight at
 once. Caps one noisy guild from starving others on the shared Anthropic key.
+
+### `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`
+
+`bool` · optional · default `False`
+
+Opt in to queue wording on the existing initial Discord mention card while its admitted
+turn waits behind the tenant concurrency cap. The same card returns to ordinary progress
+when the turn starts. Admission, Stop and queue limits are unchanged; no other tenant
+information is displayed.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`
 
@@ -1127,6 +1165,45 @@ the form in the database only. The form tells the person their answers are share
 it is on. Spends no support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a
 JSON object.
 
+## Turn
+
+Read from `daimon.core.config.TurnSettings`. Prefix `DAIMON_TURN__`.
+
+Experimental neutral turn ports; legacy remains the default.
+
+### `DAIMON_TURN__PATH`
+
+`'legacy' | 'mux'` · optional · default `legacy`
+
+Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
+opts into neutral Events/Sessions ports. Off by default.
+
+### `DAIMON_TURN__NATIVE_FOOTER_COST`
+
+`bool` · optional · default `False`
+
+Display settled native OpenAI/Gemini turn cost on platform footers. Requires complete
+normalized usage, verified rates and root accounting. Incomplete totals display Cost
+unknown or Cost partial, never an estimate. Off by default; Anthropic footers are
+unchanged with either value.
+
+### `DAIMON_TURN__CHANNEL_BACKENDS`
+
+`bool` · optional · default `False`
+
+Read each channel's backend configuration at admission. Off by default: no channel's
+configuration is read and every turn runs as before. On: a channel with no backend
+configuration is unchanged; a configured one is checked against its profile and refused
+(backend_unsupported) if the profile cannot meet it or this release cannot run it yet.
+
+### `DAIMON_TURN__AGENT_BACKENDS`
+
+`bool` · optional · default `False`
+
+Capture complete scoped source and resource intent for an agent-selected native backend.
+Unproved obligations are refused; counterpart identity readback alone never authorizes
+execution. Requires mux and channel_backends; off by default.
+
 ## Thread Naming
 
 Read from `daimon.core.config.ThreadNamingSettings`. Prefix `DAIMON_THREAD_NAMING__`.
@@ -1199,6 +1276,48 @@ refused with the plain capacity notice.
 
 Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
 queue and its card ends with the ordinary error.
+
+## Fleet
+
+Read from `daimon.core.config.FleetSettings`. Prefix `DAIMON_FLEET__`.
+
+Orchestrated worker fleets (``DAIMON_FLEET__*``). Off by default.
+
+An orchestrator turn fans out to worker turns on any enabled backend. Their concurrency
+is a pool of its own, counted from the durable worker rows, so a fan-out never takes the
+chat turns' slots.
+
+### `DAIMON_FLEET__ENABLED`
+
+`bool` · optional · default `False`
+
+Allow orchestrator turns to start worker fleets. Off by default.
+
+### `DAIMON_FLEET__MAX_WORKERS_PER_RUN`
+
+`int` · optional · default `8`
+
+Most workers one fleet run may start.
+
+### `DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`
+
+`int` · optional · default `3`
+
+Most worker turns one tenant may have starting or running at once, across all its fleet
+runs and processes. Separate from the chat turn cap.
+
+### `DAIMON_FLEET__MAX_CONCURRENT_WORKERS`
+
+`int` · optional · default `6`
+
+Most worker turns one process runs at once, across all tenants.
+
+### `DAIMON_FLEET__MAX_ATTEMPTS`
+
+`int` · optional · default `2`
+
+Most times in total a worker is started when it keeps being lost before its turn is
+sent. A worker whose turn was sent is reconciled, never resent.
 
 ## Tool Safety
 

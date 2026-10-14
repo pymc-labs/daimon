@@ -20,17 +20,19 @@ import re
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, Protocol
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
-from daimon.core.agent_fork import fork_agent
+from daimon.core.agent_fork import fork_agent, fork_host_agent
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.channel_environments import limited_readers_network_warning
+from daimon.core.channel_environments import (
+    LIMITED_OPEN_NETWORK_WARNING,
+    limited_readers_network_warning,
+)
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL_COPY,
@@ -38,6 +40,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import (
     AgentRule,
     ChannelRule,
@@ -58,11 +63,23 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
+from daimon.core.stores.neutral_catalog import CatalogConflict
 from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+class _PolicyAgent(Protocol):
+    @property
+    def id(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def metadata(self) -> Mapping[str, str]: ...
+
 
 _log = structlog.get_logger(__name__)
 
@@ -338,7 +355,7 @@ async def _own_agent_refusal(
     policy: TenantAccessPolicy,
     default: DeploymentDefault,
     name: str,
-    agent: BetaManagedAgentsAgent,
+    agent: _PolicyAgent,
     replacing_rule: bool = False,
 ) -> RuleRefusal | None:
     """Why `agent` can't be `channel_id`'s own agent; None when it can.
@@ -382,7 +399,8 @@ async def _channel_agent(
     channel_id: str,
     policy: TenantAccessPolicy,
     default: DeploymentDefault,
-    known: Mapping[str, BetaManagedAgentsAgent | None],
+    known: Mapping[str, _PolicyAgent | None],
+    resource_host: NeutralResourceHost | None = None,
 ) -> _ChannelAgent:
     """The channel's default agent and why it can't be the channel's own, if it can't.
 
@@ -398,6 +416,8 @@ async def _channel_agent(
     agent = (
         known[name]
         if name in known
+        else await resource_host.find(name)
+        if resource_host is not None
         else await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name)
     )
     if agent is None:
@@ -421,7 +441,8 @@ async def _lookup_channel_agent(
     *,
     tenant_id: uuid.UUID,
     channel_id: str,
-) -> dict[str, BetaManagedAgentsAgent | None]:
+    resource_host: NeutralResourceHost | None = None,
+) -> dict[str, _PolicyAgent | None]:
     """The channel's default agent looked up by name before the policy lock is taken.
 
     The lookup leaves the process; doing it first keeps a pooled connection
@@ -434,9 +455,9 @@ async def _lookup_channel_agent(
     if row is None or row.mode != "agent" or row.agent_name is None:
         return {}
     return {
-        row.agent_name: await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=row.agent_name
-        )
+        row.agent_name: await resource_host.find(row.agent_name)
+        if resource_host is not None
+        else await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=row.agent_name)
     }
 
 
@@ -457,7 +478,8 @@ async def _write_rule(
     tenant_id: uuid.UUID,
     platform: str,
     default: DeploymentDefault,
-    known: Mapping[str, BetaManagedAgentsAgent | None],
+    known: Mapping[str, _PolicyAgent | None],
+    resource_host: NeutralResourceHost | None = None,
 ) -> tuple[RuleChange, _ChannelAgent | None]:
     """Under the policy lock: write the rule, or say why the channel's agent can't be its own."""
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
@@ -490,6 +512,7 @@ async def _write_rule(
             policy=policy,
             default=default,
             known=known,
+            resource_host=resource_host,
         )
         if found.refusal is not None or found.name is None:
             return RuleChange(ask.channel_id, before, before, False), found
@@ -522,6 +545,7 @@ async def _archive_unused_copy(
     channel_id: str,
     name: str,
     agent_id: str,
+    resource_host: NeutralResourceHost | None = None,
 ) -> None:
     """Archive a copy whose write failed, unless the channel may point at it.
 
@@ -543,8 +567,14 @@ async def _archive_unused_copy(
         _log.warning("channel_rules.copy_kept", reason="channel_points_at_it", **log_fields)
         return
     try:
-        await anthropic.beta.agents.archive(agent_id)
-    except APIError:
+        if resource_host is None:
+            await archive_agent(anthropic, agent_id, scope=resource_scope(tenant_id=str(tenant_id)))
+        else:
+            made = await resource_host.find(name)
+            if made is None or made.id != agent_id:
+                return
+            await resource_host.retire(made.revision.catalog_id)
+    except (APIError, ProviderError, CatalogConflict, UnsupportedCapability):
         _log.warning("channel_rules.copy_archive_failed", exc_info=True, **log_fields)
 
 
@@ -555,9 +585,14 @@ async def _with_network_warning(
     *,
     tenant_id: uuid.UUID,
     default: DeploymentDefault,
+    resource_host: NeutralResourceHost | None = None,
 ) -> RuleChange:
     if change.before.readers != "any" or change.rule.readers == "any":
         return change
+    if resource_host is not None:
+        # No native network-policy certification is claimed by this resource
+        # edge. Preserve the conservative warning without an Anthropic lookup.
+        return replace(change, network_warning=LIMITED_OPEN_NETWORK_WARNING)
     async with sessionmaker() as session:
         warning = await limited_readers_network_warning(
             session, anthropic, tenant_id=tenant_id, channel_id=change.channel_id, default=default
@@ -582,6 +617,7 @@ async def set_channel_rule(
     channel_label: str | None = None,
     public_url: str | None = None,
     release_agents: bool = False,
+    resource_host: NeutralResourceHost | None = None,
 ) -> RuleChange:
     """Set `channel_id`'s rule; raise `ChannelRuleRefused` if refused. None keeps a side.
 
@@ -591,11 +627,23 @@ async def set_channel_rule(
     the locked re-check refuses, or one whose write fails, is archived unless
     the channel names it (`_archive_unused_copy`).
     """
+    if resource_host is not None and (
+        # A native host acts for exactly one account; the caller must name it,
+        # so a host for another account in this tenant can never be accepted.
+        actor_account_id is None
+        or resource_host.scope.tenant_id != str(tenant_id)
+        or resource_host.scope.account_id != str(actor_account_id)
+    ):
+        raise ScopeViolation(channel_id, "channel has a foreign resource host or actor")
     ask = _Ask(channel_id, readers, writers, release_agents, subject)
     wants_own = readers == "own" or (readers is None and writers == "own")
     known = (
         await _lookup_channel_agent(
-            anthropic, sessionmaker, tenant_id=tenant_id, channel_id=channel_id
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            resource_host=resource_host,
         )
         if wants_own
         else {}
@@ -609,36 +657,56 @@ async def set_channel_rule(
             platform=platform,
             default=default,
             known=known,
+            resource_host=resource_host,
         )
     if found is None or found.refusal is None:
         return await _with_network_warning(
-            anthropic, sessionmaker, change, tenant_id=tenant_id, default=default
+            anthropic,
+            sessionmaker,
+            change,
+            tenant_id=tenant_id,
+            default=default,
+            resource_host=resource_host,
         )
     source = copy_from or found.answering
     if not copy or source is None:
         raise ChannelRuleRefused(found.refusal, agent_name=found.name or source)
     async with sessionmaker() as session:
         ruled = (await load_access_policy(session, tenant_id=tenant_id)).agent_rules.keys()
-    new_name = copy_name(
-        channel_label,
-        channel_id,
-        taken={
+    if resource_host is None:
+        taken = {
             agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
             for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-        },
-        ruled=ruled,
-    )
-    made = await fork_agent(
-        anthropic,
-        sessionmaker,
-        tenant_id=tenant_id,
-        source_name=source,
-        new_name=new_name,
-        public_url=public_url,
-        subject=subject,
-        default_agent_name=default.agent_name,
-        extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
-    )
+        }
+        new_name = copy_name(channel_label, channel_id, taken=taken, ruled=ruled)
+        made = await fork_agent(
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            source_name=source,
+            new_name=new_name,
+            public_url=public_url,
+            subject=subject,
+            default_agent_name=default.agent_name,
+            extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
+        )
+    else:
+        taken = {
+            (row.agent.spec.metadata or {}).get(MA_METADATA_KEY_NAME) or row.agent.spec.name
+            for row in await resource_host.agents()
+        }
+        new_name = copy_name(channel_label, channel_id, taken=taken, ruled=ruled)
+        made = await fork_host_agent(
+            resource_host,
+            sessionmaker,
+            source_name=source,
+            new_name=new_name,
+            public_url=public_url,
+            subject=subject,
+            default_agent_name=default.agent_name,
+            extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
+        )
+
     try:
         async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
             await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
@@ -660,6 +728,7 @@ async def set_channel_rule(
                 platform=platform,
                 default=default,
                 known={new_name: made.agent},
+                resource_host=resource_host,
             )
             if found is not None and found.refusal is not None:
                 raise ChannelRuleRefused(found.refusal, agent_name=new_name)
@@ -672,11 +741,17 @@ async def set_channel_rule(
             channel_id=channel_id,
             name=new_name,
             agent_id=made.agent.id,
+            resource_host=resource_host,
         )
         raise
     change = replace(change, copied_from=source, dropped_skills=made.dropped_skills)
     return await _with_network_warning(
-        anthropic, sessionmaker, change, tenant_id=tenant_id, default=default
+        anthropic,
+        sessionmaker,
+        change,
+        tenant_id=tenant_id,
+        default=default,
+        resource_host=resource_host,
     )
 
 

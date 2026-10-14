@@ -31,6 +31,7 @@ from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     retire_turn_card_intent,
 )
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -77,7 +78,16 @@ async def retire_orphaned_turns(
                 session, id=row.id, expected_message_id=message_id
             )
             if cleared and not await interrupt_orphaned_session(
-                anthropic, session_id=row.ma_session_id
+                anthropic,
+                session_id=row.ma_session_id,
+                scope=Scope(
+                    tenant_id=str(row.tenant_id),
+                    account_id=str(row.account_id),
+                    principal_id="daimon",
+                    authorization_id="teams-orphan-sweep",
+                )
+                if row.account_id is not None
+                else None,
             ):
                 await mark_dead(session, id=row.id)
         started = row.active_turn_started_at

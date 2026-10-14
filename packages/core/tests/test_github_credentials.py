@@ -324,3 +324,95 @@ async def test_get_pat_fallback_value_alone_without_flag_resolves_none(
     assert result is None, (
         "fallback_pat set without allow_service_default=True must never leak the value"
     )
+
+
+@pytest.mark.parametrize(
+    "selection", ["overlay", "overlay_missing_token", "unbound", "default", "missing", "rebound"]
+)
+async def test_pat_metadata_uses_real_resolver_selection_without_token_reads(
+    db_preflight, db_nullpool_engine, fernet, selection, monkeypatch
+):
+    from daimon.core.github_credentials import get_pat_revision
+    from daimon.core.stores import agent_github_binding as bindings
+    from daimon.core.stores import github_credentials as credentials
+    from daimon.testing.db import require_owned_sessionmaker
+    from sqlalchemy import event
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    principal = uuid.uuid4()
+    overlay = uuid.uuid4()
+    agent = uuid.uuid4() if selection not in {"default", "missing"} else None
+    await upsert_credential_encrypted(
+        sessionmaker=sessions,
+        fernet=fernet,
+        principal_id=principal,
+        github_login="caller",
+        plaintext_token="private-caller",
+        scopes=("repo",),
+    )
+    await upsert_credential_encrypted(
+        sessionmaker=sessions,
+        fernet=fernet,
+        principal_id=overlay,
+        github_login="overlay",
+        plaintext_token="private-overlay",
+        scopes=("repo",),
+    )
+    async with sessions.begin() as db:
+        if selection in {"overlay", "overlay_missing_token", "rebound"}:
+            assert agent is not None
+            await bindings.set_agent_github_binding(db, agent_id=agent, principal_id=overlay)
+        if selection == "overlay_missing_token":
+            await credentials.delete_credential_for_principal(db, principal_id=overlay)
+        elif selection == "missing":
+            await credentials.delete_credential_for_principal(db, principal_id=principal)
+    expected = (
+        "private-overlay"
+        if selection in {"overlay", "rebound"}
+        else "private-caller"
+        if selection == "default"
+        else None
+    )
+    assert (
+        await get_pat(principal_id=principal, agent_id=agent, sessionmaker=sessions, fernet=fernet)
+        == expected
+    )
+
+    def refuse_secret_read(*args, **kwargs):
+        raise AssertionError("metadata selector read or decrypted token payload")
+
+    monkeypatch.setattr("daimon.core.github_credentials.decrypt_token", refuse_secret_read)
+    monkeypatch.setattr(credentials, "get_credential_by_principal", refuse_secret_read)
+    queries = []
+
+    def capture(_conn, _cursor, statement, _params, _context, _many):
+        queries.append(statement)
+
+    event.listen(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        revision = await get_pat_revision(
+            principal_id=principal, agent_id=agent, sessionmaker=sessions
+        )
+        if expected is None:
+            assert revision is None
+        else:
+            selected = overlay if selection in {"overlay", "rebound"} else principal
+            assert revision is not None and revision[0] == selected
+            async with sessions() as db:
+                assert revision[1] == await credentials.get_credential_revision(
+                    db, principal_id=selected
+                )
+        if selection == "rebound":
+            assert agent is not None
+            async with sessions.begin() as db:
+                await bindings.set_agent_github_binding(db, agent_id=agent, principal_id=principal)
+            changed = await get_pat_revision(
+                principal_id=principal, agent_id=agent, sessionmaker=sessions
+            )
+            assert changed is not None and changed[0] == principal
+            assert changed != revision
+    finally:
+        event.remove(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+    reads = [q for q in queries if q.lstrip().lower().startswith("select")]
+    assert reads and all("encrypted_token" not in q for q in reads)

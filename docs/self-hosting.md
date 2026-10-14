@@ -72,6 +72,15 @@ bold agent name on the first answer chunk.
 
 Setup and routines commands require Discord's `Manage Server` permission.
 
+Unclicked private credential forms can update their original Discord card
+after expiry when `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY=true`. The default
+is `false`, which starts no expiry job or extra database/Discord calls. The
+job runs only in the existing single posting-owner process, checks every
+15 seconds, and retires expired unused requests before editing. Failed edits
+remain pending across restarts; successful edits remove the buttons without
+pinging anyone. Missing card identities are skipped. This does not save
+credentials, extend the form's lifetime, or resume the requested work.
+
 ## 3. Start the stack
 
 ```bash

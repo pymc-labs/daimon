@@ -20,6 +20,9 @@ message can never be edited back to a classic view.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from daimon.adapters.discord.theme import COLOR_AMBER
 from daimon.core.posted_controls import CardButton, PostedCard
 
@@ -62,7 +65,11 @@ def _card_footer(card: PostedCard) -> str | None:
     )
 
 
-def build_card_view(card: PostedCard) -> discord.ui.LayoutView:
+def build_card_view(
+    card: PostedCard,
+    *,
+    button_factory: Callable[[CardButton], discord.ui.Item[Any]] | None = None,
+) -> discord.ui.LayoutView:
     """Render one `PostedCard` as the V2 `LayoutView` Discord posts and edits.
 
     Component order is a contract: the bolded headline, the facts as one
@@ -71,6 +78,10 @@ def build_card_view(card: PostedCard) -> discord.ui.LayoutView:
     pair, so the title, body, buttons and footer each get their own gap.
     Every state wears the same amber accent: the headline emoji is the state
     marker, so nothing here ever turns green on success.
+
+    The optional factory wraps persistent buttons owned by a registered SDK
+    dynamic item and batches them into rows of five. The renderer binds no
+    closures or authority to those buttons; ordinary cards retain one row.
     """
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         accent_colour=discord.Colour(COLOR_AMBER)
@@ -81,10 +92,16 @@ def build_card_view(card: PostedCard) -> discord.ui.LayoutView:
         container.add_item(discord.ui.TextDisplay("\n\n".join(f"-# {fact}" for fact in card.facts)))
     if card.buttons:
         container.add_item(discord.ui.Separator(visible=False))
-        action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
-        for button in card.buttons:
-            action_row.add_item(_build_card_button(button))
-        container.add_item(action_row)
+        row_size = 5 if button_factory is not None else len(card.buttons)
+        for offset in range(0, len(card.buttons), row_size):
+            action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            for button in card.buttons[offset : offset + row_size]:
+                action_row.add_item(
+                    button_factory(button)
+                    if button_factory is not None
+                    else _build_card_button(button)
+                )
+            container.add_item(action_row)
     footer = _card_footer(card)
     if footer is not None:
         container.add_item(discord.ui.Separator(visible=False))

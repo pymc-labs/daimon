@@ -22,6 +22,7 @@ from daimon.adapters.cli.tenant import (
 )
 from daimon.core.agent_pins import pin_refusal
 from daimon.core.authz import Place, Subject
+from daimon.core.channel_skills import NativeSkillDeleteGuard, refuse_native_skill_delete
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -37,6 +38,8 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import StoreError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import list_skill_versions
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skill_sync import PATMissingError, SyncReport, sync_agent_skills
 from daimon.core.skills.add import (
@@ -57,6 +60,7 @@ from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.seeded_skills import list_seeded_skill_names
+from mux.errors import ScopeViolation
 from rich.console import Console
 from rich.table import Table
 
@@ -386,7 +390,9 @@ async def get_skill(
     if skill is None:
         raise StoreError(f"no skill named {name!r} in your account.")
     version_count = 0
-    async for _ in rt.anthropic.beta.skills.versions.list(skill.id):
+    async for _ in list_skill_versions(
+        rt.anthropic, skill.id, scope=resource_scope(tenant_id=str(tenant_id))
+    ):
         version_count += 1
     cols = ("display_title", "id", "source", "created_at")
     emit_rows(console, [skill], columns=cols, as_json=as_json)
@@ -431,8 +437,21 @@ async def delete_skill(
     name: str,
     yes: bool,
     selector: TenantSelector | None = None,
+    native_guard: NativeSkillDeleteGuard | None = None,
     force: bool = False,
 ) -> None:
+    if native_guard is not None:
+        native_guard.require_enabled()
+        async with rt.sessionmaker() as session:
+            override = await resolve_tenant_override(session, selector)
+            tenant_id = await discover_tenant(session, override=override)
+            if str(tenant_id) != native_guard.scope.tenant_id:
+                raise ScopeViolation(
+                    "skill-delete", "CLI destination differs from the authorized native tenant"
+                )
+            tenant_label = await resolve_tenant_display(session, tenant_id)
+            confirm_or_abort(console, f"delete skill {name!r} in {tenant_label}?", yes=yes)
+        await refuse_native_skill_delete(rt.sessionmaker, guard=native_guard, skill=name)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
@@ -482,7 +501,11 @@ async def delete_skill(
     confirm_or_abort(console, question, yes=yes)
     async with rt.sessionmaker() as session, session.begin():
         outcome = await delete_skill_unless_attached(
-            rt.anthropic, session, skill_id=skill.id, detach=force
+            rt.anthropic,
+            session,
+            skill_id=skill.id,
+            detach=force,
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
         if not outcome.deleted:
             raise _refusal(outcome.attachments)

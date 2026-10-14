@@ -8,6 +8,7 @@ lands the reader on the created agent's Details carrying the honest next step.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,6 +34,7 @@ from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _CREATED_ID = "ag_churn"
@@ -56,7 +58,7 @@ def _runtime(anthropic: Any, *, sessionmaker: Any = None) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
 

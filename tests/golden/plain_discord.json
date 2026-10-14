@@ -46,6 +46,7 @@
           "memory_read_only": false,
           "memory_store_id": null,
           "model_id": "claude-sonnet-4-6",
+          "personal_memory_store_id": null,
           "repo_branch": null,
           "repo_mount_path": null,
           "repo_resource_id": null,
@@ -172,6 +173,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -232,6 +237,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -577,7 +586,7 @@
           ],
           [
             "order",
-            "asc"
+            "desc"
           ],
           [
             "types[]",

@@ -56,6 +56,7 @@ class Vaults(CoreVaults, Protocol):
         self, scope: Scope, vault: ResourceRef, config: CredentialCreate, *, key: str
     ) -> str: ...
     def walk(self, scope: Scope) -> AsyncIterator[VaultRecord]: ...
+    async def retrieve(self, scope: Scope, vault: ResourceRef) -> VaultRecord: ...
     async def create(self, scope: Scope, display_name: str, *, key: str) -> VaultRecord: ...
     def credential_walk(
         self, scope: Scope, vault: ResourceRef
@@ -162,7 +163,7 @@ class AnthropicVaults:
     async def walk_named(self, scope: Scope, display_name: str) -> AsyncIterator[NativeSnapshot]:
         # The host grants the exact account/agent-derived name, not org enumeration.
         authorize(self._authorization, scope, "vault_name", display_name)
-        async for item in provider_iter(self._client.beta.vaults.list()):
+        async for item in provider_iter(self._client.beta.vaults.list(limit=100)):
             if item.display_name == display_name and visible(scope, item.metadata):
                 yield native_snapshot(item)
 
@@ -193,11 +194,16 @@ class AnthropicVaults:
 
     async def walk(self, scope: Scope) -> AsyncIterator[VaultRecord]:
         authorize(self._authorization, scope, "vault")
-        async for item in provider_iter(self._client.beta.vaults.list()):
+        async for item in provider_iter(self._client.beta.vaults.list(limit=100)):
             if visible(scope, item.metadata) and visible_grant(
                 self._authorization, scope, "vault", item.id
             ):
                 yield self._vault(scope, item)
+
+    async def retrieve(self, scope: Scope, vault: ResourceRef) -> VaultRecord:
+        authorize(self._authorization, scope, "vault", vault.id)
+        check_ref(scope, vault, self._account_scope_id, "vault")
+        return self._vault(scope, await provider_call(self._client.beta.vaults.retrieve(vault.id)))
 
     async def create(self, scope: Scope, display_name: str, *, key: str) -> VaultRecord:
         authorize(self._authorization, scope, "vault")

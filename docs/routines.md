@@ -53,6 +53,13 @@ past the reference instant so it cannot land on it, and returns UTC.
 
 ## Creating one
 
+Operators can opt into requiring a destination for the MCP `create_routine`
+tool with `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. A call without both
+destination fields then receives a warning that nothing was created, before
+agent lookup or saving a routine. The default is `false`, preserving
+record-only creation. Existing routines and `update_routine`, including
+clearing a destination, are unaffected.
+
 Five MCP tools — `create_routine`, `list_routines`, `get_routine`,
 `update_routine`, `delete_routine` — are registered by
 `packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py` and catalogued
@@ -492,3 +499,50 @@ that returns before executing a turn (for example, a missing routine or agent)
 currently records `unknown`; shutdown cancellation can also be `unknown`.
 The bounded best-effort writer may lose diagnostics during outages, queue
 saturation or process crashes. Routine result/error fields remain unchanged.
+
+## Offline scheduler clock hook
+
+`daimon.testing.routine_clock` exposes `RoutineJobClock(anchor=aware_UTC)`
+and `ClockedRoutineJobs` for an explicitly configured offline QA runner.
+Share the callable clock with `OfflineDiscordGateway`/`DiscordSurfaceHarness`
+and wrap it in the host observation clock when binding root/step windows.
+Supply the existing scheduler `caps` and `fire` edges and the real adapter
+`RoutinePoster`; native scheduled session creation is a separate capability.
+`RoutineBinding(tenant_id, routine_id)` joins independently created durable
+rows, rather than interpreting model text as successful routine creation.
+
+`await jobs.advance(150.0)` (also 240 or 1920 seconds) runs the real scheduler
+and delivery poller in chronological ticks at most 15 seconds apart, draining
+each fire before moving time again. Receipts retain actual DB readbacks,
+destination decisions, claimed delivery counts and the adapter's captured
+HTTP posts. Delivery settlement uses the injected wall clock only when
+explicitly supplied; ordinary callers still settle at wall time. Constructors
+and invocations validate all database binds through the shared owned-lane or
+registered isolated-CI guard. Plain local `daimon_test` is refused by design.
+
+These are component receipts, not catalog PASSes. Unit-test fire callbacks do
+not certify a native scheduled session, its memory, or failure-copy delivery.
+NEW23 still needs an observed real-path post or explicit warning; the hook
+never writes either for a routine without a destination. Without an explicit
+credential-form expiry binding, requesting
+`advance(1920.0, job="credential_form_expiry")` raises `LongWaitUnavailable`
+with code `CREDENTIAL_FORM_EXPIRY_JOB_UNAVAILABLE` before connecting or moving
+time. Wizard expiry and GitHub-request expiry cannot substitute for that job.
+
+For the opt-in credential-form expiry profile, pass
+`credential_form_expiry=CredentialFormExpiryBinding(tenant_id=authorized_id,
+edit=adapter_callback)` when constructing `ClockedRoutineJobs`. The callback
+calls the real `edit_expired_posted_card(client, row=row)` companion on the
+client attached to the shared gateway clock. Chronological ticks call the real
+`poll_credential_form_expiries_once` with the shared wall clock and authorized
+tenant. Cursor state remains private; failed card edits stay durable pending
+and are retried by the product job. Every poll rechecks all database binds before
+and after the job, including its final tick.
+
+Expiry receipts are labelled `opt_in_credential_form_expiry` and retain actual
+poll counts and accepted HTTP card edits. Counts alone cannot prove an edit or
+promote a source cell. Bind independently created requests/cards with their
+persisted 30-minute expiry, actual card identity/readback and the native/root
+oracle context. A component test's store creation/renderer proves host expiry,
+not native credential-target ingress. Routine jobs and ordinary product defaults
+are unchanged.

@@ -26,6 +26,7 @@ Each test function name carries `discord` so the Slack half of this suite
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -43,6 +44,7 @@ from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -83,7 +85,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(anthropic, sessionmaker), turn_path=None),
     )
 
 

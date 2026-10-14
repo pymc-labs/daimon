@@ -24,6 +24,7 @@ from daimon.adapters.teams.output_delivery import (
     TeamsOutputDelivery,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.output_delivery import DeliverableFile
 from daimon.core.stores.file_uploads import create_upload, store_upload_content
 from daimon.core.teams_file_offers import UploadOffer, sign_offer
 from daimon.core.teams_graph import GraphClient, TeamGroups
@@ -524,6 +525,173 @@ async def test_oversize_output_in_a_dm_is_only_logged(
     assert appended == [] and harness.sender.activities == [], "nothing posted"
     assert any(e["event"] == "teams.output.oversize" for e in logs)
     assert harness.deletes == [], "an oversize file stays listed rather than being lost"
+
+
+@pytest.mark.parametrize("action", ["accept", "decline"])
+async def test_neutral_consent_uses_exact_bytes_and_never_anthropic(
+    db_session_factory: async_sessionmaker[AsyncSession], action: str
+) -> None:
+    harness = _harness(db_session_factory, listing=[])
+    content = b"\x89PNG\r\n\x1a\n\x00provider-image"
+    assert await harness.delivery.deliver_provider_output(
+        make_inbound(),
+        "session-gemini",
+        DeliverableFile("neutral:gemini:root:image", "chart", "image/png", len(content), content),
+    )
+    assert _card(harness.sender, 0).name == "chart.png"
+    assert not harness.uploads
+    await harness.delivery.handle_consent(_consent(action, _offer_token(harness.sender)))
+    await harness.settle()
+    assert not harness.deletes
+    if action == "accept":
+        [upload] = harness.uploads
+        assert upload.content == content
+        assert upload.headers["content-range"] == f"bytes 0-{len(content) - 1}/{len(content)}"
+        assert _card(harness.sender, -1).content_type == FILE_INFO_CONTENT_TYPE
+    else:
+        assert not harness.uploads
+
+
+async def test_neutral_offer_rejects_wrong_actor_then_allows_requester(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    harness = _harness(db_session_factory, listing=[])
+    assert await harness.delivery.deliver_provider_output(
+        make_inbound(),
+        "session-openai",
+        DeliverableFile("neutral:openai:root:file", "data.csv", "text/csv", 4, b"a,b\n"),
+    )
+    token = _offer_token(harness.sender)
+    await harness.delivery.handle_consent(_consent("accept", token, user=OTHER_AAD_OBJECT_ID))
+    await harness.settle()
+    assert not harness.uploads
+    await harness.delivery.handle_consent(_consent("accept", token))
+    await harness.settle()
+    assert harness.uploads[0].content == b"a,b\n"
+    assert not harness.deletes
+
+
+async def test_neutral_graph_upload_preserves_bytes_and_appends_actual_link(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    puts: list[httpx.Request] = []
+
+    def put(request: httpx.Request) -> httpx.Response:
+        puts.append(request)
+        return _uploaded(request)
+
+    harness = _harness(db_session_factory, listing=[], channel_files=_channel_files(put))
+    links: list[str] = []
+
+    async def append(text: str) -> bool:
+        links.append(text)
+        return True
+
+    assert await harness.delivery.deliver_provider_output(
+        _in_channel(),
+        "session-openai",
+        DeliverableFile(
+            "opaque-artifact-ref", "report.pdf", "application/octet-stream", 4, b"pdf!"
+        ),
+        append=append,
+    )
+    assert len(puts) == 1 and puts[0].content == b"pdf!"
+    assert links == [
+        "Saved to this channel's files:\n- [report.pdf](https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29/report.pdf)"
+    ]
+    assert not harness.sender.sent and not harness.deletes
+
+
+async def test_neutral_consent_replay_wrong_service_and_untrusted_upload_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    harness = _harness(db_session_factory, listing=[])
+    file = DeliverableFile("opaque", "data.csv", "text/csv", 4, b"a,b\n")
+    assert await harness.delivery.deliver_provider_output(make_inbound(), "session-openai", file)
+    assert await harness.delivery.deliver_provider_output(make_inbound(), "session-openai", file)
+    assert len(harness.sender.activities) == 1
+    token = _offer_token(harness.sender)
+    ctx = _consent("accept", token)
+    ctx.conversation_ref.service_url = "https://different.invalid"
+    await harness.delivery.handle_consent(ctx)
+    await harness.settle()
+    assert not harness.uploads
+    await harness.delivery.handle_consent(
+        _consent("accept", token, upload_url="https://untrusted.invalid/upload")
+    )
+    await harness.settle()
+    assert not harness.uploads and not harness.deletes
+    assert "couldn't upload" in (harness.sender.activities[-1].text or "")
+    await harness.delivery.handle_consent(_consent("accept", token))
+    await harness.settle()
+    assert not harness.uploads
+
+
+async def test_neutral_offer_memory_is_bounded_and_expired_bytes_are_released(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.output_delivery import MAX_BYTES_PER_FILE
+
+    harness = _harness(db_session_factory, listing=[])
+    now = [0.0]
+    harness.delivery._clock = lambda: now[0]
+    content = b"x" * MAX_BYTES_PER_FILE
+    for i in range(4):
+        assert await harness.delivery.deliver_provider_output(
+            make_inbound(),
+            "session-openai",
+            DeliverableFile(str(i), "data.bin", "application/octet-stream", len(content), content),
+        )
+    extra = DeliverableFile("extra", "data.bin", "application/octet-stream", 1, b"x")
+    assert not await harness.delivery.deliver_provider_output(
+        make_inbound(), "session-openai", extra
+    )
+    now[0] = 3601.0
+    assert await harness.delivery.deliver_provider_output(make_inbound(), "session-openai", extra)
+    assert not harness.uploads and not harness.deletes
+
+
+async def test_neutral_inflight_consent_bytes_still_count_toward_memory_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.output_delivery import MAX_BYTES_PER_FILE
+
+    harness = _harness(db_session_factory, listing=[])
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def upload(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await release.wait()
+        return httpx.Response(201, json={"id": "actual-upload"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(upload))
+    harness.delivery._runtime = dataclasses.replace(harness.delivery._runtime, http_client=http)
+    content = b"x" * MAX_BYTES_PER_FILE
+    try:
+        for i in range(4):
+            assert await harness.delivery.deliver_provider_output(
+                make_inbound(),
+                "session-openai",
+                DeliverableFile(
+                    str(i), "data.bin", "application/octet-stream", len(content), content
+                ),
+            )
+        await harness.delivery.handle_consent(_consent("accept", _offer_token(harness.sender)))
+        await started.wait()
+        extra = DeliverableFile("extra", "data.bin", "application/octet-stream", 1, b"x")
+        assert not await harness.delivery.deliver_provider_output(
+            make_inbound(), "session-openai", extra
+        )
+        release.set()
+        await harness.settle()
+        assert await harness.delivery.deliver_provider_output(
+            make_inbound(), "session-openai", extra
+        )
+        assert not harness.deletes
+    finally:
+        release.set()
+        await harness.settle()
+        await http.aclose()
 
 
 async def test_a_channel_without_file_access_keeps_an_oversize_output(

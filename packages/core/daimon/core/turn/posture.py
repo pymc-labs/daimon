@@ -1,10 +1,10 @@
 """Billing and tool-confirmation postures for a turn — tagged unions `run_turn`
 requires.
 
-Per CONTEXT.md D-05/D-06/D-07: every call to `run_turn` must declare how the
+Every call to `run_turn` must declare how the
 turn is billed. `Billed` carries an event-only recorder (no `session_id`
 passthrough — the recorder binds session/tenant context itself via
-`functools.partial`, per RESEARCH "Pattern 2"). `BillingExempt` carries a
+`functools.partial`). `BillingExempt` carries a
 closed `ExemptReason` literal: widening the set of exempt reasons is a
 deliberate, reviewable act (edit the `Literal`, not a free-form string),
 not something a caller can invent inline.
@@ -55,6 +55,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.tool_safety import ToolCall
+from daimon.core.usage_billing import ObservationBilled
 
 ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-caller"]
 
@@ -77,7 +78,7 @@ class BillingExempt:
     reason: ExemptReason
 
 
-BillingPosture = Billed | BillingExempt
+BillingPosture = Billed | ObservationBilled | BillingExempt
 
 
 @dataclass(frozen=True)

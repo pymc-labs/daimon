@@ -24,7 +24,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -78,6 +78,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -273,6 +274,15 @@ def _patched_discord_rest(
         yield
 
 
+class _ParityBotUser(SimpleNamespace):
+    """The concrete bot identity used by mention and reaction fixture calls."""
+
+    id: int
+
+    def mentioned_in(self, _message: discord.Message) -> bool:
+        return True
+
+
 @dataclass
 class DiscordDriver:
     """Drives turns through `DaimonBot.on_message`, the real Discord entry point."""
@@ -342,9 +352,7 @@ class DiscordDriver:
         intents = discord.Intents.default()
         intents.message_content = True
         bot = DaimonBot(runtime=runtime, intents=intents)
-        bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
-        bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
-        bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
+        bot._connection.user = cast(discord.ClientUser, _ParityBotUser(id=999))  # pyright: ignore[reportPrivateUsage]
         return bot
 
     def _make_message(
@@ -559,16 +567,19 @@ class DiscordDriver:
         settings.mcp.public_url = _MCP_PUBLIC_URL
         settings.mcp.jwt_secret = SecretStr(_MCP_JWT_SECRET)
         settings.github.oauth_scopes = ()
+        client = build_fake_anthropic(router.dispatch)
         return DiscordRuntime(
             settings=settings,
-            anthropic=build_fake_anthropic(router.dispatch),
+            anthropic=client,
             sessionmaker=sessionmaker,
             notebook_rate_limiter=RateLimiter(max_requests=999),
             billing_config=None,
             deployment_default=DeploymentDefault(),
             resolver_cache=new_resolver_cache(),
-            turn_deps=MagicMock(  # pyright: ignore[reportArgumentType]  # no turn runs here
-                fernet=build_multifernet((Fernet.generate_key().decode(),))
+            turn_deps=replace(
+                deps_for(client, sessionmaker),
+                fernet=build_multifernet((Fernet.generate_key().decode(),)),
+                turn_path=None,
             ),
         )
 

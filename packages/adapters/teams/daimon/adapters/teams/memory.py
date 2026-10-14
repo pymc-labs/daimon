@@ -30,6 +30,7 @@ from daimon.core.memory_view import (
     resolve_channel_agent,
 )
 from daimon.core.message_split import split_fenced
+from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import load_access_policy
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
@@ -106,6 +107,7 @@ async def _personal_cards(context: CommandContext, asked: TeamsInbound) -> list[
         store_id=await get_own_personal_memory_store(context.runtime.sessionmaker, agent),
         request=parse_memory_args(context.args),
         command="memory",
+        scope=resource_scope(tenant_id=str(agent.tenant_id)),
     )
     if reply.content is not None:
         return [_card(reply.title, reply.content)]

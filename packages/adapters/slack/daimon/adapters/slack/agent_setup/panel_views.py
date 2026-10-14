@@ -34,6 +34,7 @@ from daimon.adapters.slack.modal_limits import (
 )
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.setup_conversations import setup_button
+from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
@@ -61,6 +62,7 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import ChannelAdminsRow, ChannelSkillRow, McpTokenRow
+from mux.contracts.ids import Provider
 
 __all__ = [
     "ACTION_CHANNEL_ADMINS",
@@ -209,6 +211,9 @@ ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 
 ACTION_ADD_SKILL: Final = "agent_setup__skill_add"
 """Open the Add skill form for the agent on Details."""
+ACTION_BACKEND_SELECT: Final = "agent_setup__backend_select"
+ACTION_BACKEND_CONFIRM: Final = "agent_setup__backend_confirm"
+ACTION_BACKEND_CANCEL: Final = "agent_setup__backend_cancel"
 
 ACTION_REVOKE_TOKEN: Final = "agent_setup__revoke_token"
 """Revoke one minted token; the button's `value` is its jti.
@@ -536,6 +541,8 @@ def build_details_view(
     attribution: str | None,
     avatar_url: str | None = None,
     avatar_editable: bool | None = None,
+    backend_options: tuple[Provider, ...] = (),
+    backend_selection: Provider | None = None,
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
@@ -595,6 +602,30 @@ def build_details_view(
         )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
+    if is_admin and backend_options:
+        choices = [
+            {
+                "text": {"type": "plain_text", "text": channel_backend.DEFAULT_BACKEND_LABEL},
+                "value": "clear",
+            },
+            *(
+                {"text": {"type": "plain_text", "text": provider}, "value": provider}
+                for provider in backend_options
+            ),
+        ]
+        picker: dict[str, Any] = {
+            "type": "static_select",
+            "action_id": ACTION_BACKEND_SELECT,
+            "placeholder": {"type": "plain_text", "text": "Model backend"},
+            "options": choices,
+        }
+        current = next(
+            (option for option in choices if option["value"] == (backend_selection or "clear")),
+            None,
+        )
+        if current is not None:
+            picker["initial_option"] = current
+        blocks.append(_section("*Model backend*", accessory=picker))
     actions = [
         _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
         _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
@@ -620,6 +651,51 @@ def build_details_view(
                 expanded=meta.expanded,
             )
         ),
+        callback_id=CALLBACK_DETAILS,
+    )
+
+
+def build_backend_preview_view(
+    preview: channel_backend.CompatibilityPreview,
+    *,
+    meta: PanelMetadata,
+    applying: bool = False,
+) -> dict[str, Any]:
+    selection = "Use default" if meta.backend_target == "clear" else preview.target_backend
+    lines = [f"*Model backend: {selection}*"]
+    for label, items in (
+        ("Unsupported skills", preview.unsupported_skills),
+        ("Unsupported MCPs", preview.unsupported_mcps),
+        ("Unsupported capabilities", preview.unsupported_capabilities),
+        ("Shared-thread limits", preview.shared_thread_limits),
+    ):
+        names = ", ".join(escape_mrkdwn(item) for item in items) or "None"
+        shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
+        lines.append(f"{label}: {shown}")
+    lines.extend(
+        [preview.cost_line, "Existing threads keep their backend; channel overrides still apply."]
+    )
+    blocks = [_section("\n".join(lines))]
+    if not preview.allowed:
+        blocks.append(_context("This backend is not enabled for this workspace."))
+    if applying:
+        blocks.append(_context("Applying…"))
+    else:
+        buttons = [
+            _button(action_id=ACTION_BACKEND_CANCEL, label="Cancel", value=meta.agent_name or "")
+        ]
+        if preview.allowed:
+            buttons.insert(
+                0,
+                _button(
+                    action_id=ACTION_BACKEND_CONFIRM, label="Confirm", value=meta.agent_name or ""
+                ),
+            )
+        blocks.append({"type": "actions", "elements": buttons})
+    return finish_modal(
+        title="Model backend",
+        blocks=blocks,
+        private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_DETAILS,
     )
 

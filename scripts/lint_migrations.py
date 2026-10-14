@@ -70,6 +70,28 @@ def _body_without_docstring(func: ast.FunctionDef) -> list[ast.stmt]:
     return body
 
 
+def _is_merge_revision(tree: ast.Module) -> bool:
+    """True when the module's ``down_revision`` is a tuple of two or more parents.
+
+    An Alembic merge revision only joins branches: it has no schema change of
+    its own, so its downgrade (back to both parents) is a safe no-op.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name, value = node.target.id, node.value
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            name, value = node.targets[0].id, node.value
+        else:
+            continue
+        if name == "down_revision":
+            return isinstance(value, ast.Tuple) and len(value.elts) >= 2
+    return False
+
+
 def _classify_downgrade_body(func: ast.FunctionDef) -> str:
     """Classify the downgrade() body as 'raises', 'trivial', or 'real'."""
     body = _body_without_docstring(func)
@@ -182,6 +204,8 @@ def lint_file(path: Path) -> list[Finding]:
                     ),
                 )
             )
+        elif marker_value == "safe" and shape == "trivial" and _is_merge_revision(tree):
+            pass  # a merge revision's no-op downgrade is a real reversal
         elif marker_value in {"safe", "destructive"} and shape != "real":
             findings.append(
                 Finding(

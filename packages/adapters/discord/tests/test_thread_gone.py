@@ -14,7 +14,7 @@ import asyncio
 import types
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -46,6 +46,7 @@ from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import MARouter, build_fake_anthropic, json_body, ma_session
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.turn_fakes import deps_for
 from daimon.testing.turn_router import build_turn_router, turn_events
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -648,7 +649,7 @@ async def test_thread_delete_event_with_no_turn_running_still_retires_the_sessio
             billing_config=None,
             deployment_default=DeploymentDefault(),
             resolver_cache=new_resolver_cache(),
-            turn_deps=MagicMock(),
+            turn_deps=replace(deps_for(), turn_path=None),
         )
     )
     payload = types.SimpleNamespace(thread_id=_THREAD_ID, parent_id=_PARENT_ID, guild_id=_GUILD_ID)

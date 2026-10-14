@@ -88,3 +88,6 @@ async def test_turn_blocked_when_over_cap_writes_no_new_usage_or_ledger_row(
     ledger_rows = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
     debit_rows = [row for row in ledger_rows if row.delta_usd < 0]
     assert debit_rows == [], "over-cap turn must write zero tenant_ledger debits"
+    assert len(ledger_rows) == 1
+    assert ledger_rows[0].delta_usd == Decimal("100.00")
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("100.00")

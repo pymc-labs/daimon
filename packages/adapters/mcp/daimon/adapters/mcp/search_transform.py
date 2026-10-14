@@ -7,7 +7,7 @@ wrong for a per-agent token: the IdentityMiddleware narrows such a session to
 agent-chat tools via ``disable_components(match_all=True)`` +
 ``enable_components(tags={"agent-chat"})``, and the synthetic search/call tools
 carry no ``agent-chat`` tag, so the ``match_all`` disable hides them — leaving
-``tools/list`` empty even though ``tools/call`` still works (issue #181).
+``tools/list`` empty even though ``tools/call`` still works.
 
 For a narrowed agent session the catalog is small — the six ``agent_chat``
 tools plus the eight tools tagged ``agent-chat`` in ``self_edit``/``vault``

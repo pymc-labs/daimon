@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import thread_participation as store
 from daimon.core.thread_participation import ParticipationMode, ParticipationScope
 from daimon.core.turn.protection import ProtectionState
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -68,7 +70,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # _handle_mention stubbed
+        turn_deps=replace(deps_for(), turn_path=None),  # _handle_mention stubbed
     )
 
 

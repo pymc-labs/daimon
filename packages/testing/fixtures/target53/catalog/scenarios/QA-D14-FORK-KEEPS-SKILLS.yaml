@@ -1,0 +1,32 @@
+id: QA-D14-FORK-KEEPS-SKILLS
+title: a channel-own fork keeps every skill its source carries
+friction:
+- F5
+- D39
+set: A
+surface: headless
+tier: weekly
+priority: P1
+est_turns: 0
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: cli
+  args: daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from
+    {env.qa_base_with_own_skill}
+assert:
+- kind: cli_check
+  cmd: daimon agents --guild {guild_id} get {fork.name}
+  expect_all_of: '{env.qa_base_with_own_skill.skills}'
+- kind: cli_check
+  cmd: daimon agents --guild {guild_id} get {fork.name}
+  expect: '{env.qa_base_with_own_skill.model}'
+- kind: log_absent
+  turn: 0
+  event: agent_fork.dropped_skills
+teardown:
+- do: admin
+  tool: archive_channel_forks
+  args:
+    channel: '{channel_id}'

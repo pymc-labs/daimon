@@ -1,0 +1,374 @@
+{
+  "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+  "source": {
+    "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+    "sha256": "9baa102bb4e21b61cac0d139157bad5c1def055846b2e1452c3d9bcfae7f8de0"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW8-LINK-PAGE-THREAD-TITLE.yaml",
+    "sha256": "273af0b4e1addcfe3c66e421e348413eaf5a854d9b452bf775dd9be89a96ea16"
+  },
+  "scenario": {
+    "id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+    "title": "a mention whose only content is a sign-in-walled link is not titled 'Sign in - Google Accounts'",
+    "friction": [
+      "D32",
+      "F14"
+    ],
+    "set": "A",
+    "surface": "discord",
+    "tier": "weekly",
+    "priority": "P2",
+    "est_turns": 1,
+    "setup": [],
+    "steps": [
+      {
+        "do": "new_channel"
+      },
+      {
+        "do": "mention",
+        "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit"
+      },
+      {
+        "do": "wait_done"
+      }
+    ],
+    "assert": [
+      {
+        "kind": "thread_name",
+        "turn": 1,
+        "pattern_absent": "(?i)sign in|google accounts|log ?in",
+        "max_len": 60
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [
+    {
+      "location": "steps[0]",
+      "operation": "new_channel",
+      "source": {
+        "do": "new_channel"
+      },
+      "turn": null,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[1]",
+      "operation": "host_turn",
+      "source": {
+        "do": "mention",
+        "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": "turn1",
+      "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit",
+      "fixture": null,
+      "fixture_sha256": null
+    },
+    {
+      "location": "steps[2]",
+      "operation": "wait_done",
+      "source": {
+        "do": "wait_done"
+      },
+      "turn": 1,
+      "channel": "default",
+      "thread": null,
+      "text": null,
+      "fixture": null,
+      "fixture_sha256": null
+    }
+  ],
+  "anthropic": {
+    "pin": {
+      "path": "tests/judge/fixtures/catalog_anthropic.json",
+      "sha256": "f35892ba2141e72cf0c074d5681d0e288f95ef58bfa28598b02a7e8ebe31f618"
+    },
+    "scenario_id": "QA-NEW8-LINK-PAGE-THREAD-TITLE",
+    "source_kind": "catalog-authored"
+  },
+  "anthropic_gaps": [],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit",
+          "session_id": "qa-session-b5288bdc4e1ec9a0",
+          "root_id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+          "request": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "frames": [
+            {
+              "type": "agent.session.turn.in_progress",
+              "event_id": "qa-openai-b5288bdc4e1ec9a0-turn-1:running",
+              "session_id": "qa-session-b5288bdc4e1ec9a0",
+              "turn": {
+                "id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+                "session_id": "qa-session-b5288bdc4e1ec9a0",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "in_progress",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-b5288bdc4e1ec9a0-turn-1:input",
+              "session_id": "qa-session-b5288bdc4e1ec9a0",
+              "turn": {
+                "id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+                "session_id": "qa-session-b5288bdc4e1ec9a0",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-b5288bdc4e1ec9a0-turn-1:input",
+                "turn_id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "input_text",
+                    "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.item.done",
+              "event_id": "qa-openai-b5288bdc4e1ec9a0-turn-1:answer",
+              "session_id": "qa-session-b5288bdc4e1ec9a0",
+              "turn": {
+                "id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+                "session_id": "qa-session-b5288bdc4e1ec9a0",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              },
+              "item": {
+                "id": "qa-openai-b5288bdc4e1ec9a0-turn-1:answer",
+                "turn_id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Please paste the version changes to review."
+                  }
+                ]
+              }
+            },
+            {
+              "type": "agent.session.turn.completed",
+              "event_id": "qa-openai-b5288bdc4e1ec9a0-turn-1:end",
+              "session_id": "qa-session-b5288bdc4e1ec9a0",
+              "turn": {
+                "id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+                "session_id": "qa-session-b5288bdc4e1ec9a0",
+                "agent_id": "qa-agent",
+                "subagent_id": null,
+                "status": "completed",
+                "created_at": 0,
+                "usage": {
+                  "input_tokens": 64,
+                  "input_tokens_details": {
+                    "cached_tokens": 16
+                  },
+                  "output_tokens": 8,
+                  "output_tokens_details": {
+                    "reasoning_tokens": 3
+                  }
+                }
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-openai-b5288bdc4e1ec9a0-turn-1",
+            "session_id": "qa-session-b5288bdc4e1ec9a0",
+            "agent_id": "qa-agent",
+            "subagent_id": null,
+            "status": "completed",
+            "created_at": 0,
+            "usage": {
+              "input_tokens": 64,
+              "input_tokens_details": {
+                "cached_tokens": 16
+              },
+              "output_tokens": 8,
+              "output_tokens_details": {
+                "reasoning_tokens": 3
+              }
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+      },
+      "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
+      "provenance": "authored-sdk-wire",
+      "turns": [
+        {
+          "turn": 1,
+          "location": "steps[1]",
+          "channel": "default",
+          "thread": "turn1",
+          "request_text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit",
+          "session_id": "qa-session-b5288bdc4e1ec9a0",
+          "root_id": "qa-gemini-b5288bdc4e1ec9a0-turn-1",
+          "request": {
+            "agent": "antigravity-preview-05-2026",
+            "agent_config": {
+              "type": "antigravity",
+              "model": "gemini-3.8-flash"
+            },
+            "environment": {
+              "type": "remote",
+              "sources": []
+            },
+            "input": [
+              {
+                "type": "text",
+                "text": "review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit"
+              }
+            ],
+            "background": true,
+            "store": true,
+            "tools": []
+          },
+          "frames": [
+            {
+              "event_type": "interaction.completed",
+              "event_id": "qa-gemini-b5288bdc4e1ec9a0-turn-1:end",
+              "interaction": {
+                "id": "qa-gemini-b5288bdc4e1ec9a0-turn-1",
+                "status": "completed"
+              }
+            }
+          ],
+          "snapshot": {
+            "id": "qa-gemini-b5288bdc4e1ec9a0-turn-1",
+            "created": "2026-10-10T00:00:00Z",
+            "updated": "2026-10-10T00:00:00Z",
+            "status": "completed",
+            "environment_id": "qa-workspace-b5288bdc4e1ec9a0",
+            "steps": [
+              {
+                "id": "qa-gemini-b5288bdc4e1ec9a0-turn-1:answer",
+                "type": "model_output",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Please paste the version changes to review."
+                  }
+                ]
+              }
+            ],
+            "usage": {
+              "total_input_tokens": 64,
+              "total_cached_tokens": 16,
+              "total_output_tokens": 8,
+              "total_thought_tokens": 3
+            }
+          },
+          "completion_gate": null
+        }
+      ],
+      "gaps": []
+    }
+  ]
+}

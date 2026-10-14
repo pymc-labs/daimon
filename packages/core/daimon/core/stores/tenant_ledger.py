@@ -17,11 +17,32 @@ from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores.domain import TenantLedgerRow
-from sqlalchemy import DateTime, func, select
+from sqlalchemy import DateTime, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def lock_funds(
+    session: AsyncSession, *, tenant_id: uuid.UUID, financial: bool = True
+) -> uuid.UUID | None:
+    """Fence one tenant's append-only funds inside the caller's transaction.
+
+    Ledger inserts already take KEY SHARE on this parent through their foreign
+    key. FOR UPDATE waits for those inserts and fences subsequent ones until
+    commit, without changing writers or blocking another tenant's ledger.
+    Passive refresh takes KEY SHARE instead, protecting tenant lifetime without
+    fencing ordinary writes. Acquire before actor and reservation rows, and
+    never hold over native I/O.
+    """
+    statement = select(Tenant.id).where(Tenant.id == tenant_id)
+    statement = (
+        statement.with_for_update()
+        if financial
+        else statement.with_for_update(read=True, key_share=True)
+    )
+    return await session.scalar(statement)
 
 
 async def insert_entry(
@@ -86,7 +107,13 @@ async def get_channel_spend(
     stmt = select(func.coalesce(-func.sum(TenantLedger.delta_usd), Decimal("0"))).where(
         TenantLedger.tenant_id == tenant_id,
         TenantLedger.channel_id == channel_id,
-        TenantLedger.delta_usd < Decimal("0"),
+        or_(
+            TenantLedger.delta_usd < Decimal("0"),
+            and_(
+                TenantLedger.reason.in_(("turn_debit", "checkpoint_debit")),
+                TenantLedger.idempotency_key.like("adjust:%"),
+            ),
+        ),
     )
     if since is not None:
         stmt = stmt.where(TenantLedger.occurred_at >= since)

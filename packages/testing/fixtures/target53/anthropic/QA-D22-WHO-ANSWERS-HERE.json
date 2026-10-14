@@ -1,0 +1,186 @@
+{
+  "scenario_id": "QA-D22-WHO-ANSWERS-HERE",
+  "scenario_sha256": "6f417f2975dd34ad8b8285046f2c83f69e798b217322b295d9bfc84cde130da5",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "Which agent are you, and which agent answers in this channel? Name them exactly.",
+      "events": [
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Which agent are you, and which agent answers in this channel? Name them exactly."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "get_agent",
+          "input": {
+            "name": "daimon",
+            "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-1"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:6fa51e21abf64e0a-turn-1:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"name\":\"daimon\",\"answering_agent_name\":\"qa-channel-agent\"}"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "I am daimon. qa-channel-agent answers in this channel."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:6fa51e21abf64e0a-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:6fa51e21abf64e0a-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "request_text": "Read this channel's recent messages with your Discord tools and reply with only the release codename.",
+      "events": [
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "Read this channel's recent messages with your Discord tools and reply with only the release codename."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:mcp:2",
+          "type": "agent.mcp_tool_use",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "name": "read_channel",
+          "input": {
+            "channel_id": "default",
+            "origin_context_id": "qa-origin-QA-D22-WHO-ANSWERS-HERE-3"
+          },
+          "mcp_server_name": "daimon-mcp",
+          "evaluated_permission": "allow"
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:mcp:2:result",
+          "type": "agent.mcp_tool_result",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "mcp_tool_use_id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:mcp:2",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"messages\":[{\"content\":\"QA-SEED-qa-fixture-0001 is the release codename.\"}]}"
+            }
+          ],
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:answer:3",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA-SEED-qa-fixture-0001"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:e02fc4ecdf4c906f-turn-3:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

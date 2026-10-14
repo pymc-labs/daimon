@@ -40,8 +40,8 @@ async def _get_cli_token_impl(
 ) -> str:
     """Dispatch to the broker for ``service``; map BrokerError → ToolError.
 
-    Reads identity server-side via ``await ctx.get_state("auth")`` (no
-    tool-supplied agent_id; confused-deputy by construction).
+    Reads identity server-side via ``await ctx.get_state("auth")``;
+    no tool-supplied agent_id, avoiding a confused deputy by construction.
     """
     auth = await _auth(ctx)
     agent_id = auth.agent_id or (auth.chat_agent_id if service == "gcloud" else None)

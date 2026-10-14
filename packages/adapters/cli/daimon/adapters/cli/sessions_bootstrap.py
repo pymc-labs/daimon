@@ -13,6 +13,7 @@ from typing import Literal
 import asyncpg.exceptions  # type: ignore[reportMissingTypeStubs]
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from daimon.adapters.cli.mux_compat import retrieve_environment
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import (
@@ -21,6 +22,8 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.scope import (
     DeploymentDefault,
     ScopeContext,
@@ -149,6 +152,7 @@ async def resolve_agent_and_environment(
     # (a)-pattern re-retrieve: resolver returns the live MA id; we re-fetch the
     # full SDK objects so downstream code (create_session, name printing) has
     # access to fields beyond .id. Small TOCTOU window is acceptable for the CLI.
-    agent = await anthropic.beta.agents.retrieve(agent_id)
-    env = await anthropic.beta.environments.retrieve(env_id)
+    scope = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
+    agent = await retrieve_agent(anthropic, agent_id, scope=scope)
+    env = await retrieve_environment(anthropic, env_id, scope=scope)
     return agent, env

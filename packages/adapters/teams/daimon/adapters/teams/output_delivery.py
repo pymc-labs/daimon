@@ -30,11 +30,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import anthropic
@@ -108,6 +109,8 @@ class _Offer:
     conversation_id: str
     service_url: str | None
     expires_at: float
+    # Neutral bytes stay server-side until consent; None retains native behavior.
+    content: bytes | None = field(default=None, repr=False)
 
 
 def consent_card(name: str, size_bytes: int, token: str) -> MessageActivityInput:
@@ -155,6 +158,7 @@ class TeamsOutputDelivery:
         # Files already previewed in a 1:1 chat: a re-offer (expired card, failed send)
         # repeats only the card. Per process, so a restart previews once more.
         self._previewed: set[str] = set()
+        self._neutral_claimed_bytes: dict[str, int] = {}
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
         # A decode can take hundreds of MB: at most two at once across all sweeps. Its own
         # pool, so queued decodes never fill the loop's default executor (to_thread, DNS).
@@ -316,7 +320,81 @@ class TeamsOutputDelivery:
         except TEAMS_SEND_ERRORS:
             log.warning("teams.channel_output.links_failed", exc_info=True)
 
-    async def _offer(self, inbound: TeamsInbound, session_id: str, file: DeliverableFile) -> None:
+    async def deliver_provider_output(
+        self,
+        inbound: TeamsInbound,
+        session_id: str,
+        file: DeliverableFile,
+        *,
+        append: AppendToAnswer | None = None,
+    ) -> bool:
+        """Deliver verified neutral bytes via Graph or the existing consent/PUT path.
+
+        Foreign artifacts are retained at their provider. Neither acceptance
+        nor decline calls the Anthropic output helpers.
+        """
+        if (
+            not file.content
+            or file.size_bytes != len(file.content)
+            or file.size_bytes > MAX_BYTES_PER_FILE
+        ):
+            return False
+        if inbound.kind != "channel":
+            # A consent ledger key binds the bytes and their actual destination.
+            # It is local identity, never a provider resource ID or byte-read authority.
+            identity = hashlib.sha256()
+            for value in (
+                file.file_id,
+                session_id,
+                inbound.user_id,
+                inbound.conversation_id,
+                inbound.service_url or "",
+            ):
+                identity.update(value.encode())
+                identity.update(b"\x00")
+            identity.update(file.content)
+            file = replace(file, file_id=f"neutral:{identity.hexdigest()}")
+            now = self._clock()
+            self._offers = {k: v for k, v in self._offers.items() if v.expires_at > now}
+            if file.file_id in self._claimed or any(
+                v.file_id == file.file_id for v in self._offers.values()
+            ):
+                return True
+            retained = sum(len(v.content or b"") for v in self._offers.values()) + sum(
+                self._neutral_claimed_bytes.values()
+            )
+            if retained + file.size_bytes > 4 * MAX_BYTES_PER_FILE:
+                return False
+            try:
+                await self._offer(inbound, session_id, file, content=file.content)
+            except OutputDeliveryDeferred:
+                return True
+            return False
+        files = self._files
+        if files is None or not await files.is_available(inbound):
+            return False
+        name = display_filename_for(file.filename, file.mime_type)
+        item = await files.upload(inbound, name, file.content)
+        text = f"{_SAVED}\n{file_link(sanitize_title(item.name or name), item.web_url)}"
+        if append is not None and await append(text):
+            return True
+        if inbound.unprompted:
+            return False
+        await self._sender.send(
+            inbound.conversation_id,
+            MessageActivityInput(text=text, text_format="markdown"),
+            service_url=inbound.service_url,
+        )
+        return True
+
+    async def _offer(
+        self,
+        inbound: TeamsInbound,
+        session_id: str,
+        file: DeliverableFile,
+        *,
+        content: bytes | None = None,
+    ) -> None:
         """Send a consent card, then defer: the click decides the file's fate."""
         now = self._clock()
         self._offers = {k: v for k, v in self._offers.items() if v.expires_at > now}
@@ -337,6 +415,7 @@ class TeamsOutputDelivery:
             conversation_id=inbound.conversation_id,
             service_url=inbound.service_url,
             expires_at=now + OFFER_TTL_S,
+            content=content,
         )
         try:
             await self._sender.send(
@@ -362,11 +441,14 @@ class TeamsOutputDelivery:
             self._spawn(staged, name="teams.file-consent")
             return
         token = str(fields.get("offer", ""))
+        now = self._clock()
+        self._offers = {k: v for k, v in self._offers.items() if v.expires_at > now}
         offer = self._offers.get(token)
         if (
             offer is None
             or offer.expires_at <= self._clock()
             or (offer.user_id, offer.conversation_id) != (actor.user_id, actor.conversation_id)
+            or (offer.content is not None and offer.service_url != service_url)
         ):
             say = self._say(activity.conversation.id, service_url, _EXPIRED)
             self._spawn(say, name="teams.file-consent")
@@ -374,6 +456,8 @@ class TeamsOutputDelivery:
         del self._offers[token]
         self._claimed.add(offer.file_id)
         self._previewed.discard(offer.file_id)
+        if offer.content is not None:
+            self._neutral_claimed_bytes[offer.file_id] = len(offer.content)
         upload = activity.value.upload_info
         if activity.value.action == "accept" and upload is not None:
             work = self._upload(offer, upload)
@@ -386,12 +470,16 @@ class TeamsOutputDelivery:
             await work
         finally:
             self._claimed.discard(file_id)
+            self._neutral_claimed_bytes.pop(file_id, None)
 
     async def _upload(self, offer: _Offer, info: FileUploadInfo) -> None:
         """PUT the bytes, show the file, then remove its output listing."""
         client = self._runtime.anthropic
         try:
-            await self._put(info, await download_output_file(client, offer.file_id))
+            content = offer.content
+            if content is None:
+                content = await download_output_file(client, offer.file_id)
+            await self._put(info, content)
         except (FetchRefused, anthropic.APIError, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
             # The output stays listed, so the next sweep offers it again.
             log.warning("teams.file_upload.failed", file_id=offer.file_id, error=type(err).__name__)
@@ -402,7 +490,8 @@ class TeamsOutputDelivery:
         await self._sender.send(
             offer.conversation_id, file_info_message(info), service_url=offer.service_url
         )
-        await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
+        if offer.content is None:
+            await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
 
     async def _put(self, info: FileUploadInfo, content: bytes) -> None:
         """PUT `content` to the person's OneDrive upload session; `FetchRefused` on failure."""
@@ -453,7 +542,8 @@ class TeamsOutputDelivery:
         await self._sender.send(conversation, file_info_message(info), service_url=service_url)
 
     async def _decline(self, offer: _Offer) -> None:
-        await delete_output_file(
-            self._runtime.anthropic, session_id=offer.session_id, file_id=offer.file_id
-        )
+        if offer.content is None:
+            await delete_output_file(
+                self._runtime.anthropic, session_id=offer.session_id, file_id=offer.file_id
+            )
         log.info("teams.file_consent.declined", file_id=offer.file_id)

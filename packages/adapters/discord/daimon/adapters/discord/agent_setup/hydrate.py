@@ -28,6 +28,7 @@ from daimon.adapters.discord.agent_setup.state import (
 )
 from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import (
@@ -451,7 +452,19 @@ async def load_details_for(
                 background_sessionmaker=runtime.sessionmaker,
             )
             state.avatar_urls[agent.name] = identity.avatar_url
-        return details
+    if state.is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
+        service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        state.backend_options = ()
+        state.backend_selection = None
+        selection = await service.read_selection(
+            runtime.anthropic, tenant_id=_tenant_id(state), agent_name=agent.name
+        )
+        if selection is not None:
+            state.backend_options = selection.policy.enabled_backends
+            state.backend_selection = (
+                selection.revision.backend if selection.revision is not None else None
+            )
+    return details
 
 
 async def load_answering_map_for(runtime: DiscordRuntime, *, state: PanelState) -> AnsweringMap:

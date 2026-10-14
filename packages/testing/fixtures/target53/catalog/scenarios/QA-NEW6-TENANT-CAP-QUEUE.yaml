@@ -1,0 +1,47 @@
+id: QA-NEW6-TENANT-CAP-QUEUE
+title: at the tenant concurrency cap, the extra mention is queued visibly, not refused
+  or dropped
+friction:
+- D24
+set: A
+surface: discord
+tier: manual
+priority: P1
+est_turns: 3
+notes: 'Lowers the turn cap of the whole staging QA tenant for ~3 min: run only when
+  no other QA lane is live (manual tier). Prod cap is 50 (#501 turn queue at cap).'
+setup:
+- do: admin
+  tool: cli
+  args: daimon tenants turn-cap discord {guild_id} 2
+steps:
+- do: new_channel
+- do: burst
+  interval_s: 1
+  texts:
+  - 'QA cap 1: run `sleep 30`, then reply with only C1'
+  - 'QA cap 2: run `sleep 30`, then reply with only C2'
+  - 'QA cap 3: reply with only C3'
+- do: wait_done
+  timeout_s: 240
+assert:
+- kind: no_silent_drop
+  turn: 3
+  max: 15
+- kind: text_absent
+  turn: 3
+  pattern: (?i)too many chats in flight|try again later
+- kind: progress_text_seen
+  turn: 3
+  pattern: (?i)queued|in line|waiting for (a )?(free )?slot|busy
+  within_s: 15
+- kind: text_present
+  turn: 3
+  pattern: \bC3\b
+- kind: done_within_s
+  turn: 3
+  max: 150
+teardown:
+- do: admin
+  tool: cli
+  args: daimon tenants turn-cap discord {guild_id} default

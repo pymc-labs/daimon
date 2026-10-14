@@ -124,6 +124,7 @@ async def retire_terminal_turn_card(
     no_post_confirmed: bool = False,
     allow_prepared_without_message: bool = False,
     requeue_unposted_messages: bool = False,
+    keep_fleet_root: bool = False,
 ) -> bool:
     """Retire by response ID, or explicitly permit retirement of a prepared NULL-ID row.
 
@@ -136,7 +137,10 @@ async def retire_terminal_turn_card(
     try:
         async with sessionmaker() as session:
             retired = await retire_turn_card_intent(
-                session, id=intent_id, expected_message_id=expected_message_id
+                session,
+                id=intent_id,
+                expected_message_id=expected_message_id,
+                keep_fleet_root=keep_fleet_root,
             )
             if retired and requeue_unposted_messages and expected_message_id is None:
                 await release_unposted_messages(session, intent_id=intent_id)

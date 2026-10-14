@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW27-MISTYPED-TOKEN-KEEPS-FORM",
+  "scenario_sha256": "4eb9c2a17a743af883fff6020e5346247d9e4c1a74977400fa16c870ffec6bab",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW33-HERE-AND-GITHUB-HOME-NO-HANG",
+  "scenario_sha256": "3706a81575ed8a7d094c29f0b0d70457e47b99ea45e41bbf7502039e8556b839",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

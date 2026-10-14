@@ -15,7 +15,7 @@ the Marketplace to 15 messages and one call a minute; an internal install gets
 the page it requests. When Slack reports ``has_more`` the block is marked
 ``truncated="true"`` so the model knows the window is partial.
 
-All message text is escaped via ``xml.sax.saxutils`` (T-80-XML mitigation).
+All message text is escaped via ``xml.sax.saxutils``.
 Thread history is the turn's own conversation, so its fetch errors propagate to
 the listener boundary. Channel context is optional: a failed fetch renders it
 ``status="unavailable"`` and the turn goes ahead.

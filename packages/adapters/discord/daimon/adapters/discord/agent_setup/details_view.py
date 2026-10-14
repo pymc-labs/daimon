@@ -32,9 +32,11 @@ from daimon.adapters.discord.agent_setup.conversations import open_setup_convers
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.checks import is_guild_admin, refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
     DetailListName,
@@ -42,16 +44,19 @@ from daimon.core.agent_detail_lists import (
 )
 from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
+from daimon.core.authz import build_subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     setup_target_label,
     shared_keys_sentence,
 )
+from mux.contracts.config import BackendConfig
 
 import discord
 
@@ -360,12 +365,56 @@ class DetailsView(PanelViewBase):
         allowed_user_id: int,
         details: AgentDetails | None = None,
         agent: RosterAgent | None = None,
+        backend_preview: channel_backend.CompatibilityPreview | None = None,
+        backend_clear: bool = False,
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
         details = details or state.details
         assert details is not None, "DetailsView needs a loaded AgentDetails on the panel state"
         self.details = details
         self.agent = agent or state.selected_agent
+        self.backend_preview = backend_preview
+        self.backend_clear = backend_clear
+        if backend_preview is not None:
+            selection = "Use default" if backend_clear else backend_preview.target_backend
+            lines = [f"**Model backend: {selection}**"]
+            for label, items in (
+                ("Unsupported skills", backend_preview.unsupported_skills),
+                ("Unsupported MCPs", backend_preview.unsupported_mcps),
+                ("Unsupported capabilities", backend_preview.unsupported_capabilities),
+                ("Shared-thread limits", backend_preview.shared_thread_limits),
+            ):
+                names = ", ".join(items) or "None"
+                shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
+                lines.append(f"{label}: {shown}")
+            lines.extend(
+                [
+                    backend_preview.cost_line,
+                    "Existing threads keep their backend; channel overrides still apply.",
+                ]
+            )
+            if not backend_preview.allowed:
+                lines.append("This backend is not enabled for this server.")
+            preview_text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
+                "\n".join(lines)[:3000]
+            )
+            preview_container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
+                preview_text
+            )
+            preview_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            confirm: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label="Confirm",
+                style=discord.ButtonStyle.primary,
+                disabled=not backend_preview.allowed,
+            )
+            confirm.callback = self._on_backend_confirm  # type: ignore[method-assign]
+            cancel: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(label="Cancel")
+            cancel.callback = self._on_backend_cancel  # type: ignore[method-assign]
+            preview_row.add_item(confirm)
+            preview_row.add_item(cancel)
+            preview_container.add_item(preview_row)
+            self.add_item(preview_container)
+            return
         container = build_details_container(
             state,
             details,
@@ -417,6 +466,37 @@ class DetailsView(PanelViewBase):
             action_row.add_item(add_skill_button)
         container.add_item(action_row)
 
+        if (
+            channel_backend.backend_selection_enabled(runtime.settings.turn)
+            and state.is_admin
+            and state.backend_options
+        ):
+            backend_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+            select: discord.ui.Select[discord.ui.LayoutView] = discord.ui.Select(
+                placeholder="Model backend",
+                options=[
+                    discord.SelectOption(
+                        label=channel_backend.DEFAULT_BACKEND_LABEL,
+                        value="clear",
+                        default=state.backend_selection is None,
+                    ),
+                    *(
+                        discord.SelectOption(
+                            label=provider,
+                            value=provider,
+                            default=state.backend_selection == provider,
+                        )
+                        for provider in state.backend_options
+                    ),
+                ],
+            )
+            select.callback = functools.partial(  # type: ignore[method-assign]
+                self._on_backend_select, select=select
+            )
+            backend_row.add_item(select)
+            container.add_item(discord.ui.TextDisplay("**Model backend**"))
+            container.add_item(backend_row)
+
         nav_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         back_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
             label=BACK_LABEL, style=discord.ButtonStyle.secondary
@@ -427,6 +507,135 @@ class DetailsView(PanelViewBase):
         container.add_item(nav_row)
 
         self.add_item(container)
+
+    async def _backend_allowed(self, interaction: discord.Interaction) -> bool:
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]
+            await self._backend_audit(interaction, outcome="denied", reason="needs_admin")
+            return False
+        if not await self.interaction_check(interaction):
+            return False
+        if (
+            self.is_finished()
+            or interaction.guild_id != self.state.guild_id
+            or not channel_backend.backend_selection_enabled(self.runtime.settings.turn)
+        ):
+            await interaction.response.send_message(
+                "Model backend wasn't changed. Open the panel again.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _backend_audit(
+        self, interaction: discord.Interaction, *, outcome: PanelOutcome, reason: str
+    ) -> None:
+        await record_panel_write(
+            self.runtime.sessionmaker,
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id)),
+            platform="discord",
+            platform_user_id=str(interaction.user.id),
+            op="agent_backend",
+            outcome=outcome,
+            reason=reason,
+            agent_name=self.details.name,
+        )
+
+    async def _on_backend_select(
+        self,
+        interaction: discord.Interaction,
+        *,
+        select: discord.ui.Select[discord.ui.LayoutView],
+    ) -> None:
+        if not await self._backend_allowed(interaction):
+            return
+        await interaction.response.defer()
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
+        service = channel_backend.make_backend_service(
+            self.runtime.sessionmaker, self.runtime.settings.turn
+        )
+        clear = select.values[0] == "clear"
+        target = BackendConfig.model_validate(
+            {"backend": None if clear else select.values[0]}
+        ).backend
+        selection = await service.read_selection(
+            self.runtime.anthropic,
+            tenant_id=tenant_id,
+            agent_name=self.details.name,
+            target_backend=target,
+        )
+        if selection is None:
+            await self._backend_audit(interaction, outcome="denied", reason="selection_unavailable")
+            await interaction.followup.send(
+                "Model backend preview is unavailable. Nothing was changed.", ephemeral=True
+            )
+            return
+        preview = selection.preview
+        await self.swap_to(
+            interaction,
+            DetailsView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                details=self.details,
+                agent=self.agent,
+                backend_preview=preview,
+                backend_clear=clear,
+            ),
+        )
+
+    async def _on_backend_cancel(self, interaction: discord.Interaction) -> None:
+        await self.swap_to(
+            interaction,
+            DetailsView(
+                self.state,
+                runtime=self.runtime,
+                allowed_user_id=self.allowed_user_id,
+                details=self.details,
+                agent=self.agent,
+            ),
+        )
+
+    async def _on_backend_confirm(self, interaction: discord.Interaction) -> None:
+        if not await self._backend_allowed(interaction) or self.backend_preview is None:
+            return
+        await interaction.response.defer()
+        preview = self.backend_preview
+        service = channel_backend.make_backend_service(
+            self.runtime.sessionmaker, self.runtime.settings.turn
+        )
+        actor = channel_backend.BackendActor(
+            tenant_id=preview.tenant_id,
+            account_id=self.state.account_id,
+            subject=build_subject(
+                is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                platform_user_id=str(interaction.user.id),
+            ),
+        )
+        try:
+            agent = await channel_backend.load_backend_agent(
+                self.runtime.anthropic,
+                self.runtime.sessionmaker,
+                tenant_id=preview.tenant_id,
+                agent_name=self.details.name,
+            )
+            if self.backend_clear:
+                revision = await service.clear_backend(
+                    agent, preview.setting_revision, actor, expected_preview_digest=preview.digest
+                )
+            else:
+                revision = await service.set_backend(
+                    agent,
+                    preview.target_backend,
+                    preview.setting_revision,
+                    actor,
+                    expected_preview_digest=preview.digest,
+                )
+        except channel_backend.AgentBackendRefused as exc:
+            await self._backend_audit(interaction, outcome="denied", reason=exc.reason)
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await self._backend_audit(interaction, outcome="allowed", reason="completed")
+        self.state.backend_selection = revision.backend
+        await self._on_backend_cancel(interaction)
 
     async def _on_github_repos(self, interaction: discord.Interaction) -> None:
         from daimon.adapters.discord.agent_setup.github_repos import (

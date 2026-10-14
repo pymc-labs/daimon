@@ -513,7 +513,7 @@ async def build_delta_xml(
     excluded from the delta. Bot replies remain visible unless their IDs are
     explicitly listed as answer chunks already delivered to this session.
 
-    Q1→(b) (SCOPING §3/§9): bot replies ARE included in the cross-speaker
+    Bot replies ARE included in the cross-speaker
     delta.  When a caller resumes after other participants spoke, their
     per-caller session must see what the agent told those participants so the
     agent does not appear to "forget" its own prior replies in the same visible
@@ -550,7 +550,7 @@ async def build_delta_xml(
     after_obj = discord.Object(id=after_message_id)
     messages = [m async for m in thread.history(after=after_obj, oldest_first=True)]
     # Intentionally minimal filter: only post-watermark, non-trigger messages.
-    # Bot replies ARE included for cross-speaker coherence (Q1→b, SCOPING §9).
+    # Bot replies ARE included for cross-speaker coherence.
     # No backfill, no thread-starter prepend, no coalescing — the reused MA session
     # already holds prior context server-side; re-injecting it duplicates tokens and
     # re-triggers image replay from earlier turns.

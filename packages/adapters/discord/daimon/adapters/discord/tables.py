@@ -7,16 +7,14 @@ import io
 import uuid
 from collections.abc import Mapping
 from functools import cache
-from pathlib import Path
 from typing import cast
 
+from daimon.core.fonts import FONT_DIR as _FONTS
 from daimon.core.tables import MarkdownTable, render_tables
 from fontTools.ttLib import TTFont  # pyright: ignore[reportMissingTypeStubs]
 from PIL import Image, ImageDraw, ImageFont
 
 import discord
-
-_FONTS = Path(__file__).with_name("fonts")
 
 
 def tables_enabled(table_rendering: Mapping[uuid.UUID, bool], tenant_id: uuid.UUID) -> bool:

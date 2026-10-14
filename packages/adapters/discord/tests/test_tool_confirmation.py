@@ -333,3 +333,118 @@ async def test_upload_card_and_details_are_scannable() -> None:
     assert click.response.send_message.await_args.kwargs["ephemeral"] is True
     assert click.response.send_message.await_args.args[0] == "Title: Bug"
     assert "```" not in click.response.send_message.await_args.args[0]
+
+
+async def test_admin_confirmation_rechecks_each_click_before_settlement() -> None:
+    channel = MagicMock()
+    message = MagicMock(edit=AsyncMock())
+    channel.send = AsyncMock(return_value=message)
+    prompt = _prompt().model_copy(update={"admin": True})
+    prepare = AsyncMock(
+        return_value=prompt.model_copy(update={"detail_lines": ("List price: verified",)})
+    )
+    check = AsyncMock(return_value="Current admin permission required.")
+    waiting = asyncio.create_task(
+        discord_confirmation_hook(channel, prepare_admin=prepare, check_admin=check)(prompt)
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not channel.send.await_count:
+                await asyncio.sleep(0)
+        view = channel.send.await_args.kwargs["view"]
+        assert _buttons(view)[0].label == "Confirm"
+        assert "List price: verified" in _texts(view)
+        denied = _interaction(111)
+        await _buttons(view)[0].callback(denied)
+        assert (
+            denied.response.send_message.await_args.args[0] == "Current admin permission required."
+        )
+        denied.response.edit_message.assert_not_awaited()
+        assert not waiting.done()
+        check.return_value = None
+        await _buttons(view)[0].callback(_interaction(111))
+        assert isinstance(await asyncio.wait_for(waiting, timeout=1), ApprovedConfirmation)
+        assert check.await_count == 2
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_admin_confirmation_without_a_verifier_posts_nothing() -> None:
+    channel = MagicMock(send=AsyncMock())
+    prompt = _prompt().model_copy(update={"admin": True})
+    assert await discord_confirmation_hook(channel)(prompt) == "denied"
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("case", ["expired", "exception", "wrong_requester", "legacy"])
+async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.posted_controls import lifecycle
+
+    channel = MagicMock(send=AsyncMock(return_value=MagicMock(edit=AsyncMock())))
+    prompt = _prompt().model_copy(update={"admin": case != "legacy"})
+
+    async def verify(*args: object) -> None:
+        await asyncio.sleep(0)
+        if case == "exception":
+            raise RuntimeError("role lookup unavailable")
+        if case == "expired":
+            clock = MagicMock()
+            clock.now.return_value = prompt.expires_at
+            monkeypatch.setattr(lifecycle, "datetime", clock)
+
+    check = AsyncMock(side_effect=verify)
+    waiting = asyncio.create_task(
+        discord_confirmation_hook(
+            channel, prepare_admin=AsyncMock(return_value=prompt), check_admin=check
+        )(prompt)
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not channel.send.await_count:
+                await asyncio.sleep(0)
+        view = channel.send.await_args.kwargs["view"]
+        click = _interaction(999 if case == "wrong_requester" else 111)
+        await _buttons(view)[0].callback(click)
+        if case == "legacy":
+            assert isinstance(await asyncio.wait_for(waiting, 1), ApprovedConfirmation)
+            check.assert_not_awaited()
+        else:
+            click.response.edit_message.assert_not_awaited()
+            click.response.send_message.assert_awaited_once()
+            assert not waiting.done()
+            if case == "wrong_requester":
+                check.assert_not_awaited()
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_runtime_hook_reuses_live_guild_admin_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.guild.owner_id = 999
+    member = MagicMock(spec=discord.Member)
+    member.id = 111
+    member.roles = []
+    member.guild_permissions = discord.Permissions(administrator=True)
+    channel.guild.fetch_member = AsyncMock(return_value=member)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
+    kwargs = factory.call_args.kwargs
+    assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
+    check = kwargs["current_admin"]
+    assert await check("111") is True
+    member.guild_permissions = discord.Permissions.none()
+    assert await check("111") is False
+    assert channel.guild.fetch_member.await_count == 2

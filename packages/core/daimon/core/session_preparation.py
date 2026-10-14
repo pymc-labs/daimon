@@ -41,11 +41,15 @@ from typing import Literal, Protocol
 
 import anthropic as anthropic_pkg
 import structlog
+from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
+from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import managed_agents, resource_ref
+from daimon.core.mux_compat import legacy_call
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -59,6 +63,11 @@ from daimon.core.session_compat import (
 )
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import lock_session_mutation
+from daimon.core.session_ports_compat import (
+    archive_session_record,
+    retrieve_session_record,
+    session_scope,
+)
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import (
     FreshSessionFactory,
@@ -120,6 +129,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import ContinuityOutcome, FreshSession, PreparedTurn
 from daimon.core.turn.session_identity import check_session_agent
+from mux.drivers.anthropic.sessions_lifecycle import SessionReads
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -261,7 +271,15 @@ async def _destination_may_carry(
     that can't be read is never carried.
     """
     try:
-        previous = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+        previous = await retrieve_session_record(
+            deps.anthropic,
+            row.ma_session_id,
+            scope=session_scope(
+                tenant_id=row.tenant_id,
+                account_id=row.account_id,
+                call_site="session_preparation:retrieve",
+            ),
+        )
     except anthropic_pkg.APIError as error:
         log.warning(
             "session_preparation.handoff_source_unreadable",
@@ -325,7 +343,15 @@ async def _heal_lineage(deps: TurnDeps, session: AsyncSession, *, row: ThreadSes
     )
     await lock_session_mutation(session, predecessor.ma_session_id, check=False)
     with contextlib.suppress(anthropic_pkg.NotFoundError):
-        await deps.anthropic.beta.sessions.archive(predecessor.ma_session_id)
+        await archive_session_record(
+            deps.anthropic,
+            predecessor.ma_session_id,
+            scope=session_scope(
+                tenant_id=predecessor.tenant_id,
+                account_id=predecessor.account_id,
+                call_site="session_preparation:heal_lineage",
+            ),
+        )
     async with deps.sessionmaker.begin() as closing:
         await lock_access_policy(closing, tenant_id=row.tenant_id)
         await mark_superseded(closing, id=row.predecessor_id, replaced_by_id=row.id)
@@ -470,7 +496,15 @@ async def _run_replacement(
             session, id=preparation.id, stage="created", now=now, new_mapping_id=fresh.mapping_id
         )
     with contextlib.suppress(anthropic_pkg.NotFoundError):
-        await deps.anthropic.beta.sessions.archive(row.ma_session_id)
+        await archive_session_record(
+            deps.anthropic,
+            row.ma_session_id,
+            scope=session_scope(
+                tenant_id=row.tenant_id,
+                account_id=row.account_id,
+                call_site="session_preparation:replacement",
+            ),
+        )
     async with deps.sessionmaker() as session, session.begin():
         await lock_access_policy(session, tenant_id=row.tenant_id)
         await _close_out(session, row=row, new_mapping_id=fresh.mapping_id, fresh_start=fresh_start)
@@ -584,7 +618,23 @@ async def _resolve_legacy_budget_stamp(
     if row is None or row.budget_channel_id != "":
         return None
     try:
-        observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+        scope = session_scope(
+            tenant_id=tenant_id,
+            account_id=account_id,
+            call_site="session_preparation:_resolve_legacy_budget_stamp",
+        )
+        backend = managed_agents(
+            deps.anthropic,
+            scope=scope,
+            resources=frozenset({("session", row.ma_session_id)}),
+        )
+        reads = backend.extension(SessionReads, namespace="anthropic.session_reads", version=1)
+        native = await legacy_call(
+            reads.read_native(
+                scope, resource_ref(backend, "session", row.ma_session_id, scope=scope)
+            )
+        )
+        observed = construct_type_unchecked(value=native, type_=BetaManagedAgentsSession)
     except anthropic_pkg.APIError as error:
         # A transient read leaves the unknown marker for the next bind.
         log.warning(
@@ -776,6 +826,11 @@ async def _prepare_session_for_turn_locked(
                 predecessor_session_id=row.ma_session_id,
                 own_thread_id=thread_id,
                 tenant_seals_anything=bool(admission.origin_seal_ids),
+                scope=session_scope(
+                    tenant_id=row.tenant_id,
+                    account_id=row.account_id,
+                    call_site="session_preparation:inherited_seal_ids",
+                ),
             )
         admission = await restrict_inherited_memory(deps, admission, inherited)
         agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
@@ -785,7 +840,7 @@ async def _prepare_session_for_turn_locked(
             environment_id=admission.environment.id,
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
-            account_id=admission.account_id,
+            account_id=admission.shared_owner or admission.account_id,
             github_app=deps.agent_github_app,
             fernet=deps.fernet,
             is_external=admission.is_external,
@@ -794,6 +849,7 @@ async def _prepare_session_for_turn_locked(
             public_url=deps.public_url,
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
+            confirmed_tools=backend_switch_tools_for_turn(deps),
             channel_skills=admission.channel_skills,
         )
         fresh_start = row.fresh_start_requested_at is not None
@@ -878,7 +934,15 @@ async def _prepare_session_for_turn_locked(
             observed = None
             if source_exists:
                 try:
-                    observed = await deps.anthropic.beta.sessions.retrieve(row.ma_session_id)
+                    observed = await retrieve_session_record(
+                        deps.anthropic,
+                        row.ma_session_id,
+                        scope=session_scope(
+                            tenant_id=row.tenant_id,
+                            account_id=row.account_id,
+                            call_site="session_preparation:retrieve",
+                        ),
+                    )
                 except anthropic_pkg.NotFoundError:
                     pass
                 except anthropic_pkg.APIError as error:
@@ -921,10 +985,15 @@ async def _prepare_session_for_turn_locked(
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()
-        if not any(isinstance(op, RemirrorVaultCredentials) for op in applying):
+        if admission.shared_owner is None and not any(
+            isinstance(op, RemirrorVaultCredentials) for op in applying
+        ):
             # Every reused session has re-mirrored the caller's vault on every
             # turn since that path existed; a compatible session keeps doing so.
             applying = (*applying, RemirrorVaultCredentials())
+        if admission.shared_owner is not None:
+            # A shared thread's workspace never takes any one caller's vault.
+            applying = tuple(op for op in applying if not isinstance(op, RemirrorVaultCredentials))
 
         async def run_ops() -> AppliedOps | SessionBusy:
             return await apply_update_ops(
@@ -936,7 +1005,7 @@ async def _prepare_session_for_turn_locked(
                 agent=admission.agent,
                 tenant_id=tenant_id,
                 agent_uuid=agent_uuid,
-                account_id=admission.account_id,
+                account_id=admission.shared_owner or admission.account_id,
                 mcp=deps.mcp,
                 tool_safety=deps.tool_safety,
                 fernet=deps.fernet,
@@ -947,6 +1016,7 @@ async def _prepare_session_for_turn_locked(
                 is_external=admission.is_external,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
+                confirmed_tools=backend_switch_tools_for_turn(deps),
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
             )
 

@@ -16,7 +16,7 @@ from typing import Literal
 
 import sentry_sdk
 import structlog
-from anthropic import AsyncAnthropic, omit
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
@@ -33,6 +33,15 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import platform_scope, resource_scope
+from daimon.core.mux_compat import (
+    collect_skills,
+    download_skill_version_id,
+    list_agents,
+    list_environments,
+    list_native_skill_versions,
+)
+from mux.contracts.ids import Scope
 
 _log = structlog.get_logger(__name__)
 
@@ -54,9 +63,6 @@ class SkillVersionNotFoundError(DaimonError):
 # at limit=200 against production, verified live 2026-08-08 — so the ceiling was
 # ours, not the API's. The guard remains necessary if the API omits the cursor.
 _SKILLS_PAGE_LIMIT = 1000
-# MA's maximum for agents, environments and skill versions. These listings walk
-# every row in the org to filter client-side, and the SDK default is 20.
-_ORG_LIST_PAGE_LIMIT = 100
 
 
 async def find_agents_by_daimon_tag(
@@ -70,7 +76,7 @@ async def find_agents_by_daimon_tag(
 
     The first element (max `created_at`) is the canonical match the resolver
     and reconcile should adopt; remaining elements are duplicates that
-    reconcile is responsible for archiving (per R5 dedup). Empty list = no
+    reconcile is responsible for archiving. Empty list = no
     match.
 
     `include_archived=True` lifts the archived filter — useful for `daimon
@@ -79,8 +85,8 @@ async def find_agents_by_daimon_tag(
     archived agents.
     """
     matches: list[BetaManagedAgentsAgent] = []
-    async for ag in client.beta.agents.list(
-        limit=_ORG_LIST_PAGE_LIMIT, include_archived=include_archived
+    async for ag in list_agents(
+        client, include_archived=include_archived, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if (
             ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
@@ -125,8 +131,8 @@ async def find_environments_by_daimon_tag(
 ) -> list[BetaEnvironment]:
     """Parity with `find_agents_by_daimon_tag` — canonical first, duplicates follow."""
     matches: list[BetaEnvironment] = []
-    async for env in client.beta.environments.list(
-        limit=_ORG_LIST_PAGE_LIMIT, include_archived=False
+    async for env in list_environments(
+        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if (
             env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
@@ -152,7 +158,9 @@ async def list_agents_by_tenant(
 ) -> list[BetaManagedAgentsAgent]:
     """Return all non-archived MA agents tagged with tenant_id."""
     results: list[BetaManagedAgentsAgent] = []
-    async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False):
+    async for ag in list_agents(
+        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
+    ):
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
     return results
@@ -163,7 +171,9 @@ async def list_agents_for_privacy_deletion(
 ) -> list[BetaManagedAgentsAgent]:
     """Return the tenant's live and archived agents for transcript deletion."""
     results: list[BetaManagedAgentsAgent] = []
-    async for agent in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=True):
+    async for agent in list_agents(
+        client, include_archived=True, scope=resource_scope(tenant_id=str(tenant_id))
+    ):
         if agent.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(agent)
     return results
@@ -183,7 +193,9 @@ async def list_agents_by_tenants(
     results: dict[uuid.UUID, list[BetaManagedAgentsAgent]] = {t: [] for t in tenant_ids}
     if not wanted:
         return results
-    async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False):
+    async for ag in list_agents(
+        client, include_archived=False, scope=platform_scope("defaults.ma_index")
+    ):
         tenant = wanted.get(ag.metadata.get(MA_METADATA_KEY_TENANT, ""))
         if tenant is not None:
             results[tenant].append(ag)
@@ -213,12 +225,14 @@ async def list_referenced_skill_ids(client: AsyncAnthropic) -> set[str]:
     cannot distinguish a defaults-created skill from a user-synced one the way
     the agent/env sweeps use the `daimon_managed` marker. Sparing any skill an
     agent still references is the available proxy for "in use, don't delete"
-    and prevents the sweep from deleting a live agent's skill out from under it
-    (smoke-matrix #19). Not tenant-scoped: skills are org-wide, so a reference
+    and prevents the sweep from deleting a live agent's skill out from under it.
+    Not tenant-scoped: skills are org-wide, so a reference
     from an agent in any tenant counts.
     """
     referenced: set[str] = set()
-    async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False):
+    async for ag in list_agents(
+        client, include_archived=False, scope=platform_scope("defaults.ma_index")
+    ):
         for skill in ag.skills:
             referenced.add(skill.skill_id)
     return referenced
@@ -235,7 +249,9 @@ async def list_agents_referencing_skill(
     """
     return [
         ag
-        async for ag in client.beta.agents.list(limit=_ORG_LIST_PAGE_LIMIT, include_archived=False)
+        async for ag in list_agents(
+            client, include_archived=False, scope=platform_scope("defaults.ma_index")
+        )
         if any(skill.skill_id == skill_id for skill in ag.skills)
     ]
 
@@ -245,8 +261,8 @@ async def list_environments_by_tenant(
 ) -> list[BetaEnvironment]:
     """Return all non-archived MA environments tagged with tenant_id."""
     results: list[BetaEnvironment] = []
-    async for env in client.beta.environments.list(
-        limit=_ORG_LIST_PAGE_LIMIT, include_archived=False
+    async for env in list_environments(
+        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
     ):
         if env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(env)
@@ -257,14 +273,9 @@ async def _collect_skills_page(
     client: AsyncAnthropic,
 ) -> tuple[list[SkillListResponse], bool]:
     """Follow skill cursors and flag a full terminal page with no cursor."""
-    rows: list[SkillListResponse] = []
-    page = await client.beta.skills.list(limit=_SKILLS_PAGE_LIMIT)
-    truncated = False
-    async for current in page.iter_pages():
-        rows.extend(current.data)
-        if len(current.data) >= _SKILLS_PAGE_LIMIT and not current.next_page:
-            truncated = True
-    return rows, truncated
+    return await collect_skills(
+        client, limit=_SKILLS_PAGE_LIMIT, scope=platform_scope("defaults.ma_index")
+    )
 
 
 async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
@@ -283,7 +294,9 @@ async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
     return rows
 
 
-async def download_skill_version(client: AsyncAnthropic, *, skill_id: str, version: str) -> bytes:
+async def download_skill_version(
+    client: AsyncAnthropic, *, skill_id: str, version: str, scope: Scope
+) -> bytes:
     """Return the zip of `skill_id` at `version` (the epoch version string).
 
     The SDK's download sends `anthropic-beta: skills-2025-10-02`, which a
@@ -291,21 +304,13 @@ async def download_skill_version(client: AsyncAnthropic, *, skill_id: str, versi
     version's id, not its epoch string (verified against production 2026-10-09).
     """
     version_id = None
-    async for row in client.beta.skills.versions.list(
-        skill_id=skill_id, limit=_ORG_LIST_PAGE_LIMIT
-    ):
+    async for row in list_native_skill_versions(client, skill_id, scope=scope):
         if row.version == version:
             version_id = row.id
             break
     if version_id is None:
         raise SkillVersionNotFoundError(f"{skill_id} has no version {version}.")
-    content = await client.beta.skills.versions.download(
-        version_id, skill_id=skill_id, extra_headers={"anthropic-beta": omit}
-    )
-    try:
-        return await content.read()
-    finally:
-        await content.close()
+    return await download_skill_version_id(client, skill_id, version_id, scope=scope)
 
 
 async def list_skills_lenient(client: AsyncAnthropic) -> tuple[list[SkillListResponse], bool]:

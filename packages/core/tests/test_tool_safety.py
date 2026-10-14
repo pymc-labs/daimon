@@ -274,6 +274,52 @@ def test_session_tools_report_no_change_once_gated() -> None:
     assert session_tools_for_policy(_ON, once, trusted_servers=trusted) is None
 
 
+def test_new_confirmed_tool_is_gated_without_an_explicit_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core import tool_safety
+
+    tool_name = "install_workspace_asset"
+    monkeypatch.setattr(
+        tool_safety,
+        "CONFIRMED_DAIMON_TOOLS",
+        {**tool_safety.CONFIRMED_DAIMON_TOOLS, tool_name: "review_digest"},
+    )
+    call = ToolCall(
+        tool_use_id="new-confirmed-tool",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name=tool_name,
+        input={"review_digest": "a" * 64},
+    )
+    policy = ToolSafetyPolicy(enabled=True, unattended_writes=("*",))
+    trusted = frozenset({DAIMON_SERVER_NAME})
+    assert (
+        decide_tool_call(
+            policy, call, attended=True, trusted_servers=trusted, confirmed_tools=frozenset()
+        ).outcome
+        == "ask"
+    )
+    assert (
+        decide_tool_call(
+            policy, call, attended=False, trusted_servers=trusted, confirmed_tools=frozenset()
+        ).outcome
+        == "deny"
+    )
+    gated = session_tools_for_policy(
+        policy, _tools(), trusted_servers=trusted, confirmed_tools=frozenset()
+    )
+    assert gated is not None and has_confirmation_gate(gated, tool_name=tool_name)
+    preview = call.model_copy(update={"input": {}})
+    assert (
+        decide_tool_call(policy, preview, attended=True, trusted_servers=trusted).outcome == "allow"
+    )
+    assert (
+        decide_tool_call(OPEN_TOOL_SAFETY, call, attended=True, trusted_servers=trusted).outcome
+        == "allow"
+    )
+    assert session_tools_for_policy(OPEN_TOOL_SAFETY, _tools(), trusted_servers=trusted) is None
+
+
 def test_daimon_add_skill_asks_only_when_it_uploads() -> None:
     trusted = trusted_servers_for("https://mcp.example.com/mcp")
     preview = _call(DAIMON_SERVER_NAME, "add_skill")

@@ -173,6 +173,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _COPY[TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE],
     "own_agents_only": _COPY[TerminationReason.ADMISSION_CHANNEL_ISOLATED],
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
+    "backend_unsupported": _Copy(
+        "This channel uses an unavailable agent backend.",
+        "Ask an admin to change or clear the channel backend.",
+    ),
     "external_participant": _Copy(
         "Daimon can't accept this request from another organisation.",
         "Ask in a channel that uses its own agents.",

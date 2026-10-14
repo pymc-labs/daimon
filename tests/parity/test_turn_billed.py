@@ -71,3 +71,5 @@ async def test_turn_billed_when_unblocked_writes_usage_event_and_ledger_debit(
     ledger_rows = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
     debit_rows = [row for row in ledger_rows if row.delta_usd < 0]
     assert len(debit_rows) == 1, "unblocked turn must write exactly one tenant_ledger debit"
+    assert debit_rows[0].delta_usd == Decimal("-0.001050")
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("99.998950")

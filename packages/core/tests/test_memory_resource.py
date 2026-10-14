@@ -493,3 +493,67 @@ async def test_one_failed_personal_archive_does_not_leave_the_others_live(
             assert [store for _, _, store in inventory] == [
                 mounts[account_id]["memory_store_id"]
             ], "every personal store stays in the erasure inventory"
+
+
+@pytest.mark.parametrize("change", (None, "clear", "rebind"))
+async def test_exact_warm_memory_refuses_changed_binding_without_provisioning(
+    db_preflight, db_nullpool_engine, change
+):
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.errors import ScopeViolation
+
+    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sm)
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+    agent_id = uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+    original = await ensure_memory_store_and_mount(
+        client, sm, tenant_id=tenant.id, agent_id=agent_id, agent_name="root", read_only=True
+    )
+    expected = original["memory_store_id"]
+    if change is not None:
+        await archive_memory_store_for_agent(client, sm, tenant_id=tenant.id, agent_id=agent_id)
+    if change == "rebind":
+        replacement = await ensure_memory_store_and_mount(
+            client, sm, tenant_id=tenant.id, agent_id=agent_id, agent_name="root"
+        )
+        assert replacement["memory_store_id"] != expected
+    async with sm() as db:
+        before = await get_memory_store_id(db, tenant_id=tenant.id, agent_id=agent_id)
+    stores_before = dict(state.stores)
+    transport = ScriptedTransport()
+    async with transport.client() as constrained:
+        if change is None:
+            assert (
+                await ensure_memory_store_and_mount(
+                    constrained,
+                    sm,
+                    tenant_id=tenant.id,
+                    agent_id=agent_id,
+                    agent_name="root",
+                    read_only=True,
+                    expected_memory_store_id=expected,
+                )
+                == original
+            )
+        else:
+            with pytest.raises(ScopeViolation) as refusal:
+                await ensure_memory_store_and_mount(
+                    constrained,
+                    sm,
+                    tenant_id=tenant.id,
+                    agent_id=agent_id,
+                    agent_name="root",
+                    expected_memory_store_id=expected,
+                )
+            assert expected not in str(refusal.value)
+            if before is not None:
+                assert before not in str(refusal.value)
+    assert not transport.requests and not transport.violations
+    assert state.stores == stores_before
+    async with sm() as db:
+        assert await get_memory_store_id(db, tenant_id=tenant.id, agent_id=agent_id) == before
+    await client.close()

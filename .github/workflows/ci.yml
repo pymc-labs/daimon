@@ -39,6 +39,14 @@ jobs:
       - name: import-linter
         run: uv run lint-imports
 
+      - name: lint distribution boundaries
+        run: uv run python scripts/lint_distribution_boundaries.py
+
+      - name: verify built wheel boundaries
+        run: |
+          uv build --all-packages --wheel --out-dir "$RUNNER_TEMP/wheel-boundaries"
+          uv run python scripts/lint_distribution_boundaries.py --wheels "$RUNNER_TEMP/wheel-boundaries"
+
       - name: lint discord modals
         run: uv run python scripts/lint_discord_modals.py
 

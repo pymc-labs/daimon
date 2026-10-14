@@ -22,13 +22,24 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
-from pydantic import BaseModel, ConfigDict, model_validator
+from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
+from mux.contracts.ids import Provider
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.neutral_resources import NeutralResourceHost
+    from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
+    from daimon.core.turn.deps import TurnDeps
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "CONFIRMATION_TIMEOUT",
@@ -36,6 +47,7 @@ __all__ = [
     "ApprovedConfirmation",
     "ConfirmationHook",
     "ConfirmationPrompt",
+    "BackendSwitchReference",
     "PendingConfirmations",
     "no_confirmation_surface",
     "prompt_for_tool_call",
@@ -47,6 +59,17 @@ ConfirmationAnswer = Literal["approved", "denied", "expired"]
 #: session sits idle meanwhile (no model spend), and the per-turn ceiling
 #: still bounds the whole turn.
 CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
+
+
+class BackendSwitchReference(BaseModel):
+    """Untrusted tool reference; hosts reload the bound server-side preview."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    agent: str = Field(min_length=1)
+    target_backend: Provider
+    expected_revision: int = Field(ge=0, strict=True)
+    preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class ConfirmationPrompt(BaseModel):
@@ -66,6 +89,11 @@ class ConfirmationPrompt(BaseModel):
     requester_platform_user_id: str
     requester_display_name: str | None = None
     expires_at: datetime
+    # Opt-in only: legacy prompts and their rendered cards stay unchanged.
+    admin: bool = Field(default=False, exclude_if=lambda value: not value)
+    backend_switch: BackendSwitchReference | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _aware_expiry(self) -> ConfirmationPrompt:
@@ -157,6 +185,24 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
+    if call.tool_name == "request_agent_backend_switch" and server == DAIMON_SERVER_NAME:
+        reference = BackendSwitchReference.model_validate(
+            {
+                "agent": data.get("agent_name"),
+                "target_backend": data.get("target_backend"),
+                "expected_revision": data.get("expected_revision"),
+                "preview_digest": data.get("preview_digest"),
+            }
+        )
+        # No model-supplied compatibility text is accepted. The host hook must
+        # reload and verify the preview before displaying this opt-in prompt.
+        return ConfirmationPrompt(
+            title="Confirm model backend change?",
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+            admin=True,
+            backend_switch=reference,
+        )
     if call.tool_name == "create_notebook_upload_url" and publishing:
         action = f"Publish {notebook}"
         title = f"{action}?"
@@ -233,6 +279,110 @@ def prompt_for_tool_call(
         requester_platform_user_id=requester_platform_user_id,
         expires_at=now + timeout,
     )
+
+
+def backend_switch_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
+    """Read the turn's already-injected selector without another feature flag."""
+    return backend_switch_tools(enabled=deps.backend_selection_enabled)
+
+
+def backend_switch_callbacks(
+    service: AgentBackendService,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    current_admin: Callable[[str], Awaitable[bool]],
+    resource_host: NeutralResourceHost | None = None,
+) -> tuple[
+    Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
+    Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
+]:
+    """Bind the existing card hook to trusted current identity and preview facts.
+
+    Only the loader reads agent configuration. The UI never treats a model's
+    compatibility claims or digest as authority; application remains the
+    shared service's compare-and-set after the approved tool call.
+    """
+    from daimon.core.authz import build_subject
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.channel_skills import may_set_channel_skills
+    from daimon.core.stores.accounts import get_account_with_tenant
+
+    async def verified(
+        prompt: ConfirmationPrompt, clicker: str
+    ) -> tuple[BackendAgent, CompatibilityPreview]:
+        reference = prompt.backend_switch
+        if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
+            raise ValueError("This confirmation is unavailable. Preview again.")
+        async with sessionmaker() as session:
+            identity = await get_account_with_tenant(session, account_id=account_id)
+        if (
+            identity is None
+            or identity.tenant_id != tenant_id
+            or identity.platform_user_id != clicker
+            or identity.is_external
+        ):
+            raise ValueError("This confirmation is unavailable. Preview again.")
+        agent = await load_backend_agent(
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=reference.agent,
+            resource_host=resource_host,
+        )
+        preview = await service.preview(agent, reference.target_backend)
+        if (
+            preview.tenant_id != tenant_id
+            or preview.agent_id != agent.agent_id
+            or preview.target_backend != reference.target_backend
+            or not preview.allowed
+            or preview.setting_revision != reference.expected_revision
+            or preview.digest != reference.preview_digest
+        ):
+            raise ValueError("This preview changed. Preview and confirm again.")
+        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
+        if not may_set_channel_skills(subject, ""):
+            raise ValueError("This change needs a current workspace admin.")
+        # Recheck the scoped identity after the platform lookup has yielded.
+        async with sessionmaker() as session:
+            current = await get_account_with_tenant(session, account_id=account_id)
+        if current != identity:
+            raise ValueError("This permission changed. Preview and confirm again.")
+        return agent, preview
+
+    async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
+        agent, preview = await verified(prompt, prompt.requester_platform_user_id)
+        details = (
+            "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
+            "Unsupported MCPs: " + (", ".join(preview.unsupported_mcps) or "None"),
+            "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),
+            "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
+            preview.cost_line,
+        )
+        action = f"Switch {agent.name} to {preview.target_backend}"
+        return prompt.model_copy(
+            update={
+                "title": action + "?",
+                "action": action,
+                "denied_action": "Model backend unchanged",
+                "detail_lines": details,
+                "consequence": (
+                    "Existing threads keep their backend; "
+                    "channel overrides still apply to new threads."
+                ),
+            }
+        )
+
+    async def check(prompt: ConfirmationPrompt, clicker: str) -> str | None:
+        try:
+            await verified(prompt, clicker)
+        except ValueError:
+            return "This preview or your permission changed. Preview and confirm again."
+        return None
+
+    return prepare, check
 
 
 class PendingConfirmations:

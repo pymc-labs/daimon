@@ -72,6 +72,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },
@@ -132,6 +136,10 @@
           [
             "include_archived",
             "false"
+          ],
+          [
+            "limit",
+            "100"
           ]
         ]
       },

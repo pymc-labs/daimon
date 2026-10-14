@@ -1545,6 +1545,23 @@ async def test_memory_access_per_headless_origin(
     assert memory["access"] == ("read_only" if origin == "routine" else "read_write")
 
 
+@pytest.mark.parametrize("reason", ["completed", "interrupted", "upstream", "ceiling"])
+async def test_headless_result_callback_only_receives_completed_turns(reason):
+    from daimon.core.headless_runner import _NoOpLifecycle
+    from daimon.core.turn.state import TurnState
+    from daimon.core.turn.termination import TerminationReason
+
+    seen = []
+
+    async def result(state):
+        seen.append(state)
+
+    lifecycle = _NoOpLifecycle(on_result=result)
+    state = TurnState(termination=TerminationReason(reason))
+    await lifecycle.on_terminal_success(state)
+    assert seen == ([state] if reason == "completed" else [])
+
+
 @pytest.mark.parametrize("answers_only_owner", [False, True])
 async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
     answers_only_owner: bool,

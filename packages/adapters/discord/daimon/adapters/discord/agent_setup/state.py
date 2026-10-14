@@ -17,6 +17,7 @@ from daimon.core.scope import (
     pick_agent,
 )
 from daimon.core.specs import AgentSpec
+from mux.contracts.ids import Provider
 
 
 @dataclasses.dataclass
@@ -146,6 +147,8 @@ class PanelState:
     routing_page: int = 0
     expanded_detail: DetailListName | None = None
     details: AgentDetails | None = None
+    backend_options: tuple[Provider, ...] = ()
+    backend_selection: Provider | None = None
     # Public URLs for agents whose Details have been loaded in this panel.
     avatar_urls: dict[str, str | None] = dataclasses.field(default_factory=dict[str, str | None])
     answering_map: AnsweringMap | None = None

@@ -58,6 +58,11 @@ class RunningTurns:
         """Mark the cancellations that follow as a shutdown's. Irreversible."""
         self._shutting_down = True
 
+    @property
+    def shutting_down(self) -> bool:
+        """Whether a shutdown drain has started cancelling turns in this process."""
+        return self._shutting_down
+
     def is_drain_cancel(self) -> bool:
         """Whether the current task is unwinding from the shutdown drain's cancel."""
         task = asyncio.current_task()

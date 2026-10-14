@@ -19,6 +19,7 @@ import contextlib
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
@@ -27,9 +28,11 @@ import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
+from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.message_split import split_fenced
+from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -37,6 +40,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
+from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -45,8 +49,11 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import termination_reason
+from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import Account, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
+from mux.contracts.events import Event
+from mux.profiles import emits_legacy_events_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -135,6 +142,7 @@ class TeamsTurnLifecycle:
         markup: Decimal = Decimal(1),
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         budget_channel_id: str | None = None,
+        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
     ) -> None:
         self._sender = sender
         # Support is on: the controls below the answer offer Ask a human.
@@ -142,9 +150,11 @@ class TeamsTurnLifecycle:
         # The summary line's agent, price and money left.
         self._agent_name = agent_name
         self._model_id = model_id
+        self._provider_draft: ProviderDraft | None = None
         self._markup = markup
         self._sessionmaker = sessionmaker
         self._budget_channel_id = budget_channel_id
+        self._on_initial_progress = on_initial_progress
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
         self._agent_name_prefix = agent_name_prefix
@@ -213,8 +223,20 @@ class TeamsTurnLifecycle:
         """Post the card now, before session setup, so Cancel exists from the start."""
         if self._unprompted:
             return
-        self._message_id = await self._send(self._status(), message_id=self._message_id)
+        activity = self._status()
+        operation = "edit" if self._message_id is not None else "send"
+        self._message_id = await self._send(activity, message_id=self._message_id)
         self._last_flush = self._clock()
+        if self._on_initial_progress is not None:
+            self._on_initial_progress(
+                InitialProgressReceipt(
+                    operation=operation,
+                    destination_id=self._conversation_id,
+                    message_id=self._message_id,
+                    rendered_json=activity.model_dump_json(by_alias=True, exclude_none=True),
+                    observed_s=self._clock(),
+                )
+            )
 
     def _status(self) -> MessageActivityInput:
         return card.status_card(self._state, now=self._clock(), cancel_key=self._cancel_key)
@@ -222,11 +244,25 @@ class TeamsTurnLifecycle:
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Only the draft rides SSE: tool calls and the phase are read from the
         # turn state on each render, which sees every tool kind.
+        if self._provider_draft is not None:
+            return
         if getattr(event, "type", "") != "agent.message":
             return
         parts: list[object] = getattr(event, "content", [])
         text = "".join(str(getattr(p, "text", "")) for p in parts).strip()
         self._state = card.on_message(self._state, text)
+
+    async def on_provider_event(self, event: Event) -> None:
+        """Cheap local tap; only on_render may send the provider's draft."""
+        if emits_legacy_events_for(event.native.provider) or self._terminal:
+            return
+        if self._provider_draft is None:
+            self._provider_draft = ProviderDraft()
+        text = self._provider_draft.text(event)
+        if text is not None:
+            self._state = (
+                card.on_message(self._state, text) if text else replace(self._state, draft=None)
+            )
 
     async def on_render(self, state: TurnState) -> None:
         if self._terminal or self._message_id is None:
@@ -274,22 +310,27 @@ class TeamsTurnLifecycle:
 
         `named_above`: agent identity's bold name leads the answer just above it.
         """
-        cost = (
-            cost_of_totals(
-                state.usage_totals,
-                state.long_prompt_usage_totals,
-                MODEL_PRICING.get(self._model_id),
+        t = state.usage_totals
+        cost = None
+        if self._provider_draft is None and not isinstance(t, ProviderUsageTotals):
+            cost = (
+                cost_of_totals(
+                    state.usage_totals,
+                    state.long_prompt_usage_totals,
+                    MODEL_PRICING.get(self._model_id),
+                )
+                if self._model_id
+                else None
             )
-            if self._model_id
-            else None
-        )
-        if cost is not None:
-            # What the tenant is debited, markup included, so `used` matches `left`.
-            cost = float(debit_amount(cost, markup=self._markup))
+            if cost is not None:
+                # What the tenant is debited, markup included, so `used` matches `left`.
+                cost = float(debit_amount(cost, markup=self._markup))
         return format_summary(
             agent_name=None if named_above else self._agent_name,
             elapsed_seconds=self._clock() - self._state.started_at,
-            cost=format_cost(cost),
+            cost=native_footer_text(t)
+            if self._provider_draft is not None or isinstance(t, ProviderUsageTotals)
+            else format_cost(cost),
             left=await self._balance(),
         )
 

@@ -36,6 +36,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent, retrieve_environment
+from mux.errors import ScopeViolation
 
 _log = structlog.get_logger(__name__)
 
@@ -125,11 +128,18 @@ async def _retrieve_shared[Resource: (BetaManagedAgentsAgent, BetaEnvironment)](
 async def retrieve_agent_cached(
     client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, agent_id: str
 ) -> BetaManagedAgentsAgent:
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     key = (tenant_id, agent_id)
     try:
         return await _retrieve_shared(
-            cache.agents, cache.agent_retrieves, key, lambda: client.beta.agents.retrieve(agent_id)
+            cache.agents,
+            cache.agent_retrieves,
+            key,
+            lambda: retrieve_agent(client, agent_id, scope=backend_scope),
         )
+    except ScopeViolation:
+        cache.agents.pop(key, None)
+        raise
     except APIStatusError as err:
         if err.status_code in (400, 404):
             cache.agents.pop(key, None)
@@ -139,14 +149,18 @@ async def retrieve_agent_cached(
 async def retrieve_environment_cached(
     client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, environment_id: str
 ) -> BetaEnvironment:
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     key = (tenant_id, environment_id)
     try:
         return await _retrieve_shared(
             cache.environments,
             cache.environment_retrieves,
             key,
-            lambda: client.beta.environments.retrieve(environment_id),
+            lambda: retrieve_environment(client, environment_id, scope=backend_scope),
         )
+    except ScopeViolation:
+        cache.environments.pop(key, None)
+        raise
     except APIStatusError as err:
         if err.status_code in (400, 404):
             cache.environments.pop(key, None)
@@ -233,7 +247,11 @@ async def find_agent_by_derived_uuid_cached(
     if ma_agent_id is None:
         return (await _list_derived_agents(client, cache, tenant_id)).get(agent_id)
     try:
-        agent = await client.beta.agents.retrieve(ma_agent_id)
+        agent = await retrieve_agent(
+            client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
+    except ScopeViolation:
+        return None  # the agent is stamped for another tenant now
     except APIStatusError as err:
         if err.status_code not in (400, 404):
             raise
@@ -270,8 +288,11 @@ class MAResolverMissError(Exception):
 
 
 async def _is_live_agent(client: AsyncAnthropic, agent_id: str, tenant_id: uuid.UUID) -> bool:
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     try:
-        obj = await client.beta.agents.retrieve(agent_id)
+        obj = await retrieve_agent(client, agent_id, scope=backend_scope)
+    except ScopeViolation:
+        return False
     except APIStatusError as err:
         # MA returns 400 for malformed / unknown ids (probe
         # `archived_retrieve_shape.py` §13: status_code=400,
@@ -289,8 +310,11 @@ async def _is_live_agent(client: AsyncAnthropic, agent_id: str, tenant_id: uuid.
 
 
 async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: uuid.UUID) -> bool:
+    backend_scope = resource_scope(tenant_id=str(tenant_id))
     try:
-        obj = await client.beta.environments.retrieve(env_id)
+        obj = await retrieve_environment(client, env_id, scope=backend_scope)
+    except ScopeViolation:
+        return False
     except APIStatusError as err:
         # MA returns 400 for malformed / unknown ids (probe
         # `archived_retrieve_shape.py` §13: status_code=400,
@@ -301,7 +325,7 @@ async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: u
         if err.status_code in (400, 404):
             return False
         raise
-    # Same ownership check as _is_live_agent (issue #198).
+    # Same ownership check as _is_live_agent.
     return obj.archived_at is None and obj.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
 
 

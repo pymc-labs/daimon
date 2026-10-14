@@ -43,7 +43,7 @@ log = structlog.get_logger()
 async def _send_callback_error(interaction: discord.Interaction, exc: Exception) -> None:
     """Best-effort ephemeral error surface for a failed panel button/select callback.
 
-    Always logs + captures to Sentry. The user-visible text
+    Always logs and captures to Sentry. The user-visible text
     is generic; the exception detail stays server-side. The send itself is
     best-effort (its own try/except that only logs) -- a failure here must
     never re-raise out of the caller's boundary.

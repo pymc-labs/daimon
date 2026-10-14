@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -49,6 +50,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # `make_tenant` derives the tenant id from `workspace_id` the exact same way
@@ -113,7 +115,7 @@ def _runtime(
         billing_config=None,
         deployment_default=deployment_default or DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # never runs a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
 
 

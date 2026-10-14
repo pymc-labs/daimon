@@ -10,6 +10,7 @@ function's docstring) and returns the current row, which is exactly the
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -22,6 +23,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.message_feedback import record_vote
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _VOTER_ID = "100000000000000001"
@@ -37,7 +39,7 @@ def _runtime(*, sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntim
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # feedback-modal tests never run a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # feedback-modal tests never run a turn
     )
 
 

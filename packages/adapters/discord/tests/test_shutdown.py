@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +27,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.running import RunningTurns
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .harness import make_bot
@@ -48,7 +50,7 @@ def _make_runtime() -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # shutdown tests never run a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # shutdown tests never run a turn
     )
 
 
@@ -229,7 +231,7 @@ async def test_drain_retires_live_confirmation_before_client_close() -> None:
 def _bot_with_running_turns() -> tuple[DaimonBot, RunningTurns, AsyncMock]:
     runtime = _make_runtime()
     running = RunningTurns()
-    runtime.turn_deps.running_turns = running  # pyright: ignore[reportAttributeAccessIssue]  # MagicMock deps
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, running_turns=running))
     bot = make_bot(runtime)
     close = AsyncMock()
     bot.close = close  # type: ignore[method-assign]

@@ -31,6 +31,17 @@ from daimon.core.github_app_auth import (
 from daimon.core.github_requester_access import PermissionCache
 from daimon.core.mcp_auth import mint_jwt
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import (
+    archive_session,
+    archive_vault,
+    create_vault,
+    delete_credential,
+    list_credentials,
+    rotate_session_repo_token,
+    store_credential,
+    update_credential,
+)
 from daimon.core.stores.github_access import (
     AgentGrant,
     AuthorizedRepo,
@@ -57,6 +68,8 @@ from daimon.core.stores.github_issued_tokens import (
 )
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.turn_origin import current_origin_id
+from mux.contracts.ids import Scope
+from mux.contracts.resources import WorkspaceSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
@@ -222,24 +235,32 @@ async def create_session_vault(
     public_url: str | None,
     jwt_secret: bytes | None,
 ) -> str:
-    vault = await anthropic.beta.vaults.create(display_name=f"github-session:{uuid.uuid4()}")
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id) if account_id is not None else "service",
+    )
+    vault = await create_vault(anthropic, f"github-session:{uuid.uuid4()}", scope=scope)
     try:
         if public_url is not None and jwt_secret is not None and account_id is not None:
-            await anthropic.beta.vaults.credentials.create(
-                vault_id=vault.id,
-                auth={
-                    "type": "static_bearer",
-                    "mcp_server_url": public_url,
-                    "token": mint_jwt(
-                        account_id=account_id,
-                        chat_agent_id=agent_id,
-                        secret=jwt_secret,
-                        now=datetime.now(UTC),
-                    ),
+            await store_credential(
+                anthropic,
+                vault.id,
+                {
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": public_url,
+                        "token": mint_jwt(
+                            account_id=account_id,
+                            chat_agent_id=agent_id,
+                            secret=jwt_secret,
+                            now=datetime.now(UTC),
+                        ),
+                    }
                 },
+                scope=scope,
             )
     except BaseException:
-        await anthropic.beta.vaults.archive(vault.id)
+        await archive_vault(anthropic, vault.id, scope=scope)
         raise
     return vault.id
 
@@ -285,6 +306,29 @@ async def revoke_token(client: httpx.AsyncClient, token: str) -> None:
         response.raise_for_status()
 
 
+async def _declared_repositories(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[tuple[AgentGrant, AuthorizedRepo]]:
+    async with sessionmaker() as session:
+        return await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+
+
+async def declared_app_repositories(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> tuple[WorkspaceSource, ...]:
+    """Local declared access only; requester authorization/materialization stays unresolved."""
+    rows = await _declared_repositories(sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
+    return tuple(
+        WorkspaceSource(
+            kind="repository",
+            target_path=grant.mount_path or f"/workspace/{repo.repo_full_name}",
+            repository_url=f"https://github.com/{repo.repo_full_name}",
+            credential_ref=f"app-repo:{tenant_id}:{agent_id}:{repo.repo_id}:{grant.version}:{repo.version}",
+        )
+        for grant, repo in rows
+    )
+
+
 async def prepare_app_access(
     sessionmaker: async_sessionmaker[AsyncSession],
     client: httpx.AsyncClient,
@@ -301,9 +345,8 @@ async def prepare_app_access(
     """Mint only this session's effective repository groups, recording every token."""
     if is_external:
         return AppSessionAccess((), (), None)
-    async with sessionmaker() as session:
-        if not await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
-            return AppSessionAccess((), (), None)
+    if not await _declared_repositories(sessionmaker, tenant_id=tenant_id, agent_id=agent_id):
+        return AppSessionAccess((), (), None)
     if fernet is None or config.app_id is None or config.private_key is None:
         raise ValueError("GitHub App mode requires App credentials and encryption")
     rows, user_id, link_generation = await _effective_rows(
@@ -485,35 +528,45 @@ async def add_app_credentials(
     access: AppSessionAccess,
     on_mutation: Callable[[], None] | None = None,
     on_delivered: Callable[[str], None] | None = None,
+    scope: Scope | None = None,
 ) -> None:
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.github_app_session:add_app_credentials"
+    )
     token = access.working_token or (access.tokens[0].token if access.tokens else None)
     desired = {"GH_TOKEN": token} if token is not None else {}
     existing = {
         cred.auth.secret_name: cred.id
-        async for cred in anthropic.beta.vaults.credentials.list(vault_id=vault_id)
+        async for cred in list_credentials(anthropic, vault_id, scope=scope)
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
         and cred.auth.secret_name.startswith("GH_TOKEN")
     }
     for name, token in desired.items():
         if name in existing:
-            await anthropic.beta.vaults.credentials.update(
+            await update_credential(
+                anthropic,
+                vault_id,
                 existing[name],
-                vault_id=vault_id,
-                auth={"type": "environment_variable", "secret_value": token},
+                {"auth": {"type": "environment_variable", "secret_value": token}},
+                scope=scope,
             )
         else:
-            await anthropic.beta.vaults.credentials.create(
-                vault_id=vault_id,
-                auth={
-                    "type": "environment_variable",
-                    "secret_name": name,
-                    "secret_value": token,
-                    "networking": {
-                        "type": "limited",
-                        "allowed_hosts": ["api.github.com", "github.com", "uploads.github.com"],
-                    },
-                    "injection_location": {"header": True, "body": False},
+            await store_credential(
+                anthropic,
+                vault_id,
+                {
+                    "auth": {
+                        "type": "environment_variable",
+                        "secret_name": name,
+                        "secret_value": token,
+                        "networking": {
+                            "type": "limited",
+                            "allowed_hosts": ["api.github.com", "github.com", "uploads.github.com"],
+                        },
+                        "injection_location": {"header": True, "body": False},
+                    }
                 },
+                scope=scope,
             )
         if on_mutation is not None:
             on_mutation()
@@ -521,24 +574,24 @@ async def add_app_credentials(
             on_delivered(token)
     for name, credential_id in existing.items():
         if name not in desired:
-            await anthropic.beta.vaults.credentials.delete(credential_id, vault_id=vault_id)
+            await delete_credential(anthropic, vault_id, credential_id, scope=scope)
             if on_mutation is not None:
                 on_mutation()
     if access.working_token is not None:
         await add_github_copilot_credential(
-            anthropic, vault_id=vault_id, token=access.working_token, in_place=True
+            anthropic, vault_id=vault_id, token=access.working_token, in_place=True, scope=scope
         )
         if on_mutation is not None:
             on_mutation()
         if on_delivered is not None:
             on_delivered(access.working_token)
     else:
-        async for cred in anthropic.beta.vaults.credentials.list(vault_id=vault_id):
+        async for cred in list_credentials(anthropic, vault_id, scope=scope):
             if (
                 isinstance(cred.auth, BetaManagedAgentsStaticBearerAuthResponse)
                 and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
             ):
-                await anthropic.beta.vaults.credentials.delete(cred.id, vault_id=vault_id)
+                await delete_credential(anthropic, vault_id, cred.id, scope=scope)
                 if on_mutation is not None:
                     on_mutation()
 
@@ -660,10 +713,18 @@ async def close_headless_app_session(
         await mark_headless_app_session_closed(session, session_id=session_id)
 
 
-async def archive_app_vault(anthropic: AsyncAnthropic, *, vault_id: str) -> None:
+async def archive_app_vault(
+    anthropic: AsyncAnthropic,
+    *,
+    vault_id: str,
+    scope: Scope | None = None,
+) -> None:
     """A repeated cleanup may find a vault archived by an earlier attempt."""
+    scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.github_app_session:archive_app_vault"
+    )
     try:
-        await anthropic.beta.vaults.archive(vault_id)
+        await archive_vault(anthropic, vault_id, scope=scope)
     except APIStatusError as exc:
         if exc.status_code not in (404, 409) and not (
             exc.status_code == 400 and "already archived" in str(exc).lower()
@@ -766,6 +827,10 @@ async def _rotate_live_app_tokens_unlocked(
     active_turn: bool = False,
 ) -> None:
     """Refresh resources and vault in place; leave equal-access old tokens to expire."""
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id) if account_id is not None else "service",
+    )
     provisional = f"pending:{uuid.uuid4()}"
     swapped = False
 
@@ -814,10 +879,12 @@ async def _rotate_live_app_tokens_unlocked(
                     # the session to mount the new checkout.
                     continue
                 try:
-                    await anthropic.beta.sessions.resources.update(
+                    await rotate_session_repo_token(
+                        anthropic,
+                        session_id,
                         resource_id,
-                        session_id=session_id,
-                        authorization_token=resource["authorization_token"],
+                        resource["authorization_token"],
+                        scope=scope,
                     )
                     swapped = True
                     delivered.add(resource["authorization_token"])
@@ -837,6 +904,7 @@ async def _rotate_live_app_tokens_unlocked(
                 access=access,
                 on_mutation=mark_swapped,
                 on_delivered=delivered.add,
+                scope=scope,
             )
             await finish_app_delivery(
                 sessionmaker,
@@ -885,7 +953,9 @@ async def _rotate_live_app_tokens_unlocked(
                             "Failed to preserve old App tokens for active session %s", session_id
                         )
                     try:
-                        await add_app_credentials(anthropic, vault_id=vault_id, access=old_access)
+                        await add_app_credentials(
+                            anthropic, vault_id=vault_id, access=old_access, scope=scope
+                        )
                     except Exception:
                         _log.exception(
                             "Failed to restore App vault for active session %s", session_id
@@ -896,10 +966,12 @@ async def _rotate_live_app_tokens_unlocked(
                         resource_id = resource_ids.get(resource["url"])
                         if resource_id is not None:
                             try:
-                                await anthropic.beta.sessions.resources.update(
+                                await rotate_session_repo_token(
+                                    anthropic,
+                                    session_id,
                                     resource_id,
-                                    session_id=session_id,
-                                    authorization_token=resource["authorization_token"],
+                                    resource["authorization_token"],
+                                    scope=scope,
                                 )
                             except Exception:
                                 _log.exception(
@@ -910,7 +982,7 @@ async def _rotate_live_app_tokens_unlocked(
                 elif swapped and not active_turn:
                     # Only an idle session is archived; a running turn is never
                     # interrupted, and the next turn boundary replaces it.
-                    await anthropic.beta.sessions.archive(session_id)
+                    await archive_session(anthropic, session_id, scope=scope)
                 elif swapped:
                     _log.warning(
                         "App refresh failed mid-swap during active turn %s; left running",

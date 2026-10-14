@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -67,6 +68,7 @@ from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.testing import list_response, ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma import skill_response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -688,6 +690,9 @@ async def test_skill_repo_submission_writes_the_skill_credential_not_the_working
             if request.method in ("POST", "PATCH"):
                 updates.append(json.loads(request.content))
             return httpx.Response(200, json=agent.model_dump(mode="json"))
+        skill = re.fullmatch(r"/v1/skills/([^/]+)", request.url.path)
+        if skill is not None:  # the attach's existence check
+            return httpx.Response(200, json=skill_response(skill.group(1)))
         return list_response([agent.model_dump(mode="json")])
 
     runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=handler)
@@ -1601,7 +1606,9 @@ async def _run_mcp_submission(
         ),
         mcp_configured=True,
     )
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -1712,7 +1719,9 @@ async def test_mcp_submission_refuses_a_token_the_server_rejects_before_any_writ
         ),
         mcp_token_probe=probe,
     )
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -2037,7 +2046,9 @@ async def test_mcp_submission_repointing_an_existing_server_on_a_shared_agent_ne
         ),
         deployment_default=DeploymentDefault(agent_name="specialist"),
     )
-    runtime.turn_deps.fernet = build_multifernet((fernet_key,))
+    runtime = replace(
+        runtime, turn_deps=replace(runtime.turn_deps, fernet=build_multifernet((fernet_key,)))
+    )
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -2124,7 +2135,7 @@ async def test_mcp_submission_member_cannot_overwrite_the_shared_token_of_a_conn
         ),
         deployment_default=DeploymentDefault(agent_name="specialist"),
     )
-    runtime.turn_deps.fernet = fernet
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fernet=fernet))
     await run_mcp_credential_submission(
         runtime,
         team_id=_TEAM_ID,
@@ -2181,7 +2192,7 @@ async def test_mcp_submission_admin_token_written_after_the_members_decision_is_
     runtime = _build_runtime(
         fernet_key, db_session_factory, anthropic_handler=handler, mcp_configured=True
     )
-    runtime.turn_deps.fernet = fernet
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fernet=fernet))
     real_decide = credential_submissions_mod.decide_mcp_connect
 
     async def decide_then_admin_writes(*args: Any, **kwargs: Any) -> Any:

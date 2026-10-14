@@ -60,8 +60,10 @@ class AnthropicEventHistoryWalk:
         authorize(self._authorization, scope, "session", session.id)
         normalizer = EventNormalizer(session)
         try:
+            # Every reconnect walks the whole session log; the SDK default page size
+            # would multiply the round trips on a long session fivefold.
             async for native in provider_iter(
-                self._client.beta.sessions.events.list(session_id=session.id)
+                self._client.beta.sessions.events.list(session_id=session.id, limit=100)
             ):
                 yield normalizer.normalize(
                     object_json(native.model_dump(mode="json")), observed_at=datetime.now(UTC)

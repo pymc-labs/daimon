@@ -282,6 +282,9 @@ class TenantAccessPolicyRecord(Base):
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    enabled_backends: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[\"anthropic\"]'::jsonb")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -428,7 +431,7 @@ class Routine(Base):
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # FEAT-085: optional place the result goes, and the outbox that posts it.
+    # Optional place the result goes, and the outbox that posts it.
     destination_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     destination_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -510,6 +513,12 @@ class ThreadSession(Base):
     effective_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The provider-neutral binding this row backs (`provider_binding`), and its
+    # generation. NULL until `stores.mux_state.link_legacy_thread_sessions`
+    # fills backfilled rows (in batches, never under the migration's lock) or
+    # the mux turn path writes them. No existing query reads them.
+    binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    binding_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Lineage of one continuing task across session replacements.
     predecessor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -884,6 +893,7 @@ class UsageEvent(Base):
         Integer, nullable=False, server_default=text("0")
     )
     event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    observation_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Parent channel of the turn or tool call that spent it; NULL when unknown.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -1651,7 +1661,7 @@ class McpToken(Base):
     Each minted token has one row. `revoked_at` is NULL while the token is
     live; `revoke_mcp_token` sets it atomically via UPDATE…RETURNING.
 
-    `agent_id` is Text, not UUID — it stores the stringified derived UUID (A2)
+    `agent_id` is Text, not UUID — it stores the stringified derived UUID
     so the column matches the JWT claim shape exactly and stays decoupled from
     the UUID type constraint. Only `kind = 'agent'` rows carry one.
 
@@ -2521,7 +2531,8 @@ class TaskContinuation(Base):
     __tablename__ = "task_continuations"
     __table_args__ = (
         CheckConstraint(
-            "reason IN ('task_handoff', 'private_input_applied', 'timer', 'github_access_ready')",
+            "reason IN ('task_handoff', 'private_input_applied', 'timer', "
+            "'github_access_ready', 'worker_finished')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
@@ -2594,7 +2605,8 @@ class TurnOutcome(Base):
     __tablename__ = "turn_outcomes"
     __table_args__ = (
         CheckConstraint(
-            "origin IN ('chat', 'routine', 'relay', 'handoff')", name="ck_turn_outcomes_origin"
+            "origin IN ('chat', 'routine', 'relay', 'handoff', 'worker')",
+            name="ck_turn_outcomes_origin",
         ),
         CheckConstraint(
             "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
@@ -2634,7 +2646,7 @@ class TurnOutcome(Base):
     release: Mapped[str] = mapped_column(Text, nullable=False)
     usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
 
-    # SYS-066: NULL distinguishes historical outcomes from measured zero usage.
+    # NULL distinguishes historical outcomes from measured zero usage.
     input_tokens: Mapped[int | None] = mapped_column(BigInteger)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger)
     cache_read_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
@@ -3342,6 +3354,279 @@ class PlatformChannelName(Base):
     )
 
 
+# The provider-neutral state store (`daimon.core.stores.mux_state`, the
+# Postgres `mux.state.store.StateStore`). Nothing in Daimon reads or writes
+# these tables yet. Contract ids that are not Daimon UUIDs (account and
+# principal ids, binding ids, native session ids) are Text; every row carries
+# its tenant for isolation and for the tenant purge cascade.
+
+
+def _tenant_fk() -> Mapped[uuid.UUID]:
+    return mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class ChannelConfigRevision(Base):
+    """One immutable revision of a channel's resolved backend configuration."""
+
+    __tablename__ = "channel_config_revision"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "platform", "channel_id", "local"),)
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    local: Mapped[int] = mapped_column(Integer, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'channel'"))
+    # A `mux.contracts.config.ConfigRevision` as JSON.
+    revision: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ProviderBindingSlot(Base):
+    """A binding slot and the one binding id that lives in it.
+
+    A slot is a thread plus the caller account owning it (NULL = a shared
+    thread), unique with NULLS NOT DISTINCT. `generation` is the slot's
+    current generation, the compare-and-swap target.
+    """
+
+    __tablename__ = "provider_binding_slot"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "thread_id",
+            "account_id",
+            name="uq_provider_binding_slot",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ProviderBinding(Base):
+    """Every generation of a binding; the slot's current one is the highest."""
+
+    __tablename__ = "provider_binding"
+    __table_args__ = (
+        PrimaryKeyConstraint("binding_id", "generation"),
+        Index(
+            "provider_binding_legacy_row_idx",
+            "legacy_row_id",
+            postgresql_where=text("legacy_row_id IS NOT NULL"),
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    # A `mux.contracts.resources.ProviderBinding` as JSON.
+    binding: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # The `thread_sessions` row a backfilled generation came from; NULL otherwise.
+    legacy_row_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ThreadLease(Base):
+    """A slot's lease: the highest fence issued and the active holder, if any."""
+
+    __tablename__ = "thread_lease"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "thread_id",
+            "account_id",
+            name="uq_thread_lease_slot",
+            postgresql_nulls_not_distinct=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_fence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # A `mux.state.lease.Lease` as JSON, or NULL when nobody holds the slot.
+    active: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class MuxOperation(Base):
+    """An idempotent operation: found by (tenant, account, key), owned by a principal.
+
+    The principal is deliberately not in the key: reusing a key from another
+    principal is refused, never forked into a second operation.
+    """
+
+    __tablename__ = "operation"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "account_id", "key"),)
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # A `mux.state.operations.OperationRecord` as JSON.
+    record: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class JournalSession(Base):
+    """A session's journal head: its owning binding (hence slot), projection and cursor.
+
+    Written when a binding names the session, never by an append.
+    """
+
+    __tablename__ = "journal_session"
+
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # A `mux.contracts.resources.ProjectionSnapshot` as JSON; NULL before the first append.
+    projection: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class Journal(Base):
+    """One normalized event, in local commit order."""
+
+    __tablename__ = "journal"
+    __table_args__ = (
+        PrimaryKeyConstraint("session_id", "sequence"),
+        UniqueConstraint(
+            "session_id", "source_key", "revision", "preview", name="uq_journal_source"
+        ),
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("journal_session.session_id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    preview: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # A `mux.contracts.events.Event` as JSON.
+    event: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class UsageObservation(Base):
+    """Each applied revision of a usage observation; the latest is the highest."""
+
+    __tablename__ = "usage_observation"
+    __table_args__ = (PrimaryKeyConstraint("binding_id", "observation_id", "revision"),)
+
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    observation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    # A `mux.state.usage_ledger.AppliedUsage` as JSON.
+    applied: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class AccountingOutbox(Base):
+    """One revision's signed usage deltas, for the host to apply exactly once."""
+
+    __tablename__ = "accounting_outbox"
+    __table_args__ = (
+        PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
+        Index(
+            "accounting_outbox_pending_idx",
+            "created_at",
+            postgresql_where=text("applied_at IS NULL"),
+        ),
+    )
+
+    binding_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+    )
+    observation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    prior_applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    # A `mux.state.usage_ledger.OutboxRow` as JSON (its `applied` flag is `applied_at`).
+    row: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NeutralAgentRevision(Base):
+    """Immutable host revisions for explicitly selected alternate backends."""
+
+    __tablename__ = "neutral_agent_revisions"
+    __table_args__ = (
+        CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_agent_provider"),
+        CheckConstraint("local_revision > 0", name="ck_neutral_agent_revision"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    catalog_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    local_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class NeutralSkillVersion(Base):
+    """Retained checked bundles; native skill versions remain opaque strings."""
+
+    __tablename__ = "neutral_skill_versions"
+    __table_args__ = (
+        CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_skill_provider"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_title: Mapped[str] = mapped_column(Text, nullable=False)
+    preview: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    zip_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
 class DiscordMessageAdmission(Base):
     """Durable addressed-message admission, shared by gateway and startup replay."""
 
@@ -3404,6 +3689,173 @@ class SessionSettleState(Base):
     covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     settle_turn_event_id: Mapped[str | None] = mapped_column(Text)
     settle_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AgentBackendRevisionRecord(Base):
+    """Tenant/agent-scoped immutable backend settings, like channel revisions."""
+
+    __tablename__ = "agent_backend_revision"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "local"),
+        CheckConstraint("local > 0", name="ck_agent_backend_local"),
+        CheckConstraint(
+            "backend IS NULL OR backend IN ('anthropic', 'openai', 'gemini')",
+            name="ck_agent_backend_provider",
+        ),
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    local: Mapped[int] = mapped_column(Integer, nullable=False)
+    backend: Mapped[str | None] = mapped_column(Text)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    preview_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    previous_local: Mapped[int | None] = mapped_column(Integer)
+    fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class FleetRun(Base):
+    """One orchestrator's fan-out: its budget, deadline and status.
+
+    Workers are `FleetWorker` rows. Each worker's session, lease and journal
+    live in the neutral state store under its own private binding slot; these
+    two tables hold only what the store cannot: the run graph, budgets,
+    deadlines, status and a pointer to each worker's result.
+    """
+
+    __tablename__ = "fleet_run"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_fleet_run_tenant_id"),
+        UniqueConstraint("tenant_id", "operation_key", name="uq_fleet_run_operation"),
+        CheckConstraint(
+            "status IN ('running', 'collecting', 'completed', 'cancelled', 'failed')",
+            name="ck_fleet_run_status",
+        ),
+        CheckConstraint("max_workers > 0", name="ck_fleet_run_max_workers"),
+        CheckConstraint(
+            "quorum IS NULL OR (quorum > 0 AND quorum <= max_workers)", name="ck_fleet_run_quorum"
+        ),
+        CheckConstraint(
+            "total_budget_usd >= 0 AND reserved_usd >= 0 AND observed_usd >= 0",
+            name="ck_fleet_run_amounts",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    orchestrator_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    orchestrator_session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    orchestrator_binding_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    operation_key: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    total_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    reserved_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default=text("0")
+    )
+    observed_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default=text("0")
+    )
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    max_workers: Mapped[int] = mapped_column(Integer, nullable=False)
+    quorum: Mapped[int | None] = mapped_column(Integer)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class FleetWorker(Base):
+    """One worker turn of a fleet run; its result stays in the journal."""
+
+    __tablename__ = "fleet_worker"
+    __table_args__ = (
+        UniqueConstraint("run_id", "ordinal", name="uq_fleet_worker_ordinal"),
+        UniqueConstraint("run_id", "id", name="uq_fleet_worker_run_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"],
+            ["fleet_run.tenant_id", "fleet_run.id"],
+            name="fk_fleet_worker_run",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "reviewer_of"],
+            ["fleet_worker.run_id", "fleet_worker.id"],
+            name="fk_fleet_worker_reviewer",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'starting', 'running', 'succeeded', 'failed', "
+            "'cancelled', 'timed_out', 'budget_exceeded')",
+            name="ck_fleet_worker_status",
+        ),
+        CheckConstraint(
+            "backend IN ('anthropic', 'openai', 'gemini')", name="ck_fleet_worker_backend"
+        ),
+        CheckConstraint("ordinal >= 0", name="ck_fleet_worker_ordinal"),
+        CheckConstraint("reviewer_of IS NULL OR reviewer_of <> id", name="ck_fleet_worker_review"),
+        CheckConstraint(
+            "max_turns > 0 AND turns_used >= 0 AND turns_used <= max_turns AND attempts >= 0",
+            name="ck_fleet_worker_counts",
+        ),
+        CheckConstraint("budget_usd >= 0 AND reserved_usd >= 0", name="ck_fleet_worker_amounts"),
+        CheckConstraint(
+            "(result_session_id IS NULL) = (result_sequence IS NULL) "
+            "AND (result_session_id IS NULL) = (result_digest IS NULL) "
+            "AND (result_excerpt IS NULL OR char_length(result_excerpt) <= 4096)",
+            name="ck_fleet_worker_result",
+        ),
+        Index(
+            "ix_fleet_worker_active",
+            "tenant_id",
+            postgresql_where=text("status IN ('starting', 'running')"),
+        ),
+        Index("ix_fleet_worker_run_status", "run_id", "status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    spec_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    backend: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    binding_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    reserved_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default=text("0")
+    )
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    max_turns: Mapped[int] = mapped_column(Integer, nullable=False)
+    turns_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    reviewer_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    result_contract: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    result_session_id: Mapped[str | None] = mapped_column(Text)
+    result_sequence: Mapped[int | None] = mapped_column(Integer)
+    result_digest: Mapped[str | None] = mapped_column(Text)
+    result_excerpt: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

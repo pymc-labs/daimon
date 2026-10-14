@@ -163,6 +163,8 @@ from daimon.core.mcp_token_connect import (
     McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import update_agent
 from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
@@ -179,6 +181,7 @@ from daimon.core.stores.agent_files import (
 )
 from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.domain import CredentialRequestRow
+from mux.errors import ScopeViolation
 
 import discord
 
@@ -1328,13 +1331,22 @@ class SkillRepoModal(discord.ui.Modal):
                     "That skill overlaps an attached skill. "
                     "Ask an admin to check the skill setup before attaching it."
                 )
-            return await self._runtime.anthropic.beta.agents.update(
-                fresh.id, version=fresh.version, skills=merged
+            return await update_agent(
+                self._runtime.anthropic,
+                fresh.id,
+                version=fresh.version,
+                payload={"skills": merged},
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
 
         try:
-            await update_agent_with_version_retry(self._runtime.anthropic, agent.id, _apply)
-        except (DaimonError, anthropic.APIStatusError) as err:
+            await update_agent_with_version_retry(
+                self._runtime.anthropic,
+                agent.id,
+                _apply,
+                scope=resource_scope(tenant_id=str(tenant_id)),
+            )
+        except (DaimonError, anthropic.APIStatusError, ScopeViolation) as err:
             _log.warning(
                 "credential_modal.skill_repo_attach_failed",
                 agent_id=str(agent_id),

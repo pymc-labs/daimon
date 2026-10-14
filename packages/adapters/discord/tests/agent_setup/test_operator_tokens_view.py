@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -25,6 +26,7 @@ from daimon.core.stores.mcp_tokens import list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -42,7 +44,7 @@ def _runtime(sessionmaker: object) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=replace(deps_for(), turn_path=None),
     )
 
 

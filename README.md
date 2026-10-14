@@ -172,6 +172,13 @@ Bug reports and pull requests are welcome. Start with
 every PR keeps green, and look for issues labelled
 [`good first issue`](https://github.com/pymc-labs/daimon/labels/good%20first%20issue).
 
+SDK tests use explicit fixture keys. Before local runs, unset exported
+`ANTHROPIC_*`, `OPENAI_*`, `GOOGLE_*` and `GEMINI_*` settings, including empty
+values, and the TLS/proxy overrides listed in the
+[test SDK guide](packages/testing/README.md#isolated-provider-sdk-clients).
+Their presence raises `AmbientSDKConfigurationError` before client construction.
+To remove a single exported key for one run: `env -u ANTHROPIC_API_KEY uv run pytest`.
+
 Report vulnerabilities privately as described in
 [`SECURITY.md`](SECURITY.md). What a deployment stores about its users is in
 [`PRIVACY.md`](PRIVACY.md).

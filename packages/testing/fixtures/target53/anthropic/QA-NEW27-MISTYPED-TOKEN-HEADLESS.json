@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+  "scenario_sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

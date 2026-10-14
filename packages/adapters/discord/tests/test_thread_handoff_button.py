@@ -7,6 +7,7 @@ message routes to it; a refused click writes nothing and answers privately.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _GUILD = "700000009"
@@ -53,7 +55,7 @@ def _interaction(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: Any)
     runtime = SimpleNamespace(
         anthropic=build_fake_anthropic(router.dispatch),
         sessionmaker=sessionmaker,
-        turn_deps=SimpleNamespace(deployment_default=_DEFAULT),
+        turn_deps=replace(deps_for(None, None), deployment_default=_DEFAULT, turn_path=None),
     )
     thread = MagicMock(spec=discord.Thread)
     thread.id = _THREAD

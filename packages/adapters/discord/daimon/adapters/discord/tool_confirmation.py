@@ -4,7 +4,7 @@ The card's words and states come from `daimon.core.posted_controls.confirmation`
 this module only draws them as a components-v2 `LayoutView` with Approve and
 Deny, and turns the click into a `ConfirmationAnswer`.
 
-The view is non-persistent (VIEW-04): the turn waiting on the answer lives in
+The view is non-persistent: the turn waiting on the answer lives in
 this process, so a live View instance holds the future and no custom_id or
 `DynamicItem` registration is needed. If the process restarts, the turn that
 was waiting dies with it and the card's buttons simply stop answering.
@@ -15,6 +15,9 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
@@ -31,12 +34,16 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import (
+    check_confirmation_admin,
     edit_card_within,
     settle_local_confirmation,
     wait_local_confirmation,
 )
 
 import discord
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.runtime import DiscordRuntime
 
 __all__ = ["build_confirmation_view", "discord_confirmation_hook"]
 
@@ -78,10 +85,12 @@ class _ConfirmationView(discord.ui.LayoutView):
         card: ConfirmationCard,
         prompt: ConfirmationPrompt,
         answer: asyncio.Future[ConfirmationAnswer] | None,
+        check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
     ) -> None:
         super().__init__(timeout=None)
         self._prompt = prompt
         self._answer = answer
+        self._check_admin = check_admin
         self.answered_edit_done = asyncio.Event()
         #: The posted card's ordering key for `edit_card_within`; set once the
         #: card is sent, before anyone can click it.
@@ -97,11 +106,14 @@ class _ConfirmationView(discord.ui.LayoutView):
         )
         for text in _body(card):
             container.add_item(discord.ui.TextDisplay(text))
+        if prompt.admin:
+            for text in card.detail_lines:
+                container.add_item(discord.ui.TextDisplay(_safe_text(text)))
         if card.state == "pending":
             container.add_item(discord.ui.Separator())
             row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
             approve: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                style=discord.ButtonStyle.success, label="Approve"
+                style=discord.ButtonStyle.success, label="Confirm" if prompt.admin else "Approve"
             )
             deny: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 style=discord.ButtonStyle.danger, label="Deny"
@@ -137,6 +149,14 @@ class _ConfirmationView(discord.ui.LayoutView):
         )
 
     async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
+        refusal = await check_confirmation_admin(
+            self._prompt, str(interaction.user.id), self._check_admin
+        )
+        if refusal is not None:
+            await interaction.response.send_message(
+                refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
+            return
         refusal = settle_local_confirmation(
             self._prompt, self._answer, str(interaction.user.id), answer
         )
@@ -178,14 +198,52 @@ def build_confirmation_view(
     return _ConfirmationView(card, prompt, answer)
 
 
-def discord_confirmation_hook(channel: discord.abc.Messageable) -> ConfirmationHook:
+def discord_confirmation_hook(
+    channel: discord.abc.Messageable,
+    *,
+    runtime: DiscordRuntime | None = None,
+    tenant_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
+    prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
+    check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
+) -> ConfirmationHook:
     """A hook that posts each prompt's card into `channel` (the turn's thread)."""
 
+    if runtime is not None:
+        from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+
+        if backend_selection_enabled(runtime.settings.turn):
+            from daimon.adapters.discord.bot import requester_role
+            from daimon.core.confirmation import backend_switch_callbacks
+            from daimon.core.stores.domain import Role
+
+            if tenant_id is None or account_id is None:
+                raise ValueError("Backend confirmation requires an admitted account and tenant")
+
+            async def current_admin(clicker: str) -> bool:
+                if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+                    return False
+                role, _ = await requester_role(channel.guild, clicker)
+                return role is Role.ADMIN
+
+            prepare_admin, check_admin = backend_switch_callbacks(
+                make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+                sessionmaker=runtime.sessionmaker,
+                anthropic=runtime.anthropic,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                current_admin=current_admin,
+            )
+
     async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
+        if prompt.admin:
+            if prepare_admin is None or check_admin is None:
+                return "denied"
+            prompt = await prepare_admin(prompt)
         loop = asyncio.get_running_loop()
         answer: asyncio.Future[ConfirmationAnswer] = loop.create_future()
         pending = build_confirmation_card(prompt, state="pending", token=secrets.token_urlsafe(12))
-        view = _ConfirmationView(pending, prompt, answer)
+        view = _ConfirmationView(pending, prompt, answer, check_admin)
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         view.card_key = ("discord", message.id)
 

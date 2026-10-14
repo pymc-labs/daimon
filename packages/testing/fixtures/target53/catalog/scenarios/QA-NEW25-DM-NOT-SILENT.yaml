@@ -1,0 +1,22 @@
+id: QA-NEW25-DM-NOT-SILENT
+title: a DM to the bot gets a one-time pointer, not silence (bots can't DM bots)
+friction:
+- NEW-25
+set: B
+surface: discord
+tier: manual
+priority: P1
+est_turns: 0
+setup: []
+steps: []
+assert: []
+human:
+- click: Open a DM with `daimon-staging` (1530628070405308456) from your own account
+    and send 'hi'.
+  expect: Within 15 s one reply explaining how to reach Daimon (mention in a server,
+    or /dm). Silence = FAIL.
+- click: Send 'hi' again.
+  expect: No second pointer within the same day (rate-limited).
+- click: In the QA guild, run `/help`.
+  expect: '`/dm` and `/memory` are listed; `/routines` is marked admin-only.'
+teardown: []

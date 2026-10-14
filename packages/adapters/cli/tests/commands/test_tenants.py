@@ -913,3 +913,17 @@ async def test_access_policy_adds_and_removes_teams_member_guests_in_place(
             external_id="guests",
             add_member_guest=[first],
         )
+
+
+@pytest.mark.parametrize("enabled", [("anthropic",), ("anthropic", "openai")])
+def test_policy_json_keeps_legacy_shape_until_backends_are_configured(enabled):
+    policy = TenantAccessPolicy(enabled_backends=enabled)
+    console = _make_console()
+    tenants_mod._print_policy(console, label="tenant", policy=policy, as_json=True)
+    payload = json.loads(_output(console))
+    assert payload["channel_rules"] == {}
+    assert payload["agent_rules"] == {}
+    if enabled == ("anthropic",):
+        assert "enabled_backends" not in payload
+    else:
+        assert payload["enabled_backends"] == ["anthropic", "openai"]

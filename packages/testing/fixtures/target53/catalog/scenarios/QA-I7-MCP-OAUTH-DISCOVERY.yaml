@@ -1,0 +1,19 @@
+id: QA-I7-MCP-OAUTH-DISCOVERY
+title: the MCP protected-resource metadata resolves for both /mcp and /mcp/
+friction:
+- I2
+set: A
+surface: headless
+tier: weekly
+priority: P2
+est_turns: 0
+setup: []
+steps: []
+assert:
+- kind: http_check
+  url: '{env.mcp_public_url}/.well-known/oauth-protected-resource/mcp'
+  expect_status: 200
+- kind: http_check
+  url: '{env.mcp_public_url}/.well-known/oauth-protected-resource/mcp/'
+  expect_status: 200
+teardown: []

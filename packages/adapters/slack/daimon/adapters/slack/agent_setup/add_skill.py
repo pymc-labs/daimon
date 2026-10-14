@@ -34,9 +34,12 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_markdown
 from daimon.core.stores.identity import get_or_create_platform_principal
+from mux.errors import ScopeViolation
 from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
@@ -156,7 +159,9 @@ async def run_add_skill_submission(
         await tell(AGENT_GONE_MESSAGE)
         return
     try:
-        agent = await runtime.anthropic.beta.agents.retrieve(found.id)
+        agent = await retrieve_agent(
+            runtime.anthropic, found.id, scope=resource_scope(tenant_id=str(tenant_id))
+        )
         if await refused(agent):
             return
         result = await add_agent_skill(
@@ -175,7 +180,7 @@ async def run_add_skill_submission(
     except SkillIngestError as exc:
         await tell(f"{exc} Nothing was added.")
         return
-    except (DaimonError, anthropic.APIError):
+    except (DaimonError, anthropic.APIError, ScopeViolation):
         log.exception("slack.agent_setup.add_skill.failed", agent_name=agent_name)
         await tell(
             f"Adding {escape_mrkdwn(name)} to {escape_mrkdwn(agent_name)} failed. Try again."

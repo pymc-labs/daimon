@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
+from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
     DetailListName,
@@ -53,6 +54,7 @@ from microsoft_teams.cards import (
     TextBlock,
     TextInput,
 )
+from mux.contracts.ids import Provider
 
 VERB = "agent_setup"
 CREATE_DIALOG = "agent_create"
@@ -77,7 +79,16 @@ _LIST_HEADINGS: dict[DetailListName, str] = {
     "keys": "Keys",
 }
 
-Op = Literal["agents", "details", "routing", "manage", "end"]
+Op = Literal[
+    "agents",
+    "details",
+    "routing",
+    "manage",
+    "end",
+    "backend_preview",
+    "backend_confirm",
+    "backend_cancel",
+]
 
 
 def _button(
@@ -214,6 +225,8 @@ def details_card(
     coding_tools: bool,
     github_panel: GrantsPanel | None = None,
     expanded: DetailListName | None = None,
+    backend_options: tuple[Provider, ...] = (),
+    backend_selection: Provider | None = None,
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here."""
     purpose = details.purpose
@@ -246,6 +259,21 @@ def details_card(
         )
         body.append(_text("\n".join(lines)))
     body += _detail_lists(details, page=page, expanded=expanded)
+    if backend_options:
+        body.extend(
+            [
+                ChoiceSetInput(
+                    id="model_backend",
+                    label="Model backend",
+                    value=backend_selection or "clear",
+                    choices=[
+                        Choice(title=channel_backend.DEFAULT_BACKEND_LABEL, value="clear"),
+                        *(Choice(title=provider, value=provider) for provider in backend_options),
+                    ],
+                ),
+                ActionSet(actions=[_button("Preview", "backend_preview", agent=details.name)]),
+            ]
+        )
     actions: list[Action] = []
     if not details.daimon_managed:
         add = OpenDialogData(SKILL_DIALOG, {"agent": details.name})
@@ -257,6 +285,42 @@ def details_card(
         body.append(_text("Coding-tool access is not configured for this deployment.", subtle=True))
     actions.append(_button("Back", "agents", page=page))
     return _card(details.name, body, actions)
+
+
+def backend_preview_card(
+    preview: channel_backend.CompatibilityPreview, *, agent_name: str, clear: bool
+) -> AdaptiveCard:
+    selection = "Use default" if clear else preview.target_backend
+    lines = [f"Model backend: {selection}"]
+    for label, items in (
+        ("Unsupported skills", preview.unsupported_skills),
+        ("Unsupported MCPs", preview.unsupported_mcps),
+        ("Unsupported capabilities", preview.unsupported_capabilities),
+        ("Shared-thread limits", preview.shared_thread_limits),
+    ):
+        names = ", ".join(items) or "None"
+        shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
+        lines.append(f"{label}: {shown}")
+    lines.extend(
+        [preview.cost_line, "Existing threads keep their backend; channel overrides still apply."]
+    )
+    if not preview.allowed:
+        lines.append("This backend is not enabled for this organisation.")
+    actions: list[Action] = [_button("Cancel", "backend_cancel", agent=agent_name)]
+    if preview.allowed:
+        actions.insert(
+            0,
+            _button(
+                "Confirm",
+                "backend_confirm",
+                "positive",
+                agent=agent_name,
+                target="clear" if clear else preview.target_backend,
+                revision=preview.setting_revision,
+                digest=preview.digest,
+            ),
+        )
+    return _card("Model backend", [_text("\n".join(lines)[:3000])], actions)
 
 
 def routing_card(

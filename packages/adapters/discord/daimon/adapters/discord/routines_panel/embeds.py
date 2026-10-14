@@ -47,7 +47,7 @@ def _humanize_delta(target: datetime, now: datetime) -> str:
 def build_panel_container(
     state: RoutinesPanelState, *, now: datetime
 ) -> discord.ui.Container[discord.ui.LayoutView]:
-    """R3 timeline-forward container for the /routines panel.
+    """Timeline-forward container for the /routines panel.
 
     The header shows status, agent and schedule. The body shows the next run
     and, when present, when the last run started.

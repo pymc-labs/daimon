@@ -1,4 +1,4 @@
-"""Stage two of the two-stage turn chokepoint (D-01): `bind_session()`.
+"""Stage two of the two-stage turn chokepoint: `bind_session()`.
 
 A single core call performs thread-session find-or-create, the full
 `create_session` kwarg assembly, the `thread_sessions` mapping write, and
@@ -24,12 +24,13 @@ import datetime as dt
 import functools
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
 import structlog
+from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
@@ -37,8 +38,14 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
+from daimon.core.channel_backend import BackendUnsupported
+from daimon.core.config import load_turn_settings
+from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
+from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
+from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
@@ -52,10 +59,17 @@ from daimon.core.session_snapshot import (
     snapshot_from_created_session,
 )
 from daimon.core.sessions import create_session
+from daimon.core.shared_threads import (
+    SharedThread,
+    may_have_shared_binding,
+    record_shared_binding,
+    resolve_shared_thread,
+)
+from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
-from daimon.core.stores.domain import TransferKind
+from daimon.core.stores.domain import BackendAgent, TransferKind
 from daimon.core.stores.github_access import get_agent_mode, list_authorized_repos
 from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
@@ -68,15 +82,25 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
+from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runtimes
 from daimon.core.turn_origin import SessionState
+from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
+from mux.contracts.ids import ResourceRef, Revision, Scope
+from mux.contracts.ports import ManagedAgents
+from mux.contracts.resources import Agent, SessionSpec
+from mux.drivers.anthropic.sessions_lifecycle import SessionCreateRequest, SessionReads
+from mux.errors import ScopeViolation
+from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
+    from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerPermissions
     from daimon.core.session_preparation_stages import WorkspaceTransfer
+    from daimon.core.stores.neutral_catalog import AgentRevision
 
 log = structlog.get_logger(__name__)
 
@@ -151,8 +175,182 @@ class PreparedTurn:
     watermark: str | None
     reused: bool
     session_account_id: uuid.UUID
-    _record: UsageRecorder
+    _record: UsageRecorder | ObservationRecorder
     continuity: ContinuityOutcome = CONTINUED
+    # Populated only by a provider-native preparation hook. Anthropic's
+    # existing field values and preparation remain unchanged.
+    backend: ManagedAgents | None = None
+    session_ref: ResourceRef | None = None
+    runtime: TurnRuntime | None = None
+    native_footer_cost: NativeFooterCostContext | None = None
+    _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
+    _source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
+    _preparation: ProviderPreparationRequest | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
+
+
+@dataclass(frozen=True)
+class ProviderPreparationRequest:
+    deps: TurnDeps
+    admission: Admission
+    scope: Scope
+    tenant_id: uuid.UUID
+    platform: str
+    external_user_id: str
+    thread_id: str
+    session_account_id: uuid.UUID
+    reuse_existing: bool
+    capabilities: MaCapabilities
+    transfer: WorkspaceTransfer | None
+    deadline: dt.datetime
+    now: Callable[[], dt.datetime]
+    counterpart: AgentRevision | None = field(default=None, kw_only=True)
+    verified_counterpart: AgentRevision | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
+    source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
+    worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
+    before_native: Callable[[], Awaitable[None]] | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
+
+    async def capture_root(
+        self, parent: WorkerPermissions, *, deadline: dt.datetime | None = None
+    ) -> ProviderPreparationRequest:
+        """Read the pinned source once under the original root grant and ceiling."""
+        from daimon.core.mux_compat import retrieve_agent
+        from daimon.core.neutral_resources import WorkerSpecRefused
+        from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+        bound = min(self.deadline, parent.limits.deadline, deadline or self.deadline)
+        remaining_s(bound, now=self.now(), refuse_expired=True)
+        grant = self.admission.grant
+        if (
+            self.worker is not None
+            or grant is None
+            or self.admission.shared_owner is not None
+            or grant.subject != parent.subject
+            or grant.run_place != parent.fleet.place
+            or self.tenant_id != grant.tenant_id
+            or str(self.tenant_id) != parent.fleet.scope.tenant_id
+            or self.session_account_id != parent.fleet.account_id
+            or self.admission.account_id != parent.fleet.account_id
+            or self.scope != parent.fleet.scope
+            or grant.agent != parent.agent
+            or grant.turn_place != parent.fleet.place
+        ):
+            raise WorkerSpecRefused("scope", "unbound")
+        pins = tuple(pin for pin in parent.source_revisions if pin[0].id == self.admission.agent.id)
+        if len(pins) != 1:
+            raise WorkerSpecRefused("scope", "unbound")
+        async with asyncio.timeout(remaining_s(bound, now=self.now(), refuse_expired=True)):
+            actual = await retrieve_agent(self.deps.anthropic, pins[0][0].id, scope=self.scope)
+            root = replace(
+                self,
+                admission=replace(self.admission, agent=actual),
+                source=None,
+                counterpart=None,
+                verified_counterpart=None,
+            )
+            source = await capture_preparation_source(root)
+            if source.source is None or (source.source.ref, source.source.revision) != pins[0]:
+                raise WorkerSpecRefused("scope", "stale")
+            remaining_s(bound, now=self.now(), refuse_expired=True)
+            return replace(root, source=source, deadline=bound)
+
+    async def for_worker(
+        self, parent: WorkerPermissions, worker: ResolvedWorkerSpec
+    ) -> ProviderPreparationRequest:
+        """Derive a bounded worker request from the original grant and pinned source."""
+        from daimon.core.channel_backend import resolve_turn_backend
+        from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+        from daimon.core.stores.access_policy import load_access_policy
+        from mux.contracts.config import BackendConfig
+        from mux.contracts.resources import AgentPatch, AgentSpec
+
+        bound = min(self.deadline, parent.limits.deadline, worker.limits.deadline)
+        async with asyncio.timeout(remaining_s(bound, now=self.now(), refuse_expired=True)):
+            root = await self.capture_root(parent, deadline=bound)
+            source = root.source
+            if source is None or source.source is None:
+                raise WorkerSpecRefused("scope", "unbound")
+            definition = (
+                source.source if worker.source_agent else AgentSpec.model_validate(worker.spec)
+            )
+            overrides = (
+                AgentPatch.model_validate(worker.spec.model_dump(mode="json"))
+                if worker.source_agent
+                else None
+            )
+            async with self.deps.sessionmaker.begin() as db:
+
+                async def validate_origin(*_args: object) -> None:
+                    remaining_s(bound, now=self.now(), refuse_expired=True)
+                    policy = await load_access_policy(db, tenant_id=self.tenant_id)
+                    normalized = resolve_worker_spec(
+                        parent,
+                        definition,
+                        overrides=overrides,
+                        policy=policy,
+                        now=self.now(),
+                        backend=BackendConfig.model_validate(
+                            worker.backend.model_dump(include=set(BackendConfig.model_fields))
+                        ),
+                        resources=worker.resources,
+                        environment=worker.environment,
+                        limits=worker.limits,
+                        captured_source=source,
+                    )
+                    if normalized.digest != worker.digest:
+                        raise WorkerSpecRefused("scope", "stale")
+
+                await validate_origin()
+                revision, _, origin = await resolve_turn_backend(
+                    db,
+                    parent.fleet.root.channel,
+                    source,
+                    enabled=True,
+                    worker=worker,
+                    validate_origin=validate_origin,
+                )
+            remaining_s(bound, now=self.now(), refuse_expired=True)
+            if revision is None or origin != "agent":
+                raise WorkerSpecRefused("backend", "unsupported")
+            return replace(
+                root,
+                admission=replace(
+                    root.admission, backend_revision=revision, backend_revision_origin=origin
+                ),
+                worker=worker,
+                scope=worker.permissions.fleet.scope,
+                deadline=bound,
+            )
+
+
+ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
+_PROVIDER_PREPARATIONS: dict[str, ProviderPreparation] = {}
+
+
+def register_turn_preparation(
+    profile: str, prepare: ProviderPreparation, *, fallback: bool = False
+) -> None:
+    """Register provider-native binding; missing hooks never use Anthropic IDs."""
+    if profile == "anthropic.managed_agents":
+        raise ValueError(f"turn preparation already registered: {profile}")
+    if profile in _PROVIDER_PREPARATIONS:
+        if fallback:
+            return
+        raise ValueError(f"turn preparation already registered: {profile}")
+    _PROVIDER_PREPARATIONS[profile] = prepare
+
+
+def _admitted_profile(admission: Admission) -> str:
+    return (
+        admission.backend_revision.profile
+        if admission.backend_revision is not None
+        else "anthropic.managed_agents"
+    )
 
 
 @dataclass(frozen=True)
@@ -227,6 +425,7 @@ async def create_ma_session(
     tenant_id: uuid.UUID,
     extra_resources: tuple[Resource, ...] = (),
     predecessor_session_id: str | None = None,
+    preparation: ProviderPreparationRequest | None = None,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -247,6 +446,28 @@ async def create_ma_session(
     turn before any session exists, and a seal added since is stamped on the
     session and mounts memory read-only.
     """
+    if _admitted_profile(admission) != "anthropic.managed_agents":
+        raise AdmissionDenied(reason="backend_unsupported")
+    persistence = None
+    if preparation is not None:
+        from daimon.core.turn.persistence import current_persistence
+
+        persistence = current_persistence.get()
+        worker, source = preparation.worker, preparation.source
+        if (
+            worker is None
+            or source is None
+            or preparation.before_native is None
+            or persistence is None
+            or preparation.deps is not deps
+            or preparation.admission != admission
+            or source.resource_scope != preparation.scope
+            or preparation.scope != worker.permissions.fleet.scope
+            or persistence.store is not deps.state_store
+            or preparation.tenant_id != tenant_id
+        ):
+            raise ScopeViolation("worker-preparation", "complete owned source required")
+        persistence.check_session(preparation.scope, None)
     admission = await reauthorize(deps, admission)
     seal: set[str] = set(admission.origin_seal_ids)
     if predecessor_session_id is not None and admission.origin_channel_id is not None:
@@ -274,6 +495,9 @@ async def create_ma_session(
     built = admission
 
     async def fence() -> None:
+        if preparation is not None:
+            assert preparation.before_native is not None
+            await preparation.before_native()
         # `create_session` awaits vault, credential, file and repository work
         # before `sessions.create`; decide once more immediately before it.
         # A pin raises `AdmissionDenied`; a seal the session was not built
@@ -299,7 +523,33 @@ async def create_ma_session(
                 retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
             )
 
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    async def allocate(
+        call: Callable[[], Awaitable[BetaManagedAgentsSession]], wire: SessionCreateRequest
+    ) -> BetaManagedAgentsSession:
+        assert preparation is not None and preparation.worker is not None
+        assert persistence is not None
+        assert preparation.source is not None and preparation.source.source is not None
+        return await persistence.mutate(
+            None,
+            "session_create",
+            {
+                "scope": preparation.scope.model_dump(mode="json"),
+                "worker": preparation.worker.digest,
+                "source": preparation.source.source.model_dump(mode="json"),
+                "create": wire.model_dump(mode="json"),
+            },
+            lambda _key: call(),
+            BetaManagedAgentsSession,
+            lambda _: "processed",
+            guard=fence,
+            retry_failed=False,
+        )
+
+    agent_uuid = (
+        preparation.source.agent_id
+        if preparation is not None and preparation.source is not None
+        else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    )
     async with deps.sessionmaker() as session:
         github_mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
     env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
@@ -308,7 +558,10 @@ async def create_ma_session(
         agent=admission.agent,
         environment=admission.environment,
         mcp_settings=deps.mcp,
-        account_id=admission.account_id,
+        # A shared thread's session carries no caller's credentials.
+        account_id=None if admission.shared_owner is not None else admission.account_id,
+        # Leaves off every server somebody connected through their own OAuth.
+        hide_personal_for=admission.shared_owner,
         tenant_id=tenant_id,
         agent_uuid=agent_uuid,
         session_factory=deps.sessionmaker,
@@ -325,6 +578,7 @@ async def create_ma_session(
         personal_memory=True,
         tool_safety=deps.tool_safety,
         asks_before_publishing=admission.asks_before_publishing,
+        confirmed_tools=backend_switch_tools_for_turn(deps),
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
         budget_channel_id=admission.budget_channel_id,
@@ -333,6 +587,9 @@ async def create_ma_session(
         origin_seal_ids=frozenset(seal),
         before_create=fence,
         channel_skills=admission.channel_skills,
+        resource_source=preparation.source if preparation is not None else None,
+        worker=preparation.worker if preparation is not None else None,
+        allocation=allocate if preparation is not None else None,
     )
 
     async with deps.sessionmaker() as session:
@@ -582,6 +839,64 @@ async def bind_session(
     observation.agent_id = admission.agent.id
     try:
         with observation.activate():
+            # Any admitted profile may share a thread: a provider preparation
+            # receives the shared owner as `session_account_id` and keys its
+            # native session by it, with host credentials only.
+            shared = await _shared_thread(
+                deps, admission, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+            )
+            if shared is not None:
+                # The thread runs under the revision it was bound with (checked
+                # runnable by `resolve_shared_thread`), so dispatch picks that
+                # provider even after the channel moved to another.
+                origin = admission.backend_revision_origin
+                if shared.revision != admission.backend_revision:
+                    async with deps.sessionmaker() as session:
+                        persisted_origin = await mux_state.config_origin(
+                            session, shared.revision.channel, shared.revision.local
+                        )
+                    if persisted_origin not in ("channel", "channel_clear", "agent"):
+                        raise AdmissionDenied(reason="backend_unsupported")
+                    origin = "agent" if persisted_origin == "agent" else "channel"
+                admission = replace(
+                    admission,
+                    shared_owner=shared.owner,
+                    backend_revision=shared.revision,
+                    backend_revision_origin=origin,
+                )
+                session_account_id = shared.owner
+            publish: Callable[[PreparedTurn], Awaitable[None]] | None = None
+            if (
+                deps.backend_selection_enabled
+                and admission.private_dm_id is None
+                and not (admission.grant is not None and admission.grant.is_dm)
+                and admission.config.thread_binding_kind != "setup"
+            ):
+                # Complete the first binding inside the preparation owner's
+                # existing ceiling before exposing it to an awaiting caller.
+                from daimon.core.turn.binding import prepared_persistence
+
+                async def _publish(prepared: PreparedTurn) -> None:
+                    if shared is not None:
+                        async with deps.sessionmaker() as session:
+                            await record_shared_binding(
+                                session, shared, ma_session_id=prepared.ma_session_id
+                            )
+                            await session.commit()
+                    await prepared_persistence(
+                        deps,
+                        prepared.admission,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        thread_id=thread_id,
+                        session_id=prepared.ma_session_id,
+                        mapping_id=prepared.mapping_id,
+                        session_ref=prepared.session_ref,
+                        operation_key="preparation",
+                    )
+
+                publish = _publish
+
             result = await bind_session_impl(
                 deps,
                 admission,
@@ -595,12 +910,58 @@ async def bind_session(
                 transfer=transfer,
                 deadline=deadline,
                 now=now,
+                _on_prepared=publish,
             )
+            if shared is not None and publish is None:
+                async with deps.sessionmaker() as session:
+                    await record_shared_binding(session, shared, ma_session_id=result.ma_session_id)
+                    await session.commit()
     except BaseException as exc:
         observation.finish(error=exc)
         raise
     observation.session_id = result.ma_session_id
     return result
+
+
+async def _shared_thread(
+    deps: TurnDeps, admission: Admission, *, tenant_id: uuid.UUID, platform: str, thread_id: str
+) -> SharedThread | None:
+    """The thread's shared binding, or None to run per caller as before.
+
+    Reads nothing unless admission carried a channel backend revision that
+    can share (`may_have_shared_binding`); a setup conversation and a DM are
+    always per caller. A shared thread needs an app-mode agent, whose
+    credentials are its own, and a revision that can still run here;
+    otherwise the turn is refused visibly.
+    """
+    revision = admission.backend_revision
+    channel_id = admission.origin_channel_id
+    if (
+        not may_have_shared_binding(revision, ever_shared=admission.backend_ever_shared)
+        or channel_id is None
+        or admission.private_dm_id is not None
+        or admission.config.thread_binding_kind == "setup"
+    ):
+        return None
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+    async with deps.sessionmaker() as session:
+        try:
+            shared = await resolve_shared_thread(
+                session,
+                revision,
+                ever_shared=admission.backend_ever_shared,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+            )
+        except BackendUnsupported as err:
+            raise AdmissionDenied(reason="backend_unsupported") from err
+        if shared is None:
+            return None
+        if await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid) != "app":
+            raise AdmissionDenied(reason="backend_unsupported")
+    return shared
 
 
 async def _decide_reuse_again(
@@ -630,8 +991,34 @@ async def _decide_reuse_again(
     return replace(prepared, admission=current)
 
 
+def admitted_session_scope(
+    admission: Admission, *, tenant_id: uuid.UUID, session_id: str, prepared: Scope | None = None
+) -> Scope:
+    """Use the admitted tenant and account without another ownership lookup."""
+    if admission.grant is not None and admission.grant.tenant_id != tenant_id:
+        raise ScopeViolation(session_id, "the prepared turn belongs to another tenant")
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(admission.account_id),
+        authorization_id="admitted-turn",
+    )
+    if prepared is not None:
+        if (
+            prepared.is_platform
+            or prepared.is_legacy_host_authorized
+            or (prepared.tenant_id, prepared.account_id) != (scope.tenant_id, scope.account_id)
+        ):
+            raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
+        return prepared
+    return scope
+
+
 async def _stamp_reused_seal(
-    deps: TurnDeps, prepared: PreparedTurn, *, now: Callable[[], dt.datetime]
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    now: Callable[[], dt.datetime],
 ) -> None:
     """Add this sealed turn's seal to a session it reuses.
 
@@ -644,30 +1031,51 @@ async def _stamp_reused_seal(
     this turn: running it unstamped is the leak this exists to close.
     """
     if prepared.reused:
-        await stamp_session_seal(deps, prepared.ma_session_id, prepared.admission, now=now)
+        await stamp_session_seal(
+            deps, prepared.ma_session_id, prepared.admission, tenant_id=tenant_id, now=now
+        )
 
 
 async def stamp_session_seal(
-    deps: TurnDeps, ma_session_id: str, admission: Admission, *, now: Callable[[], dt.datetime]
+    deps: TurnDeps,
+    ma_session_id: str,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    now: Callable[[], dt.datetime],
 ) -> None:
     """Add `admission`'s seal to an existing session's recorded seal (`_stamp_reused_seal`)."""
     if not admission.origin_seal_ids or admission.origin_channel_id is None:
         return
+    if _admitted_profile(admission) != "anthropic.managed_agents":
+        raise AdmissionDenied(reason="backend_unsupported")
+    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id=ma_session_id)
     # Publish first, in a short transaction; no MA request holds the policy lock.
     async with deps.sessionmaker.begin() as db:
         await record_session_seals(
             db,
-            tenant_id=admission.grant.tenant_id if admission.grant is not None else None,
+            tenant_id=tenant_id,
             ma_session_id=ma_session_id,
             seals=admission.origin_seal_ids,
         )
     try:
-        current = await deps.anthropic.beta.sessions.retrieve(ma_session_id)
-        recorded = seal_ids(current.metadata)
+        backend = managed_agents(
+            deps.anthropic,
+            scope=scope,
+            resources=frozenset({("session", ma_session_id), ("agent", admission.agent.id)}),
+        )
+        ref = resource_ref(backend, "session", ma_session_id, scope=scope)
+        reads = backend.extension(SessionReads, namespace="anthropic.session_reads", version=1)
+        native = await legacy_call(reads.read_native(scope, ref))
+        metadata = native.get("metadata")
+        recorded = seal_ids(cast("dict[str, str | None] | None", metadata))
         if admission.origin_seal_ids <= recorded:
             return
-        await deps.anthropic.beta.sessions.update(
-            ma_session_id,
+        revision = Revision(local=0)
+        desired = SessionSpec(
+            agent=resource_ref(backend, "agent", admission.agent.id, scope=scope),
+            agent_revision=revision,
+            config_revision=0,
             metadata=dict(
                 origin_stamp(
                     channel_id=admission.origin_channel_id,
@@ -675,6 +1083,10 @@ async def stamp_session_seal(
                     seal=recorded | admission.origin_seal_ids,
                 )
             ),
+        )
+        plan = await backend.sessions.plan_update(scope, ref, desired)
+        await legacy_call(
+            backend.sessions.apply_update(scope, plan, expected=revision, key=str(uuid.uuid4()))
         )
     except anthropic_pkg.NotFoundError:
         log.info("turn.seal_stamp_session_gone", ma_session_id=ma_session_id)
@@ -703,6 +1115,10 @@ async def bind_session_impl(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    _on_prepared: Callable[[PreparedTurn], Awaitable[None]] | None = None,
+    _on_orphan: Callable[[PreparedTurn], Awaitable[None]] | None = None,
+    worker: ResolvedWorkerSpec | None = None,
+    before_native: Callable[[], Awaitable[None]] | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 
@@ -730,11 +1146,11 @@ async def bind_session_impl(
     MA for a row written before snapshots existed). The responder agent's
     current model is only a fallback for a session we cannot read.
 
-    `deadline`/`now` bound this whole body against the per-turn ceiling
-    (D-03): the MA `sessions.create` call and the mapping write, and on the
+    `deadline`/`now` bound this whole body against the per-turn ceiling:
+    the MA `sessions.create` call and the mapping write, and on the
     reuse path the compatibility check and whatever it applies. This does NOT
     cover `admit()`, which runs before `bind_session` and is deliberately
-    unbounded (D-04). `deadline=None` is fail-safe, not off -- it computes
+    unbounded. `deadline=None` is fail-safe, not off -- it computes
     `turn_deadline(now=now())` so every caller (including one that never
     passes a deadline) is still ceiling-covered.
 
@@ -751,6 +1167,285 @@ async def bind_session_impl(
         )
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    if worker is not None:
+        effective_deadline = turn_deadline(
+            now=now(), deadline=effective_deadline, authority_deadline=worker.limits.deadline
+        )
+
+    async def _complete(preparing: Awaitable[PreparedTurn]) -> PreparedTurn:
+        result = await preparing
+        try:
+            if deps.fleet_enabled and worker is None:
+                from daimon.core.turn.runtime_manifest import (
+                    capture_preparation_source,
+                    read_agent_fleet_grant,
+                )
+
+                if await read_agent_fleet_grant(deps, result.admission, now=now()) is not None:
+                    root_scope = admitted_session_scope(
+                        result.admission,
+                        tenant_id=tenant_id,
+                        session_id=result.ma_session_id,
+                        prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
+                    )
+                    root_request = ProviderPreparationRequest(
+                        deps,
+                        result.admission,
+                        root_scope,
+                        tenant_id,
+                        platform,
+                        external_user_id,
+                        thread_id,
+                        session_account_id,
+                        reuse_existing,
+                        capabilities,
+                        transfer,
+                        effective_deadline,
+                        now,
+                    )
+                    source = await capture_preparation_source(root_request)
+                    remaining_s(effective_deadline, now=now(), refuse_expired=True)
+                    result = replace(result, _source=source, _preparation=root_request)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            if _on_prepared is not None:
+                await _on_prepared(result)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            return result
+        except BaseException:
+            if worker is not None and _on_orphan is not None:
+                await _on_orphan(result)
+            raise
+
+    profile = _admitted_profile(admission)
+    if worker is not None and admission.backend_revision_origin != "agent":
+        raise AdmissionDenied(reason="backend_unsupported")
+    scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
+    if worker is not None:
+        scope = admitted_session_scope(
+            admission,
+            tenant_id=tenant_id,
+            session_id="preparation",
+            prepared=worker.permissions.fleet.scope,
+        )
+    request = ProviderPreparationRequest(
+        deps,
+        admission,
+        scope,
+        tenant_id,
+        platform,
+        external_user_id,
+        thread_id,
+        session_account_id,
+        reuse_existing,
+        capabilities,
+        transfer,
+        effective_deadline,
+        now,
+        worker=worker,
+        before_native=before_native,
+    )
+    if profile != "anthropic.managed_agents":
+        if (deps.turn_path or load_turn_settings().path) != "mux":
+            raise AdmissionDenied(reason="backend_unsupported")
+        from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
+
+        if not fixed_plan_origin_allowed(admission.backend_revision_origin) and not (
+            admission.backend_revision_origin == "agent"
+            and deps.agent_backends
+            and deps.channel_backends
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+
+        prepare = _PROVIDER_PREPARATIONS.get(profile)
+        if prepare is None and ensure_channel_runtime(
+            profile, ready=lambda: profile in _PROVIDER_PREPARATIONS
+        ):
+            prepare = _PROVIDER_PREPARATIONS.get(profile)
+        if prepare is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        request, runtimes = scope_channel_runtimes(request)
+
+        async def _prepare_provider() -> PreparedTurn:
+            selected = request
+            if admission.backend_revision_origin == "agent":
+                from daimon.core.turn.runtime_manifest import read_preparation_counterpart
+
+                selected = await read_preparation_counterpart(request)
+            if worker is not None:
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+            result = await prepare(selected)
+            ref = result.session_ref
+            backend = result.backend
+            if ref is None or (
+                _admitted_profile(result.admission) != profile
+                or result.admission.backend_revision != admission.backend_revision
+                or result.admission.backend_revision_origin != admission.backend_revision_origin
+                or (backend is not None and backend.capabilities().profile_id != profile)
+                or ref.provider != get_profile(profile).provider
+                or ref.id != result.ma_session_id
+                or ref.kind != "session"
+                or ref.tenant_id != scope.tenant_id
+                or ref.account_id != scope.account_id
+                or result.admission.account_id != admission.account_id
+                or result.session_account_id != session_account_id
+            ):
+                raise ScopeViolation("preparation", "provider returned a foreign prepared session")
+            if runtimes is not None:
+                result = replace(result, runtime=result.runtime or runtimes.resolved)
+            if worker is not None:
+                result = replace(result, _scope=scope)
+            return result
+
+        try:
+            timeout = remaining_s(effective_deadline, now=now(), refuse_expired=worker is not None)
+            return await asyncio.wait_for(_complete(_prepare_provider()), timeout=timeout)
+        except TimeoutError as error:
+            raise ceiling_error() from error
+
+    if worker is not None:
+
+        async def _native_worker() -> PreparedTurn:
+            from daimon.core.turn.persistence import current_persistence
+            from daimon.core.turn.runtime_manifest import capture_preparation_source, prepare_source
+            from mux.drivers.anthropic.resources.agents import agent_payload, agent_record
+
+            persistence = current_persistence.get()
+            if (
+                persistence is None
+                or persistence.store is not deps.state_store
+                or before_native is None
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            persistence.check_session(scope, None)
+            if (
+                persistence.slot.thread.thread_id != thread_id
+                or persistence.slot.thread.channel != worker.permissions.fleet.root.channel
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            selected = await prepare_source(request)
+            assert selected.source is not None and selected.source.source is not None
+
+            async def recapture() -> BackendAgent:
+                current = await retrieve_agent(
+                    deps.anthropic,
+                    admission.agent.id,
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                )
+                return await capture_preparation_source(
+                    replace(selected, admission=replace(admission, agent=current))
+                )
+
+            backend = managed_agents(deps.anthropic, scope=scope)
+
+            async def create(key: str) -> Agent:
+                return await backend.agents.create(scope, worker.spec, key=key)
+
+            allocated = await persistence.mutate(
+                None,
+                "agent_create",
+                {
+                    "worker": worker.digest,
+                    "source": selected.source.source.model_dump(mode="json"),
+                },
+                create,
+                Agent,
+                lambda _: "processed",
+                guard=before_native,
+                retry_failed=False,
+            )
+            observed = agent_record(
+                await retrieve_agent(deps.anthropic, allocated.ref.id, scope=scope),
+                allocated.ref.account_scope_id,
+                scope,
+            )
+            expected = agent_payload(worker.spec)
+            expected.update(
+                {name: expected.get(name) or [] for name in ("tools", "skills", "mcp_servers")}
+            )
+            expected.setdefault("multiagent", None)
+            actual = agent_payload(observed.spec)
+            if isinstance(expected.get("model"), str) and actual.get("model") == {
+                "id": worker.spec.model.id,
+                "speed": None,
+            }:
+                actual["model"] = worker.spec.model.id
+            if (
+                observed.ref != allocated.ref
+                or observed.lifecycle != "active"
+                or observed.revision != allocated.revision
+                or any(actual.get(key) != value for key, value in expected.items())
+                or await recapture() != selected.source
+            ):
+                raise AdmissionDenied(reason="backend_unsupported")
+            executing = replace(
+                admission,
+                agent=sdk_agent(allocated),
+                memory_read_only=admission.memory_read_only or worker.permissions.memory_read_only,
+                budget_channel_id=worker.permissions.fleet.root.channel.channel_id,
+                origin_channel_id=worker.permissions.fleet.root.channel.channel_id,
+                origin_thread_id=thread_id,
+            )
+            created = await create_ma_session(
+                deps,
+                executing,
+                tenant_id=tenant_id,
+                preparation=replace(selected, admission=executing),
+            )
+            try:
+                if await recapture() != selected.source:
+                    raise AdmissionDenied(reason="backend_unsupported")
+                remaining_s(effective_deadline, now=now(), refuse_expired=True)
+
+            except BaseException:
+                from daimon.core.turn.run import (
+                    _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
+                )
+                from mux.drivers.anthropic.transport import single_attempt_mutation
+
+                with single_attempt_mutation():
+                    await _archive_orphaned_session(
+                        deps.anthropic, session_id=created.ma_session_id, scope=scope
+                    )
+                raise
+
+            async with deps.sessionmaker.begin() as db:
+                fresh = await insert_mapping(
+                    db,
+                    created,
+                    created.admission or admission,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    session_account_id=session_account_id,
+                )
+            return PreparedTurn(
+                fresh.admission or executing,
+                fresh.ma_session_id,
+                fresh.mapping_id,
+                None,
+                False,
+                session_account_id,
+                bind_recorder(
+                    deps,
+                    tenant_id=tenant_id,
+                    external_user_id=external_user_id,
+                    ma_session_id=fresh.ma_session_id,
+                    model_id=fresh.snapshot.model_id,
+                    channel_id=admission.budget_channel_id,
+                ),
+                session_ref=resource_ref(backend, "session", fresh.ma_session_id, scope=scope),
+                _scope=scope,
+            )
+
+        try:
+            return await asyncio.wait_for(
+                _complete(_native_worker()),
+                timeout=remaining_s(effective_deadline, now=now(), refuse_expired=True),
+            )
+        except TimeoutError as error:
+            raise ceiling_error() from error
 
     async def _bind() -> PreparedTurn:
         # Decide the admission again at the moment its session is found,
@@ -777,6 +1472,7 @@ async def bind_session_impl(
             anthropic=deps.anthropic,
             sessionmaker=deps.sessionmaker,
             tenant_id=tenant_id,
+            account_id=current.account_id,
             external_user_id=external_user_id,
             markup=deps.markup,
             channel_id=admission.budget_channel_id,
@@ -806,7 +1502,7 @@ async def bind_session_impl(
         )
         if isinstance(outcome, PreparationDeferred):
             prepared_turn = await _decide_reuse_again(deps, outcome.prepared, now=now)
-            await _stamp_reused_seal(deps, prepared_turn, now=now)
+            await _stamp_reused_seal(deps, prepared_turn, tenant_id=tenant_id, now=now)
             return prepared_turn
         if isinstance(outcome, PreparationBusy):
             raise SessionBusyError(
@@ -820,11 +1516,13 @@ async def bind_session_impl(
                 preserved=outcome.preserved,
             )
         prepared_turn = await _decide_reuse_again(deps, outcome, now=now)
-        await _stamp_reused_seal(deps, prepared_turn, now=now)
+        await _stamp_reused_seal(deps, prepared_turn, tenant_id=tenant_id, now=now)
         return prepared_turn
 
     try:
-        return await asyncio.wait_for(_bind(), timeout=remaining_s(effective_deadline, now=now()))
+        return await asyncio.wait_for(
+            _complete(_bind()), timeout=remaining_s(effective_deadline, now=now())
+        )
     except TimeoutError as err:
         log.error(
             "turn.ceiling_exceeded",

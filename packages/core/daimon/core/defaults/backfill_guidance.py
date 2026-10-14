@@ -14,6 +14,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import update_agent_ignored
 
 _log = structlog.get_logger(__name__)
 
@@ -62,7 +64,13 @@ async def backfill_credential_guidance(
         try:
             # A conflict is left for the next boot, so this pass never overwrites
             # a concurrent edit using stale prompt text.
-            await client.beta.agents.update(agent.id, version=agent.version, system=system)
+            await update_agent_ignored(
+                client,
+                agent.id,
+                version=agent.version,
+                payload={"system": system},
+                scope=resource_scope(tenant_id=str(tenant_id)),
+            )
         except Exception:
             failed += 1
             _log.exception(

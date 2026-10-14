@@ -128,6 +128,8 @@ async def test_add_list_and_remove_a_channel_skill_audited(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/skills":
             return httpx.Response(200, json={"data": [skill], "next_page": None})
+        if request.url.path == "/v1/skills/skill_lib":  # the attach's existence check
+            return httpx.Response(200, json=skill)
         return httpx.Response(200, json={"data": [], "next_page": None})
 
     rt = build_cli_runtime(db_session_factory, anthropic=build_fake_anthropic(handler))

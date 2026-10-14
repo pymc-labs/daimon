@@ -1,5 +1,27 @@
 # Billing and credits
 
+Neutral-backend usage revisions can be recorded through the host accounting
+outbox in the caller's database transaction. The first revision retains the
+`turn:{session}:{event}` debit key; later revisions use
+`adjust:{binding}:{observation}:{revision}` for the signed difference between
+rounded totals. A failed transaction rolls back the claim, usage projection and
+ledger write together, allowing pending revisions to be replayed after restart.
+Corrections retain the original observation's billing time and contribute to
+channel spend, including refunds. Historical turn credits keep their existing
+channel-spend treatment.
+
+Callers select one billing grain: model requests by default, or turn/session
+observations for a provider that reports those units. Incremental and cumulative
+observations both use their per-ID revision totals. An aggregate's explicit
+coverage must reference durable observations at the selected grain before it
+can be acknowledged without another debit; unresolved coverage or an uncovered
+mismatched grain fails before claiming the outbox row. Unknown token
+stages remain unknown there; known disjoint stages can be priced, and a legacy
+usage row is projected only once all four stages are known. Callers retain the
+same tenant, user, channel, rates, markup and billing grain across revisions.
+The established Anthropic live recorder continues to use its existing transaction
+and keys.
+
 One deployment runs on one Anthropic API key, and any number of Discord
 servers and Slack workspaces can install against it. The credit model is what
 makes that safe: every model call is priced in USD and debited from the
@@ -115,6 +137,12 @@ path's, so a call recorded twice is debited once.
 - **What it does not reach.** A headless session nobody reads again after
   its turn ends is billed by [the sweep](#the-tables). Calls from before
   this path was deployed are [the backlog](#the-backlog).
+
+In a shared thread (`thread_mode="shared"`, see `docs/mux.md`) everyone's
+turns run on one session, and the recorder still bills each turn to the
+person who wrote it. The sweep cannot: a shared session carries no caller
+account, so usage it alone recovers is debited to the tenant without a
+person.
 
 The posture is a union in `packages/core/daimon/core/turn/posture.py`:
 `Billed(record=...)` or `BillingExempt(reason=...)`. There is deliberately no
@@ -367,6 +395,14 @@ budget from 2026-07-01` before it starts). An admin's `/billing` also lists,
 under **Channel budgets** after the top spenders, the five most used budgets
 on that platform (active ones first, by share of the limit spent) with a count
 of the rest.
+
+Owned offline tests can use `daimon.testing.channel_accounting.ChannelAccounting`
+to run a prepared host turn with explicit mock prices through the real usage
+recorders, then independently query its channel debits and current budget state
+in a read-only transaction. The test seam preserves the configured budget limit;
+it does not seed synthetic debits or infer a charge from a reply. Mock prices
+prove billing arithmetic, and do not establish provider actual spend or certify
+the next turn's admission/refusal. See the testing package README for the API.
 
 What a budget does not cover:
 
@@ -819,3 +855,377 @@ Telemetry inherits the outcome writer's bounded best-effort delivery: database
 outages, saturation or abrupt process termination can lose rows. It is operational
 measurement, not an accounting reconciliation source. No prompts, answers, tool
 arguments, output text or error messages are persisted here.
+
+## Usage measurements
+
+Alternate-provider observation IDs have a fixed coverage set: revisions may
+correct amounts but cannot add or remove covered IDs. Host ingest refuses
+overlapping sibling aggregates, including shared transitive or absent descendants.
+Pending observations participate in this check; invalid coverage cannot claim an
+outbox row. Dynamic coverage reconciliation is unsupported.
+
+Accounting accepts provider-neutral usage observations. Input counts include
+cache reads and writes; billing projects them back into the existing disjoint
+token stages before pricing. Unknown counts remain unknown. Anthropic model
+events retain their native event IDs, immutable revision 1 and provider
+timestamps, so replaying historical events leaves usage and ledger rows unchanged.
+
+Usage backfill reads billed and exempt model-request spans through the neutral
+usage port, retaining the ascending model-request filter and native paginator.
+Its complete session inventory uses an explicitly authorized workspace scope
+and preserves native pagination and session snapshots. The host validates
+tenant metadata before span reads and preserves historical
+event IDs, debit keys, timestamps, markup and absorbed-spend log totals.
+
+Explicit alternate backends retain native usage observations at their selected
+interaction, turn or session grain. Cumulative corrections replace prior totals;
+turn and session aggregates cannot both charge the same work. Settlement uses
+verified dated model prices and explicitly measured infrastructure cost, with
+signed corrections applied once in the usage and ledger transaction. Missing
+usage, unknown model attribution or unverified actual infrastructure leaves the
+observation pending for reconciliation. A known inapplicable cache-write bucket
+does not erase uncached input spend. Anthropic keeps its existing metering path.
+
+Prepared turns for an explicitly configured alternate provider use its authorized
+native session and bound observation recorder. Usage frames can arrive without
+a display event; nullable measurements and pending accounting stay intact.
+The default Anthropic session continues to use its SDK span recorder.
+OpenAI probe reconciliation can read captured Admin Costs and Completions Usage
+exports through `python -m daimon.testing.conformance.usage_reconciliation --costs costs.json
+--usage usage.json --attestation attestation.json --guard-config budget.json
+--spend-ledger spend.md`. This command reads files only and emits an assessment
+and, when eligible, an unsigned proposal bound to the current hold. Lead approval
+and the existing append-only guard application are separate. No key is discovered
+and no charge or hold changes during proposal generation.
+
+The [Admin Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs)
+provides daily buckets, and [Completions Usage](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/completions)
+reports grouped token counts. The collector requires an explicitly supplied
+[Admin API key](https://developers.openai.com/api/reference/administration/overview)
+and transport. Buckets are project totals: reconciliation supports an audited
+isolated project window containing exactly one run, across all keys and sources.
+It never prorates a shared project's bill. Final billing evidence and inventory
+hashes must bind the complete exports; an exhausted page cursor does not prove
+final posting. Every page must record the effective organization, origin and
+full-scope query, including its pagination cursor. The collector rejects client
+query, authentication, cookie, custom-header and event-hook defaults before IO.
+Independent final-bill totals and amounts for every classified line item, plus
+inventory token/request totals, must match the exports exactly. Copying these
+expected totals from the candidate export is not evidence of completeness; the
+lead must inspect the separate inventory and final billing artifacts before
+approval. An omitted infrastructure charge or any amount/count mismatch refuses
+the proposal and retains the hold.
+Missing amounts, empty/delayed bills, duplicate groups, foreign
+scope, unknown line items or ambiguous attribution remain estimated, unverified.
+Exact billed token and container line items replace estimates only after approval.
+An `ObservationBilled` callback is an accounting posture, not provider
+enablement. Prepared foreign turns require authorized native resources and
+profiles, genuine usage frames, bounded authoritative post-run usage fetches,
+and the admitted persistence lease/journal. Explicit host registration and
+adapter support must supply those prerequisites. Foreign `ProviderUsageTotals`
+compatibility counters are lower bounds. Before a foreign profile is enabled,
+each adapter footer must omit cost unless verified provider prices and actual
+infrastructure are available, and must not price those counters through an
+Anthropic meter. Today's Discord, Slack and Teams footers still price the legacy
+counters through `MODEL_PRICING`, so foreign enablement is gated on that adapter
+work.
+
+An explicit OpenAI native session spend cap is cumulative in integer USD cents;
+it does not replace the host budget guard or establish an invoice ceiling.
+Native `spend_control.consumed` is nullable and rounded down to whole cents, so
+it cannot certify exact spend or zero usage. Actual model usage, dated prices
+and container/session charges must still be measured separately. Missing or
+changed configured caps refuse before host input, while omitted caps preserve
+existing behavior.
+
+OpenAI delegated usage has an offline accounting API in
+`daimon.core.usage_delegation`. The admitted host supplies a frozen, bounded
+inventory of native turn IDs, subagent IDs and proven ancestry to one root.
+Native child observation IDs and meters stay intact; the accounting `turn_id`
+is fixed to that root and accounting binding. A child cannot move to another root on replay, restart or
+correction. Nested children remain separate work, including later turns from a
+reused subagent. Missing batch members, invalid ancestry, overlapping aggregates
+and omission of previously recorded work are refused before settlement.
+
+Inventory completeness and disjoint model-work coverage default to unverified.
+The host must establish both from authoritative native records before setting
+the corresponding scope decisions. A populated tree, exhausted cursor or
+subagent creation event alone is not proof. The current OpenAI collector does
+not establish that inventory or verified child model context, so this API does
+not lift G1's delegation-disabled restriction. Native collection and enablement
+remain a separate owner follow-up; no provider parent-turn field is assumed.
+
+Every root and child observation enters one transaction, including null usage.
+Unknown disjointness, inventory completeness, child model/tariff, token counts
+or actual infrastructure leaves unsatisfied observations durably pending and
+the root outcome cost unverified. Children never inherit a parent's tariff.
+The explicitly measured shared session/environment and auxiliary-charge total
+is charged once on the root; children contribute their independently priced
+model work. No missing infrastructure is filled with zero. Same-revision retries
+can settle newly verified context; changed settled amounts or newly attributed
+models require a higher observation revision. Capture follows successful
+commit, so a batch failure rolls back every debit and emits no usage sample.
+Gemini Flash currently retains interaction usage; this API refuses to invent
+independent child meters or add delegated costs to potentially inclusive totals.
+
+
+### Explicit offline footer accounting hooks
+
+`daimon.testing.footer_accounting.FooterAccountingHook` joins real
+`DiscordSurfaceCapture` posts with a read-only, consistent snapshot of an
+authorized binding's persisted usage revisions, accounting outbox and tenant
+ledger. Supply independently captured normalized `UsagePriceReceipt` values,
+including the native revision, dated controlled price, explicit infrastructure
+cost/source, and an authoritative root terminal. The shared owned-sessionmaker
+guard checks every bind before connection; plain local `daimon_test` is refused
+by design (use an owned lane database, or the registered isolated CI schema).
+
+`evaluate` returns the two D11 checks and the independently read ledger amount.
+The actual embed's `used` field is parsed from accepted adapter payloads; balance
+values and draft/model text cannot substitute for a footer. Signed correction
+debits/credits are joined by exact observation/revision keys. Unknown pricing,
+container time, pending outbox, or incomplete native turn coverage remain
+PENDING. A complete root turn usage receipt can prove controlled host arithmetic;
+request-span subtotals and delegated/covered aggregates cannot certify a complete
+turn. OpenAI/Gemini currently omit the display cost, so their footer check remains
+PENDING. These hooks never certify live spend, change adapter defaults, create
+aggregate rows, or restore the cut C12 aggregate certification. The catalog
+executor must separately bind actual capture/receipts; installing a hook does not
+promote a source cell.
+
+Offline tests can read normalized native revisions through
+`stores.turn_usage.read_accounting_revisions` without claiming or replaying the
+accounting outbox. `daimon.testing.turn_accounting.TurnAccountingReader` adds a
+coherent read-only snapshot restricted to owned test databases, explicit dated
+rate/model and infrastructure evidence, and independent native turn inventory
+coverage. Its completeness flag requires complete measured prices and coverage,
+settled revisions and an exact ledger/debit match. Unknown rates or container
+time remain unknown; a known ledger debit does not establish a complete turn
+cost. Controlled test evidence certifies host arithmetic only. The API preserves
+historical Anthropic float/debit rounding and does not change displayed footers.
+
+The manual probe guard accepts an explicit cash reservation floor in addition
+to its priced token and runtime bound. It reserves the larger amount against
+the existing admission stop without changing the execution limits. Complete
+dated usage and measured infrastructure release the unused hold; incomplete
+evidence remains `estimated_unverified`. This accounting operation does not
+authorize a live run or impose native provider execution controls.
+Gemini's host termination and usage verification are separate facts. When a turn
+has already failed with a rate limit, a retryable rate limit on its final usage
+fetch preserves the original failure and session when retained root, model and
+session evidence validates. Missing or inconsistent retained evidence refuses
+reconciliation. Validated retained usage is recorded through the same accounting
+path. Unknown usage stays pending; known
+charges remain idempotent, and later verified revisions settle only their delta.
+An unavailable final meter does not establish zero cost or release an unverified
+reservation. Local storage, validation and accounting failures still propagate.
+
+
+`evaluate_turn` consumes the read-only `TurnAccountingReader` API with independent
+normalized native receipts, per-revision `RevisionRateAttribution` evidence and
+`TurnUsageInventory`. A sealed, completely priced and settled request walk can
+resolve Anthropic request-span coverage without inventing a turn observation.
+The hook compares native versions/counts independently of persisted rows, joins
+signed corrections once, and parses the actual posted footer. Unknown rates,
+container time or inventory leave the result PENDING; a known debit cannot fill
+in an unknown cost. The complete-turn path leaves the original `evaluate`
+contract available and changes no posted cost or default product behavior.
+
+
+The additive `FooterAccountingHook.evaluate_turn` joins that complete per-turn
+snapshot to actual Discord, Slack or Teams adapter captures. Every post receipt
+is retained and the platform/destination/root must match the authorized binding.
+Cost comes from the accepted embed/context/Adaptive Card summary leaf, never from
+answer text or the queried ledger. Once capture, inventory, rates, infrastructure
+and settlement are complete, a missing required displayed cost is an executed
+D11 **FAIL / POSTED_COST_MISSING**. This currently describes unchanged native
+OpenAI/Gemini footers even when controlled host arithmetic passes. Unknown facts
+still return typed PENDING. The older `evaluate` interface remains unchanged;
+controlled component results are not live-spend or full catalog certificates.
+
+
+Native OpenAI/Gemini platform footers can show settled turn cost with
+`DAIMON_TURN__NATIVE_FOOTER_COST=true` (default `false`). The host must supply
+verified rates for the resolved model and complete native usage, infrastructure
+and current-root settlement. The displayed `used` amount includes the configured
+markup and follows the ledger's per-charge rounding. Unknown measurement shows
+`Cost unknown`; an incomplete total shows `Cost partial`, without a numeric
+subtotal. This option supplies no rates and starts no reconciliation timer.
+With the option off, native footers keep their previous appearance. Anthropic
+footers keep their existing appearance and arithmetic with either value.
+
+
+Admin backend cost previews use `pricing.list_price_preview(model, rates)` with
+rates from the existing pricing table or the explicitly supplied native runtime
+tariff. The selected model, checked date and any supplied request tier remain
+visible. Anthropic prompt-length tiers and five-minute cache-write rates use the
+existing table. Missing or unverified prices stay unknown or unverified; no
+fallback model or free turn is inferred. These are token list prices, excluding
+billing markup, hosted runtime, external tools and cache storage. The worst-case
+per-turn cost remains explicitly unknown: token limits on one request do not
+bound a turn's request count or other charges. A preview neither reserves spend
+nor establishes a financial cap.
+
+
+Host-worker accounting reads use `usage_delegation.read_delegated_usage` with
+host-authorized worker bindings and resolved tariffs. The read preserves each
+worker's native session, model, observation, revision and ledger identity. It
+returns disjoint token floors at provider list price without markup, existing
+signed customer ledger debits including markup, and pending revisions. The
+floor and debit amounts overlap and must not be added. The orchestrator rollup
+creates no second debit. Token floors omit unknown infrastructure and rates. A zero floor or settled latest observation
+alone is not proof of complete final usage or permission to release an admitted bound.
+
+`stores.turn_usage.read_fleet_accounting_revisions(session, tenant_id=..., run_id=...)`
+reads one exact durable run and its private worker bindings in the caller's coherent
+read-only transaction. It returns original usage revisions, outbox settlement facts,
+customer ledger identities and persisted worker exposure without repricing or writes.
+Fleet and per-binding accounting reads use `stores.read_persisted_columns` to
+project authoritative database columns, including after a Core update. It refuses
+effective persistent dirty/deleted state in tables the query reads, including
+subqueries, with `UnflushedReadState`. Pending new objects, reverted assignments
+and unrelated dirty tables remain unflushed. No caller state is overwritten.
+Reserved exposure already contains observed debits; the two must not be added.
+Unavailable or unaccepted bindings remain explicit gaps; a missing row never implies
+zero spend. Reused root-session history is excluded. These product facts do not prove
+provider final actuals or connect a fleet run to a separate QA cash receipt. That
+connection needs an actual allocation-owner record, not a role, model or time match.
+
+The same accounting reader accepts `outcome_ids` and the admitted `account_id`
+for exact root attribution. The caller obtains the original outcome UUIDs from
+its counted input operation associations. The query joins the scoped immutable
+outcomes' `usage_refs` to original usage revisions, usage-event rows and ledger
+keys, so reused-session history is excluded. Legacy request spans remain
+usage-event rows; no neutral meter is fabricated. Original debit keys are
+unioned once across mirrored records. Missing outcome or reference associations
+stay pending; replay never substitutes a fresh observer. `attribution_complete`
+certifies only this reference join, not final usage, price, runtime, settlement
+or permission to release a reservation. Existing no-selector reads are unchanged.
+
+
+Fleet monetary interfaces are opt-in host seams; ordinary turns do not call
+them. `channel_budget.admit_fleet_worker` is the single transactional spawn and
+reservation entry point. Its producer retains ambiguous charges at their whole
+bound, releasing only a cancelled worker with proof it was never claimed or
+allocated and has no native accounting evidence. The graph covers live or
+unsettled runs plus the requested run for terminal readback; overrun latches
+belong to the current run, while other holds reduce available tenant funds.
+
+Native preparation requires fresh `require_fleet_worker_admission` readback,
+including the shared tariff check. Hosts composing fleet row writers acquire
+`stores.fleet.lock_budget` before any run or worker lock, then commit before
+native I/O. Financial locking uses the tenant's existing ledger foreign key;
+unrelated ordinary writes continue. Passive `produce_fleet_budget` refresh
+returns a mapping of worker IDs to decisions from one graph pass, retaining
+KEY SHARE on the tenant and account while allowing ordinary chat ledger and
+turn inserts for that same tenant. Its funds snapshot is informational; only
+fresh financial admission uses the tenant FOR UPDATE fence and authorizes
+native allocation.
+
+Hosts start one `watch_fleet_budget` loop per run, passing the run's mapping
+of worker IDs to cancellation events and a run-finished event. Register each
+worker event after its admission transaction commits. It fans out
+these decisions at four Hz by default, including producer time in the interval,
+and remains active across completed or cancelled cohorts until the run owner
+sets the run-finished event. Unavailable usage fails closed and cancels all
+registered workers. The watcher has no separate worker
+deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
+admission, replacement inventory and exact final settlement remain unavailable
+here. These interfaces create no ledger charge or provider-native hard cap;
+other runs' undebited native floors are discovered by their own refresh.
+
+
+At the bound worker's before-input edge, hosts call the same
+`require_fleet_worker_admission` with the actual prepared `binding`. It requires
+an already funded running row and the exact current binding in that worker's
+private slot, including generation, configuration revision and native IDs.
+The call rechecks authorization, resolved worker tariff, priced floors and
+funds under the existing financial fence; it never reserves an unfunded worker.
+Callers commit refusals as well as successes before dispatch, and keep the
+existing lease, single-attempt input claim and canonical model/resource proof.
+Omitting `binding` keeps the unallocated starting-claim check.
+
+The worker store records the accepted initial input once under its stable
+operation identity. Financial guard recapture never increments that count.
+A funded running binding with one counted turn remains eligible for fresh
+checks and monitoring; the count is not proof of zero spend or final usage.
+Recovery attempts, extra turns and a used turn on an unallocated row stay
+refused in the single-input executor slice. The store's max-turn admission and
+input claim still precede dispatch; financial facts do not authorize replay.
+
+Optional worker request limits are part of the existing canonical intent and
+must narrow the parent's limits. Missing profile support refuses a requested
+limit before resource compilation; an output-token ceiling requires native
+enforcement. Host turn counts and observed model usage do not substitute for
+an enforced limit on internal model requests. Omitted limits preserve the
+existing serialized intent.
+
+An authenticated parent's optional `provider_limits_usd` fences each provider's
+sibling worker exposure within the run. A missing or zero line refuses that
+provider; a funded reservation cannot borrow unused capacity from another line.
+The same financial producer sums whole unknown reservations and measured
+overruns before admission, under its existing lock and exact decimal context.
+These worker sublimits do not reserve root inference or install credential-line
+guards. The caller must separately bind root admission and native request
+controls; a financial snapshot alone never certifies a provider spending cap.
+
+An optional `native_budget_usd` requests a native session spend control, in
+positive exact cents. It is a soft control, separate from the held worker
+budget. Its worker must have one host input and a deadline within 120 seconds;
+the existing input claim counts that input before dispatch and retains the
+count after an uncertain acknowledgement. Additional turn-input mutations are
+refused, while cancellation and archive remain available. A child cannot drop
+or increase a configured native budget. The driver must compile the control;
+missing profile support refuses it. Omission preserves ordinary execution.
+Native internal inference, token overshoot and remote cancellation delay are
+not bounded by that host input count. Requested hard token or model-request
+limits retain their separate unsupported-capability refusal.
+
+
+For an explicitly budgeted worker, the Anthropic session composer sends the
+canonical amount as positive integer USD cents in `budget.max_list_cost.amount`.
+The shared lifecycle codec carries that field through the SDK's extra body for
+both ordinary and repository-backed creation. The owned session's creation
+acknowledgement and fresh readback must retain the same budget before execution.
+The OpenAI preparation edge compiles the amount into the existing
+`spend_control.limit` integer cents and rejects conflicting deployment controls
+or missing, malformed or changed native echoes. Native rejection never retries
+without the control. Unconfigured calls omit these additional request fields;
+soft controls do not make provider-internal inference a hard bounded bill.
+
+
+An explicitly budgeted worker's scoped OpenAI creation acknowledgement is retained as a provisioning receipt
+before its native spend-control echo is validated. The receipt includes the
+native session reference and budget echo; it does not establish a runnable
+binding. A rejected acknowledgement or fresh readback refuses input and uses
+the existing owned, bounded session cleanup path. Cleanup failure retains the
+creation identity and financial hold for reconciliation; restart never allocates
+a replacement for that receipt. Unknown transport acceptance stays unknown.
+
+A configured provider map also requires a positive line for the financial
+parent's provider. This is an admission condition; the worker exposure producer
+does not thereby price or reserve root inference. Root admission, native budget,
+request count, wake lifetime and trusted grant installation remain separate
+caller obligations. Worker lines must fit alongside the reserved root room.
+
+Ordinary OpenAI sessions, including deployment-level spend limits without a
+worker `native_budget_usd`, preserve their prior request and readback behavior.
+Only an explicit worker budget enables strict native echo validation, against
+the exact integer cents sent in that session request. A deployment limit alone
+does not enable provisioning receipts or budget-rejection cleanup.
+
+The worker echo requirement is omitted from serialized controls when false.
+All prior control fields, including null caps and disabled delegation, remain
+verbatim in plan and creation digests. Existing ordinary bindings and retained
+creation receipts therefore recover under the same stable identity. A true
+worker echo requirement remains part of policy identity; no digest fallback or
+replacement key is used.
+
+Profile accounting modes select the existing settlement protocol. Request-span
+profiles retain their legacy arithmetic, projections and idempotency keys.
+Native totals require complete attributed usage, verified prices and measured
+infrastructure before settlement; unknown charges stay pending. Native root
+totals additionally permit the existing independently proven disjoint child
+inventory; this does not enable delegation configuration. Usage DTOs carry only
+a provider, so accounting reads the registered profiles' shared mode and refuses
+an ambiguous declaration rather than picking a different billing protocol.

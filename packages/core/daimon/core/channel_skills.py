@@ -20,7 +20,7 @@ import re
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, NoReturn
 
 import anthropic
 import structlog
@@ -41,15 +41,20 @@ from daimon.core.defaults.metadata import (
     strip_tenant_prefix,
     tenant_scoped_display_title,
 )
-from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.errors import SkillsListTruncatedError, StoreError
 from daimon.core.ma_resolver import ResolverCache, list_skills_lenient_cached
 from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
 from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
+from mux.contracts.ids import Provider, Scope
+from mux.errors import ScopeViolation
+from mux.profiles import neutral_catalog_profile_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -94,6 +99,132 @@ class ChannelSkillChoice:
     version: str
     name: str
     owner_agent_name: str | None
+
+
+@dataclass(frozen=True)
+class NativeSkillDeleteGuard:
+    """Authorized native operator edge, absent from the Anthropic default path.
+
+    This grants attached-delete inspection/refusal, not provider deletion.
+    An unlocked reference check cannot authorize a later destructive request.
+    """
+
+    scope: Scope
+    provider: Provider
+    account_scope_id: str
+    operator_enabled: bool = False
+    expected_agent_revisions: tuple[tuple[str, int], ...] = ()
+
+    def require_enabled(self) -> None:
+        if self.operator_enabled is not True:
+            raise NativeSkillDeleteUnavailable("guard_disabled")
+        if (
+            neutral_catalog_profile_for(self.provider) is None
+            or not self.account_scope_id.strip()
+            or self.scope.is_platform
+            or self.scope.is_legacy_host_authorized
+            or not self.scope.principal_id.strip()
+            or not self.scope.authorization_id.strip()
+        ):
+            raise ScopeViolation(
+                "skill-delete", "explicit native tenant/account authorization required"
+            )
+        try:
+            uuid.UUID(self.scope.tenant_id)
+            uuid.UUID(self.scope.account_id)
+        except ValueError:
+            raise ScopeViolation("skill-delete", "tenant/account UUIDs required") from None
+
+
+class NativeSkillDeleteUnavailable(StoreError):
+    """No successful deletion is implied by an unsupported or stale host edge."""
+
+    def __init__(
+        self, reason: Literal["guard_disabled", "catalog_changed", "unattached_delete_unbound"]
+    ) -> None:
+        self.reason = reason
+        super().__init__(
+            "Native skill deletion is not enabled. Nothing was deleted."
+            if reason == "guard_disabled"
+            else "The skill catalog or channel references changed. Nothing was deleted; retry."
+            if reason == "catalog_changed"
+            else "Unattached native skill deletion has no fenced host edge. Nothing was deleted."
+        )
+
+
+class NativeSkillStillAttached(StoreError):
+    def __init__(
+        self,
+        skill_id: str,
+        *,
+        agents: tuple[tuple[str, int], ...],
+        channels: tuple[str, ...],
+    ) -> None:
+        self.skill_id, self.agents, self.channels = skill_id, agents, channels
+        super().__init__("Skill is still attached to an agent or channel. Nothing was deleted.")
+
+
+async def refuse_native_skill_delete(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    guard: NativeSkillDeleteGuard,
+    skill: str,
+) -> NoReturn:
+    """Read real scoped references and fail closed; never send a provider DELETE.
+
+    Retained older agent revisions may still answer existing sessions. Inspect
+    those too. Revision/channel changes invalidate this observation. Even a
+    stable unattached observation cannot fence a subsequent attachment, so that
+    deletion stays unavailable until a shared catalog mutation fence exists.
+    """
+    guard.require_enabled()
+    tenant_id = uuid.UUID(guard.scope.tenant_id)
+    catalog = PostgresNeutralCatalog(
+        sessionmaker, provider=guard.provider, account_scope_id=guard.account_scope_id
+    )
+    versions = await catalog.list_skills(guard.scope)
+    matches = {
+        row.skill_id
+        for row in versions
+        if skill
+        in (row.skill_id, row.bundle.preview.name, f"{row.agent_name}/{row.bundle.preview.name}")
+        or row.display_title == tenant_scoped_display_title(tenant_id=tenant_id, name=skill)
+    }
+    if len(matches) != 1:
+        raise StoreError(
+            "No unique skill with that name or id exists in the authorized catalog. "
+            "Nothing was deleted."
+        )
+    skill_id = next(iter(matches))
+    before = await catalog.list_agents(guard.scope)
+    revisions = {row.catalog_id: row.local_revision for row in before}
+    if any(revisions.get(id_) != revision for id_, revision in guard.expected_agent_revisions):
+        raise NativeSkillDeleteUnavailable("catalog_changed")
+    held: list[tuple[str, int]] = []
+    for latest in before:
+        for revision in range(1, latest.local_revision + 1):
+            row = await catalog.get_agent(guard.scope, latest.catalog_id, local_revision=revision)
+            if row is None:
+                raise NativeSkillDeleteUnavailable("catalog_changed")
+            if any(pin.id == skill_id for pin in row.agent.spec.skills or ()):
+                held.append((row.catalog_id, revision))
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None:
+            raise ScopeViolation("skill-delete", "tenant no longer exists")
+        channels = await list_channel_skills(session, tenant_id=tenant_id, platform=tenant.platform)
+    after = await catalog.list_agents(guard.scope)
+    fresh_versions = await catalog.list_skills(guard.scope)
+    async with sessionmaker() as session:
+        fresh_channels = await list_channel_skills(
+            session, tenant_id=tenant_id, platform=tenant.platform
+        )
+    if before != after or versions != fresh_versions or channels != fresh_channels:
+        raise NativeSkillDeleteUnavailable("catalog_changed")
+    attached_channels = tuple(row.channel_id for row in channels if row.skill_id == skill_id)
+    if held or attached_channels:
+        raise NativeSkillStillAttached(skill_id, agents=tuple(held), channels=attached_channels)
+    raise NativeSkillDeleteUnavailable("unattached_delete_unbound")
 
 
 def _tenant_bodies(rows: Iterable[SkillListResponse], tenant_id: uuid.UUID) -> dict[str, str]:

@@ -85,3 +85,22 @@ def test_is_dead_session_never_recovers_a_ceiling_error_even_with_a_404_shaped_c
     state = TurnState(error=TurnError(kind="ceiling", message="abandoned", cause=cause))
 
     assert _is_dead_session(state) is False
+
+
+def test_turn_deadline_caps_the_caller_bound_by_retained_authority() -> None:
+    worker = _NOW + timedelta(seconds=20)
+    for caller in (_NOW + timedelta(seconds=10), _NOW + timedelta(seconds=30)):
+        assert turn_deadline(now=_NOW, deadline=caller, authority_deadline=worker) == min(
+            caller, worker
+        )
+    assert turn_deadline(now=_NOW, authority_deadline=worker) == worker
+
+
+def test_remaining_s_can_refuse_expired_authority_without_a_grace_period() -> None:
+    import pytest
+
+    for deadline in (_NOW, _NOW - timedelta(seconds=1)):
+        with pytest.raises(TurnError) as refused:
+            remaining_s(deadline, now=_NOW, refuse_expired=True)
+        assert refused.value.kind == "ceiling"
+    assert remaining_s(_NOW + timedelta(seconds=1), now=_NOW, refuse_expired=True) == 1

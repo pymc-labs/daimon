@@ -7,14 +7,19 @@ these models before returning (`Row.model_validate(orm, from_attributes=True)`).
 from __future__ import annotations
 
 import enum
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+import structlog
 from daimon.core.session_snapshot import SessionSnapshot
-from pydantic import BaseModel, ConfigDict, Field
+from mux.contracts.ids import PROVIDERS, Provider, Scope
+from mux.contracts.profile import Capability
+from mux.contracts.resources import Agent, AgentSpec, Environment, ResourceBinding, WorkspaceSource
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -35,7 +40,7 @@ PreparationFailureKind = Literal["skill_unavailable"]
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
 ContinuationReason = Literal[
-    "task_handoff", "private_input_applied", "timer", "github_access_ready"
+    "task_handoff", "private_input_applied", "timer", "github_access_ready", "worker_finished"
 ]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
@@ -484,6 +489,7 @@ class UsageEventRow(BaseModel):
     cache_read_input_tokens: int
     cache_creation_input_tokens: int
     event_id: str
+    observation_revision: int | None = None
     channel_id: str | None = None
 
 
@@ -1064,3 +1070,98 @@ class TurnOriginRow(BaseModel):
     role: Role
     created_at: datetime
     expires_at: datetime
+
+
+class _Facts(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+
+class CompatibilityItem(_Facts):
+    name: str = Field(min_length=1)
+    requires: tuple[Capability, ...]
+    providers: tuple[Provider, ...] = PROVIDERS
+
+
+class BackendAgent(_Facts):
+    """Host-resolved scoped agent; never populate this from request ownership claims."""
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    name: str = Field(min_length=1)
+    configuration_digest: str = Field(min_length=1)
+    model: str | None = None
+    skills: tuple[CompatibilityItem, ...] = ()
+    mcps: tuple[CompatibilityItem, ...] = ()
+    required_capabilities: tuple[Capability, ...] = ()
+    shared_threads: bool = False
+    # Owner-loaded preparation inputs are kept in memory, never in settings or logs.
+    source: Agent | None = Field(default=None, exclude=True, repr=False)
+    effective_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
+    environment: Environment | None = Field(default=None, exclude=True, repr=False)
+    resource_scope: Scope | None = Field(default=None, exclude=True, repr=False)
+    resource_requirements: tuple[ResourceBinding, ...] = Field(default=(), exclude=True, repr=False)
+    repository_sources: tuple[WorkspaceSource, ...] = Field(default=(), exclude=True, repr=False)
+    resource_generations: tuple[tuple[str, datetime], ...] = Field(
+        default=(), exclude=True, repr=False
+    )
+    memory_required: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
+    memory_store_id: str | None = Field(default=None, exclude=True, repr=False)
+    memory_read_only: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
+    memory_instructions: str | None = Field(default=None, exclude=True, repr=False)
+
+
+class TenantBackendPolicy(_Facts):
+    tenant_id: uuid.UUID
+    revision: str
+    enabled_backends: tuple[Provider, ...] = ("anthropic",)
+
+
+class AgentBackendRevision(_Facts):
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    local: int = Field(ge=1)
+    backend: Provider | None
+    agent_name: str
+    preview_digest: str
+    digest: str
+    previous_local: int | None
+    created_at: datetime
+    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
+    fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _read_fleet_grant(self) -> AgentBackendRevision:
+        if self.fleet_grant is None:
+            return self
+        from daimon.core.neutral_resources import AgentFleetGrant
+
+        try:
+            grant = AgentFleetGrant.model_validate_json(json.dumps(self.fleet_grant))
+            if not 0 < grant.epoch <= self.local:
+                raise ValueError("invalid grant epoch")
+        except ValueError:
+            object.__setattr__(self, "fleet_grant", None)
+            object.__setattr__(self, "fleet_grant_invalid", True)
+            structlog.get_logger(__name__).warning(
+                "fleet.grant_invalid",
+                tenant_id=self.tenant_id,
+                agent_id=self.agent_id,
+                revision=self.local,
+            )
+        return self
+
+
+class CompatibilityPreview(_Facts):
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    target_backend: Provider
+    setting_revision: int = Field(ge=0)
+    policy_revision: str
+    unsupported_skills: tuple[str, ...]
+    unsupported_mcps: tuple[str, ...]
+    unsupported_capabilities: tuple[str, ...]
+    shared_thread_limits: tuple[str, ...]
+    cost_line: str
+    allowed: bool
+    digest: str
+    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)

@@ -1,0 +1,112 @@
+{
+  "scenario_id": "QA-NEW30-APPROVE-AFTER-RESTART",
+  "source": {
+    "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+    "sha256": "fdabed807534a642da88e5cb1a46baac789583a0b7bd62e8a941ff051acacb37"
+  },
+  "projection": {
+    "path": "scenarios/QA-NEW30-APPROVE-AFTER-RESTART.yaml",
+    "sha256": "cf01acfef84229998d0bdc1456c0f6981cdbf346c4ab92bba3cbed581fb2e24f"
+  },
+  "scenario": {
+    "id": "QA-NEW30-APPROVE-AFTER-RESTART",
+    "title": "clicking Approve/Deny on a card from before a restart says it expired, not 'interaction failed'",
+    "friction": [
+      "NEW-30",
+      "D6",
+      "F11"
+    ],
+    "set": "B",
+    "surface": "discord",
+    "tier": "manual",
+    "priority": "P1",
+    "est_turns": 2,
+    "notes": "Needs a card: in a rule-held channel (readers own) a publish asks (#412). Driver triggers the restart.",
+    "setup": [],
+    "steps": [],
+    "assert": [],
+    "human": [
+      {
+        "click": "In a readers-own QA channel, @mention: 'publish a one-page report titled QA restart card'. Wait for the Approve card. Do NOT click.",
+        "expect": "Approve / Deny card shown."
+      },
+      {
+        "click": "Tell the driver to restart staging workers; wait for bot_ready, then click Approve.",
+        "expect": "'This request expired / Daimon restarted, ask again' (not 'This interaction failed'); card no longer reads 'Expires in…'."
+      },
+      {
+        "click": "@mention in the same thread: 'reply with only ALIVE'.",
+        "expect": "ALIVE within 40 s (thread not stuck, D4)."
+      }
+    ],
+    "teardown": []
+  },
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "assets": [],
+  "invocations": [],
+  "anthropic": null,
+  "anthropic_gaps": [
+    {
+      "status": "BLOCKED",
+      "code": "ANTHROPIC_SOURCE_UNBOUND",
+      "location": "anthropic",
+      "reason": "N9 tapes do not bind this source scenario; no golden substitution."
+    }
+  ],
+  "providers": [
+    {
+      "backend": "openai",
+      "profile": "openai.persistent_workspace",
+      "model": "gpt-6-luna",
+      "api_family": "agents-sessions",
+      "sdk_distribution": "openai",
+      "sdk_version": "2.54.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/openai_codec.py",
+        "sha256": "63a980ecd0df4264c227b35b9939816a4804ff4d98c3015488a8f5567f369eea"
+      },
+      "codec_commit": "8fb0c955b7eb2fee523bfda2a73c58fd53b57252",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    },
+    {
+      "backend": "gemini",
+      "profile": "gemini.inline_reuse",
+      "model": "gemini-3.8-flash",
+      "api_family": "interactions",
+      "sdk_distribution": "google-genai",
+      "sdk_version": "2.7.0",
+      "codec_source": {
+        "path": "packages/core/daimon/core/turn/gemini.py",
+        "sha256": "f1f2c74600aa819a181cb1c33c54e0386cfa990c4f52de4a6361f9632abd9546"
+      },
+      "codec_commit": "e8dcf6bda4ea3553c59b8095fc8b416fe3808226",
+      "provenance": "authored-sdk-wire",
+      "turns": [],
+      "gaps": [
+        {
+          "status": "BLOCKED",
+          "code": "MANUAL_TRIGGER",
+          "location": "steps",
+          "reason": "Source has no automated host trigger; do not invent one from a checklist."
+        }
+      ]
+    }
+  ]
+}

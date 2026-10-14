@@ -11,6 +11,7 @@ survived the handler's transaction.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -24,6 +25,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.factories import make_tenant
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,7 +41,7 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # command tests never run a turn
+        turn_deps=replace(deps_for(), turn_path=None),  # command tests never run a turn
     )
 
 

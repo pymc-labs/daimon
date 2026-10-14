@@ -122,6 +122,28 @@ class PromptCard(Protocol):
     def prompt(self) -> ConfirmationPrompt: ...
 
 
+async def check_confirmation_admin(
+    prompt: ConfirmationPrompt,
+    clicker: str | None,
+    check: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None,
+) -> str | None:
+    """Extra opt-in evidence before the existing single-use settlement.
+
+    Requester, expiry and token claiming remain owned by settle_confirmation.
+    Existing prompts skip the callback and perform no additional I/O.
+    """
+    if not prompt.admin or clicker is None or clicker != prompt.requester_platform_user_id:
+        return None
+    refusal = "This change needs a current workspace admin."
+    if check is None:
+        return refusal
+    try:
+        return await check(prompt, clicker)
+    except Exception:
+        _log.warning("tool_confirmation.admin_check_failed")
+        return refusal
+
+
 def settle_confirmation(
     prompt: ConfirmationPrompt,
     clicker: str | None,

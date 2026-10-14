@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
+from mux.contracts.ids import Provider
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ChannelReaders = Literal["any", "inside", "own"]
@@ -123,6 +124,14 @@ class TenantAccessPolicy(BaseModel):
     # organisation; any other guest is answered as from another organisation.
     # Only read while `teams.restrict_guests` is on.
     member_guest_ids: tuple[str, ...] = ()
+    enabled_backends: tuple[Provider, ...] = ("anthropic",)
+
+    @field_validator("enabled_backends")
+    @classmethod
+    def _backend_allowlist(cls, backends: tuple[Provider, ...]) -> tuple[Provider, ...]:
+        if "anthropic" not in backends or len(set(backends)) != len(backends):
+            raise ValueError("backend allowlist requires Anthropic and unique selections")
+        return backends
 
     @model_validator(mode="before")
     @classmethod

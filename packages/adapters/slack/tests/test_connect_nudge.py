@@ -9,6 +9,7 @@ posts an ephemeral message.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ from daimon.core.stores.slack_connect_prompts import was_connect_prompted
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing import ma_session, ma_session_agent
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
@@ -52,7 +54,7 @@ def _make_nudge_app(sessionmaker: async_sessionmaker[AsyncSession]) -> SlackApp:
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
         deployment_default=DeploymentDefault(agent_name="daimon", environment_name="default"),
     )
     return SlackApp(runtime=runtime)

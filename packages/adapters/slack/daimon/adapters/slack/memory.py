@@ -33,6 +33,7 @@ from daimon.core.memory_view import (
     personal_memory_reply,
     resolve_channel_agent,
 )
+from daimon.core.mux_backend import resource_scope
 from slack_sdk.errors import SlackApiError
 
 log = structlog.get_logger()
@@ -99,6 +100,7 @@ async def _personal_memory_text(
         store_id=store_id,
         request=request,
         command="/memory",
+        scope=resource_scope(tenant_id=str(agent.tenant_id)),
     )
     return _personal_text(reply)
 

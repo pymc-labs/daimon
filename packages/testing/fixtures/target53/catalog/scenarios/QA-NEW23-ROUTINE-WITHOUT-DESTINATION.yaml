@@ -1,0 +1,32 @@
+id: QA-NEW23-ROUTINE-WITHOUT-DESTINATION
+title: a routine created without a named destination still posts where it was asked
+  for (or the user is warned)
+friction:
+- NEW-23
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 2
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: Make a routine that runs every minute and says ROUTINE-PING-{nonce}.
+- do: wait_done
+- do: wait
+  s: 150
+assert:
+- kind: any_of
+  of:
+  - kind: channel_text_present
+    since_turn: 1
+    pattern: ROUTINE-PING-{nonce}
+  - kind: text_present
+    turn: 1
+    pattern: (?i)won'?t (post|be delivered)|no destination|where should
+teardown:
+- do: admin
+  tool: delete_routines
+  args:
+    channel: '{channel_id}'

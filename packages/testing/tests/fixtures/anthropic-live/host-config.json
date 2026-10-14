@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "total_cap_usd": "150",
+  "ledger_path": "/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md",
+  "providers": {
+    "anthropic": {
+      "cap_usd": "5",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": "0.50",
+          "cached_input": "0.05",
+          "cache_write_input": "1.00",
+          "cache_write_5m_input": "0.625",
+          "output": "2.50",
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+          "pricing_basis": "standard-global",
+          "short_prompt": {
+            "through_input_tokens": 100000,
+            "input": "0.10",
+            "cached_input": "0.01",
+            "cache_write_input": "0.20",
+            "cache_write_5m_input": "0.125",
+            "output": "0.50"
+          }
+        }
+      },
+      "session_prices": [
+        {
+          "meter": "agent_session",
+          "memory_gb": null,
+          "billing": "proportional",
+          "unit_seconds": 3600,
+          "minimum_seconds": 0,
+          "usd_per_unit": "0.08",
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+        }
+      ]
+    },
+    "openai": {
+      "cap_usd": "50",
+      "models": {
+        "gpt-6-luna": {
+          "input": ".10",
+          "cached_input": ".01",
+          "cache_write_input": ".125",
+          "output": ".50",
+          "actual_input_limit": 272000,
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "pricing_basis": "standard-global",
+          "source": "https://developers.openai.com/api/docs/pricing"
+        }
+      },
+      "session_prices": [
+        {
+          "meter": "hosted_container",
+          "memory_gb": 1,
+          "billing": "quantum",
+          "unit_seconds": 1200,
+          "minimum_seconds": 1200,
+          "usd_per_unit": ".03",
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "source": "https://developers.openai.com/api/docs/pricing"
+        },
+        {
+          "meter": "hosted_container",
+          "memory_gb": 4,
+          "billing": "quantum",
+          "unit_seconds": 1200,
+          "minimum_seconds": 1200,
+          "usd_per_unit": ".12",
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "source": "https://developers.openai.com/api/docs/pricing"
+        },
+        {
+          "meter": "hosted_container",
+          "memory_gb": 16,
+          "billing": "quantum",
+          "unit_seconds": 1200,
+          "minimum_seconds": 1200,
+          "usd_per_unit": ".48",
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "source": "https://developers.openai.com/api/docs/pricing"
+        },
+        {
+          "meter": "hosted_container",
+          "memory_gb": 64,
+          "billing": "quantum",
+          "unit_seconds": 1200,
+          "minimum_seconds": 1200,
+          "usd_per_unit": "1.92",
+          "effective_from": "2026-10-11",
+          "effective_until": "2026-10-12",
+          "source": "https://developers.openai.com/api/docs/pricing"
+        }
+      ]
+    },
+    "gemini": {
+      "cap_usd": "30",
+      "models": {
+        "gemini-3.8-flash": {
+          "input": "0.75",
+          "cached_input": "0.075",
+          "cache_write_input": "0.75",
+          "output": "3.75",
+          "effective_from": "2026-10-10",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing",
+          "effective_until": "2027-01-01"
+        },
+        "gemini-flash-latest": {
+          "input": "1.50",
+          "cached_input": "0.15",
+          "cache_write_input": "1.50",
+          "output": "7.50"
+        },
+        "gemini-3.5-flash-lite": {
+          "input": "0.30",
+          "cached_input": "0.03",
+          "cache_write_input": "0.30",
+          "output": "2.50",
+          "effective_from": "2026-10-10",
+          "source": "https://ai.google.dev/gemini-api/docs/pricing"
+        }
+      }
+    }
+  },
+  "approved_reconciliations": [
+    "1d55d53288b2f3f6e2fec7f18d33eadd9cd329deb804f76b84dface0d2993b11",
+    "6258b672a4a57e8e0a373c4c8d93d05e8b4975549e984a02599b870ee6c7ed63",
+    "564ad6da45fdee7b585ba37d5eaa0b31220fe12529019ccc9fa6ee995c2154e6",
+    "697f75bfb9ec7099f5ebe16d00454023dddd4e91c5d801c090b2ae11b83ed3b8",
+    "099a8ca6e1f07150cb71b341058bd855e4e1f9ce4c5784c51e385844d3dad9df",
+    "2487b04bc3f99fb4fe378cf07e5587e10f1a7a675d1c0007d38ff83add0a525e",
+    "d566c2ce264cf33d05be48fd3fa95bb605603d419659fda924b08d09693b827a"
+  ],
+  "approved_latch_recoveries": [
+    "fabcb270110c15c52e8219806b1b17fcbc836580a1dd5fb74926d7d04546acba"
+  ]
+}

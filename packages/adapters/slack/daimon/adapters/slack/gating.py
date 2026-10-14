@@ -30,7 +30,7 @@ def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:
 
     Slack Connect allows channels shared between workspaces.  The field that
     carries the sender's home workspace ID is ambiguous across SDK versions and
-    documentation (RESEARCH A2/Pitfall 3: ``user_team`` vs ``user_team_id`` vs
+    documentation (``user_team`` vs ``user_team_id`` vs
     ``source_team``), so we defensively check all three.  Any present value
     that differs from ``team_id`` indicates an external sender.
 

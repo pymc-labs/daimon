@@ -81,6 +81,7 @@ from daimon.adapters.mcp.tools.timers import (
 )
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_environments import save_scope_environment
+from daimon.core.config import McpSettings
 from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
@@ -139,7 +140,7 @@ class _World:
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], client: AsyncAnthropic) -> McpRuntime:
     settings = MagicMock()
-    settings.mcp.public_url = None
+    settings.mcp = McpSettings()
     settings.github.oauth_scopes = ()
     return McpRuntime(
         session_factory=sessionmaker,

@@ -1,0 +1,459 @@
+{
+  "target_sha256": "fc14eab684b6aa257ca5c01ab113ef154c9847938d263f2739480299c43cc2f4",
+  "scenarios": [
+    {
+      "scenario_id": "QA-D14-FORK-KEEPS-SKILLS",
+      "source_sha256": "f9cab06347907eb51d48485de62e8a2e1e4bdd4309bd57a3218fd2a05fa9c3c0",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from {env.qa_base_with_own_skill}"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D1-REPLACE-NOTICE-HIDDEN-FOR-SKILLS",
+      "source_sha256": "44d8dc0c95f90ed25961edf407844a2056bbea6f310a9cc676148e83b67ac348",
+      "operations": [
+        {
+          "location": "steps[3]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels skills add discord {guild_id} {channel_id} {env.qa_library_skill}"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels skills remove discord {guild_id} {channel_id} {env.qa_library_skill}"
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D5-UNBOUND-AGENT-EDIT-REFUSED",
+      "source_sha256": "4323ee270fa53d2f44f41c5c37d15ba0ae9b6ad02054a8887fbb9f4a4e76b52c",
+      "operations": [
+        {
+          "location": "setup[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon agents --guild {guild_id} create fixtures/qa-unbound-agent.yaml"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon agents --guild {guild_id} archive qa-unbound-{nonce} --yes"
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D7-BIG-WORKSPACE-CHECKPOINT",
+      "source_sha256": "b44930e88ec880aa25b198748b1c99f5b143c4aac2db329c71a913149849d8f3",
+      "operations": [
+        {
+          "location": "steps[3]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels skills add discord {guild_id} {channel_id} {env.qa_library_skill}"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels skills remove discord {guild_id} {channel_id} {env.qa_library_skill}"
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-D8-GITHUB-CONNECT-OFFERED",
+      "source_sha256": "0d774eaef640bcb864becc1212a1708911ce091b73fc92bf87b22efaa1e8285a",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-ISO-TEAM-CHANNEL-ISOLATION",
+      "source_sha256": "86d7c3fc054d0b06644c9259dd2cc5067250099ae057cf8fcada7a44d132804e",
+      "operations": [
+        {
+          "location": "steps[2]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel:A} --readers own --writers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "steps[3]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel:B} --readers own --writers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel:A}"
+            }
+          }
+        },
+        {
+          "location": "teardown[1]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel:B}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW12-AGENT-SWITCH-HANDOFF-COPY",
+      "source_sha256": "fe94272b12bb32f84d2d1a46e91412bdd0d12154cb9f6ca6e92d2b93c3932380",
+      "operations": [
+        {
+          "location": "steps[3]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW13-WRITERS-NONE-NOT-SILENT",
+      "source_sha256": "5197fe6b73810622ce644c1969e73bf8a2179bce8cd5df01aedd805ed2b7ddb5",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --writers none"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --writers any"
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW14-MISSING-THREAD-PERMISSION-COPY",
+      "source_sha256": "75a44495ca1c2943c80a111e698a15bf47b440bf4b7c0acd03c5e47e1b30ab43",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "discord_overwrite",
+            "args": {
+              "target": "daimon_bot",
+              "deny": [
+                "CREATE_PUBLIC_THREADS"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW15-CHANNEL-BUDGET-EXHAUSTED",
+      "source_sha256": "8451c0e49a47642f87149ef65e126412ef38d48ec0d56f1b59b9ca415e9a5e25",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels budget set discord {guild_id} {channel_id} 0.01 --window total"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels budget clear discord {guild_id} {channel_id}"
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW16-TENANT-CREDIT-DEPLETED-COPY",
+      "source_sha256": "943007ee25f76fb5840d85ccd788e8795d3c482ca9f91992f801edef1e97cdfa",
+      "operations": [
+        {
+          "location": "setup[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon tenants credit discord {env.qa_drain_guild_id} -<balance> --note qa-deplete --id qa-deplete-{nonce}"
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW17-MCP-USABLE-NEXT-MESSAGE",
+      "source_sha256": "f493f41c51eb81bb210a167c794aa2e401ca8f2383a6fb6d9feaf04e3e53ff8a",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "steps[2]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels admins set discord {guild_id} {channel_id} --user {env.qa_user_id}"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW18-SKILL-ADD-YES-PLEASE",
+      "source_sha256": "b01080a8c2f67a74893bf26418671a8069a2961145eeb668e757be38b7d592ac",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "steps[2]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels admins set discord {guild_id} {channel_id} --user {env.qa_user_id}"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW19-SKILL-DELETE-WHILE-ATTACHED",
+      "source_sha256": "033f6c04492e68687a10b0640c382bbbd58297fb62897a238474c32cd8fef333",
+      "operations": [
+        {
+          "location": "steps[1]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon channels rule set discord {guild_id} {channel_id} --readers own --copy-from daimon"
+          }
+        },
+        {
+          "location": "steps[2]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon skills --guild {guild_id} add fixtures/SKILL.md --agent {fork.name} --yes"
+          }
+        },
+        {
+          "location": "steps[3]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon skills --guild {guild_id} delete qa-echo-skill --yes",
+            "allow_fail": true,
+            "allow_fail_pattern": "(?i)skill is still attached|still attached to",
+            "allow_fail_exit_codes": [
+              1
+            ]
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "archive_channel_forks",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW22-ROUTINE-OUTPUT-NOT-TRUNCATED",
+      "source_sha256": "c1395059f170cfb3a8c2a6478607b8d7b50d3b14a84c01cdd4f798cc110a57cf",
+      "operations": [
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "delete_routines",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW23-ROUTINE-WITHOUT-DESTINATION",
+      "source_sha256": "19f4a996e788a397e0ee78504672da0ce921110cee077afd5796a2b21339f385",
+      "operations": [
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "delete_routines",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW27-MISTYPED-TOKEN-HEADLESS",
+      "source_sha256": "5a62a3ded200f694869a1e5c9b436587f7844cc09743272d58d6b9ed72ff72fd",
+      "operations": [
+        {
+          "location": "steps[0]",
+          "source": {
+            "do": "admin",
+            "tool": "headless",
+            "args": {
+              "call": "credential_submit.mcp_token",
+              "token": "wrong-token-123",
+              "url": "{env.qa_token_mcp_url}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW35-ROUTINE-FAILURE-IS-REPORTED",
+      "source_sha256": "11eb9261b0718da078bbc9118430f2963e6c191a23d82e2e51a58ecef278d513",
+      "operations": [
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "delete_routines",
+            "args": {
+              "channel": "{channel_id}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "scenario_id": "QA-NEW6-TENANT-CAP-QUEUE",
+      "source_sha256": "7a699ca0cd236b3ebee6ce7729188e4e458a6d77a75489dea137cda77e789ee3",
+      "operations": [
+        {
+          "location": "setup[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon tenants turn-cap discord {guild_id} 2"
+          }
+        },
+        {
+          "location": "teardown[0]",
+          "source": {
+            "do": "admin",
+            "tool": "cli",
+            "args": "daimon tenants turn-cap discord {guild_id} default"
+          }
+        }
+      ]
+    }
+  ]
+}

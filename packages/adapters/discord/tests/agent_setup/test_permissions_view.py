@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,6 +27,7 @@ from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -45,7 +47,7 @@ def _runtime(sessionmaker: object, state: FakeMAState | None = None) -> DiscordR
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name="daimon"),
         resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]
+        turn_deps=replace(deps_for(), turn_path=None),
     )
 
 

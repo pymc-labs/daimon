@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import html
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import structlog
@@ -38,10 +39,17 @@ from daimon.core.posted_controls.confirmation import (
     parse_confirmation_custom_id,
     parse_details_custom_id,
 )
-from daimon.core.posted_controls.lifecycle import PostedConfirmations, edit_card_within
+from daimon.core.posted_controls.lifecycle import (
+    PostedConfirmations,
+    check_confirmation_admin,
+    edit_card_within,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
+
+if TYPE_CHECKING:
+    from daimon.adapters.slack.runtime import SlackRuntime
 
 __all__ = ["CONFIRMATION_CUSTOM_ID_PREFIX", "SlackConfirmationCards"]
 
@@ -61,9 +69,19 @@ def _plain_message_text(value: str) -> str:
 
 
 def _attachment(card: ConfirmationCard, prompt: ConfirmationPrompt) -> list[dict[str, Any]]:
-    return [
-        {"color": _COLORS[card.state], "blocks": build_confirmation_blocks(card, prompt=prompt)}
-    ]
+    blocks = build_confirmation_blocks(card, prompt=prompt)
+    if prompt.admin and card.state == "pending":
+        for block in blocks:
+            if block["type"] == "actions":
+                block["elements"][0]["text"]["text"] = "Confirm"
+        blocks.insert(
+            1,
+            {
+                "type": "section",
+                "text": {"type": "plain_text", "text": "\n".join(card.detail_lines)},
+            },
+        )
+    return [{"color": _COLORS[card.state], "blocks": blocks}]
 
 
 #: Most time a card edit may take.
@@ -78,6 +96,7 @@ class _PostedCard:
     ts: str
     thread_ts: str | None
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
+    check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None
 
 
 class SlackConfirmationCards:
@@ -94,10 +113,41 @@ class SlackConfirmationCards:
         thread_ts: str,
         identity: AgentIdentity | None = None,
         record_post: Callable[[str], Awaitable[None]] | None = None,
+        runtime: SlackRuntime | None = None,
+        tenant_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
+        prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
+        check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
     ) -> ConfirmationHook:
         """A hook that posts each prompt's card into `channel`/`thread_ts`."""
 
+        if runtime is not None:
+            from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+
+            if backend_selection_enabled(runtime.settings.turn):
+                from daimon.adapters.slack.admin import resolve_is_admin
+                from daimon.core.confirmation import backend_switch_callbacks
+
+                if tenant_id is None or account_id is None:
+                    raise ValueError("Backend confirmation requires an admitted account and tenant")
+
+                async def current_admin(clicker: str) -> bool:
+                    return await resolve_is_admin(client, user_id=clicker)
+
+                prepare_admin, check_admin = backend_switch_callbacks(
+                    make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+                    sessionmaker=runtime.sessionmaker,
+                    anthropic=runtime.anthropic,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    current_admin=current_admin,
+                )
+
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
+            if prompt.admin:
+                if prepare_admin is None or check_admin is None:
+                    return "denied"
+                prompt = await prepare_admin(prompt)
             posted_cards: list[_PostedCard] = []
 
             async def post(token: str) -> _PostedCard:
@@ -126,6 +176,7 @@ class SlackConfirmationCards:
                     channel=channel,
                     ts=ts,
                     thread_ts=parent_thread_ts,
+                    check_admin=check_admin,
                 )
                 posted_cards.append(posted)
                 return posted
@@ -173,6 +224,10 @@ class SlackConfirmationCards:
         posted = self._controls.cards.get(token)
         if posted is None:
             await _ephemeral_from_payload(payload, clicker, self._controls.missing_message(token))
+            return
+        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin)
+        if refusal is not None:
+            await _ephemeral(posted, clicker, refusal)
             return
         if refusal := self._controls.claim(token, clicker, answer):
             if refusal == NOT_YOURS_MESSAGE:

@@ -160,7 +160,7 @@ async def run_purge_and_update(
     Runs AFTER the Socket Mode ack (response_action=update / "Deleting…") so the
     ~3s deadline is not at risk. Catches DaimonError | anthropic.APIError |
     SlackApiError at the listener boundary. The operator log is COUNTS ONLY —
-    no platform_user_id, user_name, or guild_id (modal.py:82-94 analog).
+    no platform_user_id, user_name, or guild_id.
 
     Ownership guard: `account_id` arrived via the modal's private_metadata; before
     running an irreversible purge we RE-RESOLVE the account from the authenticated
@@ -211,7 +211,7 @@ async def run_purge_and_update(
             account_id=account_id,
             anthropic=runtime.anthropic,
         )
-        # COUNTS-ONLY operator log (modal.py:82-94) — no PII fields.
+        # COUNTS-ONLY operator log — no PII fields.
         log.info(
             "privacy.delete.completed",
             account_id=str(account_id),

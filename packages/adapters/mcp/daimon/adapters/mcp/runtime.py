@@ -7,7 +7,9 @@ AuthIdentity flows separately via ctx.get_state.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -21,6 +23,27 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from google import genai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.adapters.mcp.tools._gemini_resources import GeminiSkillCapability
+    from daimon.core.neutral_resources import NeutralResourceHost
+
+
+class McpResourceHostFactory(Protocol):
+    """An operator-supplied OpenAI resource host, requested only for an authorized deployment."""
+
+    @property
+    def account_scope_id(self) -> str: ...
+
+    def __call__(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        account_id: uuid.UUID,
+        principal_id: str,
+        authorization_id: str,
+        operation_key: str,
+    ) -> NeutralResourceHost: ...
 
 
 @dataclass(frozen=True)
@@ -40,3 +63,10 @@ class McpRuntime:
     resolver_cache: ResolverCache = field(default_factory=new_resolver_cache)
     # None (tests) lets slack_sdk open a throwaway session per call.
     slack_http: SlackHttpSession | None = field(default=None)
+
+    # The explicit operator deployment capability for OpenAI agents. None (the
+    # default) keeps every tool on its existing Anthropic path.
+    resource_hosts: McpResourceHostFactory | None = field(default=None)
+
+    # Separate explicit capability; absent/disabled keeps existing dispatch.
+    gemini_skill_capability: GeminiSkillCapability | None = field(default=None)

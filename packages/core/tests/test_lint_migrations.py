@@ -179,6 +179,33 @@ def upgrade() -> None:
 
 SYNTAX_ERROR = "def upgrade(:\n    pass\n"
 
+VALID_MERGE_SAFE = '''"""join two branches.
+
+downgrade: safe
+"""
+
+from __future__ import annotations
+
+revision: str = "0003_merge"
+down_revision: tuple[str, str] = ("0002_a", "0002_b")
+
+
+def upgrade() -> None:
+    pass
+
+
+def downgrade() -> None:
+    pass
+'''
+
+MERGE_DESTRUCTIVE_WITH_TRIVIAL_BODY = VALID_MERGE_SAFE.replace(
+    "downgrade: safe", "downgrade: destructive"
+)
+
+SINGLE_PARENT_SAFE_WITH_TRIVIAL_BODY = VALID_MERGE_SAFE.replace(
+    'down_revision: tuple[str, str] = ("0002_a", "0002_b")', 'down_revision: str = "0002_a"'
+)
+
 
 @pytest.mark.parametrize(
     ("source", "expected_rule"),
@@ -189,6 +216,8 @@ SYNTAX_ERROR = "def upgrade(:\n    pass\n"
         (UNSUPPORTED_WITH_REAL_BODY, "migrations/marker-body-mismatch"),
         (SAFE_WITH_RAISE_BODY, "migrations/marker-body-mismatch"),
         (SAFE_WITH_TRIVIAL_BODY, "migrations/marker-body-mismatch"),
+        (SINGLE_PARENT_SAFE_WITH_TRIVIAL_BODY, "migrations/marker-body-mismatch"),
+        (MERGE_DESTRUCTIVE_WITH_TRIVIAL_BODY, "migrations/marker-body-mismatch"),
         (MISSING_DOWNGRADE, "migrations/missing-downgrade"),
         (SYNTAX_ERROR, "syntax-error"),
     ],
@@ -203,7 +232,7 @@ def test_lint_file_flags_expected_rule(tmp_path: Path, source: str, expected_rul
     assert expected_rule in rules, f"expected {expected_rule} in {rules} for source:\n{source}"
 
 
-@pytest.mark.parametrize("source", [VALID_SAFE, VALID_UNSUPPORTED])
+@pytest.mark.parametrize("source", [VALID_SAFE, VALID_UNSUPPORTED, VALID_MERGE_SAFE])
 def test_lint_file_produces_no_findings_for_valid_marker(tmp_path: Path, source: str) -> None:
     migration_file = tmp_path / "0001_good.py"
     migration_file.write_text(source, encoding="utf-8")

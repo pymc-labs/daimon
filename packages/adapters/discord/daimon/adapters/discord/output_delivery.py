@@ -162,6 +162,33 @@ async def deliver_session_outputs(
         notice_thread_ids.add(thread.id)
 
 
+async def deliver_provider_output(
+    file: DeliverableFile,
+    thread: discord.Thread,
+    *,
+    session_id: str,
+    may_post: Callable[[], Awaitable[bool]],
+    answer: AnswerMessage | None = None,
+) -> bool:
+    """Upload verified neutral output bytes using the existing answer/fallback transport.
+
+    The caller owns provider/session/root validation. This edge never reads a
+    provider or interprets a native payload, and never deletes an artifact.
+    """
+    if (
+        not file.content
+        or file.size_bytes != len(file.content)
+        or file.size_bytes > upload_limit(thread)
+        or not await may_post()
+    ):
+        return False
+    name = display_filename_for(file.filename, file.mime_type)
+    target = _AnswerTarget(thread, answer, session_id=session_id)
+    if not await target.attach(file.content, name):
+        await thread.send(file=discord.File(io.BytesIO(file.content), filename=name))
+    return True
+
+
 class _AnswerTarget:
     """Adds files to the answer message, one edit per file.
 

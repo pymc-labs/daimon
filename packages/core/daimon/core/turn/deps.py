@@ -1,4 +1,4 @@
-"""TurnDeps -- frozen DI bundle for the pre-turn admission sequence (D-04).
+"""TurnDeps -- frozen DI bundle for the pre-turn admission sequence.
 
 Built once per adapter runtime (Discord/Slack `build_runtime`, the scheduler,
 the CLI) and threaded through `admit()` / `run_prepared_turn`. Carries every
@@ -12,25 +12,42 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_admins import GroupMembersFor
 from daimon.core.channel_budget_notice import BudgetNotifier
-from daimon.core.config import GithubAppSettings, McpSettings, Settings
+from daimon.core.config import (
+    GithubAppSettings,
+    McpSettings,
+    Settings,
+    TurnSettings,
+    load_turn_settings,
+)
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
+from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.running import RunningTurns
+from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.ports import ManagedAgents
+from mux.state.store import StateStore
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.neutral_resources import WorkerPermissions
+    from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn.admission import AdmissionGrant
 
 
 @dataclass(frozen=True)
@@ -40,9 +57,9 @@ class TurnDeps:
     `fernet` is built ONCE here from `settings.crypto.keys` at adapter runtime
     construction -- this is the mechanism that makes a missing fernet on the
     Slack adapter impossible by construction (a caller can't forget to build
-    it per turn). `resolver_cache` is likewise a single shared instance per
-    adapter process (D-12): Slack stops constructing a fresh cache per turn
-    and adopts Discord's <=300s TTL staleness semantics.
+    it per turn). `resolver_cache` is likewise reused across turns for the
+    lifetime of the adapter process. Its ID mappings and full agent/environment
+    entries retain the shared resolver owner's separate expiration policies.
     """
 
     anthropic: AsyncAnthropic
@@ -66,8 +83,44 @@ class TurnDeps:
     # Re-checks a notice recipient's stored Slack group or Teams team; set with the notifier.
     group_members: GroupMembersFor | None = None
     budget_notices_off: frozenset[uuid.UUID] = frozenset()
+    # Native MA client remains during the rollout; ancillary Messages calls
+    # have a separate injection point and never go through Events/Sessions.
+    messages: AsyncAnthropic | None = None
+    backend: ManagedAgents | None = None
+    backend_session_ref: Callable[[str, Scope], ResourceRef] | None = None
+    turn_path: Literal["legacy", "mux"] | None = None
+    # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
+    channel_backends: bool = False
+    agent_backends: bool = False
+    native_footer_cost: bool = False
+    # Provider owners supply transports and durable stores; no credentials
+    # or SDK clients are discovered by profile dispatch.
+    turn_runtimes: Mapping[str, TurnRuntime] = field(default_factory=dict[str, TurnRuntime])
+    # Built-in application composition resolves only an admitted explicit channel.
+    turn_runtime_factory: RuntimeFactory | None = None
+    # Only prepared mux turns use this; default composition uses Postgres.
+    state_store: StateStore | None = None
     # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
     running_turns: RunningTurns = field(default_factory=RunningTurns)
+    fleet_enabled: bool = False
+    fleet_max_workers: int = 8
+    fleet_root_grants: (
+        Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]] | None
+    ) = None
+
+    @property
+    def backend_selection_enabled(self) -> bool:
+        """Use the settings owner's opt-in boundary for every turn stage."""
+        if not self.channel_backends:
+            return False
+        from daimon.core import channel_backend
+
+        return channel_backend.backend_selection_enabled(
+            TurnSettings(
+                path=self.turn_path or load_turn_settings().path,
+                channel_backends=self.channel_backends,
+            )
+        )
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
@@ -99,12 +152,27 @@ def build_turn_deps(
     deployment_default: DeploymentDefault,
     resolver_cache: ResolverCache,
     billing_config: BillingConfig | None,
+    fleet_root_grants: Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]]
+    | None = None,
 ) -> TurnDeps:
     """Derive `TurnDeps` from `settings`, once per adapter runtime."""
+    turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     github = settings.github
     return TurnDeps(
         anthropic=anthropic,
+        messages=anthropic,
+        turn_runtime_factory=build_channel_runtime,
+        turn_path=turn_settings.path if isinstance(turn_settings, TurnSettings) else None,
+        channel_backends=(
+            turn_settings.channel_backends if isinstance(turn_settings, TurnSettings) else False
+        ),
+        agent_backends=(
+            turn_settings.agent_backends if isinstance(turn_settings, TurnSettings) else False
+        ),
+        native_footer_cost=(
+            turn_settings.native_footer_cost if isinstance(turn_settings, TurnSettings) else False
+        ),
         sessionmaker=sessionmaker,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
@@ -121,4 +189,7 @@ def build_turn_deps(
         tool_safety=settings.tool_safety,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         budget_notices_off=_notices_off(settings),
+        fleet_enabled=settings.fleet.enabled,
+        fleet_max_workers=settings.fleet.max_workers_per_run,
+        fleet_root_grants=fleet_root_grants,
     )

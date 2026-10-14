@@ -8,7 +8,6 @@ whether the resource exists.
 from __future__ import annotations
 
 import uuid
-from typing import cast
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -34,6 +33,8 @@ from daimon.core.defaults.spec_merge import (
     merge_tools_with_ma,
 )
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
 _log = structlog.get_logger(__name__)
@@ -107,7 +108,7 @@ async def reconcile_agent(
     matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
     ma_match = matches[0] if matches else None
     # Dedup: when MA holds multiple agents with the same daimon_name (the
-    # documented R5 multi_match condition), keep the canonical one (max
+    # multi_match condition), keep the canonical one (max
     # created_at, returned first by find_agents_by_daimon_tag) and archive
     # the rest. Without this the duplicates accumulate forever.
     duplicates = matches[1:] if len(matches) > 1 else []
@@ -136,7 +137,7 @@ async def reconcile_agent(
                 canonical_id=ma_match.id if ma_match else None,
                 duplicate_id=dup.id,
             )
-            await client.beta.agents.archive(dup.id)
+            await archive_agent(client, dup.id, scope=resource_scope(tenant_id=str(tenant_id)))
     spec_dump = dump_agent_spec(spec, mode="json")
     spec_hash = compute_spec_fingerprint(
         {
@@ -180,7 +181,7 @@ async def reconcile_agent(
         # survive `defaults apply`. Spec wins on name/skill_id collision.
         # These merges — and the update call itself — live inside `_apply` so
         # a version-conflict retry recomputes them against the freshly-
-        # retrieved agent, never the stale `ma_match` read above (Pitfall 2):
+        # retrieved agent, never the stale `ma_match` read above:
         # a naive retry against `ma_match` would silently drop or duplicate a
         # concurrent writer's skills/MCP-server changes.
         async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
@@ -198,25 +199,31 @@ async def reconcile_agent(
                     update={"mcp_servers": merged_servers, "tools": merged_tools}
                 )
             merged_skills = merge_skills_with_ma(resolved_skills, fresh)
-            return await client.beta.agents.update(
+            return await update_agent(
+                client,
                 fresh.id,
                 version=fresh.version,
-                **dump_agent_spec(local_spec),
-                skills=merged_skills,
-                metadata=cast("dict[str, str | None]", metadata),
+                payload={
+                    **dump_agent_spec(local_spec),
+                    "skills": merged_skills,
+                    "metadata": metadata,
+                },
+                scope=resource_scope(tenant_id=str(tenant_id)),
             )
 
-        updated = await update_agent_with_version_retry(client, ma_match.id, _apply)
+        updated = await update_agent_with_version_retry(
+            client, ma_match.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+        )
         return ResourceOutcome(
             kind="agent", name=spec.name, action=Action.UPDATED, anthropic_id=updated.id
         )
 
     if dry_run:
         return ResourceOutcome(kind="agent", name=spec.name, action=Action.CREATED)
-    created = await client.beta.agents.create(
-        **dump_agent_spec(spec),
-        skills=resolved_skills,
-        metadata=metadata,
+    created = await create_agent(
+        client,
+        {**dump_agent_spec(spec), "skills": resolved_skills, "metadata": metadata},
+        scope=resource_scope(tenant_id=str(tenant_id)),
     )
     return ResourceOutcome(
         kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=created.id

@@ -1,0 +1,21 @@
+id: QA-NEW24-EXPIRED-LINK-HTML-PAGE
+title: an unknown/expired notebook or report link shows an HTML page, not raw JSON
+friction:
+- NEW-24
+set: A
+surface: headless
+tier: weekly
+priority: P2
+est_turns: 0
+setup: []
+steps: []
+assert:
+- kind: http_check
+  url: '{env.notebook_host}/qa-missing-{nonce}/'
+  expect_content_type: text/html
+  body_absent: \{\"detail\"
+- kind: http_check
+  url: '{env.report_host}/r/qa-missing-{nonce}'
+  expect_content_type: text/html
+  body_absent: \{\"detail\"
+teardown: []

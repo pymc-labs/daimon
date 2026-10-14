@@ -325,3 +325,141 @@ async def test_upload_card_has_color_and_private_details() -> None:
     await cards.handle_click(_click(actions["elements"][0]["action_id"], "U1"))
     assert isinstance(await waiting, ApprovedConfirmation)
     assert client.chat_update.await_args.kwargs["attachments"][0]["color"] == "#57F287"
+
+
+async def test_admin_confirmation_rechecks_each_click_before_settlement() -> None:
+    cards = SlackConfirmationCards()
+    client = _client()
+    prompt = _prompt().model_copy(update={"admin": True})
+    prepare = AsyncMock(
+        return_value=prompt.model_copy(update={"detail_lines": ("List price: verified",)})
+    )
+    check = AsyncMock(return_value="Current admin permission required.")
+    waiting = asyncio.create_task(
+        cards.hook(
+            cast(AsyncWebClient, client),
+            channel="C1",
+            thread_ts="1699.9",
+            prepare_admin=prepare,
+            check_admin=check,
+        )(prompt)
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not client.chat_postMessage.await_count:
+                await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        blocks = client.chat_postMessage.await_args.kwargs["attachments"][0]["blocks"]
+        assert any(b.get("text", {}).get("text") == "List price: verified" for b in blocks)
+        actions = next(b for b in blocks if b["type"] == "actions")
+        assert actions["elements"][0]["text"]["text"] == "Confirm"
+        action_id = actions["elements"][0]["action_id"]
+        await cards.handle_click(_click(action_id, "U1"))
+        assert (
+            client.chat_postEphemeral.await_args.kwargs["text"]
+            == "Current admin permission required."
+        )
+        client.chat_update.assert_not_awaited()
+        assert not waiting.done()
+        check.return_value = None
+        await cards.handle_click(_click(action_id, "U1"))
+        assert isinstance(await asyncio.wait_for(waiting, timeout=1), ApprovedConfirmation)
+        assert check.await_count == 2
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_admin_confirmation_without_a_verifier_posts_nothing() -> None:
+    client = _client()
+    cards = SlackConfirmationCards()
+    prompt = _prompt().model_copy(update={"admin": True})
+    assert (
+        await cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")(prompt)
+        == "denied"
+    )
+    client.chat_postMessage.assert_not_awaited()
+
+
+@pytest.mark.parametrize("case", ["expired", "exception", "wrong_requester", "legacy"])
+async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
+    case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.posted_controls import lifecycle
+
+    cards, client = SlackConfirmationCards(), _client()
+    prompt = _prompt().model_copy(update={"admin": case != "legacy"})
+
+    async def verify(*args: object) -> None:
+        await asyncio.sleep(0)
+        if case == "exception":
+            raise RuntimeError("role lookup unavailable")
+        if case == "expired":
+            clock = MagicMock()
+            clock.now.return_value = prompt.expires_at
+            monkeypatch.setattr(lifecycle, "datetime", clock)
+
+    check = AsyncMock(side_effect=verify)
+    waiting = asyncio.create_task(
+        cards.hook(
+            cast(AsyncWebClient, client),
+            channel="C1",
+            thread_ts="1699.9",
+            prepare_admin=AsyncMock(return_value=prompt),
+            check_admin=check,
+        )(prompt)
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not client.chat_postMessage.await_count:
+                await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        blocks = client.chat_postMessage.await_args.kwargs["attachments"][0]["blocks"]
+        actions = next(b for b in blocks if b["type"] == "actions")
+        await cards.handle_click(
+            _click(actions["elements"][0]["action_id"], "U2" if case == "wrong_requester" else "U1")
+        )
+        if case == "legacy":
+            assert isinstance(await asyncio.wait_for(waiting, 1), ApprovedConfirmation)
+            check.assert_not_awaited()
+        else:
+            client.chat_update.assert_not_awaited()
+            client.chat_postEphemeral.assert_awaited_once()
+            assert not waiting.done()
+            if case == "wrong_requester":
+                check.assert_not_awaited()
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_runtime_hook_reuses_live_workspace_admin_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    client = _client()
+    client.users_info = AsyncMock(return_value={"ok": True, "user": {"is_admin": True}})
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    SlackConfirmationCards().hook(
+        cast(AsyncWebClient, client),
+        channel="C1",
+        thread_ts="1699.9",
+        runtime=runtime,
+        tenant_id=tenant,
+        account_id=account,
+    )
+    kwargs = factory.call_args.kwargs
+    assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
+    check = kwargs["current_admin"]
+    assert await check("U1") is True
+    client.users_info.return_value = {"ok": True, "user": {"is_admin": False}}
+    assert await check("U1") is False
+    assert client.users_info.await_count == 2

@@ -47,6 +47,9 @@ from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_dis
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_skill, publish_skill_version, retrieve_agent, update_agent
+from daimon.core.neutral_resources import AgentGate, NeutralResourceHost
 from daimon.core.skill_zip import MAX_FILES, MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.fetch import fetch_repo
 from daimon.core.skills.ingest import (
@@ -56,6 +59,7 @@ from daimon.core.skills.ingest import (
     bundle_from_upload,
     require_upload_suffix,
 )
+from daimon.core.skills.service import StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
@@ -66,6 +70,7 @@ __all__ = [
     "AgentRecheck",
     "SkillAddResult",
     "add_agent_skill",
+    "add_host_agent_skill",
     "fetch_attachment",
     "fetch_repo_skill",
     "fetch_teams_attachment",
@@ -254,111 +259,195 @@ async def add_agent_skill(
     upload recorded; adding the same skill again attaches it without
     uploading twice.
     """
-    preview = bundle.preview
-    ledger_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
-    async with sessionmaker() as session:
-        existing = await load_user_skill(
-            session,
-            tenant_id=tenant_id,
-            principal_id=ledger_id,
-            agent_name=agent_name,
-            name=preview.name,
-        )
-    if existing is not None and existing.source == "repo":
-        raise SkillIngestError(
-            f"'{preview.name}' on {agent_name} comes from the skill repo "
-            f"{existing.source_repo_url}; change it there, or rename this one."
-        )
-    attached_ids = {skill.skill_id for skill in agent.skills}
-    known_id = existing.anthropic_id if existing is not None else None
-    if known_id not in attached_ids and len(agent.skills) >= AGENT_SKILL_CAP:
-        raise SkillIngestError(
-            f"{agent_name} already has {len(agent.skills)} skills, the most an agent may "
-            "have. Remove one first."
-        )
-
-    action: Literal["created", "updated", "unchanged"]
-    if (
-        existing is not None
-        and known_id is not None
-        and existing.content_hash == preview.content_hash
-    ):
-        skill_id, version, action = known_id, existing.anthropic_latest_version, "unchanged"
-    else:
-        skill_id = known_id or await _find_own_skill(
-            client, tenant_id=tenant_id, agent_name=agent_name, name=preview.name
-        )
-        await _refuse_mount_clash(
+    result = await add_skill(
+        _AnthropicSkillAddHost(
             client,
+            sessionmaker,
             tenant_id=tenant_id,
-            agent=agent,
+            agent_id=agent.id,
             agent_name=agent_name,
-            name=preview.name,
-            own_skill_id=skill_id,
-        )
-        fresh = await client.beta.agents.retrieve(agent.id)
-        await recheck(fresh)
-        if skill_id is not None:
-            # After the fresh read, right before the version push: another
-            # agent that attached this id meanwhile would get the version too.
-            await _refuse_shared(
-                client,
-                tenant_id=tenant_id,
-                agent=fresh,
-                agent_name=agent_name,
-                name=preview.name,
-                skill_id=skill_id,
-            )
-        if skill_id is None:
-            created = await client.beta.skills.create(
-                display_title=tenant_scoped_display_title(
-                    tenant_id=tenant_id, name=preview.name, agent_name=agent_name
-                ),
-                files=[("SKILL.zip", io.BytesIO(bundle.zip_bytes), "application/zip")],
-            )
-            skill_id, version, action = created.id, created.latest_version, "created"
-        else:
-            pushed = await client.beta.skills.versions.create(
-                skill_id=skill_id,
-                files=[("SKILL.zip", io.BytesIO(bundle.zip_bytes), "application/zip")],
-            )
-            version, action = pushed.version, "updated"
-
-    async with sessionmaker.begin() as session:
-        await upsert_user_skill(
-            session,
-            tenant_id=tenant_id,
-            principal_id=ledger_id,
-            agent_name=agent_name,
-            name=preview.name,
-            source_repo_url="",
-            source_repo_branch="",
-            source_path="",
-            content_hash=preview.content_hash,
-            anthropic_id=skill_id,
-            anthropic_latest_version=version,
-            source="upload",
             origin=origin,
             added_by_account_id=added_by_account_id,
-        )
-    newly_attached = await _attach(
-        client, tenant_id=tenant_id, agent_id=agent.id, skill_id=skill_id, recheck=recheck
+            recheck=recheck,
+        ),
+        agent=agent,
+        agent_name=agent_name,
+        bundle=bundle,
     )
     _log.info(
         "skill_upload.added",
         tenant_id=str(tenant_id),
         agent_name=agent_name,
-        name=preview.name,
-        action=action,
-        newly_attached=newly_attached,
+        name=result.name,
+        action=result.action,
+        newly_attached=result.newly_attached,
     )
     return SkillAddResult(
-        name=preview.name,
-        skill_id=skill_id,
-        version=version,
-        action=action,
-        newly_attached=newly_attached,
+        name=result.name,
+        skill_id=result.skill_id,
+        version=result.version,
+        action=result.action,
+        newly_attached=result.newly_attached,
     )
+
+
+async def add_host_agent_skill(
+    host: NeutralResourceHost,
+    *,
+    catalog_id: str,
+    bundle: SkillBundle,
+    recheck: AgentGate,
+) -> SkillAddResult:
+    """Add a confirmed bundle through the scoped neutral host resource edge.
+
+    The caller supplies its existing fresh policy/pin gate. It cannot omit it
+    or replace the actual catalog identity with an SDK id from another backend.
+    """
+    result = await host.add(catalog_id, bundle, recheck=recheck)
+    return SkillAddResult(
+        name=result.name,
+        skill_id=result.skill_id,
+        version=result.version,
+        action=result.action,
+        newly_attached=result.newly_attached,
+    )
+
+
+class _AnthropicSkillAddHost:
+    """Legacy storage/native adaptation; the service never reads Anthropic columns."""
+
+    def __init__(
+        self,
+        client: AsyncAnthropic,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        *,
+        tenant_id: uuid.UUID,
+        agent_id: str,
+        agent_name: str,
+        origin: str,
+        added_by_account_id: uuid.UUID | None,
+        recheck: AgentRecheck,
+    ) -> None:
+        self.client = client
+        self.sessionmaker = sessionmaker
+        self.tenant_id = tenant_id
+        self.agent_id = agent_id
+        self.agent_name = agent_name
+        self.origin = origin
+        self.added_by_account_id = added_by_account_id
+        self._recheck = recheck
+        self.ledger_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
+        self.scope = resource_scope(tenant_id=str(tenant_id))
+
+    def attached_ids(self, agent: BetaManagedAgentsAgent) -> frozenset[str]:
+        return frozenset(skill.skill_id for skill in agent.skills)
+
+    def skill_count(self, agent: BetaManagedAgentsAgent) -> int:
+        return len(agent.skills)
+
+    async def load_upload(self, name: str) -> StoredSkillUpload | None:
+        async with self.sessionmaker() as session:
+            row = await load_user_skill(
+                session,
+                tenant_id=self.tenant_id,
+                principal_id=self.ledger_id,
+                agent_name=self.agent_name,
+                name=name,
+            )
+        if row is None:
+            return None
+        return StoredSkillUpload(
+            row.anthropic_id,
+            row.anthropic_latest_version,
+            row.content_hash,
+            row.source,
+            row.source_repo_url,
+        )
+
+    async def find_own_skill(self, name: str) -> str | None:
+        return await _find_own_skill(
+            self.client, tenant_id=self.tenant_id, agent_name=self.agent_name, name=name
+        )
+
+    async def refuse_mount_clash(
+        self, agent: BetaManagedAgentsAgent, name: str, own_id: str | None
+    ) -> None:
+        await _refuse_mount_clash(
+            self.client,
+            tenant_id=self.tenant_id,
+            agent=agent,
+            agent_name=self.agent_name,
+            name=name,
+            own_skill_id=own_id,
+        )
+
+    async def retrieve_agent(self) -> BetaManagedAgentsAgent:
+        return await retrieve_agent(self.client, self.agent_id, scope=self.scope)
+
+    async def recheck(self, agent: BetaManagedAgentsAgent) -> None:
+        await self._recheck(agent)
+
+    async def refuse_shared(self, agent: BetaManagedAgentsAgent, name: str, skill_id: str) -> None:
+        await _refuse_shared(
+            self.client,
+            tenant_id=self.tenant_id,
+            agent=agent,
+            agent_name=self.agent_name,
+            name=name,
+            skill_id=skill_id,
+        )
+
+    async def create_skill(self, bundle: SkillBundle) -> UploadedSkill:
+        created = await create_skill(
+            self.client,
+            display_title=tenant_scoped_display_title(
+                tenant_id=self.tenant_id, name=bundle.preview.name, agent_name=self.agent_name
+            ),
+            data=bundle.zip_bytes,
+            filename="SKILL.zip",
+            media_type="application/zip",
+            scope=self.scope,
+        )
+        return UploadedSkill(created.id, created.latest_version)
+
+    async def publish_skill(self, skill_id: str, bundle: SkillBundle) -> UploadedSkill:
+        pushed = await publish_skill_version(
+            self.client,
+            skill_id,
+            data=bundle.zip_bytes,
+            filename="SKILL.zip",
+            media_type="application/zip",
+            scope=self.scope,
+        )
+        return UploadedSkill(skill_id, pushed.version)
+
+    async def save_upload(self, bundle: SkillBundle, uploaded: UploadedSkill) -> None:
+        async with self.sessionmaker.begin() as session:
+            await upsert_user_skill(
+                session,
+                tenant_id=self.tenant_id,
+                principal_id=self.ledger_id,
+                agent_name=self.agent_name,
+                name=bundle.preview.name,
+                source_repo_url="",
+                source_repo_branch="",
+                source_path="",
+                content_hash=bundle.preview.content_hash,
+                anthropic_id=uploaded.id,
+                anthropic_latest_version=uploaded.version,
+                source="upload",
+                origin=self.origin,
+                added_by_account_id=self.added_by_account_id,
+            )
+
+    async def attach(self, skill_id: str) -> bool:
+        return await _attach(
+            self.client,
+            tenant_id=self.tenant_id,
+            agent_id=self.agent_id,
+            skill_id=skill_id,
+            recheck=self._recheck,
+        )
 
 
 async def _find_own_skill(
@@ -467,17 +556,26 @@ async def _attach(
             raise SkillIngestError(f"Uploaded, but not attached: {collision}")
         attached = True
         if any(tool.type == "agent_toolset_20260401" for tool in fresh.tools):
-            return await client.beta.agents.update(fresh.id, version=fresh.version, skills=merged)
+            return await update_agent(
+                client,
+                fresh.id,
+                version=fresh.version,
+                payload={"skills": merged},
+                scope=resource_scope(tenant_id=str(tenant_id)),
+            )
         # A skill needs the base toolset's read tool, or sessions fail to start.
         tools = merge_default_agent_toolset(
             [tool.model_dump(mode="json", exclude_none=True) for tool in fresh.tools]  # type: ignore[arg-type]  # dumped dicts satisfy the Tool TypedDict shape
         )
-        return await client.beta.agents.update(
+        return await update_agent(
+            client,
             fresh.id,
             version=fresh.version,
-            skills=merged,
-            tools=tools,  # type: ignore[arg-type]  # list[dict] satisfies list[Tool] at runtime
+            payload={"skills": merged, "tools": tools},
+            scope=resource_scope(tenant_id=str(tenant_id)),
         )
 
-    await update_agent_with_version_retry(client, agent_id, _apply)
+    await update_agent_with_version_retry(
+        client, agent_id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+    )
     return attached

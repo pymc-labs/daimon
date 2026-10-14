@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -39,6 +40,7 @@ from daimon.core.stores.agent_creation_channels import get_creation_channel
 from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -242,7 +244,7 @@ def _build_runtime_with_db(
         billing_config=None,
         http_client=_build_http_client(),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
+        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
     )
 
 

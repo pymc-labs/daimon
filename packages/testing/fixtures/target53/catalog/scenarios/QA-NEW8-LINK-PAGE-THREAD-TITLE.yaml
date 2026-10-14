@@ -1,0 +1,23 @@
+id: QA-NEW8-LINK-PAGE-THREAD-TITLE
+title: a mention whose only content is a sign-in-walled link is not titled 'Sign in
+  - Google Accounts'
+friction:
+- D32
+- F14
+set: A
+surface: discord
+tier: weekly
+priority: P2
+est_turns: 1
+setup: []
+steps:
+- do: new_channel
+- do: mention
+  text: review this version bump https://docs.google.com/document/d/1qa-not-a-real-doc/edit
+- do: wait_done
+assert:
+- kind: thread_name
+  turn: 1
+  pattern_absent: (?i)sign in|google accounts|log ?in
+  max_len: 60
+teardown: []

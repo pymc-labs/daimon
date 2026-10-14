@@ -12,7 +12,7 @@ import datetime
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 import anthropic
 import httpx
@@ -40,11 +40,13 @@ from daimon.adapters.mcp.tools._rule_view import (
     load_isolation_view,
     load_skill_owners,
 )
+from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core import channel_backend
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
@@ -82,9 +84,10 @@ from daimon.core.mcp_attach import (
     replaced_server_url,
 )
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
-from daimon.core.skills.reference_lock import guarded_agent_update
 from daimon.core.specs import (
     AgentSpec,
     SkillRepo,
@@ -94,7 +97,8 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, SecretStr, ValidationError
+from mux.contracts.ids import Provider
+from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
 
 log = structlog.get_logger()
 
@@ -106,8 +110,7 @@ class AgentMcpServerInfo(BaseModel):
 
 class AgentSkillInfo(BaseModel):
     # Plain str, NOT Literal["anthropic", "custom"] — upstream-controlled
-    # value set; MA may ship a skill type the pinned SDK does not model
-    # (#214 class).
+    # value set; MA may ship a skill type the pinned SDK does not model.
     type: str
     skill_id: str
     name: str | None
@@ -263,7 +266,7 @@ def _union_tools(spec_tools: list[Tool], ma_agent: BetaManagedAgentsAgent) -> li
     * `agent_toolset_20260401` — singleton (MA allows only one)
     * `custom`         — by `name`
 
-    Caller-only fix for issue #56 bug 2: the chat `update_agent` is an
+    The chat `update_agent` is an
     additions surface (panel handles removals), so a per-field replace would
     drop everything the user didn't explicitly resend. Mirror the panel,
     which goes through `reconcile_agent`'s merge helpers.
@@ -313,7 +316,7 @@ def _reject_system_agent(agent: BetaManagedAgentsAgent) -> None:
       authoritative one. Keying on the absence of `daimon_account` alone did
       NOT work: the guild seed path account-stamps seeded agents, so the
       account key is present on them and this guard silently never fired. The
-      Discord panel hit the same trap and moved to this marker (#160); the MCP
+      Discord panel hit the same trap and moved to this marker; the MCP
       tools did not follow until now. Panel forks stamp `managed=False` and
       chat/CLI creates leave it unset, so both stay editable.
     - a missing `daimon_account` still rejects, preserving cover for older
@@ -443,7 +446,7 @@ def _reject_unknown_model(model: str) -> None:
     """Raise unless ``model`` is one this deployment meters and allows.
 
     The panel paths have validated free-text model input against
-    ALLOWED_MODEL_IDS since UX-25-03; the chat paths never did, so a typo or a
+    ALLOWED_MODEL_IDS; the chat paths never did, so a typo or a
     hallucinated id was accepted here and only surfaced later as a session that
     would not start. An unpriced id is also invisible to cost accounting —
     ``pricing.cost_of`` returns None for a model it has no rates for, so the
@@ -556,7 +559,11 @@ async def _create_agent_impl(
         default_agent_name=runtime.deployment_default.agent_name,
     )
     await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
-    ma_agent = await runtime.client.beta.agents.retrieve(outcome.anthropic_id)
+    ma_agent = await retrieve_agent(
+        runtime.client,
+        outcome.anthropic_id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     # agents.create succeeded — always return AgentInfo even if sync fails.
     # if agents.create itself raises, let it propagate as ToolError.
     warnings: list[SyncRepoFailure] | None = None
@@ -734,12 +741,12 @@ async def _update_agent_impl(
     if "system" in scalar_patch:
         scalar_patch["system"] = apply_credential_guidance(scalar_patch["system"])
 
-    # #144-2: version-retry closure. All agent-derived unions (skills, mcp_servers,
+    # Version-retry closure. All agent-derived unions (skills, mcp_servers,
     # tools) are recomputed from `fresh` on every attempt so a retry after a stale-
     # version conflict picks up any concurrent mutations rather than re-applying a
     # stale merge. MA treats list fields as per-field replaces; chat tools are an
     # additions surface (dedicated removal tools handle removals), so union caller's values with
-    # MA's current state — bug 2 of issue #56.
+    # MA's current state.
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         patch: dict[str, Any] = dict(scalar_patch)
         if resolved_skills is not None:
@@ -779,7 +786,7 @@ async def _update_agent_impl(
                 )
         if tools is not None:
             patch["tools"] = _union_tools(tools, fresh)
-        # #141: attaching skills to an agent that lacks agent_toolset_20260401 produces a
+        # Attaching skills to an agent that lacks agent_toolset_20260401 produces a
         # skills-unusable hole — MA rejects session creation ("skills require the read tool").
         # If this update includes skills, ensure the effective tools list carries the base toolset.
         if "skills" in patch:
@@ -791,7 +798,13 @@ async def _update_agent_impl(
             )
             if not has_base_toolset:
                 patch["tools"] = merge_default_agent_toolset(effective_tools)
-        return await guarded_agent_update(runtime.client, runtime.session_factory, fresh, **patch)
+        return await update_agent(
+            runtime.client,
+            fresh.id,
+            version=fresh.version,
+            payload=patch,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
 
     # An MCP server change is serialized with the token forms' attach-then-
     # publish for this agent; other fields need no lock.
@@ -806,7 +819,14 @@ async def _update_agent_impl(
     )
     try:
         async with mcp_lock:
-            updated = await update_agent_with_version_retry(runtime.client, agent.id, _apply)
+            updated = await update_agent_with_version_retry(
+                runtime.client,
+                agent.id,
+                _apply,
+                scope=resource_scope(
+                    tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)
+                ),
+            )
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
@@ -888,7 +908,7 @@ async def _attach_mcp_server_impl(
     expected_ma_agent_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> AgentInfo:
-    # #142: guard the reserved daimon-mcp entry before even looking at the agent.
+    # Guard the reserved daimon-mcp entry before even looking at the agent.
     # Also reject any URL that points at the deployment's own public_url under a
     # different name — that would make the next reconcile append a second daimon-mcp.
     public_url = (
@@ -920,7 +940,7 @@ async def _attach_mcp_server_impl(
         if s.name == server_name and s.url == url:
             return await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
 
-    # #144-2: the spec recompute lives in core.mcp_attach so the Discord
+    # The spec recompute lives in core.mcp_attach so the Discord
     # credential modal performs the identical write — it must attach the server
     # it just stored a vault credential for, and cannot import this module.
     # The reserved-server guard above is not repeated there: it depends only on
@@ -997,7 +1017,11 @@ async def _archive_agent_impl(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
-    await runtime.client.beta.agents.archive(agent.id)
+    await archive_agent(
+        runtime.client,
+        agent.id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+    )
     try:
         await archive_memory_store_for_agent(
             runtime.client,
@@ -1025,7 +1049,228 @@ async def _archive_agent_impl(
     )
 
 
+async def _set_agent_backend_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    name: str,
+    *,
+    backend: Provider | None,
+    expected_revision: int | None = None,
+    preview_only: bool = False,
+) -> dict[str, JsonValue]:
+    _require_admin(auth)
+    if auth.agent_id is not None or auth.is_external:
+        raise ToolError("An agent key or external account cannot change model backends.")
+    try:
+        require_outside_chat_turn(auth)
+    except ToolError as exc:
+        raise ToolError(
+            "Use request_agent_backend_switch in chat so the admin can confirm the preview."
+        ) from exc
+    if not channel_backend.backend_selection_enabled(runtime.settings.turn):
+        raise ToolError("Model backend selection is disabled on this deployment.")
+    service = channel_backend.make_backend_service(runtime.session_factory, runtime.settings.turn)
+    actor = channel_backend.BackendActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+    )
+    try:
+        agent = await channel_backend.load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=name,
+        )
+        preview = await service.preview(agent, backend)
+        if preview_only:
+            return {
+                "agent": name,
+                "applied": False,
+                "preview": cast(
+                    dict[str, JsonValue],
+                    TypeAdapter(type(preview)).dump_python(preview, mode="json"),
+                ),
+                "applies": "No setting was changed. Existing threads and channel overrides remain.",
+            }
+        current = await channel_backend.load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=name,
+        )
+        local = preview.setting_revision if expected_revision is None else expected_revision
+        if backend is None:
+            revision = await service.clear_backend(
+                current, local, actor, expected_preview_digest=preview.digest
+            )
+        else:
+            revision = await service.set_backend(
+                current, backend, local, actor, expected_preview_digest=preview.digest
+            )
+    except channel_backend.AgentBackendRefused as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "agent": name,
+        "backend": revision.backend,
+        "revision": revision.local,
+        "preview": cast(
+            dict[str, JsonValue],
+            TypeAdapter(type(preview)).dump_python(preview, mode="json"),
+        ),
+        "applies": "New threads use this setting; existing threads and channel overrides remain.",
+    }
+
+
+class AgentBackendSwitchInfo(BaseModel):
+    status: Literal["preview", "changed"]
+    agent_name: str
+    target_backend: Provider
+    expected_revision: int
+    preview_digest: str
+    unsupported_skills: tuple[str, ...]
+    unsupported_mcps: tuple[str, ...]
+    unsupported_capabilities: tuple[str, ...]
+    shared_thread_limits: tuple[str, ...]
+    cost_line: str
+    summary: str
+
+
+async def _request_agent_backend_switch_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agent_name: str,
+    target_backend: Provider,
+    expected_revision: int | None = None,
+    preview_digest: str | None = None,
+    origin_context_id: str | None = None,
+) -> AgentBackendSwitchInfo:
+    _require_admin(auth)
+    if auth.agent_id is not None or auth.platform_user_id is None:
+        raise ToolError("Request this change from an admin's active chat conversation.")
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    if origin is None:
+        raise ToolError("Request this change from an admin's active chat conversation.")
+
+    from daimon.adapters.mcp.tools._session_gate import session_card_gap
+    from daimon.core.channel_backend import (
+        BackendActor,
+        load_backend_agent,
+        make_backend_service,
+    )
+    from daimon.core.confirmation import BackendSwitchReference
+    from pydantic import ValidationError
+
+    try:
+        service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+        if not service.enabled:
+            raise ToolError("Model backend selection is disabled. Nothing changed.")
+        gap = await session_card_gap(
+            runtime, auth, origin, tool_name="request_agent_backend_switch"
+        )
+        if gap is not None:
+            raise ToolError(
+                "This conversation cannot verify the confirmation card. Nothing changed."
+            )
+        agent = await load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=agent_name,
+        )
+        preview = await service.preview(agent, target_backend)
+        if not preview.allowed:
+            raise ToolError(
+                "That model backend is not enabled for this workspace. Nothing changed."
+            )
+        status: Literal["preview", "changed"] = "preview"
+        summary = (
+            "Show this compatibility and cost preview. If they want to proceed, call "
+            "request_agent_backend_switch again with its expected_revision and preview_digest; "
+            "the requesting admin must Confirm on the card. Nothing has changed yet."
+        )
+        if preview_digest is not None:
+            reference = BackendSwitchReference.model_validate(
+                {
+                    "agent": agent_name,
+                    "target_backend": target_backend,
+                    "expected_revision": expected_revision,
+                    "preview_digest": preview_digest,
+                }
+            )
+            # The card check awaited provider I/O; reread configuration at the write edge.
+            agent = await load_backend_agent(
+                runtime.client,
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                agent_name=agent_name,
+            )
+            actor = BackendActor(
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+            )
+            await service.set_backend(
+                agent,
+                target_backend,
+                reference.expected_revision,
+                actor,
+                expected_preview_digest=reference.preview_digest,
+            )
+            status = "changed"
+            summary = (
+                "Model backend changed. Existing threads keep their backend; "
+                "channel overrides still take priority in new threads."
+            )
+        return AgentBackendSwitchInfo(
+            status=status,
+            agent_name=agent.name,
+            target_backend=preview.target_backend,
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+            unsupported_skills=preview.unsupported_skills,
+            unsupported_mcps=preview.unsupported_mcps,
+            unsupported_capabilities=preview.unsupported_capabilities,
+            shared_thread_limits=preview.shared_thread_limits,
+            cost_line=preview.cost_line,
+            summary=summary,
+        )
+    except (DaimonError, ValidationError) as exc:
+        raise ToolError(
+            "The preview is unavailable or changed. Preview again; nothing changed."
+        ) from exc
+
+
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+    if channel_backend.backend_selection_enabled(runtime.settings.turn):
+
+        @mcp.tool(tags={"admin"})
+        async def set_agent_backend(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context,
+            name: str,
+            backend: Provider | None,
+            expected_revision: int | None = None,
+            preview_only: bool = False,
+        ) -> dict[str, JsonValue]:
+            """Set an enabled model backend, or clear the agent setting with backend=null.
+
+            Admin only, for direct coding-tool or API requests. Chat turns use
+            request_agent_backend_switch so the admin confirms the preview.
+            The returned preview names compatibility limits and list prices.
+            Existing threads keep their backend; channel overrides still apply.
+            expected_revision refuses a setting changed since it was read.
+            preview_only returns the compatibility and cost preview without applying it.
+            """
+            return await _set_agent_backend_impl(
+                runtime,
+                await _auth(ctx),
+                name,
+                backend=backend,
+                expected_revision=expected_revision,
+                preview_only=preview_only,
+            )
+
     @mcp.tool
     async def list_agents(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, page: str | None = None, origin_context_id: str | None = None
@@ -1221,3 +1466,36 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             name,
             expected_ma_agent_id=expected_ma_agent_id,
         )
+
+    # The shared factory owns the enablement decision and validation.
+    from daimon.core.channel_backend import backend_selection_enabled
+
+    if backend_selection_enabled(runtime.settings.turn):
+
+        @mcp.tool(tags={"admin"})
+        async def request_agent_backend_switch(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context,
+            agent_name: str,
+            target_backend: Provider,
+            expected_revision: int | None = None,
+            preview_digest: str | None = None,
+            origin_context_id: str | None = None,
+        ) -> AgentBackendSwitchInfo:
+            """Preview a requested agent backend switch, then Confirm in this chat.
+
+            Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini.
+            First call without preview_digest and show the returned compatibility,
+            shared-thread limits and cost line. Call again with that preview's
+            expected_revision and preview_digest: the requesting admin must Confirm
+            on the card before anything is changed. A stale preview or expired card
+            changes nothing; preview again. Pass this active turn's origin_context_id.
+            """
+            return await _request_agent_backend_switch_impl(
+                runtime,
+                await _auth(ctx),
+                agent_name=agent_name,
+                target_backend=target_backend,
+                expected_revision=expected_revision,
+                preview_digest=preview_digest,
+                origin_context_id=origin_context_id,
+            )

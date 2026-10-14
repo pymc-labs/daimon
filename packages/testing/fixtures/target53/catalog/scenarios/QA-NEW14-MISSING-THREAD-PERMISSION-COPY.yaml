@@ -1,0 +1,34 @@
+id: QA-NEW14-MISSING-THREAD-PERMISSION-COPY
+title: when the bot can't create threads, the reply names the permission instead of
+  '@mention again'
+friction:
+- NEW-14
+set: A
+surface: discord
+tier: weekly
+priority: P1
+est_turns: 0
+setup: []
+steps:
+- do: new_channel
+- do: admin
+  tool: discord_overwrite
+  args:
+    target: daimon_bot
+    deny:
+    - CREATE_PUBLIC_THREADS
+- do: mention
+  text: 'QA no-thread-perm: hello'
+- do: wait
+  s: 20
+assert:
+- kind: no_silent_drop
+  turn: 1
+  max: 20
+- kind: text_absent
+  turn: 1
+  pattern: (?i)@?mention Daimon again
+- kind: text_present
+  turn: 1
+  pattern: (?i)create (public )?threads
+teardown: []

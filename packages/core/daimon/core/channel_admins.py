@@ -26,8 +26,9 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
-from typing import Final
+from typing import TYPE_CHECKING, Annotated, Final
 
+import httpx
 import structlog
 from daimon.core.authz import Subject, build_subject
 from daimon.core.errors import DaimonError
@@ -38,8 +39,12 @@ from daimon.core.stores.accounts import (
 )
 from daimon.core.stores.channel_admins import get_channel_admins, list_channel_admins
 from daimon.core.stores.domain import ChannelAdminsRow, Role
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StringConstraints, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.channel_backend import BackendActor
+    from daimon.core.config import Settings
 
 CHANNEL_ADMIN_PLATFORMS: Final = ("discord", "slack", "teams")
 """The platforms a channel can have its own admins on."""
@@ -68,6 +73,134 @@ LOOKED_UP_GROUP_PLATFORMS: Final = frozenset({"slack", "teams"})
 """Platforms whose groups are looked up, not sent: stored ones are re-checked live."""
 
 _log = structlog.get_logger(__name__)
+
+
+def is_guild_admin_by_permissions(
+    *, user_id: int, owner_id: int | None, administrator: bool, manage_guild: bool
+) -> bool:
+    """The guild owner, administrator or holder of Manage Server."""
+    return (owner_id is not None and user_id == owner_id) or administrator or manage_guild
+
+
+_DiscordId = Annotated[str, StringConstraints(pattern=r"^[0-9]{15,21}$")]
+
+
+class _DiscordUser(BaseModel):
+    model_config = ConfigDict(strict=True)
+    id: _DiscordId
+
+
+class _DiscordGuild(_DiscordUser):
+    owner_id: _DiscordId
+
+
+class _DiscordRole(_DiscordUser):
+    permissions: Annotated[str, StringConstraints(pattern=r"^[0-9]+$", max_length=20)]
+
+
+class _DiscordMember(BaseModel):
+    model_config = ConfigDict(strict=True)
+    user: _DiscordUser
+    roles: list[_DiscordId]
+
+
+async def verify_backend_actor(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str,
+    settings: Settings,
+    http_client: httpx.AsyncClient | None = None,
+) -> BackendActor:
+    """Read fresh guild authority for an existing principal; never create or promote it."""
+    from daimon.core.channel_backend import AgentBackendRefused, BackendActor
+    from daimon.core.stores.identity import find_platform_principal
+    from daimon.core.stores.tenants import get_tenant
+    from mux.drivers import isolated_ssl_context
+
+    if settings.discord is None or not re.fullmatch(_USER_ID["discord"], platform_user_id):
+        raise AgentBackendRefused("admin_attestation_unavailable")
+    token = settings.discord.bot_token.get_secret_value()
+    if not token:
+        raise AgentBackendRefused("admin_attestation_unavailable")
+
+    async def identity() -> tuple[str, uuid.UUID]:
+        async with sessionmaker() as session:
+            tenant = await get_tenant(session, tenant_id)
+            principal = await find_platform_principal(
+                session, tenant_id=tenant_id, platform="discord", external_id=platform_user_id
+            )
+            account = await get_account(session, principal.account_id) if principal else None
+        if (
+            tenant is None
+            or tenant.platform != "discord"
+            or not re.fullmatch(_CHANNEL_ID["discord"], tenant.external_id)
+            or principal is None
+            or account is None
+            or account.tenant_id != tenant_id
+            or account.is_external
+        ):
+            raise AgentBackendRefused("actor_not_found")
+        return tenant.external_id, account.id
+
+    guild_id, account_id = await identity()
+
+    async def attest(client: httpx.AsyncClient) -> bool:
+        async def read(path: str) -> object:
+            response = await client.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}{path}",
+                headers={"Authorization": f"Bot {token}"},
+                auth=None,
+                follow_redirects=False,
+                timeout=5,
+            )
+            response.raise_for_status()
+            return response.json()
+
+        guild = _DiscordGuild.model_validate(await read(""))
+        roles = TypeAdapter(list[_DiscordRole]).validate_python(await read("/roles"), strict=True)
+        member = _DiscordMember.model_validate(await read(f"/members/{platform_user_id}"))
+        by_id = {role.id: int(role.permissions) for role in roles}
+        if (
+            guild.id != guild_id
+            or member.user.id != platform_user_id
+            or len(by_id) != len(roles)
+            or len(set(member.roles)) != len(member.roles)
+            or guild_id not in by_id
+            or any(role not in by_id for role in member.roles)
+            or any(value >= 2**64 for value in by_id.values())
+        ):
+            raise ValueError("Unbound guild permission facts")
+        permissions = by_id[guild_id]
+        for role in member.roles:
+            permissions |= by_id[role]
+        return is_guild_admin_by_permissions(
+            user_id=int(platform_user_id),
+            owner_id=int(guild.owner_id),
+            administrator=bool(permissions & (1 << 3)),
+            manage_guild=bool(permissions & (1 << 5)),
+        )
+
+    try:
+        async with asyncio.timeout(10):
+            if http_client is None:
+                async with httpx.AsyncClient(
+                    trust_env=False, verify=isolated_ssl_context()
+                ) as client:
+                    admin = await attest(client)
+            else:
+                admin = await attest(http_client)
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        raise AgentBackendRefused("admin_attestation_unavailable") from None
+    if not admin:
+        raise AgentBackendRefused("admin_required")
+    if await identity() != (guild_id, account_id):
+        raise AgentBackendRefused("actor_not_found")
+    return BackendActor(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        subject=build_subject(is_admin=admin, platform_user_id=platform_user_id),
+    )
 
 
 class InvalidChannelAdminIds(ValueError):

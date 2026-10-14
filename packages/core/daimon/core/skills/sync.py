@@ -37,6 +37,8 @@ from daimon.core.defaults.ma_index import find_conflicting_skill_mount, find_ski
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DaimonError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.discover import DiscoveredSkill
 
@@ -138,9 +140,13 @@ async def sync_skills(
                     )
                 if ma_match is not None:
                     with pkg.path.open("rb") as fh:
-                        await client.beta.skills.versions.create(
-                            skill_id=ma_match.id,
-                            files=[("SKILL.zip", fh, "application/zip")],
+                        await publish_skill_version(
+                            client,
+                            ma_match.id,
+                            data=fh.read(),
+                            filename="SKILL.zip",
+                            media_type="application/zip",
+                            scope=resource_scope(tenant_id=str(tenant_id)),
                         )
                     outcomes.append(
                         ResourceOutcome(
@@ -166,9 +172,13 @@ async def sync_skills(
                             ),
                         )
                     with pkg.path.open("rb") as fh:
-                        created = await client.beta.skills.create(
+                        created = await create_skill(
+                            client,
                             display_title=canonical,
-                            files=[("SKILL.zip", fh, "application/zip")],
+                            data=fh.read(),
+                            filename="SKILL.zip",
+                            media_type="application/zip",
+                            scope=resource_scope(tenant_id=str(tenant_id)),
                         )
                     outcomes.append(
                         ResourceOutcome(

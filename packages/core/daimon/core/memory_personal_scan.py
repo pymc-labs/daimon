@@ -21,6 +21,8 @@ import re
 from dataclasses import dataclass, field
 
 from anthropic import AsyncAnthropic
+from daimon.core.mux_compat import list_memory_entries, read_memory
+from mux.contracts.ids import Scope
 
 _MENTION = re.compile(r"<@[!&]?[A-Za-z0-9]+>|(?<![\w.])@[A-Za-z0-9_.-]{2,}")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
@@ -117,17 +119,22 @@ class StoreScan:
 
 
 async def scan_shared_memory(
-    anthropic: AsyncAnthropic, store_id: str, *, max_examples: int = 3
+    anthropic: AsyncAnthropic,
+    store_id: str,
+    *,
+    max_examples: int = 3,
+    scope: Scope | None = None,
 ) -> StoreScan:
     """Count a store's memories that look personal. Reads only (list + retrieve)."""
+    backend_scope = scope or Scope.legacy_host_authorized(
+        call_site="daimon.core.memory_personal_scan:scan_shared_memory"
+    )
     scan = StoreScan(memory_store_id=store_id)
-    page = await anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
-    items = [item async for item in page if item.type == "memory"]
+    entries = list_memory_entries(anthropic, store_id, path_prefix="/", scope=backend_scope)
+    items = [item async for item in entries if item.type == "memory"]
     for item in items:
         scan.memories += 1
-        memory = await anthropic.beta.memory_stores.memories.retrieve(
-            item.id, memory_store_id=store_id, view="full"
-        )
+        memory = await read_memory(anthropic, store_id, item.id, scope=backend_scope)
         lines = [line for line in (memory.content or "").splitlines() if line.strip()]
         hit = next((line for line in lines if line_looks_personal(line)), None)
         if hit is None and not path_looks_personal(item.path):

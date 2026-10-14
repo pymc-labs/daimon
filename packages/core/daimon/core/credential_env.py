@@ -13,7 +13,6 @@ key_count only.
 from __future__ import annotations
 
 import datetime as dt
-import io
 import shlex
 import uuid
 
@@ -25,9 +24,12 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
 )
 from daimon.core.env_file import env_row_skip_reason, serialize_env_file
 from daimon.core.github_app_auth import BotIdentity
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import upload_credential_file
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -35,6 +37,11 @@ _MOUNT_PATH = ".env"
 #: Served at /mnt/session/uploads/git-identity.sh. Not a ``.env`` suffix, so the
 #: session snapshot and the `.env` swap never mistake it for the secrets file.
 GIT_IDENTITY_MOUNT_PATH = "git-identity.sh"
+
+
+def session_env_key(key: str, *, exclude_github: bool) -> bool:
+    """The session owner's app-mode exclusion, before value decoding/upload."""
+    return not exclude_github or key not in ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 def assemble_env_bytes(rows: list[AgentFileRow]) -> bytes:
@@ -77,6 +84,7 @@ async def upload_env_file(
     *,
     rows: list[AgentFileRow],
     ttl_hours: int = 1,
+    scope: Scope | None = None,
 ) -> str:
     """Upload the `.env` these rows assemble to, enqueue its TTL delete, return its file id.
 
@@ -91,6 +99,9 @@ async def upload_env_file(
         content=assemble_env_bytes(rows),
         mount_path=_MOUNT_PATH,
         ttl_hours=ttl_hours,
+        secret_values=[row.content for row in rows],
+        scope=scope
+        or Scope.legacy_host_authorized(call_site="daimon.core.credential_env:upload_env_file"),
     )
     _log.info("credential_env.uploaded", file_id=file_id, key_count=len(rows))
     return file_id
@@ -103,10 +114,17 @@ async def _upload_disposable(
     content: bytes,
     mount_path: str,
     ttl_hours: int,
+    secret_values: list[str],
+    scope: Scope,
 ) -> str:
     """Upload `content` through the Files API and enqueue the object's TTL delete."""
-    uploaded: FileMetadata = await anthropic.beta.files.upload(
-        file=(mount_path, io.BytesIO(content), "text/plain"),
+    uploaded: FileMetadata = await upload_credential_file(
+        anthropic,
+        content,
+        filename=mount_path,
+        media_type="text/plain",
+        secret_values=secret_values,
+        scope=scope,
     )
     delete_after = dt.datetime.now(dt.UTC) + dt.timedelta(hours=ttl_hours)
     async with session_factory() as session, session.begin():
@@ -128,6 +146,7 @@ async def upload_git_identity_and_mount(
     *,
     identity: BotIdentity,
     ttl_hours: int = 1,
+    scope: Scope | None = None,
 ) -> BetaManagedAgentsFileResourceParams:
     """Upload the bot commit-identity script and return its session resource.
 
@@ -143,6 +162,11 @@ async def upload_git_identity_and_mount(
         content=render_git_identity_script(identity),
         mount_path=GIT_IDENTITY_MOUNT_PATH,
         ttl_hours=ttl_hours,
+        secret_values=[],
+        scope=scope
+        or Scope.legacy_host_authorized(
+            call_site="daimon.core.credential_env:upload_git_identity_and_mount"
+        ),
     )
     return {"type": "file", "file_id": file_id, "mount_path": GIT_IDENTITY_MOUNT_PATH}
 
@@ -170,11 +194,16 @@ async def upload_env_and_mount(
     """
     async with session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
-    if exclude_github:
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+    rows = [row for row in rows if session_env_key(row.key, exclude_github=exclude_github)]
     if not rows:
         return None
 
-    file_id = await upload_env_file(anthropic, session_factory, rows=rows, ttl_hours=ttl_hours)
+    file_id = await upload_env_file(
+        anthropic,
+        session_factory,
+        rows=rows,
+        ttl_hours=ttl_hours,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+    )
     _log.info("credential_env.mounted", file_id=file_id, key_count=len(rows))
     return {"type": "file", "file_id": file_id, "mount_path": _MOUNT_PATH}

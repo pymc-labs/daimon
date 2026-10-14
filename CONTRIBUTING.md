@@ -34,18 +34,24 @@ Dependency rule (enforced by `import-linter` in CI):
 ```bash
 uv sync --all-extras --all-packages
 docker compose up -d postgres
-DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test \
+docker compose exec postgres createdb -U daimon daimon_test_nc_dev
+DAIMON_DATABASE_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test_nc_dev \
   uv run alembic upgrade head
-export DAIMON_DATABASE__TEST_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+export DAIMON_DATABASE__TEST_URL=postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test_nc_dev
 uv run pytest
 ```
 
-Tests run against a real Postgres, not an in-memory fake. Each pytest worker
-owns one schema (`test_w<pid>_<nonce>`), created once per run and dropped at
-the end; every ORM table in it is wiped before each test. Because the schema
-name carries the worker's pid, concurrent runs and several worktrees can all
-point at the same `daimon_test` database safely. Mark a test that runs its own
-DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
+Tests run against a real Postgres, not an in-memory fake. Session-scoped fixtures
+create process-owned schemas (`test_w<pid>_<nonce>`) and drop them at teardown;
+every ORM table in a schema is wiped before each test. Because the schema
+name carries the worker's pid, concurrent workers isolate their tables within
+the owned local database. Use your configured Postgres credentials and a
+`daimon_test_nc_<name>` database for each worktree. Shared fixtures skip plain
+local `daimon_test` outside GitHub Actions CI; a green run against that name
+does not exercise those database tests. CI alone admits `daimon_test` with
+both `GITHUB_ACTIONS=true` and `CI=true` and a registered process-owned schema.
+Remote databases and URL query overrides are refused before I/O.
+Mark a test that runs its own DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
 instead, and run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
 behind by a killed run.
 
@@ -90,6 +96,12 @@ generator, and which pages are maintained by hand.
 
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
+
+### Production comments
+
+Explain invariants and causal reasons in product comments and docstrings. Keep
+ticket numbers, review rounds, lane names and checklist labels in commit or PR
+provenance.
 
 ### Migration downgrade-safety markers
 

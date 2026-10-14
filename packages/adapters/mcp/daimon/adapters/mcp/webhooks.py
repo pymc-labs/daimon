@@ -332,7 +332,7 @@ def build_stripe_webhook(
          - charge.dispute.created      -> clawback (idempotent negative row)
          - anything else               -> 200 no-op
       4. For completed: validate metadata (tenant_id, amount_total);
-         missing/malformed -> 200 no-op (RESEARCH OQ #4)
+         missing/malformed -> 200 no-op
       5. payment_events.upsert_for_dedup(...) + try_claim_credit(...)
       6. If claimed: tenant_ledger.insert_entry (credit for completed; negative for clawback)
       7. 200
@@ -402,7 +402,7 @@ async def _handle_completed(
 ) -> Response:
     """Credit the tenant balance for a completed Checkout Session.
 
-    CR-02: credit amount is read from session.amount_total (Stripe-authoritative integer
+    Credit amount is read from session.amount_total (Stripe-authoritative integer
     minor units), NOT from metadata["amount_usd"] which the caller controls. Tenant routing
     still uses metadata.tenant_id (our own value, embedded at checkout creation time).
     """
@@ -417,7 +417,7 @@ async def _handle_completed(
         log.warning("stripe.webhook.missing_tenant_id", event_id=event_id)
         return Response(status_code=200)
 
-    # CR-02: read the Stripe-authoritative amount, not the self-supplied metadata.
+    # Read the Stripe-authoritative amount, not the self-supplied metadata.
     # amount_total is an integer in minor units (cents). Convert to USD Decimal.
     amount_total_raw: Any = getattr(event.data.object, "amount_total", None)  # pyright: ignore[reportExplicitAny]
     if amount_total_raw is None:
@@ -536,7 +536,7 @@ def _clawback_amount_from_event(
 ) -> Decimal:
     """Return the actual money to claw back (positive Decimal, in USD).
 
-    CR-03: use the event-reported amount, not the full original credit.
+    Use the event-reported amount, not the full original credit.
       - charge.refunded  -> charge.amount_refunded (minor units)
       - charge.dispute.created -> dispute.amount (minor units)
     Clamped to original_credit so we never claw back more than was credited.
@@ -678,9 +678,9 @@ async def _handle_clawback(
     durable, replay-safe row. Redundancy is enforced by the new_delta > 0 gate and the
     cumulative get_clawed_back_total, NOT by key collision. charge.refunded's
     amount_refunded is cumulative, so a second growing partial refund is no longer
-    dropped (WR-01). A full refund followed by a full dispute yields new_delta == 0,
-    so the dispute is a no-op (CR-01, now emergent). new_delta is clamped so we never
-    claw back more than the original credit (CR-03).
+    dropped. A full refund followed by a full dispute yields new_delta == 0,
+    so the dispute is a no-op. new_delta is clamped so we never
+    claw back more than the original credit.
     """
     charge = event.data.object
     pi_raw: Any = getattr(charge, "payment_intent", None)  # pyright: ignore[reportExplicitAny]

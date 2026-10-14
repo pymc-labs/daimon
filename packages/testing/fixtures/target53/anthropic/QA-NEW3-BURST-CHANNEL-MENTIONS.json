@@ -1,0 +1,195 @@
+{
+  "scenario_id": "QA-NEW3-BURST-CHANNEL-MENTIONS",
+  "scenario_sha256": "cdcb84c71265fbd8ef411b5b7efe482ce207cb343db10bea2efda9398fb0e833",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "request_text": "QA burst 1: reply with exactly the two characters B1 and nothing else.",
+      "events": [
+        {
+          "id": "qa-anthropic:1527d57e944e01dd-turn-1:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA burst 1: reply with exactly the two characters B1 and nothing else."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:1527d57e944e01dd-turn-1:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:1527d57e944e01dd-turn-1:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:1527d57e944e01dd-turn-1:answer:2",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "B1"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:1527d57e944e01dd-turn-1:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:1527d57e944e01dd-turn-1:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:1527d57e944e01dd-turn-1:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "request_text": "QA burst 2: reply with exactly the two characters B2 and nothing else.",
+      "events": [
+        {
+          "id": "qa-anthropic:7ce01c01329f21a7-turn-2:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA burst 2: reply with exactly the two characters B2 and nothing else."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7ce01c01329f21a7-turn-2:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7ce01c01329f21a7-turn-2:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:7ce01c01329f21a7-turn-2:answer:2",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "B2"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:7ce01c01329f21a7-turn-2:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:7ce01c01329f21a7-turn-2:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:7ce01c01329f21a7-turn-2:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "request_text": "QA burst 3: reply with exactly the two characters B3 and nothing else.",
+      "events": [
+        {
+          "id": "qa-anthropic:89c41cdecb884d7c-turn-3:input",
+          "type": "user.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "QA burst 3: reply with exactly the two characters B3 and nothing else."
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:89c41cdecb884d7c-turn-3:running",
+          "type": "session.status_running",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:89c41cdecb884d7c-turn-3:model:start",
+          "type": "span.model_request_start",
+          "processed_at": "2026-10-10T00:00:00Z"
+        },
+        {
+          "id": "qa-anthropic:89c41cdecb884d7c-turn-3:answer:2",
+          "type": "agent.message",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "content": [
+            {
+              "type": "text",
+              "text": "B3"
+            }
+          ]
+        },
+        {
+          "id": "qa-anthropic:89c41cdecb884d7c-turn-3:model:end",
+          "type": "span.model_request_end",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "model_request_start_id": "qa-anthropic:89c41cdecb884d7c-turn-3:model:start",
+          "model_usage": {
+            "input_tokens": 48,
+            "cache_read_input_tokens": 16,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 8
+          },
+          "is_error": false
+        },
+        {
+          "id": "qa-anthropic:89c41cdecb884d7c-turn-3:ended",
+          "type": "session.status_idle",
+          "processed_at": "2026-10-10T00:00:00Z",
+          "stop_reason": {
+            "type": "end_turn"
+          }
+        }
+      ]
+    }
+  ]
+}

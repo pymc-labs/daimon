@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
+import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_agent_custom_tool_use_event import (
     BetaManagedAgentsAgentCustomToolUseEvent,
 )
@@ -258,3 +259,9 @@ def make_overloaded_error(*, message: str = "overloaded") -> BetaManagedAgentsMo
         message=message,
         retry_status=BetaManagedAgentsRetryStatusTerminal(type="terminal"),
     )
+
+
+@pytest.fixture
+def native_budget():
+    """Imported worker fixtures retain ordinary behavior unless explicitly budgeted."""
+    return None

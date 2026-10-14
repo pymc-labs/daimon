@@ -66,6 +66,16 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions import BetaManagedAgentsSendSessionEvents
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, deliver_hosted_charts
+from daimon.adapters.mcp.resource_ports import (
+    list_session_events as list_events_page,
+)
+from daimon.adapters.mcp.resource_ports import (
+    mcp_scope,
+    retrieve_file_metadata,
+    retrieve_session,
+    send_session_events,
+    walk_sessions,
+)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
@@ -96,6 +106,7 @@ from daimon.core.permissions import agent_permissions, channel_permissions, memo
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
+from daimon.core.session_ports_compat import archive_session_record
 from daimon.core.session_seal import seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores import session_settle_state
@@ -109,6 +120,8 @@ from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
+from mux.contracts.ids import Scope
+from mux.errors import ScopeViolation
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy.exc import SQLAlchemyError
@@ -144,7 +157,7 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     return sent.data[0].id
 
 
-async def _send_billed(runtime: McpRuntime, session_id: str, message: str) -> str:
+async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, scope: Scope) -> str:
     """Send a headless turn's message with its settle request written first.
 
     Nothing meters a headless turn live, so its calls are billed by
@@ -162,8 +175,10 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str) -> st
             db, managed_session_id=session_id
         )
     try:
-        sent = await runtime.client.beta.sessions.events.send(
+        sent = await send_session_events(
+            runtime.client,
             session_id,
+            scope=scope,
             events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
         )
         turn_event_id = _turn_boundary(sent)
@@ -392,7 +407,10 @@ async def _verify_agent_owns_session(
     it (``token_channel_id``). Checked on every call, so a follow-up after the
     channel is sealed is refused too.
     """
-    s = await runtime.client.beta.sessions.retrieve(handle)
+    try:
+        s = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
+    except ScopeViolation:
+        raise ToolError("session not found") from None
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
     if auth.agent_id is None or derived != auth.agent_id:
         raise ToolError("session not found")
@@ -410,7 +428,7 @@ _CHAT_TURN_REFUSED = (
 )
 
 
-def _require_outside_chat_turn(auth: AuthIdentity) -> None:
+def require_outside_chat_turn(auth: AuthIdentity) -> None:
     """Refuse agent-chat turns driven by a chat turn's own credential.
 
     These tools are for headless callers (agent keys, the hub), which run
@@ -528,7 +546,7 @@ async def _start_turn_impl(
     sealed when the channel is, with read-only memory unless the agent is that
     isolated channel's own.
 
-    A chat turn's own credential is refused (``_require_outside_chat_turn``).
+    A chat turn's own credential is refused (``require_outside_chat_turn``).
 
     ``personal_memory`` mounts the caller's own personal memory store beside
     the shared one. Only a caller whose identity is a verified person passes
@@ -543,7 +561,7 @@ async def _start_turn_impl(
     is sent, so a pin or allowlist change saved during the lookups above
     stops the turn rather than only the next one.
     """
-    _require_outside_chat_turn(auth)
+    require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
@@ -582,7 +600,7 @@ async def _start_turn_impl(
         if claims is None:
             raise ToolError("bundle not found")
         try:
-            await runtime.client.beta.files.retrieve_metadata(claims.file_id)
+            await retrieve_file_metadata(runtime.client, claims.file_id, scope=mcp_scope(auth))
         except anthropic.NotFoundError as err:
             raise ToolError("bundle expired; re-upload") from err
         resources: list[Resource] = [
@@ -666,7 +684,7 @@ async def _start_turn_impl(
     if recheck is not None:
         await recheck()
     turn_started_at = now()
-    turn_event_id = await _send_billed(runtime, session.id, message)
+    turn_event_id = await _send_billed(runtime, session.id, message, scope=mcp_scope(auth))
 
     return {
         "handle": session.id,
@@ -694,7 +712,7 @@ async def _continue_turn_impl(
     send (see ``_start_turn_impl`` for why the echo's own timestamp isn't
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation). A
-    chat turn's own credential is refused (``_require_outside_chat_turn``).
+    chat turn's own credential is refused (``require_outside_chat_turn``).
     ``recheck`` runs the access decision again immediately before the send.
 
     A channel-bound key's channel sealed since the session opened refuses the
@@ -702,7 +720,7 @@ async def _continue_turn_impl(
     so sealed messages would outlive an unseal (`_bound_seal`). The session's
     own budget channel, which a billed follow-up is charged to, is gated too.
     """
-    _require_outside_chat_turn(auth)
+    require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
@@ -744,7 +762,7 @@ async def _continue_turn_impl(
             if touched is False:
                 raise ToolError("This session is closed.")
         # Inside the fence, so settle requests follow the order of the sends.
-        turn_event_id = await _send_billed(runtime, handle, message)
+        turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -765,7 +783,7 @@ async def _list_sessions_impl(
     """
     ma_agent = await _resolve_ma_agent(runtime, auth)
     owned: list[BetaManagedAgentsSession] = []
-    async for s in runtime.client.beta.sessions.list(agent_id=str(ma_agent.id)):
+    async for s in walk_sessions(runtime.client, agent_id=str(ma_agent.id), scope=mcp_scope(auth)):
         if _owned_by_caller(s, auth):
             owned.append(s)
     return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
@@ -805,7 +823,7 @@ async def _archive_my_session_impl(
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
-        await runtime.client.beta.sessions.archive(handle)
+        await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
     try:
         await close_headless_app_session(
             runtime.client,
@@ -846,8 +864,10 @@ async def _cancel_turn_impl(
     """
     await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
-        await runtime.client.beta.sessions.events.send(handle, events=[{"type": "user.interrupt"}])
-    session = await runtime.client.beta.sessions.retrieve(handle)
+        await send_session_events(
+            runtime.client, handle, events=[{"type": "user.interrupt"}], scope=mcp_scope(auth)
+        )
+    session = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
     return {"handle": handle, "status": session.status}
 
 
@@ -902,7 +922,9 @@ async def _get_turn_cost_impl(
         }
         if page is not None:
             list_kwargs["page"] = page
-        cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
+        cursor = await list_events_page(
+            runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
+        )
         for event in cursor.data:
             if event.id == turn_event_id:
                 continue
@@ -963,7 +985,9 @@ async def _list_events_impl(
         list_kwargs["created_at_gte"] = created_at_gte
     if types is not None:
         list_kwargs["types"] = types
-    cursor = await runtime.client.beta.sessions.events.list(handle, **list_kwargs)
+    cursor = await list_events_page(
+        runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
+    )
     return Page[SessionEventOut](
         items=[
             SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data

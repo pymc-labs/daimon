@@ -68,6 +68,15 @@ class MemoryStores(CoreMemoryStores, Protocol):
     async def read_native(
         self, scope: Scope, store: ResourceRef, memory_id: str
     ) -> NativeSnapshot: ...
+    async def delete_memory(
+        self,
+        scope: Scope,
+        store: ResourceRef,
+        memory_id: str,
+        *,
+        expected_content_sha256: str,
+        key: str,
+    ) -> Operation: ...
 
 
 class AnthropicMemoryStores:
@@ -248,6 +257,26 @@ class AnthropicMemoryStores:
                 )
             )
         )
+
+    async def delete_memory(
+        self,
+        scope: Scope,
+        store: ResourceRef,
+        memory_id: str,
+        *,
+        expected_content_sha256: str,
+        key: str,
+    ) -> Operation:
+        """Delete one memory only while its content still hashes to the expected value."""
+        self._check(scope, store)
+        await provider_call(
+            self._client.beta.memory_stores.memories.delete(
+                memory_id,
+                memory_store_id=store.id,
+                expected_content_sha256=expected_content_sha256,
+            )
+        )
+        return operation(store, key, "delete_memory")
 
     async def archive(self, scope: Scope, store: ResourceRef, *, key: str) -> Operation:
         self._check(scope, store)

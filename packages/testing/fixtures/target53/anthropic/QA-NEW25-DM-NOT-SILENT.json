@@ -1,0 +1,17 @@
+{
+  "scenario_id": "QA-NEW25-DM-NOT-SILENT",
+  "scenario_sha256": "2f67109f5bbd7db25f2bab91dd33c6907b04d8db8ca1122e6f68e9d35d9ccef5",
+  "backend": "anthropic",
+  "profile": "anthropic.managed_agents",
+  "agent_model": "claude-haiku-5-5",
+  "values": {
+    "nonce": "qa-fixture-0001",
+    "guild_id": "qa-guild",
+    "channel_id": "qa-channel",
+    "channel:A": "qa-channel-a",
+    "channel:B": "qa-channel-b",
+    "fork.name": "qa-channel-agent",
+    "env.default_agent": "daimon"
+  },
+  "turns": []
+}

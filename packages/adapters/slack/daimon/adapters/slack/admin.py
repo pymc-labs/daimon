@@ -33,8 +33,8 @@ _DISPLAY_NAME_MAX: Final = 80
 def _is_admin_signal(user: dict[str, Any]) -> bool:
     """Return True if the Slack user dict carries any admin signal.
 
-    Reads ``is_admin``, ``is_owner``, and ``is_primary_owner`` (all three per
-    A3 — read every field Slack exposes for elevated privilege). Pure: no I/O.
+    Reads ``is_admin``, ``is_owner``, and ``is_primary_owner``: every field
+    Slack exposes for elevated privilege. Pure: no I/O.
     """
     return bool(user.get("is_admin") or user.get("is_owner") or user.get("is_primary_owner"))
 
