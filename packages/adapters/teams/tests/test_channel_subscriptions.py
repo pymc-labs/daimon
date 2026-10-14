@@ -178,7 +178,6 @@ Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
 class Harness:
     """`ChannelSubscriptions` over the test DB and `FakeGraph`, with what it delivered.
 
-    `member` is what the membership check answers, or the error it raises;
     `taking` is what delivery answers (False while the app drains).
     """
 
@@ -193,19 +192,11 @@ class Harness:
         self.delivered: list[GraphMessage] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.now = NOW
-        self.member: bool | Exception = True
-        self.membership_checks: list[str] = []
         self.taking = True
         self.database = FlakyDatabase(factory)
 
         async def lookup(_team: str, _channel: str) -> str | None:
             return channel_type
-
-        async def is_member(channel_id: str) -> bool:
-            self.membership_checks.append(channel_id)
-            if isinstance(self.member, Exception):
-                raise self.member
-            return self.member
 
         async def record(message: GraphMessage, _row: TeamsChannelSubscriptionRow) -> bool:
             if self.taking:
@@ -222,7 +213,6 @@ class Harness:
             graph=GraphClient(graph.http(), _graph_token),
             groups=TeamGroups(_no_group),
             channel_type=lookup,
-            is_member=is_member,
             deliver=deliver or record,
             spawn=spawn,
             tenant_id=TENANT,
@@ -280,7 +270,9 @@ def test_a_resource_names_a_post_or_a_reply_under_its_root() -> None:
     reply = parse_resource(
         f"/teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('101')"
     )
-    assert post is not None and (post.message_id, post.root_id) == ("100", None)
+    assert post is not None and (post.message_id, post.root_id) == ("100", None), (
+        "a root post has no root"
+    )
     assert reply is not None and (reply.message_id, reply.root_id) == ("101", "100"), (
         "a reply is read under its root"
     )
@@ -298,17 +290,24 @@ def test_a_subscription_resource_refuses_ids_that_could_move_it() -> None:
 
 def test_client_state_is_compared_against_its_hash() -> None:
     stored = client_state_hash(SECRET)
-    assert client_state_matches(stored, SECRET)
+    assert client_state_matches(stored, SECRET), "the secret Graph sends back matches"
     assert not client_state_matches(stored, "guess") and not client_state_matches(stored, None)
     assert SECRET.encode() not in stored, "only the hash is kept"
 
 
 def test_renewal_is_due_a_margin_before_expiry_and_waits_out_a_retry() -> None:
     expiry = NOW + timedelta(days=3)
-    assert renewal_due_at(expiry) == expiry - RENEW_MARGIN
+    assert renewal_due_at(expiry) == expiry - RENEW_MARGIN, "renewed a margin before expiry"
     retry = expiry - RENEW_MARGIN + RETRY_DELAY
     assert renewal_due_at(expiry, not_before=retry) == retry, "a failed renewal waits to retry"
-    assert renewal_due_at(expiry, not_before=NOW) == expiry - RENEW_MARGIN
+    assert renewal_due_at(expiry, not_before=NOW) == expiry - RENEW_MARGIN, (
+        "a retry floor already passed changes nothing"
+    )
+    soon = NOW + RETRY_DELAY
+    assert renewal_due_at(expiry, due_by=soon) == soon, "a failed recreation retries early"
+    assert renewal_due_at(expiry, not_before=soon, due_by=NOW) == soon, (
+        "but never before its retry floor"
+    )
     due = [NOW + timedelta(hours=5), NOW + timedelta(hours=2)]
     assert seconds_until(due, NOW) == 2 * 3600, "it sleeps until the earliest"
     assert seconds_until([NOW - timedelta(hours=1)], NOW) == 0.0, "an overdue one runs now"
@@ -327,9 +326,11 @@ async def test_the_first_sight_of_a_private_channel_subscribes_it_once(
 
     [create] = graph.calls("POST")
     body = json.loads(create.content)
-    assert body["resource"] == f"/teams/{TEAM_GROUP_ID}/channels/{PRIVATE}/messages"
-    assert body["notificationUrl"] == PUBLIC_URL + NOTIFICATIONS_PATH
-    assert body["lifecycleNotificationUrl"] == PUBLIC_URL + LIFECYCLE_PATH
+    assert body["resource"] == f"/teams/{TEAM_GROUP_ID}/channels/{PRIVATE}/messages", (
+        "the channel's messages, by group id"
+    )
+    assert body["notificationUrl"] == PUBLIC_URL + NOTIFICATIONS_PATH, "notifications route"
+    assert body["lifecycleNotificationUrl"] == PUBLIC_URL + LIFECYCLE_PATH, "lifecycle route"
     row = await harness.row()
     assert row is not None and row.subscription_id == "sub-1", "the subscription is recorded"
     assert client_state_matches(row.client_state_sha256, body["clientState"]), (
@@ -363,7 +364,7 @@ async def test_a_refused_subscription_is_logged_and_not_retried_at_once(
     assert failed["status"] == 403, "the missing consent shows as a 403"
     harness.subscriptions.notice(CHANNEL)
     assert harness.tasks[1:] == [] and len(graph.calls("POST")) == 1, "backed off, not retried"
-    assert await harness.row() is None
+    assert await harness.row() is None, "nothing recorded for a refused subscription"
 
 
 async def test_removing_the_bot_deletes_the_row_and_the_graph_subscription(
@@ -389,7 +390,9 @@ async def test_removing_the_bot_deletes_the_row_and_the_graph_subscription(
     ctx.activity = activity
     await harness.subscriptions.on_conversation_update(ctx)
 
-    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-1"]
+    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-1"], (
+        "Graph's subscription is deleted"
+    )
     assert await harness.row() is None, "the row goes with the bot"
     ctx.next.assert_awaited_once()
 
@@ -402,7 +405,7 @@ async def test_a_new_message_is_read_once_delivered_and_marks_the_watermark(
     harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
     resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('101')"
 
     await harness.subscriptions.on_change(_notice(changeType="updated", resource=resource), row)
@@ -411,7 +414,7 @@ async def test_a_new_message_is_read_once_delivered_and_marks_the_watermark(
 
     [read] = graph.calls("GET")
     assert read.url.path.endswith("/messages/100/replies/101"), "one GET, under the root"
-    assert [message.id for message in harness.delivered] == ["101"]
+    assert [message.id for message in harness.delivered] == ["101"], "delivered once"
     stored = await harness.row()
     assert stored is not None and stored.last_message_id == "101", "catch-up starts after it"
 
@@ -423,12 +426,16 @@ async def test_lifecycle_notices_renew_recreate_and_catch_up(
     harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
 
     await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="reauthorizationRequired"), row)
-    assert [r.url.path for r in graph.calls("PATCH")] == ["/v1.0/subscriptions/sub-0"]
+    assert [r.url.path for r in graph.calls("PATCH")] == ["/v1.0/subscriptions/sub-0"], (
+        "reauthorization renews the same subscription"
+    )
     renewed = await harness.row()
-    assert renewed is not None and renewed.expires_at == NOW + timedelta(minutes=4260)
+    assert renewed is not None and renewed.expires_at == NOW + timedelta(minutes=4260), (
+        "the new expiry is recorded"
+    )
 
     await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="subscriptionRemoved"), row)
     recreated = await harness.row()
@@ -452,7 +459,7 @@ async def test_missed_reads_only_what_came_after_the_watermark(
             session, tenant_id=TENANT, channel_id=PRIVATE, message_id="101", at=NOW
         )
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
 
     await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="missed"), row)
     assert [m.id for m in harness.delivered] == ["102", "103"], (
@@ -490,7 +497,7 @@ async def test_a_stale_row_is_not_renewed_or_recreated_after_forget(
     harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
     stale = await harness.row()
-    assert stale is not None
+    assert stale is not None, "the stored subscription is read back"
     await harness.subscriptions.forget(channel_id=PRIVATE)
 
     await harness.subscriptions.on_lifecycle(
@@ -509,7 +516,7 @@ async def test_a_repeated_subscription_removed_notice_recreates_once(
     harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
     removed = _notice(lifecycleEvent="subscriptionRemoved")
     await asyncio.gather(
         harness.subscriptions.on_lifecycle(removed, row),
@@ -517,65 +524,100 @@ async def test_a_repeated_subscription_removed_notice_recreates_once(
     )
     assert len(graph.calls("POST")) == 1, "one replacement, no orphan"
     current = await harness.row()
-    assert current is not None and current.subscription_id == "sub-1"
+    assert current is not None and current.subscription_id == "sub-1", "the row holds it"
 
 
-@pytest.mark.parametrize("event", ["reauthorizationRequired", "subscriptionRemoved"])
-async def test_a_channel_the_bot_left_loses_its_subscription_on_refresh(
-    db_session_factory: async_sessionmaker[AsyncSession], event: str
-) -> None:
-    """The removal event was lost: the membership check on refresh catches it."""
-    graph = FakeGraph()
-    harness = Harness(db_session_factory, graph)
-    harness.member = False
-    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
-    row = await harness.row()
-    assert row is not None
-
-    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent=event), row)
-    assert graph.calls("PATCH") == [] and graph.calls("POST") == [], "neither renewed nor recreated"
-    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-0"]
-    assert await harness.row() is None, "the row is dropped"
-
-
-async def test_a_failed_membership_lookup_keeps_and_renews_the_subscription(
+async def test_a_failed_recreation_retries_after_the_retry_delay(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Graph removed it and the recreation failed: the retry comes in minutes, not at renewal."""
     graph = FakeGraph()
     harness = Harness(db_session_factory, graph)
-    harness.member = httpx.ConnectError("unreachable")
-    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
-    row = await harness.row()
-    assert row is not None
-    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="reauthorizationRequired"), row)
-    assert len(graph.calls("PATCH")) == 1, "an unknown answer never drops a channel"
-    assert await harness.row() is not None
-
-
-async def test_a_channel_send_refused_with_403_drops_a_channel_the_bot_left(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    graph = FakeGraph()
-    harness = Harness(db_session_factory, graph)
-    harness.member = False
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    graph.status["POST"] = 503
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="subscriptionRemoved"), row)
+    assert await harness.row() is not None, "a transient failure keeps the row"
 
-    class Refusing:
-        async def send(self, conversation_id: str, activity: Any, *, service_url: Any) -> Any:
-            request = httpx.Request("POST", "https://smba.example/v3/conversations")
-            response = httpx.Response(403, request=request)
-            raise httpx.HTTPStatusError(
-                "BotNotInConversationRoster", request=request, response=response
-            )
+    del graph.status["POST"]
+    harness.now = NOW + RETRY_DELAY
+    task = asyncio.create_task(harness.subscriptions.run())
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if len(graph.calls("POST")) == 2:
+                break
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert len(graph.calls("POST")) == 2 and graph.calls("PATCH") == [], (
+        "RETRY_DELAY later, days before its renewal, the task recreates it directly"
+    )
+    current = await harness.row()
+    assert current is not None and current.subscription_id == "sub-1", "the row holds it"
 
-    sender = harness.subscriptions.watch(Refusing())
+
+class Refusing:
+    """A Bot Framework sender answering every send with `status` and error `code`."""
+
+    def __init__(self, status: int, code: str | None) -> None:
+        self.status = status
+        self.code = code
+
+    async def send(self, conversation_id: str, activity: Any, *, service_url: Any) -> Any:
+        request = httpx.Request("POST", "https://smba.example/v3/conversations")
+        body = {"error": {"code": self.code, "message": "refused"}} if self.code else None
+        response = httpx.Response(self.status, json=body, request=request)
+        raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+
+async def _send_refused(harness: Harness, sender: Refusing, channel_id: str = PRIVATE) -> None:
+    watched = harness.subscriptions.watch(sender)
     with pytest.raises(httpx.HTTPStatusError):
-        await sender.send(
-            f"{PRIVATE};messageid=1", MessageActivityInput(text="hi"), service_url=None
+        await watched.send(
+            f"{channel_id};messageid=1", MessageActivityInput(text="hi"), service_url=None
         )
     await harness.settle()
-    assert harness.membership_checks == [PRIVATE], "the refusal asks whether the bot left"
-    assert await harness.row() is None and len(graph.calls("DELETE")) == 1, "it had: dropped"
+
+
+async def test_a_send_refused_as_not_in_the_roster_drops_only_that_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    other = "19:private-2@thread.tacv2"
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    await _stored(
+        db_session_factory,
+        expires_at=NOW + timedelta(days=3),
+        channel_id=other,
+        subscription_id="s2",
+    )
+
+    await _send_refused(harness, Refusing(403, "BotNotInConversationRoster"))
+    assert await harness.row() is None, "the channel the bot is not in loses its row"
+    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-0"], (
+        "and Graph's subscription"
+    )
+    assert await harness.row(other) is not None, "the team's other channels keep theirs"
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(403, "BotDisabledByAdmin"), (403, "ConversationBlockedByUser"), (403, None), (404, None)],
+)
+async def test_another_refused_send_keeps_the_subscription(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int, code: str | None
+) -> None:
+    """Only `BotNotInConversationRoster` says the bot left; an admin block or a 404 does not."""
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+
+    await _send_refused(harness, Refusing(status, code))
+    assert harness.tasks == [], "nothing is dropped in the background"
+    assert await harness.row() is not None and graph.requests == [], "the subscription stays"
 
 
 async def test_catch_up_overlapping_a_live_notification_runs_each_message_once(
@@ -607,7 +649,7 @@ async def test_catch_up_overlapping_a_live_notification_runs_each_message_once(
             session, tenant_id=TENANT, channel_id=PRIVATE, message_id="101", at=NOW
         )
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
     resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('102')"
 
     with patch.object(TeamsApp, "_observe", observe):
@@ -627,12 +669,13 @@ async def test_a_message_not_taken_while_draining_leaves_the_watermark(
     harness.taking = False
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
     resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('102')"
     await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
     stored = await harness.row()
+    assert harness.delivered == [], "a message refused while draining is not taken"
     assert stored is not None and stored.last_message_id is None, (
-        "a catch-up after the restart still reads it"
+        "the watermark stays before it, so a `missed` catch-up would still read it"
     )
 
 
@@ -651,7 +694,7 @@ async def test_a_failed_watermark_write_does_not_stop_the_batch(
             session, tenant_id=TENANT, channel_id=PRIVATE, message_id="101", at=NOW
         )
     row = await harness.row()
-    assert row is not None
+    assert row is not None, "the stored subscription is read back"
     harness.database.fail_writes = True
     with structlog.testing.capture_logs() as logs:
         await harness.subscriptions.catch_up(row)
@@ -727,12 +770,16 @@ async def test_a_failed_forget_still_passes_the_activity_on(
         else:
             await harness.subscriptions.on_uninstall(ctx, ours=True)
     ctx.next.assert_awaited_once()
-    assert [e for e in logs if e["event"] == "teams.channel_subscription.forget_failed"]
+    assert [e for e in logs if e["event"] == "teams.channel_subscription.forget_failed"], (
+        "the failed forget is logged"
+    )
 
 
-async def test_an_uninstall_from_one_channel_leaves_the_teams_other_channels(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize("named", [PRIVATE, TEAM])
+async def test_an_uninstall_drops_every_channel_of_the_team(
+    db_session_factory: async_sessionmaker[AsyncSession], named: str
 ) -> None:
+    """Team-scope even when channelData names one channel, the one selected in the client."""
     other = "19:private-2@thread.tacv2"
     graph = FakeGraph()
     harness = Harness(db_session_factory, graph)
@@ -744,12 +791,26 @@ async def test_an_uninstall_from_one_channel_leaves_the_teams_other_channels(
         subscription_id="s2",
     )
 
-    await harness.subscriptions.on_uninstall(_removal("uninstall", PRIVATE), ours=True)
-    assert await harness.row() is None, "the channel it left is dropped"
-    assert await harness.row(other) is not None, "the team's other channels keep theirs"
+    await harness.subscriptions.on_uninstall(_removal("uninstall", named), ours=True)
+    assert await harness.row() is None and await harness.row(other) is None, (
+        "every channel of the team loses its row"
+    )
+    assert sorted(r.url.path for r in graph.calls("DELETE")) == [
+        "/v1.0/subscriptions/s2",
+        "/v1.0/subscriptions/sub-0",
+    ], "and Graph's subscriptions"
 
-    await harness.subscriptions.on_uninstall(_removal("uninstall", TEAM), ours=True)
-    assert await harness.row(other) is None, "a team uninstall (General) drops them all"
+
+async def test_another_apps_uninstall_drops_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    ctx = _removal("uninstall", TEAM)
+    await harness.subscriptions.on_uninstall(ctx, ours=False)
+    assert await harness.row() is not None, "another app's uninstall is not ours"
+    ctx.next.assert_awaited_once()
 
 
 # --- HTTP ingress -----------------------------------------------------------------
@@ -788,7 +849,7 @@ async def test_graph_validation_echoes_the_token_as_plain_text(
     for path in (NOTIFICATIONS_PATH, LIFECYCLE_PATH):
         response = await _post(service, path, params={"validationToken": "a b&c"})
         assert response.status_code == 200 and response.text == "a b&c", "verbatim"
-        assert response.headers["content-type"].startswith("text/plain")
+        assert response.headers["content-type"].startswith("text/plain"), "Graph wants text"
 
 
 @pytest.mark.usefixtures("entra_env", "stub_bot_token", "no_renewals")

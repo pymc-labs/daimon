@@ -90,10 +90,9 @@ _CHANNEL_ID = re.compile(r"^19:[^/?#'\s]+$")
 # True when the message was taken; False (only while draining) leaves it for a replay.
 Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
 ChannelTypeLookup = Callable[[str, str], Awaitable[str | None]]
-# Whether the bot is still in a channel; raises when it cannot tell.
-MembershipCheck = Callable[[str], Awaitable[bool]]
-# A Bot Framework send answered 403 or 404: the bot may have left the conversation.
-_REMOVED_STATUSES = frozenset({403, 404})
+# Bot Framework's 403 code for a conversation the bot is not in. No read tells:
+# a channel's member list answers whether or not the bot is in it.
+NOT_IN_ROSTER = "BotNotInConversationRoster"
 
 
 class Spawn(Protocol):
@@ -153,9 +152,13 @@ def client_state_matches(stored: bytes, given: str | None) -> bool:
     return hmac.compare_digest(stored, client_state_hash(given or ""))
 
 
-def renewal_due_at(expires_at: datetime, *, not_before: datetime | None = None) -> datetime:
-    """When to renew: `RENEW_MARGIN` before expiry, but not before a retry is allowed."""
+def renewal_due_at(
+    expires_at: datetime, *, not_before: datetime | None = None, due_by: datetime | None = None
+) -> datetime:
+    """`RENEW_MARGIN` before expiry, or `due_by` if sooner; never before `not_before`."""
     due = expires_at - RENEW_MARGIN
+    if due_by is not None:
+        due = min(due, due_by)
     return max(due, not_before) if not_before is not None else due
 
 
@@ -169,6 +172,21 @@ def is_subscribed_type(channel_type: str | None) -> bool:
     return (channel_type or "").strip().lower() in SUBSCRIBED_CHANNEL_TYPES
 
 
+def bot_not_in_roster(err: httpx.HTTPStatusError) -> bool:
+    """A send refused because the bot left the conversation; any other refusal is not that."""
+    if err.response.status_code != 403:
+        return False
+    try:
+        body: object = err.response.json()
+    except ValueError:
+        return False
+    match body:
+        case {"error": {"code": str(code)}}:
+            return code == NOT_IN_ROSTER
+        case _:
+            return False
+
+
 def _created(message: GraphMessage) -> datetime | None:
     try:
         return datetime.fromisoformat(message.created_date_time or "")
@@ -180,9 +198,9 @@ class ChannelSubscriptions:
     """Subscriptions for `tenant_id`'s private and shared channels, and their notifications.
 
     `ChannelMessage.Read.All` is tenant-wide: Graph serves a channel whether or
-    not the bot is in it. So membership is checked (`is_member`) before each
-    renewal and recreation, and on a refused send, and a channel the bot left
-    loses its subscription even when the removal event never arrived.
+    not the bot is in it, and no read tells whether it is. A channel is dropped
+    on the bot's removal event, or on a send there refused with
+    `BotNotInConversationRoster` when that event was lost.
     """
 
     def __init__(
@@ -192,7 +210,6 @@ class ChannelSubscriptions:
         graph: GraphClient,
         groups: TeamGroups,
         channel_type: ChannelTypeLookup,
-        is_member: MembershipCheck,
         deliver: Deliver,
         spawn: Spawn,
         tenant_id: uuid.UUID,
@@ -205,7 +222,6 @@ class ChannelSubscriptions:
         self._graph = graph
         self._groups = groups
         self._channel_type = channel_type
-        self._is_member = is_member
         self._deliver = deliver
         self._spawn = spawn
         self._tenant_id = tenant_id
@@ -220,8 +236,8 @@ class ChannelSubscriptions:
         self._refused_until: dict[str, float] = {}
         # Channel id -> the earliest its subscription may be refreshed again.
         self._not_before: dict[str, datetime] = {}
-        # Channels whose membership a refused send is having checked.
-        self._checking: set[str] = set()
+        # Channel id -> when to retry a failed recreation, ahead of its renewal.
+        self._recreate_at: dict[str, datetime] = {}
         # Graph writes one at a time: a renewal, a lifecycle notice and a removal never race.
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
@@ -320,6 +336,7 @@ class ChannelSubscriptions:
         except SQLAlchemyError:
             await self._delete_remote(created.id)
             raise
+        self._recreate_at.pop(channel.channel_id, None)
         log.info("teams.channel_subscription.created", channel_type=channel_type)
 
     async def forget(self, *, channel_id: str | None = None, team_id: str | None = None) -> None:
@@ -333,6 +350,8 @@ class ChannelSubscriptions:
                 await self._delete_remote(subscription_id)
         if channel_id is not None:
             self._known.discard(channel_id)
+            self._not_before.pop(channel_id, None)
+            self._recreate_at.pop(channel_id, None)
         if team_id is not None:
             self._known.clear()  # cheap to rebuild: a row read per channel seen again
         if removed:
@@ -345,7 +364,7 @@ class ChannelSubscriptions:
         try:
             await self.forget(channel_id=channel_id, team_id=team_id)
         except SQLAlchemyError as err:
-            # The row stays; the next renewal's membership check drops it.
+            # The row stays, renewed, until a send there is refused as not in the roster.
             log.warning("teams.channel_subscription.forget_failed", error=type(err).__name__)
 
     async def _delete_remote(self, subscription_id: str) -> None:
@@ -390,55 +409,28 @@ class ChannelSubscriptions:
             )
 
     async def on_uninstall(self, ctx: ActivityContext[UninstalledActivity], *, ours: bool) -> None:
-        """The app was removed: from one channel when the activity names one, else the team.
+        """The app was removed from a team: drop every channel of it.
 
-        A team's own conversation is its General channel, whose id is the team's.
+        An uninstall is team-scope even when its channelData names a channel
+        (the one selected in the client), as `TeamInstalls.on_uninstall` reads
+        it. One channel's removal arrives as a conversationUpdate.
         """
         try:
             data = ctx.activity.channel_data
             team = data.team if data is not None else None
-            channel = data.channel if data is not None else None
             if ours and team is not None and team.id:
-                if channel is not None and channel.id and channel.id != team.id:
-                    await self._forget_logged(channel_id=channel.id)
-                else:
-                    await self._forget_logged(team_id=team.id)
+                await self._forget_logged(team_id=team.id)
         finally:
             await ctx.next()
 
     def watch(self, sender: TeamsSender) -> TeamsSender:
-        """`sender`, reporting a channel send refused with 403 or 404 to `send_refused`."""
+        """`sender`, reporting a send refused with `BotNotInConversationRoster` to `bot_removed`."""
         return _RemovalWatch(sender, self)
 
-    def send_refused(self, conversation_id: str) -> None:
-        """A send there was refused: check in the background whether the bot left."""
+    def bot_removed(self, conversation_id: str) -> None:
+        """Bot Framework says the bot is not in that channel: drop it in the background."""
         channel_id = conversation_id.split(";", 1)[0]
-        if channel_id in self._checking:
-            return
-        self._checking.add(channel_id)
-        self._spawn(self._check_membership(channel_id), name="teams.channel-membership")
-
-    async def _check_membership(self, channel_id: str) -> None:
-        try:
-            async with self._lock:
-                async with self._sessionmaker() as session:
-                    row = await get_teams_channel_subscription(
-                        session, tenant_id=self._tenant_id, channel_id=channel_id
-                    )
-                if row is not None and not await self._still_member(row):
-                    await self._drop(row, reason="not_a_member")
-        except SQLAlchemyError as err:
-            log.warning("teams.channel_membership.check_failed", error=type(err).__name__)
-        finally:
-            self._checking.discard(channel_id)
-
-    async def _still_member(self, row: TeamsChannelSubscriptionRow) -> bool:
-        """False only when the lookup says the bot is gone; a failed lookup keeps the channel."""
-        try:
-            return await self._is_member(row.channel_id)
-        except TEAMS_SEND_ERRORS as err:
-            log.info("teams.channel_membership.lookup_failed", error=type(err).__name__)
-            return True
+        self._spawn(self._forget_logged(channel_id=channel_id), name="teams.channel-removed")
 
     async def _drop(self, row: TeamsChannelSubscriptionRow, *, reason: str) -> None:
         """Delete the row and Graph's subscription; the next sight subscribes again."""
@@ -449,6 +441,7 @@ class ChannelSubscriptions:
         await self._delete_remote(row.subscription_id)
         self._known.discard(row.channel_id)
         self._not_before.pop(row.channel_id, None)
+        self._recreate_at.pop(row.channel_id, None)
         log.info("teams.channel_subscription.dropped", reason=reason)
 
     async def accept(self, notifications: Sequence[ChangeNotification], *, lifecycle: bool) -> bool:
@@ -544,7 +537,11 @@ class ChannelSubscriptions:
         """Deliver in order; the watermark moves only past a message that was taken."""
         for message in messages:
             if not await self._deliver(message, row):
-                return  # draining: the rest waits for Graph's replay or a later catch-up
+                # Draining began after this batch was answered 202 (mid-GET, or mid-catch-up):
+                # Graph never resends it, and only a `missed` notice runs a catch-up, so
+                # these messages are lost unless one comes. The watermark stays before
+                # them so that catch-up would still read them.
+                return
             if (created := _created(message)) is None:
                 continue
             try:
@@ -577,7 +574,7 @@ class ChannelSubscriptions:
             now = self._now()
             due = [row for row in rows if self._due_at(row) <= now]
             for row in due:
-                await self._refresh_current(row, recreate=False)
+                await self._refresh_current(row, recreate=row.channel_id in self._recreate_at)
             if due:
                 continue
             delay = seconds_until((self._due_at(row) for row in rows), now)
@@ -585,7 +582,11 @@ class ChannelSubscriptions:
                 await asyncio.wait_for(self._wake.wait(), delay)
 
     def _due_at(self, row: TeamsChannelSubscriptionRow) -> datetime:
-        return renewal_due_at(row.expires_at, not_before=self._not_before.get(row.channel_id))
+        return renewal_due_at(
+            row.expires_at,
+            not_before=self._not_before.get(row.channel_id),
+            due_by=self._recreate_at.get(row.channel_id),
+        )
 
     async def _refresh_current(self, seen: TeamsChannelSubscriptionRow, *, recreate: bool) -> None:
         """Refresh or recreate `seen`, re-read under the lock.
@@ -609,7 +610,7 @@ class ChannelSubscriptions:
                 log.info("teams.channel_subscription.stale_skipped")
                 return
             if recreate:
-                await self._recreate(row)
+                await self._replace(row)
             else:
                 await self._refresh(row)
 
@@ -618,9 +619,6 @@ class ChannelSubscriptions:
         now = self._now()
         # Set first: whatever happens, this subscription is not refreshed again for a while.
         self._not_before[row.channel_id] = now + RETRY_DELAY
-        if not await self._still_member(row):
-            await self._drop_logged(row, reason="not_a_member")
-            return
         if row.expires_at <= now:
             await self._replace(row)
             return
@@ -647,13 +645,6 @@ class ChannelSubscriptions:
             return
         log.info("teams.channel_subscription.renewed")
 
-    async def _recreate(self, row: TeamsChannelSubscriptionRow) -> None:
-        """Replace a subscription Graph removed, if the bot is still in the channel."""
-        if await self._still_member(row):
-            await self._replace(row)
-        else:
-            await self._drop_logged(row, reason="not_a_member")
-
     async def _drop_logged(self, row: TeamsChannelSubscriptionRow, *, reason: str) -> None:
         try:
             await self._drop(row, reason=reason)
@@ -661,7 +652,13 @@ class ChannelSubscriptions:
             log.warning("teams.channel_subscription.drop_failed", error=type(err).__name__)
 
     async def _replace(self, row: TeamsChannelSubscriptionRow) -> None:
-        """Replace a removed or expired subscription; drop the row where Graph refuses one."""
+        """Replace a removed or expired subscription; drop the row where Graph refuses one.
+
+        Any other failure retries after `RETRY_DELAY`: waiting for the renewal
+        would leave the channel without notifications for up to two days.
+        """
+        self._recreate_at.pop(row.channel_id, None)
+        self._not_before[row.channel_id] = self._now() + RETRY_DELAY
         await self._delete_remote(row.subscription_id)
         channel = SeenChannel(
             team_id=row.team_id,
@@ -683,15 +680,16 @@ class ChannelSubscriptions:
                 await self._drop_logged(row, reason=f"recreate_{err.status}")
                 return
             log.warning("teams.channel_subscription.recreate_failed", status=err.status)
-            return
         except SQLAlchemyError as err:
             log.warning("teams.channel_subscription.recreate_failed", error=type(err).__name__)
+        else:
+            log.info("teams.channel_subscription.recreated")
             return
-        log.info("teams.channel_subscription.recreated")
+        self._recreate_at[row.channel_id] = self._now() + RETRY_DELAY
 
 
 class _RemovalWatch:
-    """A sender that reports channel sends refused with 403 or 404, then re-raises."""
+    """A sender that reports a channel send refused as not in the roster, then re-raises."""
 
     def __init__(self, inner: TeamsSender, subscriptions: ChannelSubscriptions) -> None:
         self._inner = inner
@@ -703,10 +701,9 @@ class _RemovalWatch:
         try:
             return await self._inner.send(conversation_id, activity, service_url=service_url)
         except httpx.HTTPStatusError as err:
-            # Edits (a set id) can 404 on a deleted message; only a new post says much.
-            refused = err.response.status_code in _REMOVED_STATUSES
-            if refused and activity.id is None and conversation_id.startswith("19:"):
-                self._subscriptions.send_refused(conversation_id)
+            # Only this code: another 403 (an admin block) or a 404 says nothing of membership.
+            if conversation_id.startswith("19:") and bot_not_in_roster(err):
+                self._subscriptions.bot_removed(conversation_id)
             raise
 
 

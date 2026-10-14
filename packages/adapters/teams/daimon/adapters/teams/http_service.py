@@ -369,24 +369,11 @@ def create_teams_http_service(
         async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> bool:
             return await turns.handle_graph_message(message, channel)  # Built below.
 
-        async def bot_in_channel(channel_id: str) -> bool:
-            # No API names the channels an app is in; Bot Framework refuses a members read
-            # in a conversation the bot is not part of.
-            conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
-            try:
-                await conversations.get_paged_members(channel_id)
-            except httpx.HTTPStatusError as err:
-                if err.response.status_code in (403, 404):
-                    return False
-                raise
-            return True
-
         subscriptions = ChannelSubscriptions(
             sessionmaker=runtime.sessionmaker,
             graph=graph,
             groups=groups,
             channel_type=channel_type,
-            is_member=bot_in_channel,
             deliver=deliver,
             spawn=spawn,
             tenant_id=teams_tenant,

@@ -310,8 +310,8 @@ class TeamsApp:
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
-        # With Graph subscriptions, a channel send refused with 403 or 404 checks the bot is
-        # still there: a lost removal event would otherwise keep its subscription alive.
+        # With Graph subscriptions, a channel send refused as not in the roster drops the
+        # channel: a lost removal event would otherwise keep its subscription alive.
         self._sender = TimedSender(subscriptions.watch(sender) if subscriptions else sender)
         self._commands = commands
         self._bot_token = bot_token
