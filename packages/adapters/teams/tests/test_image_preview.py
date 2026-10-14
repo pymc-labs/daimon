@@ -83,6 +83,16 @@ def test_preview_is_skipped_when_nothing_fits(monkeypatch: pytest.MonkeyPatch) -
     assert preview_image(_noise_png(256), "image/png") is None, "no step fits 64 bytes"
 
 
+def test_preview_skips_an_image_over_the_pixel_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A huge image is refused from its header, before decoding costs gigabytes."""
+    monkeypatch.setattr(image_preview, "MAX_PREVIEW_PIXELS", 100 * 100)
+
+    assert preview_image(_image_bytes((101, 100), "PNG"), "image/png") is None, "over the cap"
+    assert preview_image(_image_bytes((100, 100), "PNG"), "image/png") is not None, (
+        "an image exactly at the cap still gets a preview"
+    )
+
+
 def test_preview_skips_an_animated_gif() -> None:
     """Teams does not render animated GIFs inline."""
     frames = [Image.new("RGB", (32, 32), color) for color in ("red", "blue")]

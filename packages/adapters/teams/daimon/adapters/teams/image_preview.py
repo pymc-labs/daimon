@@ -20,6 +20,9 @@ MAX_PREVIEW_DIMENSION = 1024
 # near 2.7 MB, and a 1024px chart is far under it as PNG.
 MAX_PREVIEW_BYTES = 512 * 1024
 MAX_PREVIEWS = 4
+# Pillow only warns up to 178M pixels, and decoding plus `copy()` of a 13000px
+# square took about 2 GB: anything this large gets no preview.
+MAX_PREVIEW_PIXELS = 40_000_000
 PREVIEW_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
 _PNG_MODES = frozenset({"1", "L", "LA", "P", "RGB", "RGBA"})
@@ -67,6 +70,8 @@ def preview_image(content: bytes, mime_type: str) -> tuple[str, bytes] | None:
         return None
     try:
         with Image.open(io.BytesIO(content), formats=_FORMATS) as source:
+            if source.width * source.height > MAX_PREVIEW_PIXELS:
+                return None
             if getattr(source, "n_frames", 1) != 1:
                 return None  # Teams does not render animated GIFs inline.
             return _fit(source)

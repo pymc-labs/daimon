@@ -90,11 +90,6 @@ async def _log_skip(file: SkippedFile) -> None:
     log.info("teams.output.oversize", file_id=file.file_id, size_bytes=file.size_bytes)
 
 
-async def _preview(name: str, file: DeliverableFile) -> Attachment | None:
-    # Decoding and re-encoding a large image takes long enough to stall other turns.
-    return await asyncio.to_thread(preview_attachment, name, file.content, file.mime_type)
-
-
 class Spawn(Protocol):
     """`TeamsApp.spawn`: runs a tracked background task the drain waits for."""
 
@@ -157,11 +152,18 @@ class TeamsOutputDelivery:
         # Files whose click is being handled: still listed, never offered again.
         self._claimed: set[str] = set()
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
+        # A decode can take hundreds of MB: at most two at once across all sweeps.
+        self._preview_slots = asyncio.Semaphore(2)
 
     async def _say(self, conversation_id: str, service_url: str | None, text: str) -> None:
         await self._sender.send(
             conversation_id, MessageActivityInput(text=text), service_url=service_url
         )
+
+    async def _preview(self, name: str, file: DeliverableFile) -> Attachment | None:
+        # Off the event loop: decoding and re-encoding a large image would stall other turns.
+        async with self._preview_slots:
+            return await asyncio.to_thread(preview_attachment, name, file.content, file.mime_type)
 
     async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
         # An extra, never the file itself: a failure is logged and the delivery stands.
@@ -246,7 +248,7 @@ class TeamsOutputDelivery:
             preview = None
             if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
                 # Before the upload: a preview error must never re-upload a saved file.
-                preview = await _preview(name, file)
+                preview = await self._preview(name, file)
             try:
                 item = await files.upload(inbound, name, file.content)
             except GraphUnavailable as err:
@@ -305,7 +307,7 @@ class TeamsOutputDelivery:
         if file.file_id in pending:
             raise OutputDeliveryDeferred(file.file_id)  # Still waiting on the last card.
         name = display_filename_for(file.filename, file.mime_type)
-        if (preview := await _preview(name, file)) is not None:
+        if (preview := await self._preview(name, file)) is not None:
             await self._send_previews(inbound, [preview])
         token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(
