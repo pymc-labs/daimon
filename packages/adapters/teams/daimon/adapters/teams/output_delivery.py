@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import functools
 import secrets
+import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
@@ -155,8 +156,9 @@ class TeamsOutputDelivery:
         # repeats only the card. Per process, so a restart previews once more.
         self._previewed: set[str] = set()
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
-        # A decode can take hundreds of MB: at most two at once across all sweeps.
-        self._preview_slots = asyncio.Semaphore(2)
+        # A decode can take hundreds of MB: at most two at once across all sweeps. Held
+        # by the worker thread, which a cancelled sweep cannot stop.
+        self._preview_slots = threading.BoundedSemaphore(2)
 
     async def _say(self, conversation_id: str, service_url: str | None, text: str) -> None:
         await self._sender.send(
@@ -165,8 +167,11 @@ class TeamsOutputDelivery:
 
     async def _preview(self, name: str, file: DeliverableFile) -> Attachment | None:
         # Off the event loop: decoding and re-encoding a large image would stall other turns.
-        async with self._preview_slots:
-            return await asyncio.to_thread(preview_attachment, name, file.content, file.mime_type)
+        return await asyncio.to_thread(self._decode_preview, name, file)
+
+    def _decode_preview(self, name: str, file: DeliverableFile) -> Attachment | None:
+        with self._preview_slots:
+            return preview_attachment(name, file.content, file.mime_type)
 
     async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
         # An extra, never the file itself: a failure is logged and the delivery stands.
