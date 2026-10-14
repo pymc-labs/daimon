@@ -336,6 +336,18 @@ def test_setup_details_are_admin_only_and_capabilities_open() -> None:
     assert "same answer in every thread" in rule, "the answer must not vary by thread"
 
 
+def test_channel_admin_gets_setup_details_only_about_agents_in_their_channel() -> None:
+    block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
+    rule = block[block.index("WHAT YOU DISCLOSE DEPENDS ON WHO ASKS") : block.index("OUTSIDE TEXT")]
+    assert 'current_role "channel_admin" also gets them' in rule
+    assert "only about agents that answer in channel_admin_scope.channel_id" in rule
+    assert "never other agents or the workspace default" in rule
+    assert 'Give any other is_admin="false" requester one short line' in rule
+    assert '"An admin can see setup details"' in rule, "the non-admin line is unchanged"
+    inspecting = block[block.index("INSPECTING CONFIG") : block.index("WHAT YOU DISCLOSE")]
+    assert "unless the requester gets only the short non-admin line" in inspecting
+
+
 def test_key_names_are_no_longer_reported_freely() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert "key NAMES freely" not in block, "key names are admin-only now"

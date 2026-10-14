@@ -3220,10 +3220,11 @@
       'description': '''
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
         <blank line>
-        ``mcp_servers`` and ``created_at`` are null for a non-admin caller: setup
-        details are admin-only, capabilities (name, description, model, skills)
-        are not. Members see the channel/thread responders and agents explicitly
-        allowed to run here; unrouted agents and other channels' agents are hidden.
+        ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
+        admin nor an admin of a channel the agent is limited to: setup details are
+        for them, capabilities (name, description, model, skills) are not. Members
+        see the channel/thread responders and agents explicitly allowed to run
+        here; unrouted agents and other channels' agents are hidden.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.

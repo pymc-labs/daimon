@@ -775,7 +775,11 @@ write (`daimon config set`, `daimon config propagate`) binds an agent with a
 rule as the default of a channel outside it, for server admins too
 (`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
 and the tenant default stay with server
-admins, and a tenant with no grant behaves as before. Stored role ids refresh on
+admins, and a tenant with no grant behaves as before. Setup details follow the same
+reach: `list_agents` and `get_agent` show a channel admin an agent's MCP servers, creation date
+and prompt only for an agent they could edit this way, and the agent's own guidance tells a
+channel admin its setup details only about agents that answer in their channel; every other
+non-admin sees capabilities only. Stored role ids refresh on
 the member's next chat turn; until then MCP calls, a coding-tools token
 included, keep the old grant. Unattended runs are routines and queued wakes
 (timers, handoffs, applied private input); each fires with its requester's
