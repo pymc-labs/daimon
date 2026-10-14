@@ -20,6 +20,7 @@ from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
     FILE_INFO_CONTENT_TYPE,
+    OFFER_TTL_S,
     TeamsOutputDelivery,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -72,6 +73,7 @@ def _harness(
     listing: list[FileMetadata] | None = None,
     channel_files: ChannelFiles | None = None,
     contents: dict[str, bytes] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> _Harness:
     """MA serves `listing` (a small CSV by default) minus deleted entries;
     a file's bytes come from `contents` by id, else a small CSV."""
@@ -115,7 +117,12 @@ def _harness(
     )
     sender = FakeSender()
     delivery = TeamsOutputDelivery(
-        runtime=runtime, sender=sender, spawn=spawn, files=channel_files, sleep=no_sleep
+        runtime=runtime,
+        sender=sender,
+        spawn=spawn,
+        files=channel_files,
+        clock=clock,
+        sleep=no_sleep,
     )
     return _Harness(delivery, sender, deletes, uploads, tasks)
 
@@ -563,6 +570,26 @@ async def test_dm_image_output_is_previewed_right_before_its_consent_card(
     assert (image.content_url or "").startswith("data:image/png;base64,"), "as a data URI"
     assert card.attachments and card.attachments[0].content_type == FILE_CONSENT_CONTENT_TYPE
     assert harness.deletes == [], "the preview does not change the consent card's ledger"
+
+
+async def test_dm_image_reoffered_after_its_card_expires_is_not_previewed_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A re-offer repeats the consent card only: the chart is already on screen."""
+    meta, content = _png("file_png")
+    now = [0.0]
+    harness = _harness(
+        db_session_factory, [meta], contents={"file_png": content}, clock=lambda: now[0]
+    )
+
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    now[0] += OFFER_TTL_S + 1
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    kinds = [(a.attachments or [])[0].content_type for a in harness.sender.activities]
+    assert kinds == ["image/png", FILE_CONSENT_CONTENT_TYPE, FILE_CONSENT_CONTENT_TYPE], (
+        "one preview, then a fresh card per offer"
+    )
 
 
 async def test_failed_dm_preview_still_sends_the_consent_card(

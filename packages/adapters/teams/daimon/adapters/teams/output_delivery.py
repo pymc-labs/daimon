@@ -17,7 +17,7 @@ skip path to be logged, and the agent guidance has the agent say so in its
 reply.
 Image outputs also travel as inline previews (`image_preview`): in a channel,
 up to MAX_PREVIEWS in delivery order in one message after the links; in a 1:1
-chat, each just before its consent card. A failed preview is only logged.
+chat, each just before its first consent card. A failed preview is only logged.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -151,6 +151,9 @@ class TeamsOutputDelivery:
         self._offers: dict[str, _Offer] = {}
         # Files whose click is being handled: still listed, never offered again.
         self._claimed: set[str] = set()
+        # Files already previewed in a 1:1 chat: a re-offer (expired card, failed send)
+        # repeats only the card. Per process, so a restart previews once more.
+        self._previewed: set[str] = set()
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
         # A decode can take hundreds of MB: at most two at once across all sweeps.
         self._preview_slots = asyncio.Semaphore(2)
@@ -313,8 +316,10 @@ class TeamsOutputDelivery:
         if file.file_id in pending:
             raise OutputDeliveryDeferred(file.file_id)  # Still waiting on the last card.
         name = display_filename_for(file.filename, file.mime_type)
-        if (preview := await self._preview(name, file)) is not None:
-            await self._send_previews(inbound, [preview])
+        if file.file_id not in self._previewed:
+            self._previewed.add(file.file_id)
+            if (preview := await self._preview(name, file)) is not None:
+                await self._send_previews(inbound, [preview])
         token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(
             file_id=file.file_id,
