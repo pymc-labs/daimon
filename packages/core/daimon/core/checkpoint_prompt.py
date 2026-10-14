@@ -241,7 +241,8 @@ def build_checkpoint_prompt(
     size_check = [
         f'  size=$(stat -c %s {scratch_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
         f"    members ! -type d -printf '%D:%i %s %p\\0' > {_MEMBER_SIZES_PATH}",
-        "    declare -A w n k; total=0; while IFS= read -r -d '' e; do i=${e%% *}; e=${e#* }; "
+        "    declare -A w n k; total=0; "
+        "while IFS= read -r -d '' e; do i=${e%% *}; e=${e#* }; "
         "p=${e#* }; w[$i]=$((${w[$i]-${e%% *}} + 1024)); n[$i]+=$p$'\\n'",
         f"      [[ $p == *$'\\n'* || $p == *[[:space:]] ]] && k[$i]=1; done < {_MEMBER_SIZES_PATH}",
         '    for i in "${!w[@]}"; do total=$((total + ${w[$i]})); echo "${w[$i]} $i"; '
@@ -255,7 +256,8 @@ def build_checkpoint_prompt(
         f"    pack; size=$(stat -c %s {scratch_path})",
         "  fi",
         f'  if [ "$size" -gt {max_bundle_bytes} ]; then echo "{HANDOFF_TOO_LARGE_MARKER} $size"; '
-        f"else cp {scratch_path} {archive_path}; ls -l {archive_path}; fi",
+        f"else cp {scratch_path} {archive_path} && ls -l {archive_path} "
+        f"|| rm -f {archive_path}; fi",
         f"  rm -f {_SCRATCH_ARCHIVE_DIR}/{HANDOFF_FILENAME_PREFIX}*",
     ]
 
@@ -282,8 +284,8 @@ def build_checkpoint_prompt(
         f"{home_dir} and {CHECKPOINT_SCRATCH_DIR}, the files directly in / (where the shell "
         "starts), the outputs directory, and the working "
         "repository if one is mounted. Credential mounts, hidden directories and language "
-        "toolchains and their caches stay behind. The commands below already exclude every one "
-        "of them; run them as written and add nothing.",
+        "toolchains and their caches stay behind. The commands below already exclude them; "
+        "run them as written.",
     ]
     steps.append(
         "\n".join(

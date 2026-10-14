@@ -62,7 +62,7 @@ def test_prompt_names_the_exact_archive_path_and_filename() -> None:
     )
     filename = handoff_filename(TRANSFER_ID)
     assert f"tar czf /tmp/{filename} " in prompt, "tar writes outside the outputs directory"
-    assert f"cp /tmp/{filename} /mnt/session/outputs/{filename};" in prompt, (
+    assert f"cp /tmp/{filename} /mnt/session/outputs/{filename} &&" in prompt, (
         "and the final archive is copied in flat, never renamed inside that mount"
     )
     assert f"ls -l /mnt/session/outputs/{filename}" in prompt, (
@@ -402,8 +402,8 @@ def test_prompt_deletes_an_over_cap_archive_and_reports_the_size_instead() -> No
     )
     assert (
         f'  if [ "$size" -gt 20971520 ]; then echo "HANDOFF_TOO_LARGE $size"; '
-        f"else cp {scratch} {archive}; ls -l {archive}; fi\n  rm -f /tmp/daimon-handoff-*\n"
-        in prompt
+        f"else cp {scratch} {archive} && ls -l {archive} || rm -f {archive}; fi\n"
+        "  rm -f /tmp/daimon-handoff-*\n" in prompt
     ), "only an archive under the cap reaches the outputs, and the scratch files go after"
     assert "do not retry, shrink or rebuild the archive yourself" in prompt, (
         "an over-cap archive is a final answer, not an invitation to a second attempt"
