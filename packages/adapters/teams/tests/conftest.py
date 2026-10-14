@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import functools
 import json
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -495,6 +497,20 @@ async def running_service(
         # One shared test connection: let the boot sweep finish first.
         await service.turns.start()
         yield service
+
+
+async def settle(teams: TeamsApp) -> None:
+    """Wait until every task `teams` spawned has ended."""
+    async with asyncio.timeout(10):
+        while teams._tasks:
+            await asyncio.gather(*list(teams._tasks))
+            await asyncio.sleep(0)  # lets a finished task's done callback drop it
+
+
+async def finish_turns(teams: TeamsApp) -> None:
+    """Let every turn run, then drain: one reaching its start during a drain is held."""
+    await settle(teams)
+    await teams.drain(timeout=30)
 
 
 async def post_activity(service: TeamsHttpService, payload: dict[str, object]) -> Any:

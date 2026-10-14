@@ -435,9 +435,11 @@ restart began (queued behind a running turn, or arriving during the 15
 seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
 this up as soon as I'm back." note, and the next process runs it once, in
 order, through the usual admission checks. One more than 10 minutes old by
-then, or one that could not be stored, gets "I restarted for an update and
-couldn't get to this in time. Please send it again." instead. A turn that had
-started is never rerun: its card is marked interrupted as above. A message's
+then gets "I restarted for an update and couldn't get to this in time. Please
+send it again." instead. A turn that had started is never rerun: its card is
+marked interrupted as above. Nothing is said about a message until its receipt
+is written: while the database is unreachable the chat hears nothing, and a
+message whose start could not be recorded is tried again every 30 seconds. A message's
 text is stored only until its turn starts or it is answered, and the
 content-free receipt is deleted after 24 hours.
 

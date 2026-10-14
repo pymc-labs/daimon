@@ -124,6 +124,30 @@ async def test_a_drain_tells_the_chat_once_about_queued_messages_even_when_repea
     assert _texts(sender) == [HOLDING], "one notice for the chat, however often it drains"
 
 
+async def test_a_drain_tells_a_chat_once_when_a_message_arrives_behind_a_queued_one(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        started.set()
+        await release.wait()
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        teams.spawn(teams._admit(make_inbound("one")), name="turn")
+        await started.wait()
+        await teams._admit(_sent("two", 2))
+        drain = asyncio.create_task(teams.drain(timeout=5.0))
+        await asyncio.sleep(0)
+        await teams.handle_message(_message(make_message_activity(text="three", activity_id="a-3")))
+        release.set()
+        await drain
+
+    assert _texts(sender) == [HOLDING], "the queued message and the arrival share one notice"
+
+
 async def test_a_turn_ending_during_the_drain_starts_no_queued_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -173,18 +197,58 @@ async def test_a_message_arriving_during_the_drain_is_held_unless_unaddressed(
     assert ran == ["a-2"], "the addressed message is replayed; chatter is not held"
 
 
-async def test_an_unrecorded_arrival_asks_the_chat_to_send_it_again(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize("draining", [True, False])
+async def test_an_unrecorded_arrival_is_not_answered(
+    db_session_factory: async_sessionmaker[AsyncSession], draining: bool
 ) -> None:
+    """The write may have landed after all: a notice could precede its own replay."""
     sender = FakeSender()
     teams = _app(db_session_factory, sender)
-    teams.draining = True
+    teams.draining = draining
     down = OperationalError("INSERT", {}, Exception("database is down"))
 
-    with patch.object(TeamsAdmissions, "claim", AsyncMock(side_effect=down)):
+    with (
+        patch.object(TeamsAdmissions, "claim", AsyncMock(side_effect=down)),
+        patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn,
+    ):
         await teams.handle_message(_message(make_message_activity(activity_id="a-1")))
+        await _settle(teams)
 
-    assert _texts(sender) == [NOT_HELD], "nothing was kept, so no promise is made"
+    turn.assert_not_awaited()
+    assert _texts(sender) == [], "silent: nothing said without a recorded admission"
+
+
+async def test_a_message_arriving_during_a_slow_boot_sweep_survives_a_drain(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """It is claimed before it waits for the sweep, so the next boot replays it."""
+    teams = _app(db_session_factory, FakeSender())
+    claimed = asyncio.Event()
+    claim = TeamsAdmissions.claim
+
+    async def _claim(self: TeamsAdmissions, inbound: TeamsInbound, *, now: datetime) -> bool:
+        try:
+            return await claim(self, inbound, now=now)
+        finally:
+            claimed.set()
+
+    with (
+        patch.object(app_module, "retire_orphaned_turns", lambda **_: asyncio.Event().wait()),
+        patch.object(TeamsAdmissions, "claim", _claim),
+    ):
+        teams.start()
+        await teams.handle_message(_message(make_message_activity(text="hi", activity_id="a-1")))
+        await claimed.wait()
+        await teams.drain(timeout=0.0)
+    ran: list[str] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.text)
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        await _boot(_app(db_session_factory, FakeSender()))
+
+    assert ran == ["hi"], "the next process runs it"
 
 
 async def test_boot_replays_unhandled_messages_once_in_order(
@@ -351,24 +415,18 @@ async def test_an_error_notice_that_cannot_be_fenced_is_not_sent_and_the_message
     turn.assert_awaited_once()
 
 
-@pytest.mark.parametrize("refused", [True, False])
-async def test_a_queued_message_failing_its_fence_drops_alone_from_the_batch(
-    db_session_factory: async_sessionmaker[AsyncSession], refused: bool
+async def test_a_queued_message_another_process_has_drops_alone_from_the_batch(
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Another owner, or an unreachable database, costs that message, not its neighbours."""
     sender = FakeSender()
     teams = _app(db_session_factory, sender)
     started, release = asyncio.Event(), asyncio.Event()
     ran: list[str] = []
     two, three = _sent("two", 2), _sent("three", 3)
-    finish = TeamsAdmissions.finish
+    finish = admissions_module.finish_teams_messages
 
-    async def _finish(self: TeamsAdmissions, inbound: TeamsInbound) -> bool:
-        if inbound.activity_id != two.activity_id:
-            return await finish(self, inbound)
-        if refused:
-            return False
-        raise OperationalError("UPDATE", {}, Exception("database is down"))
+    async def _finish(session: AsyncSession, **kwargs: Any) -> set[str]:
+        return await finish(session, **kwargs) - {two.activity_id}
 
     async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         ran.append(inbound.text)
@@ -377,7 +435,7 @@ async def test_a_queued_message_failing_its_fence_drops_alone_from_the_batch(
 
     with (
         patch.object(TeamsApp, "_run_turn", _turn),
-        patch.object(TeamsAdmissions, "finish", _finish),
+        patch.object(admissions_module, "finish_teams_messages", _finish),
     ):
         teams.spawn(teams._admit(make_inbound("one")), name="turn")
         await started.wait()
@@ -386,8 +444,63 @@ async def test_a_queued_message_failing_its_fence_drops_alone_from_the_batch(
         release.set()
         await _settle(teams)
 
-    assert ran == ["one", "three"], "the batch's turn runs without the fenced message"
+    assert ran == ["one", "three"], "the batch's turn runs without the other process's message"
     assert _texts(sender) == [], "and nothing is said about it"
+
+
+async def test_a_batch_whose_fence_fails_stays_silent_and_runs_on_the_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A database error leaves the whole batch unhandled; the reclaim loop runs it again."""
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[str] = []
+    two, three = _sent("two", 2), _sent("three", 3)
+    finish = TeamsAdmissions.finish
+
+    async def _finish(self: TeamsAdmissions, items: list[TeamsInbound]) -> list[TeamsInbound]:
+        if two in items:
+            raise OperationalError("UPDATE", {}, Exception("database is down"))
+        return await finish(self, items)
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.text)
+        started.set()
+        await release.wait()
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        with patch.object(TeamsAdmissions, "finish", _finish):
+            teams.spawn(teams._admit(make_inbound("one")), name="turn")
+            await started.wait()
+            await teams._admit(two)
+            await teams._admit(three)
+            release.set()
+            await _settle(teams)
+        assert ran == ["one"], "no part of the batch runs unfenced"
+        await teams._retry_unfenced()
+        await _settle(teams)
+        await teams._retry_unfenced()
+        await _settle(teams)
+
+    assert ran == ["one", "two", "three"], "the retry runs each held message once, in order"
+    assert _texts(sender) == [], "and nothing was said while it waited"
+
+
+async def test_the_retry_never_reruns_a_started_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failed fence after the turn (its error notice's) leaves a done message done."""
+    teams = _app(db_session_factory, FakeSender())
+    inbound = make_inbound("hi")
+
+    with patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn:
+        await teams._admit(inbound)
+        teams._unfenced.append(inbound)
+        await teams._retry_unfenced()
+        await _settle(teams)
+
+    turn.assert_awaited_once()
 
 
 async def test_a_typed_name_thread_reply_is_kept_for_a_replay(
@@ -402,6 +515,25 @@ async def test_a_typed_name_thread_reply_is_kept_for_a_replay(
     reclaimed = await gate.reclaim(now=datetime.now(UTC))
 
     assert reclaimed.replay == [reply], "it may start a turn, so a restart must not lose it"
+
+
+@pytest.mark.parametrize("switch_on", [True, False])
+async def test_a_stale_typed_name_reply_is_told_only_while_its_switch_is_on(
+    db_session_factory: async_sessionmaker[AsyncSession], switch_on: bool
+) -> None:
+    reply = dataclasses.replace(
+        make_inbound("@daimon look", kind="channel"), unprompted=True, by_name=True
+    )
+    await _left_by_exited_process(db_session_factory, reply)
+    sender = FakeSender()
+
+    with (
+        patch.object(admissions_module, "REPLAY_MAX_AGE", timedelta(minutes=-1)),
+        patch.object(TeamsApp, "_plain_text_mentions_on", AsyncMock(return_value=switch_on)),
+    ):
+        await _boot(_app(db_session_factory, sender))
+
+    assert _texts(sender) == ([NOT_HELD] if switch_on else []), "told only if it still asks"
 
 
 async def test_a_message_reaching_its_turn_during_the_drain_is_held_not_started(

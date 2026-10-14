@@ -368,6 +368,8 @@ class TeamsApp:
         # A replayed message's (conversation, activity) -> set once it holds its
         # place in the thread queue, so the chat's next replay may follow.
         self._replay_queued: dict[tuple[str, str], asyncio.Event] = {}
+        # Messages whose fence hit a database error: the reclaim loop runs them again.
+        self._unfenced: list[TeamsInbound] = []
 
     @property
     def in_flight(self) -> int:
@@ -469,26 +471,54 @@ class TeamsApp:
             stale=len(reclaimed.stale),
         )
         if reclaimed.stale:
-            self.spawn(self._tell(reclaimed.stale, NOT_HELD), name="teams.admission-stale")
-        chats: dict[str, list[TeamsInbound]] = {}
+            self.spawn(self._tell_stale(reclaimed.stale), name="teams.admission-stale")
         for inbound in reclaimed.replay:
             # The pre-filter learns it too, so a redelivery here is dropped cheaply.
             root = inbound.conversation_id.removesuffix(f";messageid={inbound.activity_id}")
             for conversation in {inbound.conversation_id, root}:
                 self._first_delivery(conversation, inbound.activity_id)
+        self._replay(reclaimed.replay)
+
+    def _replay(self, items: list[TeamsInbound]) -> None:
+        chats: dict[str, list[TeamsInbound]] = {}
+        for inbound in items:
             chats.setdefault(inbound.conversation_id, []).append(inbound)
         for queue in chats.values():
             self.spawn(self._replay_chat(queue), name="teams.replay")
 
+    async def _tell_stale(self, stale: list[TeamsInbound]) -> None:
+        """Ask a too-old message's chat to resend it; a typed name only while it still asks."""
+        if any(i.by_name for i in stale) and await self._plain_text_mentions_on():
+            stale = [_as_mention(i) if i.by_name else i for i in stale]
+        await self._tell([i for i in stale if not i.by_name], NOT_HELD)
+
     async def _reclaim_loop(self) -> None:
-        """Catch rows of a predecessor still draining at boot, once it exits; prune."""
+        """Catch rows of a predecessor still draining at boot, once it exits; retry
+        messages whose fence failed; prune."""
         while not self.draining:
             await asyncio.sleep(RECLAIM_INTERVAL_S)
             await self._reclaim()
+            await self._retry_unfenced()
             try:
                 await self._admissions.prune(now=datetime.now(UTC))
             except _DB_ERRORS as exc:
                 log.warning("teams.admission.prune_failed", error_type=type(exc).__name__)
+
+    async def _retry_unfenced(self) -> None:
+        """Run again what a failed fence left unhandled; its intake passes the fence first.
+
+        A message the fence did hold (its turn started) stays done, never rerun.
+        """
+        unfenced, self._unfenced = self._unfenced, []
+        if not unfenced:
+            return
+        try:
+            pending = await self._admissions.unhandled(unfenced)
+        except _DB_ERRORS as exc:
+            log.error("teams.admission.retry_failed", exc_info=exc)
+            self._unfenced[:0] = unfenced
+            return
+        self._replay(pending)
 
     async def _replay_chat(self, queue: list[TeamsInbound]) -> None:
         """Feed one chat's replays through the intake in order, each queued behind
@@ -551,25 +581,28 @@ class TeamsApp:
         try:
             claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
         except _DB_ERRORS as exc:
+            # Unrecorded, a redelivery could be answered too: stay silent.
             log.error("teams.admission.claim_failed", exc_info=exc)
-            await self._tell([parsed], NOT_HELD)  # nothing stored, so nothing replays
             return
         if claimed:
             await self._hold([parsed])
 
     async def _admit(self, parsed: TeamsInbound) -> None:
-        """Claim the message's admission, then run the intake; a duplicate stops here."""
-        if self._recovery is not None:
-            await asyncio.shield(self._recovery)  # the boot reclaim shares this path
+        """Claim the message's admission, then run the intake; a duplicate stops here.
+
+        Claimed first, so a drain during a slow boot sweep leaves it for the next boot.
+        """
         try:
             claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
         except _DB_ERRORS as exc:
+            # Unrecorded, a redelivery could be answered too: stay silent.
             log.error("teams.admission.claim_failed", exc_info=exc)
-            await self._tell([parsed], _FAILED)
             return
         if not claimed:
             log.info("teams.message.duplicate", conversation_type=parsed.kind)
             return
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)  # a predecessor's replays go first
         await self._intake(parsed)
 
     async def _intake(self, parsed: TeamsInbound) -> None:
@@ -581,9 +614,18 @@ class TeamsApp:
         else:
             await self._handle(parsed)
 
-    async def _finish(self, inbound: TeamsInbound) -> bool:
-        """The admission fence before a turn or an answer: False when another process has it."""
-        return await self._admissions.finish(inbound)
+    async def _finish(self, items: list[TeamsInbound]) -> list[TeamsInbound]:
+        """The admission fence before a turn or an answer: the items this process may act on.
+
+        On a database error none: they stay unhandled and silent, kept for the reclaim
+        loop to run again.
+        """
+        try:
+            return await self._admissions.finish(items)
+        except _DB_ERRORS as exc:
+            log.error("teams.admission.finish_failed", exc_info=exc)
+            self._unfenced.extend(items)
+            return []
 
     async def _provision(self) -> None:
         settings = self.runtime.settings
@@ -742,7 +784,7 @@ class TeamsApp:
             await self._handle(_as_mention(inbound))
             return
         # Off: a root post stays unanswered and a thread reply is screened as before.
-        if not await self._finish(inbound):
+        if not await self._finish([inbound]):
             return
         if (
             inbound.unprompted
@@ -874,7 +916,7 @@ class TeamsApp:
         May-post is decided first, so no post below (denial, pointer, shed, error) skips it.
         """
         if not await self._may_post(inbound.channel_id, inbound.thread_id):
-            await self._finish(inbound)  # nothing to answer, so nothing to replay
+            await self._finish([inbound])  # nothing to answer, so nothing to replay
             return
         # For the billing card's names; in the background, never failing the turn.
         remember_inbound(self.runtime.sessionmaker, self._tenant_id, inbound)
@@ -891,8 +933,8 @@ class TeamsApp:
         except _TURN_ERRORS as exc:
             log.error("teams.message.failed", conversation_id=inbound.conversation_id, exc_info=exc)
             capture_exception_with_scope(exc)
-            with contextlib.suppress(*TEAMS_SEND_ERRORS, *_DB_ERRORS):
-                if await self._finish(inbound):  # unfinished, it replays: say nothing
+            if await self._finish([inbound]):  # unfinished, it replays: say nothing
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(inbound, _FAILED)
 
     async def _route(self, inbound: TeamsInbound) -> None:
@@ -900,7 +942,7 @@ class TeamsApp:
             await asyncio.shield(self._recovery)
         tenant_id = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
         if tenant_id is None:
-            if await self._finish(inbound):
+            if await self._finish([inbound]):
                 await self._say(inbound, DENIED)
             return
         inbound = await self._stored_external(inbound, tenant_id)
@@ -908,7 +950,7 @@ class TeamsApp:
         # and a command's 1:1 chat cannot be opened across organisations.
         command = None if inbound.is_external else parse_command(inbound.text, self._commands)
         if command is not None:
-            if not await self._finish(inbound):
+            if not await self._finish([inbound]):
                 return
             name, args = command
             asked_in = None
@@ -1010,7 +1052,7 @@ class TeamsApp:
                 cap=cap,
                 reason="queue_full",
             )
-            if await self._finish(inbound):
+            if await self._finish([inbound]):
                 await self._say(inbound, _SHED)
             return
         self._last_message_at[key] = datetime.now(UTC)
@@ -1040,32 +1082,24 @@ class TeamsApp:
             if self.draining:
                 if unstarted:
                     await self._hold(unstarted)
-            else:
-                for item in unstarted:
-                    with contextlib.suppress(*TEAMS_SEND_ERRORS, *_DB_ERRORS):
-                        if await self._finish(item):
-                            await self._say(item, _FAILED)
+            elif unstarted:
+                for item in await self._finish(unstarted):
+                    with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                        await self._say(item, _FAILED)
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
         return ThreadQueue(self._processing, self._pending)
 
     async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
-        """One turn per author; each message passes the admission fence on its own."""
+        """One turn per author, composed of the messages its fence still held."""
 
         async def run(batch: list[TeamsInbound]) -> None:
             if self.draining:
                 # A turn started now would be cut off: `_holding` holds these instead.
                 self._pending.setdefault(key, []).extend(batch)
                 return
-            kept: list[TeamsInbound] = []
-            for item in batch:
-                try:
-                    if await self._finish(item):  # False: another process has it
-                        kept.append(item)
-                except _DB_ERRORS as exc:
-                    # Left unhandled: it replays once this process is gone, never twice.
-                    log.error("teams.admission.finish_failed", exc_info=exc)
+            kept = await self._finish(batch)  # one another process has drops alone
             if not kept:
                 return
             turn = await route_to_setup(self.runtime.sessionmaker, _compose(kept), tenant_id)

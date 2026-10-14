@@ -141,8 +141,8 @@ class Replay:
     async def barrier(self):
         self.effects.append(("recovery",))
 
-    async def finish(self, item):
-        return True
+    async def finish(self, items):
+        return items
 
     async def hold(self, items):
         self.effects.extend(("held", item.activity_id) for item in items)

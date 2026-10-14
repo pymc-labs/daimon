@@ -58,6 +58,7 @@ from .conftest import (
     TeamsApiFake,
     assert_teams_accepts,
     build_teams_runtime,
+    finish_turns,
     make_channel_activity,
     make_invoke,
     make_message_activity,
@@ -114,7 +115,7 @@ async def _service(
     with create if one_session else nullcontext():
         async with running_service(runtime, fake) as service:
             yield service
-            await service.turns.drain(timeout=30)
+            await finish_turns(service.turns)
     for request in fake.activity_requests:
         assert_teams_accepts(request)
 

@@ -8,7 +8,8 @@ is handled: before its turn starts or it is otherwise answered. When the
 process exits first (a drain, a crash), the next boot reclaims the row and
 feeds it through the ordinary intake again; one older than `REPLAY_MAX_AGE`
 gets a "send it again" notice instead. Notices are recorded before they are
-sent, so none goes out twice; a failed send is lost, never repeated.
+sent, so none goes out twice; a failed send is lost, never repeated. Nothing
+is said before its write succeeds: on a database error the chat hears nothing.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from daimon.core.stores.domain import TeamsMessageAdmissionRow
 from daimon.core.stores.teams_message_admissions import (
     claim_teams_message,
     finish_teams_messages,
+    list_unhandled_teams_messages,
     mark_restart_notice,
     prune_teams_messages,
     reclaim_teams_messages,
@@ -112,16 +114,36 @@ class TeamsAdmissions:
                 sent_at=now,
             )
 
-    async def finish(self, inbound: TeamsInbound) -> bool:
-        """The fence before a turn or an answer: False means another process has it."""
+    async def finish(self, items: Sequence[TeamsInbound]) -> list[TeamsInbound]:
+        """The fence before a turn or an answer, one transaction for one chat's batch.
+
+        Returns the items this process may act on; one another process has is left out.
+        """
         async with self.sessionmaker.begin() as session:
-            return await finish_teams_messages(
+            held = await finish_teams_messages(
                 session,
                 tenant_id=self.tenant_id,
-                channel_id=admission_channel(inbound.conversation_id),
-                message_ids=inbound.message_ids,
+                channel_id=admission_channel(items[0].conversation_id),
+                message_ids=[i for item in items for i in item.message_ids],
                 owner_key=self.owner_key,
             )
+        return [item for item in items if held.issuperset(item.message_ids)]
+
+    async def unhandled(self, items: Sequence[TeamsInbound]) -> list[TeamsInbound]:
+        """The items still waiting on this process's fence: none of their rows handled."""
+        async with self.sessionmaker() as session:
+            return [
+                item
+                for item in items
+                if set(item.message_ids)
+                <= await list_unhandled_teams_messages(
+                    session,
+                    tenant_id=self.tenant_id,
+                    channel_id=admission_channel(item.conversation_id),
+                    message_ids=item.message_ids,
+                    owner_key=self.owner_key,
+                )
+            ]
 
     async def mark_notice(self, items: Sequence[TeamsInbound]) -> bool:
         """Record the restart notice for one chat's messages; True if it is still owed."""
@@ -130,6 +152,7 @@ class TeamsAdmissions:
                 session,
                 tenant_id=self.tenant_id,
                 channel_id=admission_channel(items[0].conversation_id),
+                conversation_id=items[0].conversation_id,
                 message_ids=[i for item in items for i in item.message_ids],
                 owner_key=self.owner_key,
             )

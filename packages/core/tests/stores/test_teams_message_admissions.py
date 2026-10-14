@@ -13,6 +13,7 @@ from daimon.core.stores.teams_message_admissions import (
     count_teams_messages_for_user,
     delete_teams_messages_for_user,
     finish_teams_messages,
+    list_unhandled_teams_messages,
     mark_restart_notice,
     prune_teams_messages,
     reclaim_teams_messages,
@@ -33,13 +34,14 @@ async def _claim(
     *,
     payload: bool = True,
     user_id: str | None = None,
+    conversation: str | None = None,
 ) -> bool:
     return await claim_teams_message(
         session,
         tenant_id=tenant_id,
         channel_id=CHANNEL,
         message_id=message_id,
-        conversation_id=f"{CHANNEL};messageid={message_id}",
+        conversation_id=conversation or f"{CHANNEL};messageid={message_id}",
         owner_key=owner,
         sent_at=NOW,
         user_id=user_id,
@@ -47,7 +49,7 @@ async def _claim(
     )
 
 
-async def _finish(session: AsyncSession, tenant_id: uuid.UUID, owner: int, *ids: str) -> bool:
+async def _finish(session: AsyncSession, tenant_id: uuid.UUID, owner: int, *ids: str) -> set[str]:
     return await finish_teams_messages(
         session, tenant_id=tenant_id, channel_id=CHANNEL, message_ids=ids or ("1",), owner_key=owner
     )
@@ -151,22 +153,46 @@ async def test_a_stale_message_is_handled_before_anyone_is_told(
     assert first.replay == [] and second.stale == [], "and never again, nor replayed"
 
 
-async def test_the_restart_notice_is_marked_once(db_session: AsyncSession) -> None:
+async def test_the_restart_notice_is_marked_once_per_chat(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     owner = randbits(30)
-    assert await _claim(db_session, tenant.id, owner, "1")
-    assert await _claim(db_session, tenant.id, owner, "2")
+    chat = f"{CHANNEL};messageid=0"
+    for message_id in ("1", "2", "3"):
+        assert await _claim(db_session, tenant.id, owner, message_id, conversation=chat)
 
     async def mark(*ids: str) -> bool:
         return await mark_restart_notice(
-            db_session, tenant_id=tenant.id, channel_id=CHANNEL, message_ids=ids, owner_key=owner
+            db_session,
+            tenant_id=tenant.id,
+            channel_id=CHANNEL,
+            conversation_id=chat,
+            message_ids=ids,
+            owner_key=owner,
         )
 
     assert await mark("1", "2"), "the first drain owes the notice"
     assert not await mark("1", "2"), "a second drain does not"
-    assert await _finish(db_session, tenant.id, owner, "1", "2")
-    assert await _claim(db_session, tenant.id, owner, "3")
-    assert await mark("3"), "a later message owes its own"
+    assert not await mark("3"), "nor a message joining a chat already told"
+    assert await _finish(db_session, tenant.id, owner, "1", "2", "3")
+    assert await _claim(db_session, tenant.id, owner, "4", conversation=chat)
+    assert await mark("4"), "once the chat's held messages ran, a later one owes its own"
+
+
+async def test_a_batch_fence_finishes_its_own_rows_and_leaves_another_owners(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    owner, other = randbits(30), randbits(30) + 2**31
+    assert await _claim(db_session, tenant.id, owner, "1")
+    assert await _claim(db_session, tenant.id, other, "2")
+
+    held = await _finish(db_session, tenant.id, owner, "1", "2", "form")
+
+    assert held == {"1", "form"}, "its own row and a rowless form submit, not the other's"
+    unhandled = await list_unhandled_teams_messages(
+        db_session, tenant_id=tenant.id, channel_id=CHANNEL, message_ids=("1", "2"), owner_key=other
+    )
+    assert unhandled == {"2"}, "the other owner's row is left as it was"
 
 
 async def test_a_message_answered_at_once_keeps_no_payload(db_session: AsyncSession) -> None:

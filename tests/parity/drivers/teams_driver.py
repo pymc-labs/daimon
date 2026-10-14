@@ -12,6 +12,7 @@ id without a root starts a new thread, the way a new post does.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -161,6 +162,7 @@ async def _exchange(
         patch("daimon.adapters.teams.app.provision_configured_tenant", new_callable=AsyncMock),
         patch("daimon.adapters.teams.app.run_wake_poller", new_callable=AsyncMock),
         patch("daimon.adapters.teams.app.run_delivery_poller", new_callable=AsyncMock),
+        patch("daimon.adapters.teams.app.TeamsApp._reclaim_loop", new_callable=AsyncMock),
     ):
         service = create_teams_http_service(
             settings=runtime.settings.teams, runtime=runtime, client=client
@@ -170,6 +172,11 @@ async def _exchange(
             transport = httpx.ASGITransport(app=service.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://parity") as http:
                 response = await http.post("/api/messages", json=activity)
+            async with asyncio.timeout(30):
+                # Turns first: one reaching its start during the drain is held instead.
+                while tasks := list(service.turns._tasks):
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.sleep(0)
             await service.turns.drain(30.0)
     assert response.status_code == 200, f"{response.status_code}: {response.text}"
     return (response.json() if response.content else {}), fake

@@ -42,6 +42,7 @@ from .conftest import (
     THREAD_ID,
     TeamsApiFake,
     build_teams_runtime,
+    finish_turns,
     make_inbound,
     patched_turns,
     post_activity,
@@ -217,7 +218,7 @@ async def _run(
     with patched_turns() as turns:
         async with running_service(runtime, fake) as service:
             response = await post_activity(service, _load(case))
-            await service.turns.drain(timeout=30)
+            await finish_turns(service.turns)
     return response, turns
 
 
@@ -398,7 +399,7 @@ async def _consent(
         context = card[0]["content"][f"{payload['value']['action']}Context"]
         payload["value"]["context"] = context  # Teams echoes it back.
         response = await post_activity(service, payload)
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
     return response, uploads, deletes
 
 

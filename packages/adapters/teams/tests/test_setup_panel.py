@@ -44,6 +44,7 @@ from .conftest import (
     OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
     build_teams_runtime,
+    finish_turns,
     make_card_action,
     make_invoke,
     make_message_activity,
@@ -88,7 +89,7 @@ async def _running(
 
 async def _say(service: TeamsHttpService, text: str) -> None:
     await post_activity(service, make_message_activity(text=text, activity_id=f"a-{uuid.uuid4()}"))
-    await service.turns.drain(timeout=30)
+    await finish_turns(service.turns)
     service.turns.draining = False
 
 

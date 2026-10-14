@@ -95,28 +95,48 @@ async def finish_teams_messages(
     channel_id: str,
     message_ids: Collection[str],
     owner_key: int,
-) -> bool:
-    """Mark messages handled and drop their content, before the turn or answer.
+) -> set[str]:
+    """Mark this owner's messages handled and drop their content, before the turn or answer.
 
-    False when another process owns one of them: the caller must not act.
-    Idempotent for this owner; an id with no row (a form submit) does not count.
+    One transaction for a whole batch. Returns the ids the caller may act on:
+    its own, and any with no row (a form submit); one another process owns is
+    left alone and left out. Idempotent for this owner.
     """
     rows = (
-        await session.scalars(
-            select(TeamsMessageAdmission)
+        await session.execute(
+            select(TeamsMessageAdmission.message_id, TeamsMessageAdmission.owner_key)
             .where(*_keys(tenant_id, channel_id, message_ids))
             .with_for_update()
         )
     ).all()
-    if any(row.owner_key != owner_key for row in rows):
-        return False
-    if rows:
+    taken = {row.message_id for row in rows if row.owner_key != owner_key}
+    ours = [row.message_id for row in rows if row.owner_key == owner_key]
+    if ours:
         await session.execute(
             update(TeamsMessageAdmission)
-            .where(*_keys(tenant_id, channel_id, message_ids))
+            .where(*_keys(tenant_id, channel_id, ours))
             .values(handled=True, message=None)
         )
-    return True
+    return set(message_ids) - taken
+
+
+async def list_unhandled_teams_messages(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    message_ids: Collection[str],
+    owner_key: int,
+) -> set[str]:
+    """Which of `message_ids` this owner admitted and has not handled yet."""
+    ids = await session.scalars(
+        select(TeamsMessageAdmission.message_id).where(
+            *_keys(tenant_id, channel_id, message_ids),
+            TeamsMessageAdmission.owner_key == owner_key,
+            TeamsMessageAdmission.handled.is_(False),
+        )
+    )
+    return set(ids.all())
 
 
 async def mark_restart_notice(
@@ -124,22 +144,37 @@ async def mark_restart_notice(
     *,
     tenant_id: uuid.UUID,
     channel_id: str,
+    conversation_id: str,
     message_ids: Collection[str],
     owner_key: int,
 ) -> bool:
-    """Record the restart notice for unhandled messages; True if any had none yet."""
-    result = await session.execute(
+    """Record the restart notice on unhandled messages; True if their chat is still owed one.
+
+    One notice per chat per drain: False once any of this owner's unhandled
+    messages there carries it. The chat's rows are locked, so two holds agree.
+    """
+    chat = (
+        TeamsMessageAdmission.tenant_id == tenant_id,
+        TeamsMessageAdmission.channel_id == channel_id,
+        TeamsMessageAdmission.conversation_id == conversation_id,
+        TeamsMessageAdmission.owner_key == owner_key,
+        TeamsMessageAdmission.handled.is_(False),
+    )
+    told = await session.scalars(
+        select(TeamsMessageAdmission.notice_sent).where(*chat).with_for_update()
+    )
+    owed = not any(told.all())
+    marked = await session.execute(
         update(TeamsMessageAdmission)
         .where(
-            *_keys(tenant_id, channel_id, message_ids),
-            TeamsMessageAdmission.owner_key == owner_key,
-            TeamsMessageAdmission.handled.is_(False),
+            *chat,
+            TeamsMessageAdmission.message_id.in_(tuple(message_ids)),
             TeamsMessageAdmission.notice_sent.is_(False),
         )
         .values(notice_sent=True)
         .returning(TeamsMessageAdmission.message_id)
     )
-    return bool(result.all())
+    return owed and bool(marked.all())
 
 
 @dataclass(frozen=True)
