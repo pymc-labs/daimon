@@ -34,10 +34,10 @@ matrix §A/§D):
   the shell starts, and no environment setting moves it, so a file written
   "in your working directory" lands there (observed live). Only files, never
   ``/``'s directories, which are the system itself.
-- ``/tmp/work`` is an archived root too, minus its own dot entries and this
-  module's scratch file. It is not where daimon would choose to put working
-  files, but it is where an agent asked to "create notes.md" reached for
-  first (observed live), and a root nothing writes to costs nothing.
+- ``/tmp/work`` is an archived root too, minus its own dot entries. It is
+  not where daimon would choose to put working files, but it is where an
+  agent asked to "create notes.md" reached for first (observed live), and a
+  root nothing writes to costs nothing.
 - The prompt is written to be legible as HOST instruction rather than chat
   text. It travels twice: in the user message, behind a ``<turn_controls>``
   element carrying a ``checkpoint`` block, and again on the
@@ -108,12 +108,13 @@ CHECKPOINT_EXCLUDED_GLOBS: tuple[str, ...] = (
     ".cache",
 )
 
-# Written inside the sandbox, outside every archived root (``/tmp`` itself is
-# not archived — only ``/tmp/work`` is), so the list of oversized files never
-# ends up inside the archive it filters.
-_EXCLUDE_LIST_PATH = "/tmp/daimon-handoff-excludes.txt"
-# The partial rebuild's scratch files, outside every archived root for the
-# same reason: the archive's members with sizes, and the files it drops.
+#: Appended to the bundle's name while tar writes it: the transfer never
+#: collects a name ending in it, and the sweep skips it by the prefix.
+HANDOFF_PARTIAL_SUFFIX = ".part"
+
+# The partial rebuild's scratch files, outside every archived root (``/tmp``
+# itself is not archived, only ``/tmp/work``): the members with sizes, and
+# the files the rebuild drops.
 _MEMBER_SIZES_PATH = "/tmp/daimon-handoff-sizes"
 _LEFT_OUT_LIST_PATH = "/tmp/daimon-handoff-left-out.txt"
 
@@ -190,53 +191,55 @@ def build_checkpoint_prompt(
         roots.append(_relative_to_root(repo_mount_path))
     roots_argument = " ".join(roots)
 
-    # The oversize list holds file names, not patterns: a name like `[e]tc` must not match.
-    excludes = [f"--no-wildcards --exclude-from={_EXCLUDE_LIST_PATH} --wildcards"]
-    # Every dot entry directly under $HOME: .ssh, and the ~100 MB of toolchain
-    # caches the base image ships (.bun/.cargo/.rustup/.gradle/.npm/.local/
-    # .config). `*` matches `/` in a tar exclude pattern, so the subtree goes
-    # with it, while a dotfile deeper inside the task's own work is untouched.
-    excludes.append(f"--exclude='{home_root}/.*'")
-    # The scratch directory carries a working file when the agent chose it over
-    # $HOME, and nothing else worth having: its dot entries are the sandbox's
-    # own sockets and locks, and this transfer's oversize list would otherwise
-    # be archived by the tar command reading it.
-    excludes.append(f"--exclude='{scratch_root}/.*'")
-    excludes.append(f"--exclude='{_relative_to_root(_EXCLUDE_LIST_PATH)}'")
-    # The bundle being written, and any bundle a previous transfer left.
-    excludes.append(f"--exclude='{outputs_root}/{HANDOFF_FILENAME_PREFIX}*'")
-    excludes += [f"--exclude='{_relative_to_root(path)}'" for path in CHECKPOINT_EXCLUDED_PATHS]
-    excludes += [f"--exclude='*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS]
-    excludes.append("--exclude='*.env'")
+    # One find decides what travels, for tar and for the size count alike, so the
+    # drop list is exactly what was archived. A pruned path is never listed; tar
+    # gets the rest by name and does not recurse. The first two prunes keep only
+    # the loose non-hidden files of `.`, where the shell starts; patterns are
+    # anchored at a root, and `*` matches `/`.
+    prune_lines = [
+        [
+            "-path './*' ! -type f",
+            "-path './.*'",
+            f"-type f -size +{max_bundle_mib}M",
+        ],
+        # Every dot entry directly under $HOME: .ssh, and the ~100 MB of toolchain
+        # caches the base image ships (.bun/.cargo/.rustup/.gradle/.npm/.local/
+        # .config), while a dotfile deeper inside the task's own work travels. The
+        # scratch directory's dot entries are the sandbox's sockets and locks. Then
+        # the bundle being written, and any bundle a previous transfer left.
+        [
+            f"-path '{home_root}/.*'",
+            f"-path '{scratch_root}/.*'",
+            f"-path '{outputs_root}/{HANDOFF_FILENAME_PREFIX}*'",
+        ],
+        [f"-path '{_relative_to_root(path)}'" for path in CHECKPOINT_EXCLUDED_PATHS],
+        [f"-path '*/{glob}'" for glob in CHECKPOINT_EXCLUDED_GLOBS] + ["-path '*.env'"],
+    ]
+    first, *rest = (" -o ".join(line) for line in prune_lines)
+    members_function = "\n".join(
+        [f"  members() {{ find . {roots_argument} -mindepth 1 \\( {first} \\"]
+        + [f"    -o {line} \\" for line in rest]
+        + ['    \\) -prune -o "$@"; }']
+    )
+    # Built under a name the transfer never collects, then renamed in place, so a
+    # turn killed mid-pack leaves no truncated bundle to be picked up.
+    partial_path = f"{archive_path}{HANDOFF_PARTIAL_SUFFIX}"
+    # The left-out list goes to tar as anchored literal names, one per line.
+    pack_function = (
+        f"  pack() {{ members -printf '%p\\0' | tar czf {partial_path} --no-recursion "
+        f"--anchored --no-wildcards --exclude-from={_LEFT_OUT_LIST_PATH} --null -T -; }}"
+    )
     # Over the cap, the archive is rebuilt once without its largest members
     # until the rest, counted uncompressed with 1 KiB each for the tar header
     # and padding, fits 5% under the cap; the margin covers directory headers
     # and gzip's worst case, so small working files always travel. The size
     # check after the rebuild still guards the cap.
-    # Member names and sizes come from tar itself (`--to-command` passes them
-    # in the environment and writes nothing to disk), so the drop list is
-    # exactly what was archived. It goes back to tar as anchored literal names,
-    # one per line, so a name with a newline is skipped rather than split.
-    excludes.append(
-        f"--anchored --no-wildcards --exclude-from={_LEFT_OUT_LIST_PATH} --no-anchored --wildcards"
-    )
-    pack_function = "\n".join(
-        # The loose files in /, where the shell starts, NUL-separated into tar's file list:
-        # never re-read by the shell, `./`-prefixed so no name is an option, and the
-        # oversize ones left out by find itself.
-        [
-            f"  pack() {{ find / -maxdepth 1 -type f ! -name '.*' ! -size +{max_bundle_mib}M "
-            f"-printf './%P\\0' | tar czf {archive_path} \\"
-        ]
-        + [f"    {exclude} \\" for exclude in excludes]
-        + [f"    -C / {roots_argument} --null -T -; }}"]
-    )
+    # A name with a newline is never dropped: tar would split it.
     budget = max_bundle_bytes - max_bundle_bytes // 20
     listed = _LEFT_OUT_LISTED
     size_check = [
-        f'  size=$(stat -c %s {archive_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
-        f'    tar xzf {archive_path} --to-command=\'printf "%s %s\\0" "$TAR_SIZE" '
-        f'"$TAR_FILENAME"; cat >/dev/null\' > {_MEMBER_SIZES_PATH}',
+        f'  size=$(stat -c %s {partial_path}); if [ "$size" -gt {max_bundle_bytes} ]; then',
+        f"    members ! -type d -printf '%s %p\\0' > {_MEMBER_SIZES_PATH}",
         "    total=0; while IFS= read -r -d '' e; do total=$((total + ${e%% *} + 1024)); "
         f"done < {_MEMBER_SIZES_PATH}",
         f"    while [ \"$total\" -gt {budget} ] && IFS= read -r -d '' e; do",
@@ -246,10 +249,11 @@ def build_checkpoint_prompt(
         f"    sed 's|^\\./||; s|^|{HANDOFF_LEFT_OUT_MARKER} /|; {listed}q' {_LEFT_OUT_LIST_PATH}",
         f'    n=$(wc -l < {_LEFT_OUT_LIST_PATH}); if [ "$n" -gt {listed} ]; then '
         f'echo "{HANDOFF_LEFT_OUT_MORE_MARKER} $((n - {listed}))"; fi',
-        f"    pack; size=$(stat -c %s {archive_path})",
+        f"    pack; size=$(stat -c %s {partial_path})",
         "  fi",
-        f'  if [ "$size" -gt {max_bundle_bytes} ]; then rm -f {archive_path}; '
-        f'echo "{HANDOFF_TOO_LARGE_MARKER} $size"; else ls -l {archive_path}; fi',
+        f'  if [ "$size" -gt {max_bundle_bytes} ]; then rm -f {partial_path}; '
+        f'echo "{HANDOFF_TOO_LARGE_MARKER} $size"; else mv {partial_path} {archive_path}; '
+        f"ls -l {archive_path}; fi",
     ]
 
     steps: list[str] = []
@@ -330,8 +334,8 @@ def build_checkpoint_prompt(
         "shell, in order, exactly as written:",
         "  cd /",
         f"  mkdir -p {home_dir}/work {CHECKPOINT_SCRATCH_DIR}",
-        f"  find {roots_argument} -type f -size +{max_bundle_mib}M > {_EXCLUDE_LIST_PATH}",
         f"  : > {_LEFT_OUT_LIST_PATH}",
+        members_function,
         pack_function,
         "  pack",
         *size_check,
@@ -339,7 +343,7 @@ def build_checkpoint_prompt(
     if repo_mount_path is not None:
         archive_commands.append(f"  git -C {repo_mount_path} rev-parse HEAD")
     archive_commands.append(
-        "The first find lists files too large to carry so tar skips them. The archive cannot "
+        "members lists what travels. The archive cannot "
         f"be carried above {max_bundle_mib} MiB: then the commands rebuild it once without the "
         f"largest files, printing {HANDOFF_LEFT_OUT_MARKER} for each, and if it is still too "
         f"large delete it and print {HANDOFF_TOO_LARGE_MARKER}. That is a complete answer: do "
