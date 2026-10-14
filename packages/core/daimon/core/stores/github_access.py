@@ -515,7 +515,15 @@ async def _keep_legacy_working_repo(
     binding = await agent_repo_binding.get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
     if binding is None:
         return
-    wanted = binding.repo_url.casefold()
+    wanted = (
+        binding.repo_url.removeprefix("https://github.com/")
+        .removeprefix("http://github.com/")
+        .removeprefix("github.com/")
+        .rstrip("/")
+        .removesuffix(".git")
+        .rstrip("/")
+        .casefold()
+    )
     matches: list[AgentGitHubGrant] = []
     for grant in grants:
         repo = await repo_for_agent(
