@@ -73,9 +73,8 @@ then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. Messages sent while a turn
 runs are queued and run as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
-refuses that work, it is dropped without a notice, as on Slack. Retried
-deliveries are deduplicated in memory only, so a retry that lands after a
-restart runs again.
+refuses that work, it is dropped without a notice, as on Slack. A retried
+delivery runs once, across restarts too (see Restart behaviour).
 
 ### Feedback and Ask a human
 
@@ -290,11 +289,13 @@ notification must carry the channel's secret, compared in constant time; one
 that does not is ignored, and a request with no valid entry and a wrong
 secret gets 401. While the service shuts down it answers 503 and reads
 nothing, so Graph retries the batch (for up to four hours) against the next
-instance; a batch accepted just before shutdown began is not read again.
-When Graph reports missed notifications, Daimon
-reads the channel once for messages after the last one it handled. Edits never
-start a turn, and a message seen through both Bot Framework and Graph, or
-notified twice, runs once (in memory, so not across a restart). A shared
+instance. Graph does not resend a batch accepted just before shutdown began,
+so each boot reads every subscribed channel once for messages after the last
+one handled, at most 10 minutes back. When Graph reports missed notifications,
+Daimon reads the channel the same way, without that limit. Edits never start
+a turn, and a message seen through both Bot Framework and Graph, notified
+twice or read again after a restart runs once: both routes write the same
+database receipt (see Restart behaviour). A shared
 channel hosted by another organisation cannot be subscribed. With the
 setting off the routes answer 404 and nothing is subscribed.
 
