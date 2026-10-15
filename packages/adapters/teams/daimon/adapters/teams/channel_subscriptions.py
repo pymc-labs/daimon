@@ -13,13 +13,15 @@ Graph posts notifications to `NOTIFICATIONS_PATH` and lifecycle notices to
 `LIFECYCLE_PATH`, both outside Bot Framework's JWT check: each entry is
 verified by its client-state secret, of which only a hash is stored. A new
 message costs one GET (`includeResourceData` is off, so no certificate) and
-goes to `deliver`, where the adapter routes it as a Bot Framework message.
+goes to `deliver`, where the adapter routes it as a Bot Framework message;
+one older than `CATCH_UP_WINDOW` is skipped. A burst of more than
+`MAX_MESSAGE_READS` reads each channel's newest page once instead.
 Only `created` changes are read, so an edit never runs anything again. A
 `missed` notice reads the channel's newest page since the last message handled;
 so does each boot, for what a predecessor answered 202 but never read. Neither
 reads further back than `CATCH_UP_WINDOW`. The adapter's admission row keeps a
-message read twice from running twice; one read while draining is held for the
-next boot's reclaim.
+message read twice from running twice; an addressed one read while draining is
+held for the next boot's reclaim.
 """
 
 from __future__ import annotations
@@ -87,8 +89,8 @@ REFUSED_BACKOFF_S = 3600.0
 # How far back a catch-up reads: older messages would be answered too late.
 CATCH_UP_WINDOW = REPLAY_MAX_AGE
 MAX_NOTIFICATION_BYTES = 256 * 1024
-# Entries in one POST: each verified one is a task and a Graph read.
-MAX_NOTIFICATIONS = 100
+# Above this many new messages in one POST, each channel is read once instead of each message.
+MAX_MESSAGE_READS = 100
 _MAX_VALIDATION_TOKEN = 4096
 _RESOURCE = re.compile(
     r"^/?teams\('([^']+)'\)/channels\('([^']+)'\)/messages\('([^']+)'\)"
@@ -245,8 +247,8 @@ class ChannelSubscriptions:
         self._refused_until: dict[str, float] = {}
         # Channel id -> the earliest its subscription may be refreshed again.
         self._not_before: dict[str, datetime] = {}
-        # Channel id -> when to retry a failed recreation, ahead of its renewal.
-        self._recreate_at: dict[str, datetime] = {}
+        # Channel id -> (subscription id, when): retry its failed recreation, ahead of renewal.
+        self._recreate_at: dict[str, tuple[str, datetime]] = {}
         # Graph writes one at a time: a renewal, a lifecycle notice and a removal never race.
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
@@ -319,16 +321,24 @@ class ChannelSubscriptions:
         (None: no row yet); the watermark stays.
 
         A subscription that cannot be recorded is deleted again: nothing would renew it.
-        False when another process wrote the row first, which keeps its subscription.
+        False when another process wrote the row first, which keeps its subscription,
+        or Graph answered 409 for one it already holds.
         """
         secret = self._new_secret()
-        created = await self._graph.create_subscription(
-            resource=channel_resource(group_id, channel.channel_id),
-            notification_url=self._notification_url,
-            lifecycle_url=self._lifecycle_url,
-            client_state=secret,
-            expires_at=self._now() + SUBSCRIPTION_LIFETIME,
-        )
+        try:
+            created = await self._graph.create_subscription(
+                resource=channel_resource(group_id, channel.channel_id),
+                notification_url=self._notification_url,
+                lifecycle_url=self._lifecycle_url,
+                client_state=secret,
+                expires_at=self._now() + SUBSCRIPTION_LIFETIME,
+            )
+        except GraphUnavailable as err:
+            if err.status != 409:
+                raise
+            # Graph already holds one for this channel and URL: another process's.
+            log.info("teams.channel_subscription.superseded", status=409)
+            return False
         try:
             async with self._sessionmaker.begin() as session:
                 if replacing is None:
@@ -503,17 +513,27 @@ class ChannelSubscriptions:
                 log.warning("teams.channel_notification.rejected", reason="client_state")
             else:
                 verified.append((notification, row))
-        for notification, row in verified:
-            if lifecycle:
+        if lifecycle:
+            for notification, row in verified:
                 self._spawn(self.on_lifecycle(notification, row), name="teams.graph-lifecycle")
-            else:
+            return bool(verified) or not rejected
+        created = [(n, row) for n, row in verified if n.change_type == "created"]
+        if len(created) > MAX_MESSAGE_READS:
+            # A burst: one bounded page read per channel, not a GET per message.
+            floor = self._now() - CATCH_UP_WINDOW
+            for row in {row.subscription_id: row for _, row in created}.values():
+                catch_up = self.catch_up(row, floor=floor, notified=True)
+                self._spawn(catch_up, name="teams.graph-catch-up")
+        else:
+            for notification, row in created:
                 self._spawn(self.on_change(notification, row), name="teams.graph-message")
         return bool(verified) or not rejected
 
     async def on_change(
         self, notification: ChangeNotification, row: TeamsChannelSubscriptionRow
     ) -> None:
-        """Read the new message a notification names and deliver it."""
+        """Read the new message a notification names and deliver it, unless older than
+        `CATCH_UP_WINDOW`: Graph's own retries after an outage can bring hours-old ones."""
         if notification.change_type != "created":
             return  # an edit or a deletion never runs a message again
         address = parse_resource(notification.resource)
@@ -531,6 +551,10 @@ class ChannelSubscriptions:
         except GraphUnavailable as err:
             log.warning("teams.channel_message.read_failed", status=err.status, reason=err.reason)
             return
+        created = _created(message)
+        if created is None or created <= self._now() - CATCH_UP_WINDOW:
+            log.info("teams.channel_message.ignored", reason="too_old")
+            return
         await self._handle(row, [message])
 
     async def on_lifecycle(
@@ -546,12 +570,15 @@ class ChannelSubscriptions:
             await self.catch_up(row, floor=self._now() - CATCH_UP_WINDOW)
         self._wake.set()
 
-    async def catch_up(self, row: TeamsChannelSubscriptionRow, *, floor: datetime) -> None:
+    async def catch_up(
+        self, row: TeamsChannelSubscriptionRow, *, floor: datetime, notified: bool = False
+    ) -> None:
         """Deliver what the channel's newest page holds since the last message handled
-        and since `floor`. One read: the page bounds it."""
-        if row.last_message_at is None:
-            return  # nothing handled yet, so nothing to have missed after
-        since = max(row.last_message_at, floor)
+        and since `floor`. One read: the page bounds it. Without a watermark, only
+        when Graph `notified` new messages: else nothing was handled to have missed after."""
+        if row.last_message_at is None and not notified:
+            return
+        since = max(row.last_message_at or floor, floor)
         try:
             page = await self._graph.list_channel_messages(
                 row.group_id, row.channel_id, expand_replies=True
@@ -607,7 +634,7 @@ class ChannelSubscriptions:
             now = self._now()
             due = [row for row in rows if self._due_at(row) <= now]
             for row in due:
-                await self._refresh_current(row, recreate=row.channel_id in self._recreate_at)
+                await self._refresh_current(row, recreate=self._retry_at(row) is not None)
             if due:
                 continue
             delay = seconds_until((self._due_at(row) for row in rows), now)
@@ -631,8 +658,20 @@ class ChannelSubscriptions:
         return renewal_due_at(
             row.expires_at,
             not_before=self._not_before.get(row.channel_id),
-            due_by=self._recreate_at.get(row.channel_id),
+            due_by=self._retry_at(row),
         )
+
+    def _retry_at(self, row: TeamsChannelSubscriptionRow) -> datetime | None:
+        """When to retry `row`'s failed recreation. A row holding another subscription was
+        replaced elsewhere: its retry is cleared, so the winner's is renewed, never deleted."""
+        retry = self._recreate_at.get(row.channel_id)
+        if retry is None:
+            return None
+        subscription_id, at = retry
+        if subscription_id != row.subscription_id:
+            del self._recreate_at[row.channel_id]
+            return None
+        return at
 
     async def _refresh_current(self, seen: TeamsChannelSubscriptionRow, *, recreate: bool) -> None:
         """Refresh or recreate `seen`, re-read under the lock.
@@ -738,7 +777,7 @@ class ChannelSubscriptions:
             if recorded:
                 log.info("teams.channel_subscription.recreated")
             return
-        self._recreate_at[row.channel_id] = self._now() + RETRY_DELAY
+        self._recreate_at[row.channel_id] = (row.subscription_id, self._now() + RETRY_DELAY)
 
 
 class _RemovalWatch:
@@ -789,8 +828,6 @@ def notification_route(
             batch = ChangeNotificationBatch.model_validate_json(bytes(body))
         except ValidationError:
             return Response(status_code=400)
-        if len(batch.value) > MAX_NOTIFICATIONS:
-            return Response(status_code=413)
         accepted = await subscriptions.accept(batch.value, lifecycle=lifecycle)
         return Response(status_code=202 if accepted else 401)
 

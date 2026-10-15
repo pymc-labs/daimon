@@ -278,10 +278,9 @@ async def test_while_draining_a_message_is_held_and_the_next_boot_runs_it_once(
 
     successor = Routed(_app(db_session_factory))
     await successor.boot()
-    await successor.graph(message)
     await successor.teams.drain(0)
     assert [(path, i.activity_id) for path, i in successor.paths] == [("turn", ROOT)], (
-        "the next boot replays the held message once; unaddressed chatter is not held"
+        "only the reclaim can run it: the next boot replays it once; chatter is not held"
     )
 
 

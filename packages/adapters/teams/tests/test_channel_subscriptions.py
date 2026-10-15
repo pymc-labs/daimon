@@ -16,11 +16,12 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import structlog
+from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.channel_subscriptions import (
     CATCH_UP_WINDOW,
     LIFECYCLE_PATH,
-    MAX_NOTIFICATIONS,
+    MAX_MESSAGE_READS,
     NOTIFICATIONS_PATH,
     RENEW_MARGIN,
     RETRY_DELAY,
@@ -42,6 +43,7 @@ from daimon.core.stores.teams_channel_subscriptions import (
     record_teams_channel_watermark,
     update_teams_channel_subscription,
 )
+from daimon.core.stores.tenants import set_plain_text_mentions
 from daimon.core.teams_graph import (
     ChangeNotification,
     GraphClient,
@@ -430,6 +432,52 @@ async def test_a_new_message_is_read_once_delivered_and_marks_the_watermark(
     assert stored is not None and stored.last_message_id == "101", "catch-up starts after it"
 
 
+async def test_a_notice_of_a_message_older_than_the_window_runs_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Graph's own retries after an outage can bring hours-old notices: not run as fresh."""
+    graph = FakeGraph()
+    graph.messages["100"] = _message("100", NOW - CATCH_UP_WINDOW - timedelta(minutes=1))
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')"
+    await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
+    assert len(graph.calls("GET")) == 1 and harness.delivered == [], "read, then skipped"
+    stored = await harness.row()
+    assert stored is not None and stored.last_message_id is None, "the watermark stays"
+
+
+async def test_a_message_held_while_draining_moves_the_watermark_past_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The next boot's catch-up starts after it: only the admission's reclaim can run it."""
+    async with db_session_factory.begin() as session:
+        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+    sender = FakeSender()
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={},
+        bot_token=bot_token,
+    )
+    teams.draining = True
+    graph = FakeGraph()
+    graph.messages["100"] = _message("100", NOW) | {
+        "body": {"contentType": "html", "content": "<p>@Daimon summarise the week</p>"}
+    }
+    harness = Harness(db_session_factory, graph, deliver=teams.handle_graph_message)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')"
+    await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
+    assert [activity.text for _, activity, _ in sender.sent] == [HOLDING], "held, not dropped"
+    stored = await harness.row()
+    assert stored is not None and stored.last_message_id == "100", "the watermark moves past it"
+
+
 async def test_lifecycle_notices_renew_recreate_and_catch_up(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -568,6 +616,39 @@ async def test_a_failed_recreation_retries_after_the_retry_delay(
     )
     current = await harness.row()
     assert current is not None and current.subscription_id == "sub-1", "the row holds it"
+
+
+@pytest.mark.parametrize("status", [409, 503])
+async def test_a_failed_recreation_never_retries_over_another_process_replacement(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
+) -> None:
+    """Another process replaced it while this one's create failed: its retry is cleared and the
+    winner's subscription renewed as usual, never deleted. A 409 is that winner's: no retry."""
+    graph = RacedGraph("POST", _replaced_elsewhere(db_session_factory))
+    graph.status["POST"] = status
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    with structlog.testing.capture_logs() as logs:
+        await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="subscriptionRemoved"), row)
+    superseded = [e for e in logs if e["event"] == "teams.channel_subscription.superseded"]
+    assert bool(superseded) == (status == 409), "a 409 is logged as superseded"
+
+    del graph.status["POST"]
+    harness.now = NOW + RETRY_DELAY
+    task = asyncio.create_task(harness.subscriptions.run())
+    try:
+        await asyncio.sleep(0.2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert len(graph.calls("POST")) == 1, "no second recreation"
+    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-0"], (
+        "only the removed subscription is deleted"
+    )
+    current = await harness.row()
+    assert current is not None and current.subscription_id == "sub-other", "the winner's stays"
 
 
 class Refusing:
@@ -997,7 +1078,7 @@ async def test_a_notification_with_the_wrong_client_state_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     graph = FakeGraph()
-    graph.messages["100"] = _message("100", NOW)
+    graph.messages["100"] = _message("100", datetime.now(UTC))
     service = _service(db_session_factory, graph, on=True)
     await _stored(
         db_session_factory, expires_at=NOW + timedelta(days=3), subscription_id=SUBSCRIPTION
@@ -1020,16 +1101,32 @@ async def test_a_notification_with_the_wrong_client_state_is_refused(
 
 
 @pytest.mark.usefixtures("entra_env", "stub_bot_token", "no_renewals")
-async def test_an_oversized_batch_is_refused_unread(
+async def test_a_burst_reads_each_channel_once_instead_of_each_message(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Graph resends a refused batch as is, so a burst is taken, one page read per channel."""
     graph = FakeGraph()
+    graph.page = [_message("100", datetime.now(UTC))]
     service = _service(db_session_factory, graph, on=True)
-    entry = {"subscriptionId": SUBSCRIPTION, "clientState": SECRET, "changeType": "created"}
-    response = await _post(
-        service, NOTIFICATIONS_PATH, json={"value": [entry] * (MAX_NOTIFICATIONS + 1)}
+    await _stored(
+        db_session_factory, expires_at=NOW + timedelta(days=3), subscription_id=SUBSCRIPTION
     )
-    assert response.status_code == 413 and graph.requests == [], "refused before any work"
+    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')"
+    entry = {
+        "subscriptionId": SUBSCRIPTION,
+        "clientState": SECRET,
+        "changeType": "created",
+        "resource": resource,
+    }
+    with patch.object(TeamsApp, "handle_graph_message", new_callable=AsyncMock) as handled:
+        response = await _post(
+            service, NOTIFICATIONS_PATH, json={"value": [entry] * (MAX_MESSAGE_READS + 1)}
+        )
+        await asyncio.gather(*service.turns._tasks)  # pyright: ignore[reportPrivateUsage]
+    assert response.status_code == 202, "accepted"
+    [listing] = graph.calls("GET")
+    assert listing.url.path.endswith("/messages"), "one page read, no GET per entry"
+    assert [call.args[0].id for call in handled.await_args_list] == ["100"], "delivered once"
 
 
 async def test_an_id_that_is_no_guid_is_not_looked_up(
