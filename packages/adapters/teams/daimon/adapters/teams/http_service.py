@@ -366,8 +366,8 @@ def create_teams_http_service(
     subscriptions = None
     if runtime.settings.private_channel_messages.enabled and settings.public_url is not None:
 
-        async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> bool:
-            return await turns.handle_graph_message(message, channel)  # Built below.
+        async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> None:
+            await turns.handle_graph_message(message, channel)  # Built below.
 
         subscriptions = ChannelSubscriptions(
             sessionmaker=runtime.sessionmaker,

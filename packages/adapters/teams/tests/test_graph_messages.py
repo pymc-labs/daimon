@@ -15,7 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from daimon.adapters.teams.admissions import admission_channel
+from daimon.adapters.teams.admissions import HOLDING, admission_channel
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.identity import DENIED
@@ -98,9 +98,12 @@ def _graph(
     )
 
 
-def _app(factory: async_sessionmaker[AsyncSession]) -> TeamsApp:
+def _app(factory: async_sessionmaker[AsyncSession], sender: FakeSender | None = None) -> TeamsApp:
     return TeamsApp(
-        runtime=build_teams_runtime(factory), sender=FakeSender(), commands={}, bot_token=bot_token
+        runtime=build_teams_runtime(factory),
+        sender=sender or FakeSender(),
+        commands={},
+        bot_token=bot_token,
     )
 
 
@@ -113,6 +116,10 @@ class Routed:
 
     async def graph(self, message: GraphMessage) -> None:
         await self._run(self.teams.handle_graph_message(message, CHANNEL))
+
+    async def boot(self) -> None:
+        """Start the app, so it reclaims what an exited one held."""
+        await self._run(self.teams.start())
 
     async def bot_framework(self, payload: dict[str, object]) -> None:
         activity = MessageActivity.model_validate(payload)
@@ -135,7 +142,10 @@ class Routed:
             patch.object(TeamsApp, "_observe", _observe),
         ):
             await delivery
-            await asyncio.gather(*self.teams._tasks)  # pyright: ignore[reportPrivateUsage]
+            async with asyncio.timeout(10):
+                while tasks := list(self.teams._tasks):  # pyright: ignore[reportPrivateUsage]
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(0)  # lets a finished task's done callback drop it
 
 
 async def _switch_on(factory: async_sessionmaker[AsyncSession]) -> None:
@@ -249,20 +259,29 @@ async def test_a_guest_is_classified_by_the_roster_not_by_graphs_tenant(
     )
 
 
-async def test_while_draining_a_message_is_not_taken_and_a_replay_runs_once(
+async def test_while_draining_a_message_is_held_and_the_next_boot_runs_it_once(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The draining instance claims nothing, so the next one runs a catch-up's read once."""
-    draining = Routed(_app(db_session_factory))
+    """Graph never resends a notice answered 202 and the watermark moves past the message,
+    so the draining instance claims and holds it as a Bot Framework arrival."""
+    await _switch_on(db_session_factory)
+    sent = datetime.now(UTC).isoformat()
+    message = _graph(ROOT, "<p>@Daimon summarise the week</p>", reply_to=None, createdDateTime=sent)
+    chatter = _graph("1700000000003", "<p>any thoughts?</p>", createdDateTime=sent)
+    sender = FakeSender()
+    draining = Routed(_app(db_session_factory, sender))
     draining.teams.draining = True
-    message = _graph("1700000000003", "<p>any thoughts?</p>")
-    taken = await draining.teams.handle_graph_message(message, CHANNEL)
-    assert taken is False and draining.paths == [], "nothing taken, nothing run"
+    await draining.graph(message)
+    await draining.graph(chatter)
+    assert draining.paths == [], "nothing runs while draining"
+    assert [a.text for _, a, _ in sender.sent] == [HOLDING], "the asker is told it is held"
+
     successor = Routed(_app(db_session_factory))
+    await successor.boot()
     await successor.graph(message)
-    await successor.graph(message)
-    assert [inbound.activity_id for _, inbound in successor.paths] == [message.id], (
-        "the replay runs once on the next instance"
+    await successor.teams.drain(0)
+    assert [(path, i.activity_id) for path, i in successor.paths] == [("turn", ROOT)], (
+        "the next boot replays the held message once; unaddressed chatter is not held"
     )
 
 
@@ -316,7 +335,7 @@ async def test_a_refusal_from_graph_is_sent_once(
         attachments=[quote | {"content": json.dumps(reference)}],
     )
     for _ in range(2):
-        assert await teams.handle_graph_message(message, CHANNEL), "a refusal is taken"
+        await teams.handle_graph_message(message, CHANNEL)
     assert [(conversation, activity.text) for conversation, activity, _ in sender.sent] == [
         (f"{PRIVATE};messageid={ROOT}", DENIED)
     ], "one refusal, in the message's thread"

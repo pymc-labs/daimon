@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def upsert_teams_channel_subscription(
+async def insert_teams_channel_subscription(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
@@ -28,33 +28,27 @@ async def upsert_teams_channel_subscription(
     subscription_id: str,
     client_state_sha256: bytes,
     expires_at: datetime,
-) -> None:
-    """Record a new subscription; a channel's earlier one, and its watermark, are kept apart."""
-    now = datetime.now(UTC)
-    values = {
-        "team_id": team_id,
-        "group_id": group_id,
-        "channel_type": channel_type,
-        "channel_name": channel_name,
-        "team_name": team_name,
-        "bot_name": bot_name,
-        "service_url": service_url,
-        "subscription_id": subscription_id,
-        "client_state_sha256": client_state_sha256,
-        "expires_at": expires_at,
-    }
+) -> bool:
+    """Record a channel's first subscription; False when another process recorded one first."""
     stmt = pg_insert(TeamsChannelSubscription).values(
-        tenant_id=tenant_id, channel_id=channel_id, updated_at=now, **values
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        team_id=team_id,
+        group_id=group_id,
+        channel_type=channel_type,
+        channel_name=channel_name,
+        team_name=team_name,
+        bot_name=bot_name,
+        service_url=service_url,
+        subscription_id=subscription_id,
+        client_state_sha256=client_state_sha256,
+        expires_at=expires_at,
+        updated_at=datetime.now(UTC),
     )
-    await session.execute(
-        stmt.on_conflict_do_update(
-            index_elements=[
-                TeamsChannelSubscription.tenant_id,
-                TeamsChannelSubscription.channel_id,
-            ],
-            set_={**values, "updated_at": now},
-        )
+    inserted = await session.scalars(
+        stmt.on_conflict_do_nothing().returning(TeamsChannelSubscription.channel_id)
     )
+    return inserted.first() is not None
 
 
 async def get_teams_channel_subscription(
@@ -80,11 +74,16 @@ async def update_teams_channel_subscription(
     *,
     tenant_id: uuid.UUID,
     channel_id: str,
+    seen: str,
     subscription_id: str,
     expires_at: datetime,
     client_state_sha256: bytes | None = None,
-) -> None:
-    """A renewal's new expiry, or with `client_state_sha256` a replacement subscription."""
+) -> bool:
+    """A renewal's new expiry, or with `client_state_sha256` a replacement subscription.
+
+    Only while the row still holds `seen`, the subscription the caller read: False
+    when another process replaced or dropped it since. The watermark stays.
+    """
     values: dict[str, object] = {
         "subscription_id": subscription_id,
         "expires_at": expires_at,
@@ -92,14 +91,18 @@ async def update_teams_channel_subscription(
     }
     if client_state_sha256 is not None:
         values["client_state_sha256"] = client_state_sha256
-    await session.execute(
-        update(TeamsChannelSubscription)
+    model = TeamsChannelSubscription
+    updated = await session.scalars(
+        update(model)
         .where(
-            TeamsChannelSubscription.tenant_id == tenant_id,
-            TeamsChannelSubscription.channel_id == channel_id,
+            model.tenant_id == tenant_id,
+            model.channel_id == channel_id,
+            model.subscription_id == seen,
         )
         .values(**values)
+        .returning(model.channel_id)
     )
+    return updated.first() is not None
 
 
 async def record_teams_channel_watermark(
@@ -124,12 +127,19 @@ async def delete_teams_channel_subscriptions(
     tenant_id: uuid.UUID,
     channel_id: str | None = None,
     team_id: str | None = None,
+    seen: str | None = None,
 ) -> list[str]:
-    """Delete one channel's row or a whole team's; the Graph subscription ids they held."""
+    """Delete one channel's row or a whole team's; the Graph subscription ids they held.
+
+    With `seen`, only a row still holding that subscription: one another process
+    replaced since is kept.
+    """
     model = TeamsChannelSubscription
     stmt = delete(model).where(model.tenant_id == tenant_id)
     if channel_id is not None:
         stmt = stmt.where(model.channel_id == channel_id)
+    if seen is not None:
+        stmt = stmt.where(model.subscription_id == seen)
     if team_id is not None:
         stmt = stmt.where(model.team_id == team_id)
     if channel_id is None and team_id is None:

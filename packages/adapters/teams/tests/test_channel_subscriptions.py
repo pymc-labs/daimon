@@ -18,8 +18,9 @@ import pytest
 import structlog
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.channel_subscriptions import (
-    BOOT_CATCH_UP_WINDOW,
+    CATCH_UP_WINDOW,
     LIFECYCLE_PATH,
+    MAX_NOTIFICATIONS,
     NOTIFICATIONS_PATH,
     RENEW_MARGIN,
     RETRY_DELAY,
@@ -37,8 +38,9 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.teams_channel_subscriptions import (
     get_teams_channel_subscription,
+    insert_teams_channel_subscription,
     record_teams_channel_watermark,
-    upsert_teams_channel_subscription,
+    update_teams_channel_subscription,
 )
 from daimon.core.teams_graph import (
     ChangeNotification,
@@ -78,6 +80,8 @@ TEAM = "19:team@thread.tacv2"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 PUBLIC_URL = "https://bot.example"
 SECRET = "the-client-state"
+# Graph's subscription ids are GUIDs; the ingress ignores any other.
+SUBSCRIPTION = "0f8fad5b-d9cb-469f-a165-70867728950e"
 CHANNEL = SeenChannel(
     team_id=TEAM,
     team_group_id=TEAM_GROUP_ID,
@@ -189,10 +193,7 @@ Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
 
 
 class Harness:
-    """`ChannelSubscriptions` over the test DB and `FakeGraph`, with what it delivered.
-
-    `taking` is what delivery answers (False while the app drains).
-    """
+    """`ChannelSubscriptions` over the test DB and `FakeGraph`, with what it delivered."""
 
     def __init__(
         self,
@@ -205,16 +206,13 @@ class Harness:
         self.delivered: list[GraphMessage] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.now = NOW
-        self.taking = True
         self.database = FlakyDatabase(factory)
 
         async def lookup(_team: str, _channel: str) -> str | None:
             return channel_type
 
-        async def record(message: GraphMessage, _row: TeamsChannelSubscriptionRow) -> bool:
-            if self.taking:
-                self.delivered.append(message)
-            return self.taking
+        async def record(message: GraphMessage, _row: TeamsChannelSubscriptionRow) -> None:
+            self.delivered.append(message)
 
         def spawn(coro: Any, *, name: str) -> asyncio.Task[None]:
             task = asyncio.create_task(coro, name=name)
@@ -255,7 +253,7 @@ async def _stored(
 ) -> None:
     """A subscription of `channel_id` in `TEAM` whose client state is `SECRET`."""
     async with factory.begin() as session:
-        await upsert_teams_channel_subscription(
+        await insert_teams_channel_subscription(
             session,
             tenant_id=TENANT,
             channel_id=channel_id,
@@ -674,23 +672,117 @@ async def test_catch_up_overlapping_a_live_notification_runs_each_message_once(
     assert sorted(observed) == ["102", "103"], "each message runs once"
 
 
-async def test_a_message_not_taken_while_draining_leaves_the_watermark(
+async def test_missed_reads_no_further_back_than_the_window(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """However old the watermark, an hours-old message is not answered as a fresh one."""
     graph = FakeGraph()
-    graph.messages["102"] = _message("102", NOW + timedelta(minutes=2), reply_to="100")
+    graph.page = [
+        _message("103", NOW - timedelta(minutes=2)),
+        _message("102", NOW - CATCH_UP_WINDOW - timedelta(minutes=1)),
+    ]
     harness = Harness(db_session_factory, graph)
-    harness.taking = False
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    async with db_session_factory.begin() as session:
+        await record_teams_channel_watermark(
+            session,
+            tenant_id=TENANT,
+            channel_id=PRIVATE,
+            message_id="101",
+            at=NOW - timedelta(hours=3),
+        )
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="missed"), row)
+    assert [m.id for m in harness.delivered] == ["103"], "only what the window holds"
+
+
+class RacedGraph(FakeGraph):
+    """`FakeGraph` where `race`, another process's write, runs after each `method` request."""
+
+    def __init__(self, method: str, race: Callable[[], Awaitable[None]]) -> None:
+        super().__init__()
+        self._method = method
+        self._race = race
+
+    def http(self) -> httpx.AsyncClient:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            response = self.handler(request)
+            if request.method == self._method:
+                await self._race()
+            return response
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _replaced_elsewhere(factory: async_sessionmaker[AsyncSession]) -> Callable[[], Awaitable[None]]:
+    async def race() -> None:
+        async with factory.begin() as session:
+            await update_teams_channel_subscription(
+                session,
+                tenant_id=TENANT,
+                channel_id=PRIVATE,
+                seen="sub-0",
+                subscription_id="sub-other",
+                expires_at=NOW + timedelta(days=3),
+                client_state_sha256=client_state_hash("other"),
+            )
+
+    return race
+
+
+async def test_a_first_subscription_lost_to_another_process_is_deleted_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def race() -> None:
+        await _stored(
+            db_session_factory, expires_at=NOW + timedelta(days=3), subscription_id="sub-other"
+        )
+
+    graph = RacedGraph("POST", race)
+    harness = Harness(db_session_factory, graph)
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    row = await harness.row()
+    assert row is not None and row.subscription_id == "sub-other", "the first writer keeps it"
+    assert [r.url.path for r in graph.calls("DELETE")] == ["/v1.0/subscriptions/sub-1"], (
+        "the loser's subscription is not left orphaned"
+    )
+
+
+async def test_a_replacement_lost_to_another_process_keeps_the_winners_row(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = RacedGraph("POST", _replaced_elsewhere(db_session_factory))
+    harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
     row = await harness.row()
     assert row is not None, "the stored subscription is read back"
-    resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')/replies('102')"
-    await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
-    stored = await harness.row()
-    assert harness.delivered == [], "a message refused while draining is not taken"
-    assert stored is not None and stored.last_message_id is None, (
-        "the watermark stays before it, so the next boot's catch-up still reads it"
-    )
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="subscriptionRemoved"), row)
+    current = await harness.row()
+    assert current is not None and current.subscription_id == "sub-other", "not overwritten"
+    assert [r.url.path for r in graph.calls("DELETE")] == [
+        "/v1.0/subscriptions/sub-0",
+        "/v1.0/subscriptions/sub-1",
+    ], "the removed one and the loser's own are deleted"
+
+
+@pytest.mark.parametrize("method", ["PATCH", "POST"])
+async def test_a_stale_renewal_or_drop_leaves_another_process_row(
+    db_session_factory: async_sessionmaker[AsyncSession], method: str
+) -> None:
+    """PATCH: a renewal recorded after a replacement; POST: a refused recreation's drop."""
+    graph = RacedGraph(method, _replaced_elsewhere(db_session_factory))
+    graph.status = {"POST": 403} if method == "POST" else {}
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    event = "reauthorizationRequired" if method == "PATCH" else "subscriptionRemoved"
+    await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent=event), row)
+    current = await harness.row()
+    assert current is not None and current.subscription_id == "sub-other", "the row is kept"
+    assert current.expires_at == NOW + timedelta(days=3), "and not given the stale expiry"
 
 
 async def test_a_boot_catches_up_once_within_its_window(
@@ -701,7 +793,7 @@ async def test_a_boot_catches_up_once_within_its_window(
     graph = FakeGraph()
     graph.page = [
         _message("103", NOW - timedelta(minutes=2)),
-        _message("102", NOW - BOOT_CATCH_UP_WINDOW - timedelta(minutes=1)),
+        _message("102", NOW - CATCH_UP_WINDOW - timedelta(minutes=1)),
     ]
     harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
@@ -745,7 +837,7 @@ async def test_a_failed_watermark_write_does_not_stop_the_batch(
     assert row is not None, "the stored subscription is read back"
     harness.database.fail_writes = True
     with structlog.testing.capture_logs() as logs:
-        await harness.subscriptions.catch_up(row)
+        await harness.subscriptions.catch_up(row, floor=NOW - CATCH_UP_WINDOW)
     assert [m.id for m in harness.delivered] == ["102", "103"], "every message is still handled"
     assert [e for e in logs if e["event"] == "teams.channel_watermark.write_failed"], "logged"
 
@@ -907,9 +999,11 @@ async def test_a_notification_with_the_wrong_client_state_is_refused(
     graph = FakeGraph()
     graph.messages["100"] = _message("100", NOW)
     service = _service(db_session_factory, graph, on=True)
-    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    await _stored(
+        db_session_factory, expires_at=NOW + timedelta(days=3), subscription_id=SUBSCRIPTION
+    )
     resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')"
-    entry = {"subscriptionId": "sub-0", "changeType": "created", "resource": resource}
+    entry = {"subscriptionId": SUBSCRIPTION, "changeType": "created", "resource": resource}
 
     forged = await _post(
         service, NOTIFICATIONS_PATH, json={"value": [entry | {"clientState": "guess"}]}
@@ -923,6 +1017,41 @@ async def test_a_notification_with_the_wrong_client_state_is_refused(
     assert genuine.status_code == 202, "accepted, then handled in the background"
     [(message, _row)] = [call.args for call in handled.await_args_list]
     assert message.id == "100", "the message is read and handed to the adapter"
+
+
+@pytest.mark.usefixtures("entra_env", "stub_bot_token", "no_renewals")
+async def test_an_oversized_batch_is_refused_unread(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    service = _service(db_session_factory, graph, on=True)
+    entry = {"subscriptionId": SUBSCRIPTION, "clientState": SECRET, "changeType": "created"}
+    response = await _post(
+        service, NOTIFICATIONS_PATH, json={"value": [entry] * (MAX_NOTIFICATIONS + 1)}
+    )
+    assert response.status_code == 413 and graph.requests == [], "refused before any work"
+
+
+async def test_an_id_that_is_no_guid_is_not_looked_up(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Graph's ids are GUIDs: anything else is junk, even if a row happens to hold it."""
+    graph = FakeGraph()
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(hours=1))
+    await _stored(
+        db_session_factory,
+        expires_at=NOW + timedelta(hours=1),
+        channel_id="19:other@thread.tacv2",
+        subscription_id=SUBSCRIPTION,
+    )
+    renew = {"lifecycleEvent": "reauthorizationRequired"}
+    notices = [_notice(**renew), _notice(subscriptionId=SUBSCRIPTION, **renew)]
+    assert await harness.subscriptions.accept(notices, lifecycle=True), "accepted"
+    await harness.settle()
+    assert [r.url.path for r in graph.calls("PATCH")] == [f"/v1.0/subscriptions/{SUBSCRIPTION}"], (
+        "only the GUID-shaped entry is handled"
+    )
 
 
 def _private_mention() -> dict[str, object]:

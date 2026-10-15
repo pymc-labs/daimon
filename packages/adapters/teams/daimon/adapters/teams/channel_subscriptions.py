@@ -16,8 +16,10 @@ message costs one GET (`includeResourceData` is off, so no certificate) and
 goes to `deliver`, where the adapter routes it as a Bot Framework message.
 Only `created` changes are read, so an edit never runs anything again. A
 `missed` notice reads the channel's newest page since the last message handled;
-so does each boot, at most `BOOT_CATCH_UP_WINDOW` back, for what a drain left.
-The adapter's admission row keeps a message read twice from running twice.
+so does each boot, for what a predecessor answered 202 but never read. Neither
+reads further back than `CATCH_UP_WINDOW`. The adapter's admission row keeps a
+message read twice from running twice; one read while draining is held for the
+next boot's reclaim.
 """
 
 from __future__ import annotations
@@ -43,10 +45,10 @@ from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.teams_channel_subscriptions import (
     delete_teams_channel_subscriptions,
     get_teams_channel_subscription,
+    insert_teams_channel_subscription,
     list_teams_channel_subscriptions,
     record_teams_channel_watermark,
     update_teams_channel_subscription,
-    upsert_teams_channel_subscription,
 )
 from daimon.core.teams_graph import (
     ChangeNotification,
@@ -82,18 +84,20 @@ RENEW_MARGIN = timedelta(hours=12)
 RETRY_DELAY = timedelta(minutes=10)
 # A channel Graph refused (no consent, app not in it) is not tried again for this long.
 REFUSED_BACKOFF_S = 3600.0
-# How far back a boot's catch-up reads: older messages would be answered too late.
-BOOT_CATCH_UP_WINDOW = REPLAY_MAX_AGE
+# How far back a catch-up reads: older messages would be answered too late.
+CATCH_UP_WINDOW = REPLAY_MAX_AGE
 MAX_NOTIFICATION_BYTES = 256 * 1024
+# Entries in one POST: each verified one is a task and a Graph read.
+MAX_NOTIFICATIONS = 100
 _MAX_VALIDATION_TOKEN = 4096
 _RESOURCE = re.compile(
     r"^/?teams\('([^']+)'\)/channels\('([^']+)'\)/messages\('([^']+)'\)"
     r"(?:/replies\('([^']+)'\))?$"
 )
 _CHANNEL_ID = re.compile(r"^19:[^/?#'\s]+$")
+_GUID = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 
-# True when the message was taken; False (only while draining) leaves it for a catch-up.
-Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
+Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[None]]
 ChannelTypeLookup = Callable[[str, str], Awaitable[str | None]]
 # Bot Framework's 403 code for a conversation the bot is not in. No read tells:
 # a channel's member list answers whether or not the bot is in it.
@@ -288,7 +292,7 @@ class ChannelSubscriptions:
             return True  # `run` keeps it alive
         try:
             group = await self._groups.group_id(channel.team_id, known=channel.team_group_id)
-            await self._subscribe(channel, group, kind.strip().lower())
+            await self._subscribe(channel, group, kind.strip().lower(), replacing=None)
         except GraphUnavailable as err:
             self._refused_until[channel.channel_id] = self._clock() + REFUSED_BACKOFF_S
             # The permission is tenant-wide, so a 403 means the admin consent is missing.
@@ -308,10 +312,14 @@ class ChannelSubscriptions:
             log.info("teams.channel_type.lookup_failed", error=type(err).__name__)
             return None
 
-    async def _subscribe(self, channel: SeenChannel, group_id: str, channel_type: str) -> None:
-        """Create a subscription with a fresh secret and record it; the watermark stays.
+    async def _subscribe(
+        self, channel: SeenChannel, group_id: str, channel_type: str, *, replacing: str | None
+    ) -> bool:
+        """Create a subscription with a fresh secret and record it in place of `replacing`
+        (None: no row yet); the watermark stays.
 
         A subscription that cannot be recorded is deleted again: nothing would renew it.
+        False when another process wrote the row first, which keeps its subscription.
         """
         secret = self._new_secret()
         created = await self._graph.create_subscription(
@@ -323,26 +331,42 @@ class ChannelSubscriptions:
         )
         try:
             async with self._sessionmaker.begin() as session:
-                await upsert_teams_channel_subscription(
-                    session,
-                    tenant_id=self._tenant_id,
-                    channel_id=channel.channel_id,
-                    team_id=channel.team_id,
-                    group_id=group_id,
-                    channel_type=channel_type,
-                    channel_name=channel.channel_name,
-                    team_name=channel.team_name,
-                    bot_name=channel.bot_name,
-                    service_url=channel.service_url,
-                    subscription_id=created.id,
-                    client_state_sha256=client_state_hash(secret),
-                    expires_at=created.expiration_date_time,
-                )
+                if replacing is None:
+                    recorded = await insert_teams_channel_subscription(
+                        session,
+                        tenant_id=self._tenant_id,
+                        channel_id=channel.channel_id,
+                        team_id=channel.team_id,
+                        group_id=group_id,
+                        channel_type=channel_type,
+                        channel_name=channel.channel_name,
+                        team_name=channel.team_name,
+                        bot_name=channel.bot_name,
+                        service_url=channel.service_url,
+                        subscription_id=created.id,
+                        client_state_sha256=client_state_hash(secret),
+                        expires_at=created.expiration_date_time,
+                    )
+                else:
+                    recorded = await update_teams_channel_subscription(
+                        session,
+                        tenant_id=self._tenant_id,
+                        channel_id=channel.channel_id,
+                        seen=replacing,
+                        subscription_id=created.id,
+                        client_state_sha256=client_state_hash(secret),
+                        expires_at=created.expiration_date_time,
+                    )
         except SQLAlchemyError:
             await self._delete_remote(created.id)
             raise
         self._recreate_at.pop(channel.channel_id, None)
+        if not recorded:
+            await self._delete_remote(created.id)
+            log.info("teams.channel_subscription.superseded")
+            return False
         log.info("teams.channel_subscription.created", channel_type=channel_type)
+        return True
 
     async def forget(self, *, channel_id: str | None = None, team_id: str | None = None) -> None:
         """The bot left a channel or a team: drop their subscriptions."""
@@ -438,10 +462,14 @@ class ChannelSubscriptions:
         self._spawn(self._forget_logged(channel_id=channel_id), name="teams.channel-removed")
 
     async def _drop(self, row: TeamsChannelSubscriptionRow, *, reason: str) -> None:
-        """Delete the row and Graph's subscription; the next sight subscribes again."""
+        """Delete the row, unless another process replaced it since, and Graph's
+        subscription; the next sight subscribes again."""
         async with self._sessionmaker.begin() as session:
             await delete_teams_channel_subscriptions(
-                session, tenant_id=self._tenant_id, channel_id=row.channel_id
+                session,
+                tenant_id=self._tenant_id,
+                channel_id=row.channel_id,
+                seen=row.subscription_id,
             )
         await self._delete_remote(row.subscription_id)
         self._known.discard(row.channel_id)
@@ -454,8 +482,10 @@ class ChannelSubscriptions:
 
         False when an entry claimed a subscription of ours with the wrong
         secret and none verified: the caller answers 401. An unknown
-        subscription (one deleted meanwhile) is ignored, not refused.
+        subscription (one deleted meanwhile) is ignored, not refused, and an
+        id that is no GUID is not looked up.
         """
+        notifications = [n for n in notifications if _GUID.match(n.subscription_id)]
         ids = sorted({notification.subscription_id for notification in notifications})
         async with self._sessionmaker() as session:
             rows = await list_teams_channel_subscriptions(
@@ -513,19 +543,15 @@ class ChannelSubscriptions:
         elif event == "subscriptionRemoved":
             await self._refresh_current(row, recreate=True)
         elif event == "missed":
-            await self.catch_up(row)
+            await self.catch_up(row, floor=self._now() - CATCH_UP_WINDOW)
         self._wake.set()
 
-    async def catch_up(
-        self, row: TeamsChannelSubscriptionRow, *, floor: datetime | None = None
-    ) -> None:
+    async def catch_up(self, row: TeamsChannelSubscriptionRow, *, floor: datetime) -> None:
         """Deliver what the channel's newest page holds since the last message handled
-        (and since `floor`). One read: the page bounds it."""
-        since = row.last_message_at
-        if since is None:
+        and since `floor`. One read: the page bounds it."""
+        if row.last_message_at is None:
             return  # nothing handled yet, so nothing to have missed after
-        if floor is not None:
-            since = max(since, floor)
+        since = max(row.last_message_at, floor)
         try:
             page = await self._graph.list_channel_messages(
                 row.group_id, row.channel_id, expand_replies=True
@@ -544,13 +570,9 @@ class ChannelSubscriptions:
         log.info("teams.channel_catch_up.read", count=len(newer))
 
     async def _handle(self, row: TeamsChannelSubscriptionRow, messages: list[GraphMessage]) -> None:
-        """Deliver in order; the watermark moves only past a message that was taken."""
+        """Deliver in order, moving the watermark past each."""
         for message in messages:
-            if not await self._deliver(message, row):
-                # Draining began after this batch was answered 202 (mid-GET, or mid-catch-up):
-                # Graph never resends it. The watermark stays before these messages, so
-                # the next boot's catch-up (or a `missed` notice) still reads them.
-                return
+            await self._deliver(message, row)
             if (created := _created(message)) is None:
                 continue
             try:
@@ -594,14 +616,14 @@ class ChannelSubscriptions:
 
     async def _catch_up_at_boot(self) -> None:
         """Read each channel once for what a predecessor answered 202 but never took
-        before it exited, within `BOOT_CATCH_UP_WINDOW`."""
+        before it exited, within `CATCH_UP_WINDOW`."""
         try:
             async with self._sessionmaker() as session:
                 rows = await list_teams_channel_subscriptions(session, tenant_id=self._tenant_id)
         except SQLAlchemyError as err:
             log.warning("teams.channel_subscription.list_failed", error=type(err).__name__)
             return
-        floor = self._now() - BOOT_CATCH_UP_WINDOW
+        floor = self._now() - CATCH_UP_WINDOW
         for row in rows:
             await self.catch_up(row, floor=floor)
 
@@ -651,10 +673,11 @@ class ChannelSubscriptions:
                 row.subscription_id, expires_at=now + SUBSCRIPTION_LIFETIME
             )
             async with self._sessionmaker.begin() as session:
-                await update_teams_channel_subscription(
+                current = await update_teams_channel_subscription(
                     session,
                     tenant_id=self._tenant_id,
                     channel_id=row.channel_id,
+                    seen=row.subscription_id,
                     subscription_id=row.subscription_id,
                     expires_at=renewed.expiration_date_time,
                 )
@@ -667,7 +690,10 @@ class ChannelSubscriptions:
         except SQLAlchemyError as err:
             log.warning("teams.channel_subscription.renew_failed", error=type(err).__name__)
             return
-        log.info("teams.channel_subscription.renewed")
+        if current:
+            log.info("teams.channel_subscription.renewed")
+        else:  # another process replaced or dropped it since, and owns the row
+            log.info("teams.channel_subscription.stale_skipped")
 
     async def _drop_logged(self, row: TeamsChannelSubscriptionRow, *, reason: str) -> None:
         try:
@@ -695,7 +721,9 @@ class ChannelSubscriptions:
             service_url=row.service_url,
         )
         try:
-            await self._subscribe(channel, row.group_id, row.channel_type)
+            recorded = await self._subscribe(
+                channel, row.group_id, row.channel_type, replacing=row.subscription_id
+            )
         except GraphUnavailable as err:
             if err.status in (403, 404):
                 # 404: the channel or team is gone; 403: the tenant-wide consent was revoked.
@@ -707,7 +735,8 @@ class ChannelSubscriptions:
         except SQLAlchemyError as err:
             log.warning("teams.channel_subscription.recreate_failed", error=type(err).__name__)
         else:
-            log.info("teams.channel_subscription.recreated")
+            if recorded:
+                log.info("teams.channel_subscription.recreated")
             return
         self._recreate_at[row.channel_id] = self._now() + RETRY_DELAY
 
@@ -734,7 +763,12 @@ class _RemovalWatch:
 def notification_route(
     subscriptions: ChannelSubscriptions, *, lifecycle: bool, draining: Callable[[], bool]
 ) -> Callable[[Request], Awaitable[Response]]:
-    """Graph's POST endpoint: the validation handshake, then 202 and work in the background."""
+    """Graph's POST endpoint: the validation handshake, then 202 and work in the background.
+
+    The 503 while draining is not the safety net: uvicorn stops serving before its
+    lifespan sets `draining`, so a notice answered 202 is usually still being read
+    then. The adapter holds what that delivers (`TeamsApp.handle_graph_message`).
+    """
 
     async def receive(request: Request) -> Response:
         token = request.query_params.get("validationToken")
@@ -744,8 +778,7 @@ def notification_route(
             # Graph wants the token back verbatim within 10 s, as text.
             return PlainTextResponse(token, headers={"X-Content-Type-Options": "nosniff"})
         if draining():
-            # Graph retries a non-2xx for up to 4 hours, so the next instance gets the batch.
-            # Nothing here was read or claimed, so the replay cannot run anything twice.
+            # Graph retries a non-2xx, so a POST seen here reaches the next instance.
             return Response(status_code=503)
         body = bytearray()
         async for chunk in request.stream():
@@ -756,6 +789,8 @@ def notification_route(
             batch = ChangeNotificationBatch.model_validate_json(bytes(body))
         except ValidationError:
             return Response(status_code=400)
+        if len(batch.value) > MAX_NOTIFICATIONS:
+            return Response(status_code=413)
         accepted = await subscriptions.accept(batch.value, lifecycle=lifecycle)
         return Response(status_code=202 if accepted else 401)
 

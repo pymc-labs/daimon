@@ -613,8 +613,11 @@ class TeamsApp:
         parsed = parse_inbound(
             activity, configured_tenant=self._teams.tenant_id, service_url=service_url
         )
-        if isinstance(parsed, Refusal):
-            return
+        if not isinstance(parsed, Refusal):
+            await self._hold_inbound(parsed)
+
+    async def _hold_inbound(self, parsed: TeamsInbound) -> None:
+        """Admit and hold a message parsed while draining, if it would start a turn."""
         if parsed.by_name:
             if not await self._plain_text_mentions_on():
                 return
@@ -801,24 +804,25 @@ class TeamsApp:
 
     async def handle_graph_message(
         self, message: GraphMessage, channel: TeamsChannelSubscriptionRow
-    ) -> bool:
+    ) -> None:
         """A message Graph reported from a subscribed channel, admitted as a Bot Framework one.
 
         Its admission row is keyed like the activity's (`admission_channel`), so a
         message seen both ways runs once, across restarts too. The parse drops
-        @mentions first: Bot Framework delivers those. False, while draining,
-        means the message was not taken (nor claimed): the caller leaves its
-        watermark so the next boot's catch-up still reads it.
+        @mentions first: Bot Framework delivers those. While draining it is held
+        as an activity would be: Graph never resends a notice answered 202, and
+        the caller moves its watermark past it, so the next boot's reclaim runs it.
         """
-        if self.draining:
-            return False
         parsed = parse_graph_message(
             message,
             channel,
             configured_tenant=self._teams.tenant_id,
             bot_app_id=self._teams.client_id,
         )
-        if not isinstance(parsed, Refusal):
+        if self.draining:
+            if not isinstance(parsed, Refusal):
+                await self._hold_inbound(parsed)
+        elif not isinstance(parsed, Refusal):
             self._dispatch_inbound(parsed)
         elif parsed.text is not None:
             thread = f"{channel.channel_id};messageid={message.reply_to_id or message.id}"
@@ -829,7 +833,6 @@ class TeamsApp:
                 )
 
             await self._refuse(parsed, thread, message.id, "channel", reply)
-        return True
 
     async def _refuse(
         self,
