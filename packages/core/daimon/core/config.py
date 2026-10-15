@@ -1351,7 +1351,7 @@ class PrivateChannelMessagesSettings(BaseModel):
             "When True, Daimon subscribes to Microsoft Graph change notifications "
             "for each Teams private or shared channel it is in, where Teams sends "
             "the bot only the posts that @mention it. Replies in followed threads, "
-            "Replies to Daimon's messages and typed @<bot name> mentions then "
+            "replies to Daimon's messages and typed @<bot name> mentions then "
             "work there too, usually within seconds. Needs DAIMON_TEAMS__PUBLIC_URL "
             "(Graph posts to <public_url>/api/graph/notifications and "
             "/api/graph/lifecycle) and the application permission "

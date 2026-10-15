@@ -1337,7 +1337,7 @@ Teams sends a bot only the posts there that @mention it. Top-level, not under
 
 When True, Daimon subscribes to Microsoft Graph change notifications for each Teams
 private or shared channel it is in, where Teams sends the bot only the posts that
-@mention it. Replies in followed threads, Replies to Daimon's messages and typed
+@mention it. Replies in followed threads, replies to Daimon's messages and typed
 @&lt;bot name&gt; mentions then work there too, usually within seconds. Needs
 DAIMON_TEAMS__PUBLIC_URL (Graph posts to &lt;public_url&gt;/api/graph/notifications and
 /api/graph/lifecycle) and the application permission ChannelMessage.Read.All with tenant
