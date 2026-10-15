@@ -450,7 +450,7 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
     detail = refused.value.__cause__
     assert isinstance(detail, UnsupportedCapability)
     expected = {"memory", "environment", obligation}
-    if obligation == "files":
+    if obligation in ("files", "repository"):
         expected.add("credentials")
     assert set(detail.missing) == expected
     assert len(captured) == 1

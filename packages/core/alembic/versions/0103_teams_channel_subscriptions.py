@@ -13,8 +13,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0102_teams_channel_subscriptions"
-down_revision: str | None = "0101_teams_message_admissions"
+revision: str = "0103_teams_channel_subscriptions"
+down_revision: str | None = "0102_agent_backend_drop_consent"
 branch_labels: str | None = None
 depends_on: str | None = None
 

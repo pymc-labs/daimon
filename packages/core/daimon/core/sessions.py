@@ -125,6 +125,7 @@ from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
+from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE
 from mux.drivers.anthropic.sessions_lifecycle import (
     SessionCreateRequest,
     SessionReads,
@@ -471,14 +472,29 @@ async def project_session_resources(
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id="caller-resources", kind="native"))
+    effective = agent_spec(payload)
+    if source.source is not None:
+        effective = effective.model_copy(
+            update={
+                "extensions": (
+                    *(effective.extensions or ()),
+                    *(
+                        extension
+                        for extension in source.source.spec.extensions or ()
+                        if extension.namespace == UNCLASSIFIED_SOURCE_NAMESPACE
+                    ),
+                )
+            }
+        )
     return source.model_copy(
         update={
-            "effective_spec": agent_spec(payload),
+            "effective_spec": effective,
             "environment": source_environment_record(environment, scope),
             "resource_scope": scope,
             "resource_requirements": tuple(requirements),
             "repository_sources": tuple(repos),
             "resource_generations": tuple(generations),
+            "asks_before_publishing": asks_before_publishing,
             "memory_required": True,
             "memory_store_id": store_id,
             "memory_read_only": memory_read_only,

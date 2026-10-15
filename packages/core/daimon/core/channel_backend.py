@@ -25,7 +25,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, cast
+from functools import partial
+from typing import Literal, Protocol, cast
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -59,7 +60,7 @@ from mux.contracts.config import (
     ResolvedBackend,
     resolve_default,
 )
-from mux.contracts.ids import PROVIDERS, ChannelRef, Provider
+from mux.contracts.ids import PROVIDERS, ChannelRef, ModelRef, Provider
 from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, UnsupportedCapability
@@ -70,6 +71,7 @@ from mux.profiles import (
     runnable_selection,
     shared_threads_available,
 )
+from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
 from pydantic import JsonValue
 from sqlalchemy.exc import IntegrityError
@@ -207,7 +209,10 @@ def _digest(facts: object) -> str:
 
 
 def _revision_digest(
-    agent: BackendAgent, backend: Provider | None, fleet_grant: JsonValue | None
+    agent: BackendAgent,
+    backend: Provider | None,
+    fleet_grant: JsonValue | None,
+    drop_consent: JsonValue | None = None,
 ) -> str:
     facts: dict[str, object] = {
         "tenant_id": agent.tenant_id,
@@ -216,6 +221,8 @@ def _revision_digest(
     }
     if fleet_grant is not None:
         facts["fleet_grant"] = fleet_grant
+    if drop_consent is not None:
+        facts["drop_consent"] = drop_consent
     return _digest(facts)
 
 
@@ -335,8 +342,10 @@ class AgentBackendService:
         *,
         enabled: bool = False,
         cost_line: Callable[[BackendAgent, Provider], str] | None = None,
+        capture_source: Callable[[BackendAgent], Awaitable[BackendAgent]] | None = None,
     ) -> None:
         self._sessions = sessionmaker
+        self._capture_source = capture_source
         self.enabled = enabled
         self._cost_line: Callable[[BackendAgent, Provider], str] = cost_line or _default_cost
 
@@ -389,14 +398,52 @@ class AgentBackendService:
     async def _preview(
         self, session: AsyncSession, agent: BackendAgent, target: Provider | None
     ) -> CompatibilityPreview:
+        capture = self._capture_source if target is not None else None
         target = target or DEFAULT_BACKEND
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-        return compatibility_preview(
+        original = agent
+        if capture is not None:
+            agent = await capture(agent)
+            if (agent.tenant_id, agent.agent_id) != (original.tenant_id, original.agent_id):
+                raise AgentBackendRefused("tenant_mismatch")
+        preview = compatibility_preview(
             agent,
             target,
             await self._policy(session, agent.tenant_id),
             setting_revision=current.local if current else 0,
             cost_line=self._cost_line(agent, target),
+        )
+
+        if capture is None:
+            return preview
+        from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
+
+        selection = backend_selection(target)
+        try:
+            proposed = preview_source_drops(
+                agent, ModelRef(provider=selection.backend, id=selection.model or agent.model or "")
+            )
+        except UnsupportedCapability as error:
+            raise AgentBackendRefused("source_unavailable") from error
+        if not proposed.declared_drops:
+            return preview
+        consent = {
+            "declared_drops": proposed.declared_drops,
+            "source_pin": source_preservation_pin(agent),
+            "target_digest": request_digest(proposed.model_dump(mode="json")),
+        }
+        preview = CompatibilityPreview.model_validate(
+            {**preview.model_dump(), "drop_consent": consent}
+        )
+        return preview.model_copy(
+            update={
+                "digest": _digest(
+                    {
+                        "preview": preview.model_dump(mode="json"),
+                        "configuration_digest": agent.configuration_digest,
+                    }
+                )
+            }
         )
 
     async def preview(
@@ -445,6 +492,7 @@ class AgentBackendService:
         expected_preview_digest: str | None,
         *,
         fleet_grant: AgentFleetGrant | None = None,
+        accepted_drops: tuple[str, ...] | None = None,
         now: datetime | None = None,
     ) -> AgentBackendRevision:
         self._check_actor(agent.tenant_id, actor)
@@ -456,6 +504,7 @@ class AgentBackendService:
             local = current.local if current else 0
             if local != expected_revision:
                 raise AgentBackendRefused("stale_revision")
+            previous = None
             if operation == "revert":
                 if current is None:
                     raise AgentBackendRefused("no_previous_revision")
@@ -483,6 +532,33 @@ class AgentBackendService:
                     raise AgentBackendRefused("backend_not_allowed")
                 previous_local = local or None
                 retained_grant = current.fleet_grant if current else None
+            consent = (
+                current.drop_consent
+                if grant_operation and current is not None
+                else preview.drop_consent
+            )
+            if (
+                operation == "revert"
+                and (previous.drop_consent if previous is not None else None) != consent
+            ):
+                raise AgentBackendRefused("re_confirm")
+            if not grant_operation and consent is not None:
+                if operation != "revert":
+                    if accepted_drops is None:
+                        raise AgentBackendRefused("drops_required")
+                    try:
+                        accepted = type(consent).model_validate(
+                            {**consent.model_dump(), "declared_drops": accepted_drops}
+                        )
+                    except ValueError:
+                        raise AgentBackendRefused("drops_mismatch") from None
+                    if accepted != consent:
+                        raise AgentBackendRefused("drops_mismatch")
+                if expected_preview_digest is None:
+                    raise AgentBackendRefused("stale_preview")
+            elif not grant_operation and accepted_drops not in (None, ()):
+                raise AgentBackendRefused("source_unavailable")
+            consent_json = consent.model_dump(mode="json") if consent is not None else None
             if (grant_operation or expected_preview_digest is not None) and (
                 preview.digest != expected_preview_digest
             ):
@@ -507,9 +583,10 @@ class AgentBackendService:
                     local=local + 1,
                     backend=backend,
                     previous_local=previous_local,
-                    digest=_revision_digest(agent, backend, retained_grant),
+                    digest=_revision_digest(agent, backend, retained_grant, consent_json),
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
+                    drop_consent=consent_json,
                 )
             except IntegrityError:
                 raise AgentBackendRefused("stale_revision") from None
@@ -523,7 +600,12 @@ class AgentBackendService:
                 tool_name="agent_backend",
                 operation=operation,
                 outcome="allowed",
-                reason="completed",
+                reason="completed"
+                + (
+                    "; declared_drops=" + ",".join(revision.declared_drops)
+                    if revision.declared_drops
+                    else ""
+                ),
                 scope=f"agent_backend:{agent.agent_id}:{revision.local}",
             )
             return revision
@@ -657,9 +739,16 @@ class AgentBackendService:
         actor: BackendActor,
         *,
         expected_preview_digest: str | None = None,
+        accepted_drops: tuple[str, ...] | None = None,
     ) -> AgentBackendRevision:
         return await self._change(
-            agent, target_backend, expected_revision, actor, "set", expected_preview_digest
+            agent,
+            target_backend,
+            expected_revision,
+            actor,
+            "set",
+            expected_preview_digest,
+            accepted_drops=accepted_drops,
         )
 
     async def clear_backend(
@@ -777,6 +866,18 @@ def make_backend_service(
     )
 
 
+class _ConsentOriginValidator(Protocol):
+    def __call__(
+        self,
+        selection: ResolvedBackend,
+        origin: Literal["channel", "agent"],
+        revision: ConfigRevision | None,
+        /,
+        *,
+        agent_revision: AgentBackendRevision,
+    ) -> Awaitable[None] | None: ...
+
+
 async def resolve_turn_backend(
     session: AsyncSession,
     channel: ChannelRef,
@@ -808,6 +909,7 @@ async def resolve_turn_backend(
         raise AgentBackendRefused("tenant_mismatch")
     await policy_store.lock_policy_writes_shared(session, tenant_id=tenant_id)
     override, ever_shared = await current_backend_and_sharing(session, channel)
+    setting: AgentBackendRevision | None = None
     if worker is None:
         if (
             override is not None
@@ -847,6 +949,13 @@ async def resolve_turn_backend(
         ):
             raise AgentBackendRefused("stale_revision")
         selection = worker.backend
+    consent_revision = setting if setting is not None and setting.drop_consent is not None else None
+    if consent_revision is not None:
+        if validate_origin is None:
+            raise AgentBackendRefused("source_unavailable")
+        validate_origin = partial(
+            cast(_ConsentOriginValidator, validate_origin), agent_revision=consent_revision
+        )
     policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
     if not backend_is_enabled(selection.backend, policy.enabled_backends):
         raise AgentBackendRefused("backend_not_allowed")
@@ -870,7 +979,7 @@ async def resolve_turn_backend(
         return retained, ever_shared, "agent"
     for _ in range(3):
         effective = await mux_state.effective_revision(
-            session, channel, selection.content_digest(), "agent"
+            session, channel, selection.content_digest(), "agent", agent_revision=consent_revision
         )
         if effective is not None:
             if validate_origin is not None:
@@ -886,7 +995,9 @@ async def resolve_turn_backend(
             if inspect.isawaitable(checking):
                 await checking
         try:
-            await mux_state.put_config_revision(session, effective, origin="agent")
+            await mux_state.put_config_revision(
+                session, effective, origin="agent", agent_revision=consent_revision
+            )
         except ConfigRevisionConflict:
             continue
         return effective, ever_shared, "agent"

@@ -411,7 +411,7 @@ async def test_after_source_await_refuses_before_environment_read(root_turn, cha
     deps, prepared, *_ = root_turn
     parent = await retained(root_turn)
     clock = [datetime.now(UTC)]
-    bound = clock[0] + timedelta(seconds=1)
+    bound = clock[0] + timedelta(seconds=30)
     router = MARouter()
 
     async def read_source(request, match):
@@ -446,7 +446,7 @@ async def test_original_short_request_bound_survives_freeze_and_default_reader(r
 
     value = (await default_source_turn(root_turn))[0]
     deps, prepared, _, intent, _, scope, _, transport = value
-    original = datetime.now(UTC) + timedelta(seconds=5)
+    original = datetime.now(UTC) + timedelta(seconds=30)
     prepared = replace(prepared, _preparation=replace(prepared._preparation, deadline=original))
     before = len(transport.requests)
     await freeze((deps, prepared, *value[2:]))

@@ -19,7 +19,15 @@ from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import Agent, AgentSpec, Environment, ResourceBinding, WorkspaceSource
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -1140,6 +1148,7 @@ class BackendAgent(_Facts):
     resource_generations: tuple[tuple[str, datetime], ...] = Field(
         default=(), exclude=True, repr=False
     )
+    asks_before_publishing: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
     memory_required: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
     memory_store_id: str | None = Field(default=None, exclude=True, repr=False)
     memory_read_only: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
@@ -1152,7 +1161,30 @@ class TenantBackendPolicy(_Facts):
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
 
 
-class AgentBackendRevision(_Facts):
+class _BackendDropConsent(_Facts):
+    declared_drops: tuple[str, ...]
+    source_pin: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
+    target_digest: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
+
+    @field_validator("declared_drops")
+    @classmethod
+    def _labels(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return TypeAdapter(
+            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
+        ).validate_python(value)
+
+
+class _BackendConsentFacts(_Facts):
+    drop_consent: _BackendDropConsent | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @property
+    def declared_drops(self) -> tuple[str, ...]:
+        return self.drop_consent.declared_drops if self.drop_consent is not None else ()
+
+
+class AgentBackendRevision(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     local: int = Field(ge=1)
@@ -1187,7 +1219,7 @@ class AgentBackendRevision(_Facts):
         return self
 
 
-class CompatibilityPreview(_Facts):
+class CompatibilityPreview(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     target_backend: Provider

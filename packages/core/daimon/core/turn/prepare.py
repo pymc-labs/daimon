@@ -92,7 +92,7 @@ from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
-from mux.contracts.resources import Agent, SessionSpec
+from mux.contracts.resources import Agent, AgentSpec, SessionSpec
 from mux.drivers.anthropic.sessions_lifecycle import SessionCreateRequest, SessionReads
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
@@ -213,6 +213,7 @@ class ProviderPreparationRequest:
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
     worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
     native_budget_usd: Decimal | None = field(default=None, kw_only=True, compare=False, repr=False)
+    target_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
     before_native: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
@@ -322,9 +323,13 @@ class ProviderPreparationRequest:
             return replace(
                 root,
                 admission=replace(
-                    root.admission, backend_revision=revision, backend_revision_origin=origin
+                    root.admission,
+                    backend_revision=revision,
+                    backend_revision_origin=origin,
+                    backend_agent_revision=None,
                 ),
                 worker=worker,
+                target_spec=None,
                 scope=worker.permissions.fleet.scope,
                 deadline=bound,
             )

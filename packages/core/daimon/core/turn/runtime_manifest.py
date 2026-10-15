@@ -24,12 +24,12 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
-from mux.contracts.ids import Scope
+from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
 from mux.errors import UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
-from mux.state.operations import OperationRecord
+from mux.state.operations import OperationRecord, request_digest
 from mux.state.store import binding_slot
 from pydantic import (
     AfterValidator,
@@ -56,7 +56,8 @@ _MAX_BYTES = 1_048_576
 _ADMISSION_FACTS = {
     name: TypeAdapter(annotation)
     for name, annotation in get_type_hints(Admission).items()
-    if name not in ("agent", "environment", "observation", "backend_counterpart")
+    if name
+    not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
 
 
@@ -883,12 +884,28 @@ def fixed_plan_origin_allowed(origin: str | None) -> bool:
     return origin == "channel"
 
 
-async def capture_preparation_source(request: ProviderPreparationRequest) -> BackendAgent:
+async def capture_preparation_source(
+    request: ProviderPreparationRequest, *, fresh: bool = False
+) -> BackendAgent:
     """Capture source facts; the existing proof and materializer validate them."""
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
 
+    if fresh:
+        from daimon.core.mux_compat import retrieve_agent, retrieve_environment
+
+        actual = await retrieve_agent(
+            request.deps.anthropic, request.admission.agent.id, scope=request.scope
+        )
+        environment = await retrieve_environment(
+            request.deps.anthropic, request.admission.environment.id, scope=request.scope
+        )
+        request = replace(
+            request,
+            source=None,
+            admission=replace(request.admission, agent=actual, environment=environment),
+        )
     source = request.source
     if source is None:
         source = await load_backend_agent(
@@ -972,30 +989,29 @@ def classify_source_obligations(
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())
-    if target is not None:
-        from mux.drivers.anthropic.schemas import agent_tools
+    from mux.drivers.anthropic.schemas import agent_tools
 
-        for extension in spec.extensions or ():
-            model = extension.value.get("model")
-            if extension.version != 1:
-                missing.add("source_definition")
-            elif extension.namespace == "anthropic.agent_tools":
-                try:
-                    native = agent_tools(extension)
-                    if "tools" not in drops:
-                        source_tools = native.intent()
-                except ValueError:
-                    missing.update(("source_definition", "tools"))
-            elif not (
-                extension.namespace == "anthropic.model_config"
-                and isinstance(model, dict)
-                and set(model) <= {"id", "speed"}
-                and model.get("speed") is None
-                or extension.namespace == "anthropic.multiagent"
-                and extension.value == {"clear": True}
-                or extension.namespace == "anthropic.agent_create_nulls"
-            ):
-                missing.add("source_definition")
+    for extension in spec.extensions or ():
+        model = extension.value.get("model")
+        if extension.version != 1:
+            missing.add("source_definition")
+        elif extension.namespace == "anthropic.agent_tools":
+            try:
+                native = agent_tools(extension)
+                if target is not None and "tools" not in drops:
+                    source_tools = native.intent()
+            except ValueError:
+                missing.update(("source_definition", "tools"))
+        elif not (
+            extension.namespace == "anthropic.model_config"
+            and isinstance(model, dict)
+            and set(model) <= {"id", "speed"}
+            and model.get("speed") is None
+            or extension.namespace == "anthropic.multiagent"
+            and extension.value == {"clear": True}
+            or extension.namespace == "anthropic.agent_create_nulls"
+        ):
+            missing.add("source_definition")
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
         spec.tools or any(item.value.get("tools") for item in spec.extensions or ())
@@ -1021,9 +1037,26 @@ def classify_source_obligations(
         missing.add("mcp")
     if source.repository_sources and "repository" not in drops:
         missing.add("repository")
+    if any(
+        server.credential_ref and (target is None or server not in (target.mcp_servers or ()))
+        for server in spec.mcp_servers or ()
+    ) or any(repository.credential_ref for repository in source.repository_sources):
+        missing.add("credentials")
     for resource in source.resource_requirements:
         if resource.target_path is not None and "files" not in drops:
             missing.add("files")
+        if (
+            resource.kind == "artifact"
+            and resource.resource is not None
+            and resource.resource.kind == "file"
+            and source.resource_scope is not None
+            and (resource.resource.tenant_id, resource.resource.account_id)
+            == (source.resource_scope.tenant_id, source.resource_scope.account_id)
+            and resource.native is None
+            and resource.credential_ref is None
+            and resource.target_path is not None
+        ):
+            continue
         # No installed materializer proves credentials or opaque private resources.
         missing.add("credentials" if resource.kind == "credential" else "source_definition")
     if (source.memory_required is not False or source.memory_store_id is not None) and (
@@ -1058,6 +1091,13 @@ def classify_source_obligations(
             )
         if not retained:
             missing.add("memory")
+    if source.environment is not None and source.environment.spec.native_config is not None:
+        from mux.drivers.anthropic.schemas import EnvironmentConfig
+
+        try:
+            EnvironmentConfig.model_validate(dict(source.environment.spec.native_config.value))
+        except ValueError:
+            missing.add("source_definition")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
     if target is None or not (
@@ -1075,8 +1115,83 @@ def classify_source_obligations(
     return frozenset(missing)
 
 
+def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
+    """Derive explicit losses using the same complete source-preservation rule."""
+    spec = source.effective_spec
+    profile = backend_selection(model.provider).profile
+    if (
+        spec is None
+        or source.source is None
+        or source.environment is None
+        or source.resource_scope is None
+        or source.memory_required is None
+        or source.memory_read_only is None
+        or source.asks_before_publishing is None
+        or model.options
+    ):
+        raise UnsupportedCapability(("source_context",), profile)
+    if profile == backend_selection(spec.model.provider).profile:
+        return spec.model_copy(update={"model": model})
+    target = AgentSpec(
+        name=spec.name,
+        description=spec.description,
+        model=model,
+        system=spec.system,
+        tools=(),
+        skills=(),
+        mcp_servers=(),
+        metadata=spec.metadata,
+    )
+    missing = classify_source_obligations(
+        source, target, environment=None, asks_before_publishing=source.asks_before_publishing
+    )
+    try:
+        target = AgentSpec.model_validate(
+            {
+                **target.model_dump(),
+                "declared_drops": tuple(
+                    sorted("sandbox" if item == "environment" else item for item in missing)
+                ),
+            }
+        )
+    except ValueError:
+        raise UnsupportedCapability(tuple(sorted(missing)), profile) from None
+    missing = classify_source_obligations(
+        source, target, environment=None, asks_before_publishing=source.asks_before_publishing
+    )
+    if missing:
+        raise UnsupportedCapability(tuple(sorted(missing)), profile)
+    if target.declared_drops:
+        target = target.model_copy(
+            update={
+                "system": compose_source_instructions(
+                    spec.system,
+                    "Unavailable capabilities: " + ", ".join(target.declared_drops) + ".",
+                )
+            }
+        )
+    return target
+
+
+def source_preservation_pin(source: BackendAgent) -> str:
+    """Pin complete owner-captured intent independently of the current caller address."""
+    updates: dict[str, object] = {"resource_scope": None}
+    for name in ("source", "environment"):
+        resource = getattr(source, name)
+        if resource is not None:
+            updates[name] = resource.model_copy(
+                update={"ref": resource.ref.model_copy(update={"account_id": None})}
+            )
+    captured = source.model_copy(update=updates)
+    # Direct facts include the intentionally non-serialized resource projection.
+    return request_digest(
+        cast(JsonValue, TypeAdapter(object).dump_python(dict(captured), mode="json"))
+    )
+
+
 async def prepare_source(request: ProviderPreparationRequest) -> ProviderPreparationRequest:
     """Prepare scoped source intent; native output verification remains mandatory."""
+    from daimon.core.channel_backend import AgentBackendRefused
     from daimon.core.ma_identity import derive_agent_uuid
 
     revision = request.admission.backend_revision
@@ -1105,12 +1220,50 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         ),
     )
 
+    agent_id = derive_agent_uuid(
+        tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+    )
+    setting = None
+    if request.worker is None:
+        from daimon.core.stores import agent_backends, mux_state
+
+        async with asyncio.timeout(
+            remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        ):
+            async with request.deps.sessionmaker() as session:
+                with session.no_autoflush:
+                    setting = await mux_state.get_config_agent_revision(
+                        session,
+                        revision,
+                        agent_id=agent_id,
+                    )
+                    provisional = request.admission.backend_agent_revision
+                    if provisional is not None:
+                        if (
+                            await mux_state.get_config_revision(
+                                session, revision.channel, revision.local
+                            )
+                            is None
+                        ):
+                            setting = await agent_backends.current(
+                                session, request.tenant_id, agent_id, persisted=True
+                            )
+                        if (
+                            setting != provisional
+                            or setting is None
+                            or setting.drop_consent is None
+                        ):
+                            raise AgentBackendRefused("re_confirm")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-    source = await asyncio.wait_for(capture_preparation_source(request), timeout=timeout)
+    source = await asyncio.wait_for(
+        capture_preparation_source(request, fresh=True)
+        if setting is not None
+        else capture_preparation_source(request),
+        timeout=timeout,
+    )
     if (
         source.tenant_id != request.tenant_id
-        or source.agent_id
-        != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
+        or source.agent_id != agent_id
         or source.resource_scope != request.scope
         or source.source is None
         or source.source.ref.kind != "agent"
@@ -1119,6 +1272,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         or source.source.ref.id != request.admission.agent.id
         or source.source.revision.local != request.admission.agent.version
     ):
+        if setting is not None:
+            raise AgentBackendRefused("re_confirm")
         raise UnsupportedCapability(("source_context",), revision.profile)
     # Capture is evidence of source intent, not evidence that a target preserved it.
     spec = source.effective_spec
@@ -1154,6 +1309,20 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         ):
             raise UnsupportedCapability(("worker_context",), revision.profile)
     target = worker.spec if worker is not None else None
+    if setting is not None:
+        consent = setting.drop_consent
+        if consent is None or setting.backend != revision.backend or revision.model is None:
+            raise AgentBackendRefused("re_confirm")
+        if source_preservation_pin(source) != consent.source_pin:
+            raise AgentBackendRefused("re_confirm")
+        target = preview_source_drops(
+            source, ModelRef(provider=revision.backend, id=revision.model)
+        )
+        if (
+            target.declared_drops != consent.declared_drops
+            or request_digest(target.model_dump(mode="json")) != consent.target_digest
+        ):
+            raise AgentBackendRefused("re_confirm")
     missing = classify_source_obligations(
         source,
         target,
@@ -1163,13 +1332,15 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
-    return replace(request, source=source)
+    return replace(request, source=source, target_spec=target)
 
 
 async def read_preparation_counterpart(
     request: ProviderPreparationRequest,
 ) -> ProviderPreparationRequest:
     """Verify the prepared source's owned native counterpart before handoff."""
+
+    from daimon.core.channel_backend import AgentBackendRefused
 
     try:
         selected = await prepare_source(request)
@@ -1181,17 +1352,24 @@ async def read_preparation_counterpart(
         )
         if source is None or revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
-        target = worker.spec if worker is not None else None
+        target = selected.target_spec
+        from daimon.core.turn.runtimes import ScopedTurnRuntimes
+
+        if isinstance(selected.deps.turn_runtimes, ScopedTurnRuntimes):
+            selected.deps.turn_runtimes.bind_preparation(selected)
         runtime = selected.deps.turn_runtimes.get(revision.profile)
         if runtime is None or runtime.read_agent_counterpart is None:
             raise UnsupportedCapability(("native_counterpart",), revision.profile)
-        if runtime.materialize_worker is not None and selected.before_native is not None:
+        if (
+            worker is not None
+            and runtime.materialize_worker is not None
+            and selected.before_native is not None
+        ):
             from daimon.core.turn.persistence import current_persistence
 
             persistence = current_persistence.get()
             if (
-                worker is None
-                or persistence is None
+                persistence is None
                 or persistence.store is not selected.deps.state_store
                 or persistence.slot.thread.channel != revision.channel
                 or persistence.slot.thread.thread_id != selected.thread_id
@@ -1214,13 +1392,18 @@ async def read_preparation_counterpart(
             raise UnsupportedCapability(("worker_acknowledgement",), revision.profile)
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         current_source = await asyncio.wait_for(
-            capture_preparation_source(request), timeout=timeout
+            capture_preparation_source(request, fresh=True)
+            if worker is None and target is not None
+            else capture_preparation_source(request),
+            timeout=timeout,
         )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        if worker is None and target is not None and current_source != source:
+            raise AgentBackendRefused("re_confirm")
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)
-    except (UnsupportedCapability, TimeoutError, TurnError) as error:
+    except (UnsupportedCapability, TimeoutError, TurnError, AgentBackendRefused) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
         raise AdmissionDenied(reason="backend_unsupported") from None

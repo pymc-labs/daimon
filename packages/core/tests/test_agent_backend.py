@@ -437,11 +437,17 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     spec = importlib.util.spec_from_file_location("backend_settings_rollback", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    consent_path = path.with_name("0102_agent_backend_drop_consent.py")
+    consent_spec = importlib.util.spec_from_file_location("backend_consent_restore", consent_path)
+    assert consent_spec is not None and consent_spec.loader is not None
+    consent_module = importlib.util.module_from_spec(consent_spec)
+    consent_spec.loader.exec_module(consent_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                consent_module.downgrade()
                 module.downgrade()
             schema = sync.scalar(text("SELECT current_schema()"))
             assert "enabled_backends" not in {
@@ -467,6 +473,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     fleet_module = importlib.util.module_from_spec(fleet_spec)
                     fleet_spec.loader.exec_module(fleet_module)
                     fleet_module.upgrade()
+                    consent_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:

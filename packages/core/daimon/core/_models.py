@@ -3470,6 +3470,7 @@ class ChannelConfigRevision(Base):
     local: Mapped[int] = mapped_column(Integer, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     origin: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'channel'"))
+    agent_backend_ref: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # A `mux.contracts.config.ConfigRevision` as JSON.
     revision: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -3806,6 +3807,7 @@ class AgentBackendRevisionRecord(Base):
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     previous_local: Mapped[int | None] = mapped_column(Integer)
     fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

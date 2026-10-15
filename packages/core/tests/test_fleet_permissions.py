@@ -1464,15 +1464,16 @@ def test_source_obligations_cannot_be_silently_omitted(field):
     root = parent("openai")
     additions = {
         "skills": (SkillRef(id="pinned", version="1"),),
-        "mcp_servers": (
+    }
+    if field != "tools":
+        additions["mcp_servers"] = (
             MCPConnection(
                 name="bound",
                 url="https://bound.invalid",
-                credential_ref="bound-auth",
+                credential_ref="bound-auth" if field != "mcp" else None,
                 tool_policy={"allowed_tools": ["read"]},
             ),
-        ),
-    }
+        )
     root = replace(root, spec=root.spec.model_copy(update=additions))
     root, captured = captured_worker_source(root)
     key = "mcp_servers" if field == "mcp" else field

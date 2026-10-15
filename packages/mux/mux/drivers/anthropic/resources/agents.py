@@ -10,7 +10,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import AgentCreateParams
 from anthropic.types.beta.agent_update_params import AgentUpdateParams
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
@@ -33,6 +33,8 @@ from mux.drivers.anthropic.schemas import (
 )
 from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import ScopeViolation, UnsupportedCapability
+
+UNCLASSIFIED_SOURCE_NAMESPACE = "anthropic.unclassified_source"
 
 
 def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
@@ -160,6 +162,49 @@ def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Sco
             },
         )
     }
+    # Fields without a neutral meaning remain obligations, never inferred losses.
+    native = cast(dict[str, JsonValue], item.model_dump(mode="json", exclude_unset=True))
+    unclassified = set(native) - {
+        "id",
+        "type",
+        "version",
+        "created_at",
+        "updated_at",
+        "archived_at",
+        "name",
+        "description",
+        "model",
+        "system",
+        "metadata",
+        "multiagent",
+        "tools",
+        "mcp_servers",
+        "skills",
+    }
+    for name in ("type", "model", "multiagent", "mcp_servers", "skills"):
+        if name == "type" or name in native:
+            try:
+                TypeAdapter(BetaManagedAgentsAgent.model_fields[name].annotation).validate_python(
+                    native.get(name)
+                )
+            except ValidationError:
+                unclassified.add(name)
+    try:
+        agent_tools(extensions["anthropic.agent_tools"])
+    except ValidationError:
+        unclassified.add("tools")
+    for collection, fields in (
+        ("mcp_servers", {"type", "name", "url"}),
+        ("skills", {"type", "skill_id", "version"}),
+    ):
+        for index, entry in enumerate(cast(list[dict[str, JsonValue]], native.get(collection, []))):
+            unclassified.update(f"{collection}.{index}.{key}" for key in set(entry) - fields)
+    if unclassified:
+        extensions[UNCLASSIFIED_SOURCE_NAMESPACE] = ExtensionConfig(
+            namespace=UNCLASSIFIED_SOURCE_NAMESPACE,
+            version=1,
+            value={"fields": cast(JsonValue, sorted(unclassified))},
+        )
     if item.multiagent is not None:
         extensions["anthropic.multiagent"] = ExtensionConfig(
             namespace="anthropic.multiagent",

@@ -89,7 +89,7 @@ from daimon.core.stores.accounts import (
     set_role,
 )
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import BackendAgent, Role
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
@@ -235,6 +235,9 @@ class Admission:
     )
     backend_footer_profile: str | None = field(default=None, compare=False, repr=False)
     backend_counterpart: AgentRevision | None = field(default=None, compare=False, repr=False)
+    backend_agent_revision: AgentBackendRevision | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.backend_revision is not None and self.backend_revision_origin not in (
@@ -250,6 +253,7 @@ def _require_backend_origin(
     revision: ConfigRevision | None = None,
     *,
     agent_backends: bool = False,
+    agent_revision: AgentBackendRevision | None = None,
 ) -> None:
     from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
 
@@ -751,14 +755,17 @@ async def admit_impl(
     )
 
     backend_counterpart: AgentRevision | None = None
+    backend_agent_revision: AgentBackendRevision | None = None
     source_agent: BackendAgent | None = None
 
     async def verify_origin(
         selection: ResolvedBackend,
         origin: Literal["channel", "agent"],
         revision: ConfigRevision | None,
+        *,
+        agent_revision: AgentBackendRevision | None = None,
     ) -> None:
-        nonlocal backend_counterpart
+        nonlocal backend_counterpart, backend_agent_revision
         _require_backend_origin(selection, origin, agent_backends=deps.agent_backends)
         if revision is None or selection.profile == MANAGED_AGENTS.profile_id:
             return
@@ -788,6 +795,7 @@ async def admit_impl(
             is_external=is_external,
             backend_revision=revision,
             backend_revision_origin=origin,
+            backend_agent_revision=agent_revision,
         )
         request = ProviderPreparationRequest(
             deps=deps,
@@ -810,6 +818,7 @@ async def admit_impl(
         request, _ = scope_channel_runtimes(request)
         prepared = await read_preparation_counterpart(request)
         backend_counterpart = prepared.counterpart
+        backend_agent_revision = agent_revision
 
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
@@ -954,6 +963,7 @@ async def admit_impl(
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,
+        backend_agent_revision=backend_agent_revision,
         backend_footer_profile=backend_footer_profile,
         backend_ever_shared=backend_ever_shared,
         backend=backend,

@@ -12,6 +12,7 @@ from anthropic.types.beta.beta_environment import Config
 from anthropic.types.beta.environment_create_params import EnvironmentCreateParams
 from anthropic.types.beta.environment_list_params import EnvironmentListParams
 from anthropic.types.beta.environment_update_params import EnvironmentUpdateParams
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
@@ -95,6 +96,32 @@ def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scop
     # identity reads only need metadata and archive state; retain their exact
     # native snapshot without requiring or inventing configuration.
     config = cast(Config | None, item.config)
+    native = item.model_dump(mode="json", exclude_unset=True)
+    unclassified = set(native) - {
+        "id",
+        "type",
+        "created_at",
+        "updated_at",
+        "archived_at",
+        "name",
+        "description",
+        "metadata",
+        "scope",
+        "config",
+    }
+    for name in ("type", "scope"):
+        if name == "type" or name in native:
+            try:
+                TypeAdapter(BetaEnvironment.model_fields[name].annotation).validate_python(
+                    native.get(name)
+                )
+            except ValidationError:
+                unclassified.add(name)
+    config_value: dict[str, JsonValue] = (
+        {} if config is None else {"config": config.model_dump(mode="json", exclude_unset=True)}
+    )
+    if unclassified:
+        config_value["unclassified_fields"] = cast(JsonValue, sorted(unclassified))
     return Environment.model_validate(
         {
             "ref": {
@@ -106,7 +133,7 @@ def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scop
                 "account_id": scope.account_id,
             },
             "revision": {"local": 0},
-            "native": item.model_dump(mode="json", exclude_unset=True),
+            "native": native,
             "created_at": item.created_at,
             "updated_at": item.updated_at,
             "archived_at": item.archived_at,
@@ -125,11 +152,11 @@ def environment_record(item: BetaEnvironment, account_scope_id: str, scope: Scop
                 ),
                 "native_config": (
                     None
-                    if config is None
+                    if config is None and not unclassified
                     else {
                         "namespace": "anthropic.environment_config",
                         "version": 1,
-                        "value": {"config": config.model_dump(mode="json", exclude_unset=True)},
+                        "value": config_value,
                     }
                 ),
             },

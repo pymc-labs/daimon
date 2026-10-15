@@ -1,7 +1,8 @@
 """Explicit Gemini deployment and caller-private binding for the host turn seam.
 
-A runtime must supply the exact admitted deployment and durable stores. No
-Anthropic agent is translated, and no credentials or clients are discovered.
+A runtime supplies the exact admitted deployment and durable stores. Ordinary
+source targets require confirmed losses and native readback; credentials and
+clients are never discovered implicitly.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or request.session_account_id != admission.account_id
     ):
         raise ScopeViolation(request.thread_id, "Gemini preparation differs from admission")
+    target = request.worker.spec if request.worker is not None else request.target_spec
     # Shared ownership, seals, mounts and transfer require a separate complete
     # deployment adapter. Never silently drop those obligations in this slice.
     if (
@@ -56,14 +58,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or admission.shared_owner is not None
         or admission.origin_seal_ids
         or (
-            admission.memory_read_only
-            and (request.worker is None or "memory" not in request.worker.declared_drops)
+            admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
         )
         or admission.asks_before_publishing
-        or (
-            admission.channel_skills
-            and (request.worker is None or "skills" not in request.worker.declared_drops)
-        )
+        or (admission.channel_skills and (target is None or "skills" not in target.declared_drops))
         or request.transfer is not None
         or not request.reuse_existing
     ):
@@ -77,10 +75,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     if request.worker is not None or admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment
 
-        if request.worker is None or request.counterpart is None or request.source is None:
+        if request.counterpart is None or request.source is None or target is None:
             raise AdmissionDenied(reason="backend_unsupported")
         plan = load_gemini_deployment(request)
-        expected = plan.worker_deployment(request.worker, config)
+        expected = plan.deployment(request)
         checked, ref = request.counterpart, request.counterpart.agent.ref
         if (
             deployment is None
@@ -98,7 +96,9 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             != ("gemini", "agent", request.scope.tenant_id, request.scope.account_id, plan.project)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
-        if plan.worker_materialization and request.verified_counterpart != checked:
+        if (plan.worker_materialization or request.worker is None) and (
+            request.verified_counterpart != checked
+        ):
             raise AdmissionDenied(reason="backend_unsupported")
         deployment = replace(deployment, native_agent=request.counterpart.agent)
         journal = replace(journal, deployment=deployment)
@@ -251,5 +251,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         backend=backend,
         session_ref=session_ref,
         native_footer_cost=footer_cost,
-        runtime=runtime if request.worker is not None else None,
+        runtime=runtime
+        if request.worker is not None or admission.backend_revision_origin == "agent"
+        else None,
     )

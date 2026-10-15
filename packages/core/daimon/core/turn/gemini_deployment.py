@@ -195,6 +195,47 @@ class GeminiPlan(BaseModel):
             max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
         )
 
+    def deployment(self, request: ProviderPreparationRequest) -> GeminiDeployment:
+        """Compile the prepared source target without borrowing worker authority."""
+        revision = request.admission.backend_revision
+        if revision is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        if request.worker is not None:
+            return self.worker_deployment(request.worker, revision)
+        target, source = request.target_spec, request.source
+        from daimon.core.turn.runtime_manifest import source_instructions_preserved
+
+        if (
+            request.admission.backend_revision_origin != "agent"
+            or target is None
+            or source is None
+            or source.effective_spec is None
+            or self.worker_materialization
+            or self.max_output_tokens is not None
+            or revision.profile != self.profile
+            or revision.model != FLASH_PRIMARY
+            or target.model != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
+            or "memory" not in target.declared_drops
+            or target.name != source.effective_spec.name
+            or not source_instructions_preserved(source.effective_spec.system, target.system)
+            or target.tools != ()
+            or target.skills != ()
+            or target.mcp_servers != ()
+            or target.extensions
+            or self.tools
+            or self.skill_ids
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        try:
+            compile_agent(target)
+            if compile_environment(self.environment) != {"type": "remote", "sources": []}:
+                raise AdmissionDenied(reason="backend_unsupported")
+        except UnsupportedCapability as error:
+            raise AdmissionDenied(reason="backend_unsupported") from error
+        return GeminiDeployment(
+            revision.digest, revision.local, self.project, target, self.environment
+        )
+
     async def read_counterpart(
         self,
         request: ProviderPreparationRequest,
@@ -205,11 +246,8 @@ class GeminiPlan(BaseModel):
         """Read native named-agent intent; no full source or execution proof is implied."""
 
         expected = None
-        if request.worker is not None:
-            revision = request.admission.backend_revision
-            if revision is None:
-                raise AdmissionDenied(reason="backend_unsupported")
-            expected = self.worker_deployment(request.worker, revision)
+        if request.worker is not None or request.target_spec is not None:
+            expected = self.deployment(request)
 
         async def verify_native(checked: AgentRevision) -> None:
             adapter = resources.backend.agents
@@ -221,7 +259,7 @@ class GeminiPlan(BaseModel):
                 or adapter.account_scope_id != self.project
                 or compile_environment(self.environment) != {"type": "remote", "sources": []}
                 or (
-                    (not self.worker_materialization or expected is None)
+                    expected is None
                     and (
                         checked.agent.spec.system != self.system
                         or checked.agent.spec.tools != self.tools
@@ -287,8 +325,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     )
     # Validate native policy before reading the selected credential or opening
     # persistence. Unsupported MCP, confirmations and workspace sources refuse.
-    if request.worker is not None:
-        deployment = plan.worker_deployment(request.worker, revision)
+    if request.worker is not None or request.target_spec is not None:
+        deployment = plan.deployment(request)
     else:
         try:
             compile_agent(agent, max_output_tokens=plan.max_output_tokens)
@@ -329,8 +367,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         if preparation.worker != request.worker:
             raise AdmissionDenied(reason="backend_unsupported")
         source = preparation.source
-        if preparation.worker is not None:
-            if source is None or plan.worker_deployment(preparation.worker, revision) != deployment:
+        if preparation.worker is not None or preparation.target_spec is not None:
+            if source is None or plan.deployment(preparation) != deployment:
                 raise AdmissionDenied(reason="backend_unsupported")
         elif source is None:
             source = await load_backend_agent(

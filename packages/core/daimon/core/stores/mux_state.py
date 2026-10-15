@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 from daimon.core._models import (
     AccountingOutbox,
@@ -42,7 +42,8 @@ from daimon.core._models import (
     TurnCardIntent,
     UsageObservation,
 )
-from daimon.core.stores import read_persisted_columns
+from daimon.core.stores import agent_backends, read_persisted_columns
+from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope
@@ -63,7 +64,7 @@ from mux.state.store import (
     check_binding_successor,
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter
 from sqlalchemy import ColumnElement, String, cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -131,8 +132,22 @@ def fixed_clock(now: datetime) -> Clock:
 # Config revisions
 
 
+def _agent_backend_reference(
+    channel: ChannelRef, origin: str, revision: AgentBackendRevision | None
+) -> list[JsonValue] | None:
+    if revision is None:
+        return None
+    if revision.tenant_id != _tenant(channel.tenant_id) or origin != "agent":
+        raise ScopeViolation(channel.channel_id, "foreign agent backend association")
+    return [str(revision.agent_id), revision.local]
+
+
 async def put_config_revision(
-    session: AsyncSession, revision: ConfigRevision, *, origin: str = "channel"
+    session: AsyncSession,
+    revision: ConfigRevision,
+    *,
+    origin: str = "channel",
+    agent_revision: AgentBackendRevision | None = None,
 ) -> ConfigRevision:
     channel = revision.channel
     key = {
@@ -141,15 +156,27 @@ async def put_config_revision(
         "channel_id": channel.channel_id,
         "local": revision.local,
     }
+    reference = _agent_backend_reference(channel, origin, agent_revision)
     inserted = await session.scalar(
         insert(ChannelConfigRevision)
-        .values(**key, digest=revision.digest, revision=_json(revision), origin=origin)
+        .values(
+            **key,
+            digest=revision.digest,
+            revision=_json(revision),
+            origin=origin,
+            agent_backend_ref=reference,
+        )
         .on_conflict_do_nothing()
         .returning(ChannelConfigRevision.local)
     )
     if inserted is None:
         existing = await get_config_revision(session, channel, revision.local)
-        if existing != revision:
+        retained = await session.scalar(
+            select(ChannelConfigRevision.agent_backend_ref).where(
+                *_channel_where(channel), ChannelConfigRevision.local == revision.local
+            )
+        )
+        if existing != revision or retained != reference:
             raise ConfigRevisionConflict(channel.channel_id, revision.local)
     return ConfigRevision.model_validate(_json(revision))
 
@@ -1102,14 +1129,23 @@ async def next_config_local(session: AsyncSession, channel: ChannelRef) -> int:
 
 
 async def effective_revision(
-    session: AsyncSession, channel: ChannelRef, digest: str, origin: str
+    session: AsyncSession,
+    channel: ChannelRef,
+    digest: str,
+    origin: str,
+    *,
+    agent_revision: AgentBackendRevision | None = None,
 ) -> ConfigRevision | None:
+    reference = _agent_backend_reference(channel, origin, agent_revision)
     body = await session.scalar(
         select(ChannelConfigRevision.revision)
         .where(
             *_channel_where(channel),
             ChannelConfigRevision.origin == origin,
             ChannelConfigRevision.digest == digest,
+            ChannelConfigRevision.agent_backend_ref == reference
+            if reference is not None
+            else ChannelConfigRevision.agent_backend_ref.is_(None),
         )
         .order_by(ChannelConfigRevision.local.desc())
         .limit(1)
@@ -1123,3 +1159,33 @@ async def config_origin(session: AsyncSession, channel: ChannelRef, local: int) 
             *_channel_where(channel), ChannelConfigRevision.local == local
         )
     )
+
+
+async def get_config_agent_revision(
+    session: AsyncSession, revision: ConfigRevision, *, agent_id: uuid.UUID
+) -> AgentBackendRevision | None:
+    """Recover only the immutable consent association retained with this effective revision."""
+    statement = select(ChannelConfigRevision.agent_backend_ref).where(
+        *_channel_where(revision.channel),
+        ChannelConfigRevision.local == revision.local,
+        ChannelConfigRevision.origin == "agent",
+    )
+    raw = (await read_persisted_columns(session, statement)).scalar_one_or_none()
+    if raw is None:
+        return None
+    try:
+        identity, local = TypeAdapter(
+            tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)]]
+        ).validate_python(raw)
+    except ValueError:
+        raise ScopeViolation(
+            revision.channel.channel_id, "invalid agent backend association"
+        ) from None
+    if identity != agent_id:
+        raise ScopeViolation(revision.channel.channel_id, "foreign agent backend association")
+    retained = await agent_backends.current(
+        session, _tenant(revision.channel.tenant_id), identity, local=local, persisted=True
+    )
+    if retained is None or retained.drop_consent is None:
+        raise ScopeViolation(revision.channel.channel_id, "missing original backend consent")
+    return retained

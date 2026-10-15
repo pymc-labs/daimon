@@ -163,6 +163,19 @@ class ScopedTurnRuntimes(Mapping[str, TurnRuntime]):
         revision = request.admission.backend_revision
         self._profile = revision.profile if revision is not None else None
 
+    def bind_preparation(self, request: ProviderPreparationRequest) -> None:
+        """Attach canonical preparation facts before the first scoped construction."""
+        if (
+            request.scope != self._request.scope
+            or request.admission.backend_revision != self._request.admission.backend_revision
+            or request.platform != self._request.platform
+            or request.thread_id != self._request.thread_id
+            or request.session_account_id != self._request.session_account_id
+        ):
+            raise ScopeViolation(request.thread_id, "preparation differs from runtime scope")
+        if self.resolved is None:
+            self._request = request
+
     @property
     def resolved(self) -> TurnRuntime | None:
         """Inspect the selected runtime without constructing it."""

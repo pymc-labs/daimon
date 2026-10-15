@@ -108,7 +108,17 @@ PROD_SEARCH_PATHS=(
 # that exports the approved alternative). Empty by default; the
 # implementation phase can grow this allow-list with intent.
 ALLOWLIST_T1=()  # MagicMock(id=...) for SDK shapes
-ALLOWLIST_T2=()  # model_construct
+# T2 residue: the unknown-discriminator-value regressions must prove the
+# ACTUAL non-strict Anthropic SDK response parser (which does not enforce
+# Literal discriminators) still lets an invalid native value through to our
+# driver code; model_validate would already refuse it (extra_forbidden /
+# literal_error) and silently defeat the regression it exists to prove.
+# Content-level entries only — not the file, not the directory.
+ALLOWLIST_T2=(
+  'BetaManagedAgentsFileResourceConfig.model_construct(**payload)'
+  'BetaManagedAgentsMemoryStoreResourceConfig.model_construct(**payload)'
+  'BetaManagedAgentsGitHubRepositoryResourceConfig.model_construct(**payload)'
+)
 # T3 residue: the Discord runtime builders wire two retrieves onto a bare
 # AsyncMock() client. Converting them to build_fake_anthropic is a real
 # migration of ~4,400 lines of Discord tests (TODO in test_orchestration.py);

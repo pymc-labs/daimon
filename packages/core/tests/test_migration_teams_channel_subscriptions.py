@@ -1,4 +1,4 @@
-"""Migration 0102 creates the channel subscription table, and its downgrade drops it."""
+"""Migration 0103 creates the channel subscription table, and its downgrade drops it."""
 
 import importlib.util
 from pathlib import Path
@@ -19,7 +19,7 @@ async def test_teams_channel_subscriptions_upgrade_matches_the_model(
     """Rebuilt by the migration, the table serves the store; downgrade removes it."""
     tenant = await make_tenant(db_session)
     await db_session.execute(text("DROP TABLE teams_channel_subscriptions"))
-    path = Path(__file__).parents[1] / "alembic/versions/0102_teams_channel_subscriptions.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0103_teams_channel_subscriptions.py"
     spec = importlib.util.spec_from_file_location("migration_teams_subscriptions", path)
     assert spec and spec.loader, "the migration module must load"
     migration = importlib.util.module_from_spec(spec)

@@ -23,6 +23,18 @@ from .test_provider_dispatch import ACCOUNT, REVISION, SCOPE, TENANT, admission,
 NOW = datetime(2026, 10, 12, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def no_drop_consent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These no-database component tests isolate source-capture ownership."""
+    from daimon.core.stores import mux_state
+
+    async def read(session: AsyncSession, revision: ConfigRevision, *, agent_id: object):
+        assert session.sync_session.bind is None
+        return None
+
+    monkeypatch.setattr(mux_state, "get_config_agent_revision", read)
+
+
 @pytest.fixture(params=["openai", "gemini"])
 def counterpart(request: pytest.FixtureRequest) -> AgentRevision:
     provider = request.param

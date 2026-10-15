@@ -2983,3 +2983,58 @@ Discord orchestration callers may omit the origin stack. The existing owner then
 manages its lifetime internally; constructing the stack makes no database or
 provider change. Admission and the queue gate still complete before entering
 the opt-in fleet origin or binding its session.
+
+### Source-loss consent persistence
+
+Agent backend revisions can retain a closed source-loss consent body containing
+the canonical declared drops, the complete source pin and the target-spec digest.
+Existing revisions have no consent and serialize as before. Consent-bearing
+effective configuration rows retain the original logical agent UUID and local
+revision; identical backend/model selections with different consent do not share
+an effective revision. Retained reads resolve that exact original association,
+and refuse foreign, malformed or missing originals. This storage alone enables
+no ordinary cross-backend execution.
+
+The migration adds two nullable JSONB columns without changing existing data.
+Downgrade removes consent and its associations; subsequent source-loss execution
+requires fresh confirmation rather than recovering consent from another revision.
+
+Retained consent and its original association are read from persisted columns.
+Cached ORM values cannot hide cleared or malformed consent. Effective dirty or
+deleted proof sources refuse without flushing, refreshing or overwriting caller
+state; pending new objects remain unflushed. Ordinary revision reads retain their
+existing ORM behavior unless the authoritative persisted mode is selected.
+
+The backend service may receive a trusted complete source-capture callback. Its
+preview derives losses through the existing worker source-preservation rule and
+includes the exact losses, source pin and target digest in the confirmation
+digest. A switch must accept exactly that tuple. Credentials, instructions,
+unknown obligations and publishing approval cannot be discarded. Missing source
+or publishing context refuses. Clear removes consent; revert rechecks the original
+consent against a fresh capture, and fleet-grant changes carry the current consent.
+
+Turn preparation reads the original accepted revision through the effective
+configuration association, never through the latest preference. It freshly reads
+and projects the source, derives the target again, and supplies that canonical
+target to the existing lazy runtime factory before construction. Native readback
+still must prove the counterpart matches, followed by another fresh source read.
+Source drift requires confirmation again. Provider and adapter owners supply their
+runtime and trusted capture implementations separately; no-consent execution
+retains its existing refusal and all feature defaults remain unchanged.
+
+Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP, tool and environment-config policy fields. Original native definitions are validated before requester filtering, including required discriminator presence, supported discriminator values and environment visibility scope. Hidden MCP attachments cannot erase unknown or invalid control fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed. Schema-supported omission and null values retain their existing meanings.
+
+
+Ordinary Gemini agent-origin turns can use a plain chat counterpart after the
+existing backend-switch flow records the exact declared losses on the original
+immutable revision. Preparation rederives that target from fresh source facts,
+checks the installed source/catalog/configuration pins and native definition,
+and carries the verified named-agent runtime into execution. Memory must be
+explicitly dropped; tools, skills and MCP are empty, and the target uses an
+explicit remote environment without sources. Credentials, publishing approval,
+unknown source controls, shared ownership, seals and transfer remain refused.
+The source instructions and logical name are retained; operator deployment text
+cannot replace them. No worker is fabricated, and ordinary chat does not inherit
+worker token controls. Missing consent, source drift or incomplete native proof
+refuses preparation. The existing explicit backend-selection flags remain
+required; unconfigured channels and the worker option-A limits are unchanged.

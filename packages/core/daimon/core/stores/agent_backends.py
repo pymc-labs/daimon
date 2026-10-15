@@ -9,6 +9,7 @@ from daimon.core._models import (
     AgentBackendRevisionRecord,
     Tenant,
 )
+from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.ids import Provider
 from pydantic import JsonValue
@@ -39,15 +40,25 @@ async def actor_exists(session: AsyncSession, tenant_id: uuid.UUID, account_id: 
 
 
 async def current(
-    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, local: int | None = None
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    *,
+    local: int | None = None,
+    persisted: bool = False,
 ) -> AgentBackendRevision | None:
+    """Use persisted columns for authority; ordinary callers retain ORM semantics."""
     query = select(AgentBackendRevisionRecord).where(
         AgentBackendRevisionRecord.tenant_id == tenant_id,
         AgentBackendRevisionRecord.agent_id == agent_id,
     )
     if local is not None:
         query = query.where(AgentBackendRevisionRecord.local == local)
-    row = await session.scalar(query.order_by(AgentBackendRevisionRecord.local.desc()).limit(1))
+    query = query.order_by(AgentBackendRevisionRecord.local.desc()).limit(1)
+    if persisted:
+        row = (await read_persisted_columns(session, query)).mappings().one_or_none()
+    else:
+        row = await session.scalar(query)
     return AgentBackendRevision.model_validate(row) if row is not None else None
 
 
@@ -63,6 +74,7 @@ async def put_revision(
     agent_name: str,
     preview_digest: str,
     fleet_grant: JsonValue | None = None,
+    drop_consent: JsonValue | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
@@ -74,6 +86,7 @@ async def put_revision(
         agent_name=agent_name,
         preview_digest=preview_digest,
         fleet_grant=fleet_grant,
+        drop_consent=drop_consent,
     )
     session.add(row)
     await session.flush()
