@@ -287,12 +287,13 @@ refused, replies in followed threads still reach the metered classifier,
 and that one turn is spent. Each
 notification must carry the channel's secret, compared in constant time; one
 that does not is ignored, and a request with no valid entry and a wrong
-secret gets 401. While the service shuts down it answers 503 and reads
-nothing, so Graph retries the batch (for up to four hours) against the next
-instance. Graph does not resend a batch accepted just before shutdown began,
-so each boot reads every subscribed channel once for messages after the last
-one handled, at most 10 minutes back. When Graph reports missed notifications,
-Daimon reads the channel the same way, without that limit. Edits never start
+secret gets 401; one of more than 100 entries gets 413, and an entry whose
+subscription id is not a GUID is ignored. Graph does not resend a batch it
+saw accepted, so a message read while the service shuts down is held like a
+Bot Framework one, and the next instance runs it (see Restart behaviour).
+Each boot also reads every subscribed channel once for messages after the
+last one handled, at most 10 minutes back, and so does a notice that Graph
+missed notifications. Edits never start
 a turn, and a message seen through both Bot Framework and Graph, notified
 twice or read again after a restart runs once: both routes write the same
 database receipt (see Restart behaviour). A shared
