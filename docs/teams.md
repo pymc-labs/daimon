@@ -287,13 +287,16 @@ refused, replies in followed threads still reach the metered classifier,
 and that one turn is spent. Each
 notification must carry the channel's secret, compared in constant time; one
 that does not is ignored, and a request with no valid entry and a wrong
-secret gets 401; one of more than 100 entries gets 413, and an entry whose
-subscription id is not a GUID is ignored. Graph does not resend a batch it
-saw accepted, so a message read while the service shuts down is held like a
-Bot Framework one, and the next instance runs it (see Restart behaviour).
-Each boot also reads every subscribed channel once for messages after the
-last one handled, at most 10 minutes back, and so does a notice that Graph
-missed notifications. Edits never start
+secret gets 401, and an entry whose subscription id is not a GUID is
+ignored. A batch naming more than 100 new messages reads each channel's
+newest page once instead of each message. Graph does not resend a batch it
+saw accepted, so a Reply quoting the bot or a typed name read while the
+service shuts down is held like a Bot Framework message and runs on the next
+instance (see Restart behaviour); a followed-thread reply or a refusal read
+then is dropped, as on Bot Framework. Each boot also reads every subscribed
+channel once for messages after the last one handled, at most 10 minutes
+back, and so does a notice that Graph missed notifications; a notified
+message older than that is skipped too. Edits never start
 a turn, and a message seen through both Bot Framework and Graph, notified
 twice or read again after a restart runs once: both routes write the same
 database receipt (see Restart behaviour). A shared
