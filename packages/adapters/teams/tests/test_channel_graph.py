@@ -41,6 +41,7 @@ from .conftest import (
     TEAM_GROUP_ID,
     TeamsApiFake,
     build_teams_runtime,
+    finish_turns,
     patched_turns,
     post_activity,
     running_service,
@@ -191,7 +192,7 @@ async def _run(
     with patched_turns() as turns:
         async with running_service(runtime, fake) as service:
             await post_activity(service, payload)
-            await service.turns.drain(timeout=30)
+            await finish_turns(service.turns)
     return turns
 
 
@@ -273,7 +274,7 @@ async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_si
         async with running_service(runtime, teams_api_fake) as service:
             for _ in range(2):
                 await post_activity(service, _load("channel_attachments_reply"))
-                await service.turns.drain(timeout=30)
+                await finish_turns(service.turns)
 
     offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
     if not admin:
@@ -323,7 +324,7 @@ async def test_the_agents_enable_files_call_posts_the_card_for_this_channel(
     with patched_turns(tools=(asked,)) as turns:
         async with running_service(runtime, teams_api_fake) as service:
             await post_activity(service, _load("channel_attachments_reply"))
-            await service.turns.drain(timeout=30)
+            await finish_turns(service.turns)
 
     offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
     assert len(offers) == posted
@@ -341,7 +342,7 @@ async def test_where_files_are_refused_the_hint_tells_the_agent_to_call_for_the_
     with patched_turns() as turns:
         async with running_service(runtime, teams_api_fake) as service:
             await post_activity(service, _load("channel_attachments_reply"))
-            await service.turns.drain(timeout=30)
+            await finish_turns(service.turns)
 
     message = turns[0]["user_message"]
     assert f"call {ENABLE_FILES_TOOL} first" in message, "the agent knows to post the card"

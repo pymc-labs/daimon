@@ -1536,6 +1536,8 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
         return {("openai", "gpt-6-luna"): native}
 
     monkeypatch.setattr(runtime_registry, "_RUNTIME_FACTORIES", {})
+    # This fixture supplies its own tariffs; installed providers are tested separately.
+    monkeypatch.setattr(runtime_registry, "entry_points", lambda **kwargs: ())
     runtime_registry.register_channel_runtime(
         "openai.persistent_workspace", no_native_client, tariffs=tariffs
     )

@@ -15,12 +15,16 @@ The ladder, best first, each rung the fallback for the one above:
    file resource to mount in the successor's `sessions.create`. The Files API
    lists only session outputs and mounted uploads, so a session that does not
    pack its own files has none that daimon can see (capability matrix P4.b).
+   An archive over the cap is rebuilt once by the checkpoint turn without its
+   largest files; that partial archive is still a full handoff, and the files
+   it dropped are named to the successor as not carried over.
 2. **Transcript only** — the old session is dead, the checkpoint failed or
-   timed out, the bundle was oversized, or there was no work worth spending a
-   turn on. The conversation still crosses, quoted; the files do not. An
-   oversized bundle is deleted on the way down this rung — by the checkpoint
-   turn itself where its own size guard caught it, by this module where the
-   listing did — so a rejected transfer leaves nothing behind.
+   timed out, the bundle was oversized even after the partial rebuild, or
+   there was no work worth spending a turn on. The conversation still
+   crosses, quoted; the files do not. An oversized bundle is deleted on the
+   way down this rung — by the checkpoint turn itself where its own size
+   guard caught it, by this module where the listing did — so a rejected
+   transfer leaves nothing behind.
 3. **History only** — even `events.list` is gone (the session was deleted).
    Nothing crosses here; the platform thread is all the successor has.
 
@@ -63,6 +67,7 @@ from daimon.core.checkpoint_prompt import (
     HANDOFF_MAX_BYTES,
     build_checkpoint_prompt,
     checkpoint_head_lines,
+    checkpoint_left_out,
     checkpoint_too_large_bytes,
     handoff_filename,
     is_handoff_filename,
@@ -196,6 +201,24 @@ _GAP_PHRASING: dict[GapReason | Literal["events_unavailable"], str] = {
 }
 
 _COMMITTED_DURING_CHECKPOINT = "the agent committed to the repository during checkpoint"
+
+
+def _left_out_phrase(paths: tuple[str, ...], more: int) -> str | None:
+    """The files a partial archive dropped, as one `_GAP_PHRASING`-style noun phrase."""
+    # Backticks keep a comma inside a name from splitting the not-carried list;
+    # a name that holds one is counted rather than quoted half-open.
+    named = [f"`{path}`" for path in paths if "`" not in path]
+    more += len(paths) - len(named)
+    if not named and not more:
+        return None
+    listed = ", ".join(named)
+    if more:
+        listed = f"{listed} and {more} more" if named else f"{more} files"
+    return (
+        "these files from the previous workspace, left out because the whole workspace was "
+        f"too large to carry (regenerate them if the task needs them): {listed}"
+    )
+
 
 # What `leave` costs, in the same noun-phrase shape as `_GAP_PHRASING`: the
 # person was asked and chose this, so the successor is told plainly rather
@@ -567,6 +590,15 @@ async def transfer_workspace(
         if unsaved_work == "leave" and old_snapshot.repo_mount_path is not None
         else ()
     )
+    left_out_paths, left_out_more = checkpoint_left_out(reply)
+    left_out = _left_out_phrase(left_out_paths, left_out_more)
+    if left_out is not None:
+        log.info(
+            "workspace_transfer.files_left_out",
+            session_id=old_session_id,
+            count=len(left_out_paths) + left_out_more,
+        )
+        unpreserved = (*unpreserved, left_out)
     if first_head is not None and last_head is not None and first_head != last_head:
         log.warning(
             "workspace_transfer.repository_changed",

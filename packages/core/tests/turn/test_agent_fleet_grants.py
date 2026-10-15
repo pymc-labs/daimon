@@ -16,6 +16,7 @@ from daimon.core.stores import security_audit
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.ids import ModelRef
 from mux.profiles import backend_selection
+from pydantic import ValidationError
 from sqlalchemy import update
 
 from ..test_agent_backend import enable
@@ -543,3 +544,94 @@ async def test_backend_append_after_malformed_grant_revokes_without_rewriting_hi
             )
         )
         assert retained == invalid
+
+
+async def test_root_controls_use_the_existing_audited_grant_and_preserve_worker_limits(owned):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    value = grant().model_copy(
+        update={"native_root_budget_usd": Decimal("0.20"), "root_cash_budget_usd": Decimal("1.00")}
+    )
+    value = AgentFleetGrant.model_validate_json(value.model_dump_json())
+    revision = await set_grant(service, agent, actor, value)
+    loaded = await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW)
+    assert loaded is not None
+    assert loaded.native_root_budget_usd == Decimal("0.20")
+    assert loaded.root_cash_budget_usd == Decimal("1.00")
+    assert loaded.limits == grant().limits
+    assert loaded.epoch == revision.local
+    assert loaded.model_dump(mode="json") == revision.fleet_grant
+    audit = await service.audit(agent.tenant_id, agent_id=agent.agent_id)
+    assert len(audit) == 1 and audit[0].outcome == "allowed"
+    await revoke_grant(service, agent, actor)
+    assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
+
+
+def test_omitted_root_controls_preserve_the_existing_grant_encoding():
+    value = grant()
+    serialized = value.model_dump(mode="json")
+    assert set(serialized) == {
+        "epoch",
+        "max_workers",
+        "choices",
+        "limits",
+        "max_run_seconds",
+        "max_worker_seconds",
+        "max_root_turns",
+    }
+    assert (
+        AgentFleetGrant.model_validate_json(value.model_dump_json()).model_dump(mode="json")
+        == serialized
+    )
+    assert "native_budget_usd" not in serialized["limits"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"native_root_budget_usd": Decimal("0")},
+        {"native_root_budget_usd": Decimal("-0.01")},
+        {"native_root_budget_usd": Decimal("NaN")},
+        {"native_root_budget_usd": Decimal("Infinity")},
+        {"native_root_budget_usd": Decimal("0.001")},
+        {"native_root_budget_usd": Decimal("10000000000.00")},
+        {"native_root_budget_usd": "0.20"},
+        {"native_root_budget_usd": 0.20},
+        {"native_root_budget_usd": True},
+        {"root_cash_budget_usd": Decimal("0")},
+        {"root_cash_budget_usd": Decimal("-1")},
+        {"root_cash_budget_usd": Decimal("NaN")},
+        {"root_cash_budget_usd": Decimal("Infinity")},
+        {"root_cash_budget_usd": "1.00"},
+        {"root_cash_budget_usd": 1.00},
+        {"root_cash_budget_usd": True},
+    ],
+)
+def test_root_budget_pair_refuses_partial_and_malformed_operator_inputs(changes):
+    data = grant().model_dump()
+    data.update(native_root_budget_usd=Decimal("0.20"), root_cash_budget_usd=Decimal("1.00"))
+    with pytest.raises(ValidationError):
+        AgentFleetGrant.model_validate({**data, **changes})
+
+
+@pytest.mark.parametrize("turns", [2, 3])
+def test_shared_native_budget_annotation_keeps_single_input_worker_dispatch(turns):
+    from daimon.core.neutral_resources import WorkerSpecRefused
+
+    limits = WorkerLimits(
+        budget_usd=Decimal("1.00"),
+        deadline=NOW + timedelta(seconds=120),
+        max_turns=turns,
+        native_budget_usd=Decimal("0.20"),
+    )
+    with pytest.raises(WorkerSpecRefused) as refused:
+        limits.require_native_dispatch(NOW)
+    assert (refused.value.field, refused.value.reason) == ("max_turns", "not_subset")
+
+
+@pytest.mark.parametrize("field", ["native_root_budget_usd", "root_cash_budget_usd"])
+def test_root_budget_pair_requires_both_operator_fields(field):
+    data = grant().model_dump()
+    data[field] = Decimal("0.20")
+    with pytest.raises(ValidationError, match="supplied together"):
+        AgentFleetGrant.model_validate(data)

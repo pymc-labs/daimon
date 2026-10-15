@@ -210,7 +210,7 @@ Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos, such as a private GitHub repo. |
+| `github_connect` | Discord callers, Slack callers, Teams callers | Give this agent token access to more repos, such as a private GitHub repo. |
 
 ## `github_remove_repo`
 
@@ -218,7 +218,7 @@ Remove one repository from one agent after confirmation in chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `remove_repo` | Discord callers, Slack callers | Remove owner/repo from this agent only. |
+| `remove_repo` | Discord callers, Slack callers, Teams callers | Remove owner/repo from this agent only. |
 
 ## `github_requests`
 
@@ -234,7 +234,7 @@ Conversational selection of an agent's one filesystem repository.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_working_repo` | Discord callers, Slack callers | Choose the one repo in this agent's filesystem, or pass 'none' to clear it. |
+| `set_working_repo` | Discord callers, Slack callers, Teams callers | Choose the one repo in this agent's filesystem, or pass 'none' to clear it. |
 
 ## `here`
 

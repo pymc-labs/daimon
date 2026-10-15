@@ -862,6 +862,11 @@ class WorkerSpecRefused(ValueError):
         super().__init__(f"worker {field}: {reason}")
 
 
+_NativeBudgetUSD = Annotated[
+    Decimal, Field(gt=0, strict=True, allow_inf_nan=False, max_digits=12, decimal_places=2)
+]
+
+
 class WorkerLimits(Contract):
     budget_usd: Decimal = Field(ge=0, allow_inf_nan=False, strict=True)
     deadline: datetime
@@ -875,14 +880,8 @@ class WorkerLimits(Contract):
     max_output_tokens: int | None = Field(
         default=None, gt=0, strict=True, exclude_if=lambda value: value is None
     )
-    native_budget_usd: Decimal | None = Field(
-        default=None,
-        gt=0,
-        strict=True,
-        allow_inf_nan=False,
-        max_digits=12,
-        decimal_places=2,
-        exclude_if=lambda value: value is None,
+    native_budget_usd: _NativeBudgetUSD | None = Field(
+        default=None, exclude_if=lambda value: value is None
     )
     provider_limits_usd: (
         FrozenMap[
@@ -944,6 +943,18 @@ class AgentFleetGrant(Contract):
     max_run_seconds: int = Field(gt=0, strict=True)
     max_worker_seconds: int = Field(gt=0, strict=True)
     max_root_turns: int = Field(gt=0, strict=True)
+    native_root_budget_usd: _NativeBudgetUSD | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    root_cash_budget_usd: Decimal | None = Field(
+        default=None, gt=0, strict=True, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def _root_budgets(self) -> AgentFleetGrant:
+        if (self.native_root_budget_usd is None) != (self.root_cash_budget_usd is None):
+            raise ValueError("root native and cash budgets must be supplied together")
+        return self
 
     @property
     def expires_at(self) -> datetime:

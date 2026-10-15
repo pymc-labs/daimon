@@ -6,7 +6,7 @@ the tenant through `usage_recording.record_classifier_usage` from the token
 counts returned here. It runs only for threads whose resolved mode is `on`,
 after the burst of messages has gone quiet and after the balance and cap
 gates, so a deployment that never turns the feature on never pays for it.
-Any error, including malformed output, yields `SILENCE_ON_ERROR`: a
+Any error, including malformed output or a refusal, yields `SILENCE_ON_ERROR`: a
 classifier outage must never turn into a chattier bot.
 """
 
@@ -28,7 +28,10 @@ from daimon.core.thread_participation import (
 
 log = structlog.get_logger()
 
-_MAX_OUTPUT_TOKENS = 100
+# A 100-token cap truncated Haiku 5.5's JSON verdict (newer tokenizer, longer
+# reasons), and truncated JSON fails closed to silence. The cap also leaves
+# room for the rare adaptive-thinking episode.
+_MAX_OUTPUT_TOKENS = 1024
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,9 @@ async def classify(
         response = await anthropic.messages.create(
             model=model,
             max_tokens=_MAX_OUTPUT_TOKENS,
+            # Adaptive thinking at low effort judged ambiguous bursts better than
+            # thinking off, and rarely thinks at all.
+            output_config={"effort": "low"},
             system=classifier_system_prompt(bot_display_name),
             messages=[{"role": "user", "content": prompt}],
         )
@@ -69,6 +75,8 @@ async def classify(
             output_tokens=response.usage.output_tokens,
             cache_read_input_tokens=response.usage.cache_read_input_tokens or 0,
         )
+        if response.stop_reason == "refusal":
+            raise ValueError("classifier call was refused")
         text = "".join(b.text for b in response.content if isinstance(b, TextBlock))
         return ClassifierOutcome(parse_classifier_response(text), usage)
     except Exception:  # fail-closed boundary: any failure means silence

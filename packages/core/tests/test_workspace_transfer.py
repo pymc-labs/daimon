@@ -43,6 +43,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_EXCLUDED_PATHS,
+    HANDOFF_LEFT_OUT_MARKER,
+    HANDOFF_LEFT_OUT_MORE_MARKER,
     HANDOFF_TOO_LARGE_MARKER,
     handoff_filename,
 )
@@ -847,6 +849,92 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
 
     assert isinstance(outcome, FullHandoff)
     assert outcome.unpreserved == (), "nothing was left behind, so nothing is claimed to be"
+
+
+async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Over the cap, the checkpoint rebuilds the archive without its largest
+    files. That archive is still a full handoff, and the successor is told
+    exactly which files to regenerate instead of losing every file."""
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(
+        state,
+        old_session,
+        f"{HANDOFF_LEFT_OUT_MARKER} /root/work/model.pkl\n"
+        f"{HANDOFF_LEFT_OUT_MARKER} /root/work/draws, v2.nc\n"
+        f"{HANDOFF_LEFT_OUT_MORE_MARKER} 3\n"
+        "-rw-r--r-- 1 root root 42 handoff.tar.gz\n",
+    )
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+
+    assert isinstance(outcome, FullHandoff), f"a partial archive still crosses, got {outcome!r}"
+    [phrase] = outcome.unpreserved
+    assert phrase.endswith("`/root/work/model.pkl`, `/root/work/draws, v2.nc` and 3 more"), (
+        "every named file is quoted, so a comma in a name cannot split the list"
+    )
+    prepared = as_prepared_replacement(
+        outcome,
+        destination_model_id="claude-sonnet-5",
+        from_agent_name="analysis-bot",
+        to_agent_name="analysis-bot",
+        requested_work=None,
+    )
+    assert f"Not carried over: {phrase}" in prepared.system_blocks[0]["text"], (
+        "the successor reads the list where it reads everything else that is missing"
+    )
+
+
+async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When even the rebuild is over the cap, the turn deletes it and says so:
+    the transfer degrades to the transcript as before."""
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(
+        state,
+        old_session,
+        f"{HANDOFF_LEFT_OUT_MARKER} /root/work/model.pkl\n{HANDOFF_TOO_LARGE_MARKER} 22000000\n",
+    )
+
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+    )
+
+    assert isinstance(outcome, TranscriptOnly), f"expected a transcript rung, got {outcome!r}"
+    assert outcome.gap_reason == "bundle_oversize", "the rejection still wins"
 
 
 def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behind() -> None:

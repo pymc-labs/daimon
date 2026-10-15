@@ -26,6 +26,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, cast
 
 import anthropic as anthropic_pkg
@@ -211,6 +212,7 @@ class ProviderPreparationRequest:
     )
     source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
     worker: ResolvedWorkerSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
+    native_budget_usd: Decimal | None = field(default=None, kw_only=True, compare=False, repr=False)
     before_native: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
@@ -826,6 +828,7 @@ async def bind_session(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    turn_card_intent_id: uuid.UUID | None = None,
 ) -> PreparedTurn:
     if not isinstance(admission, Admission):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise TypeError("bind_session requires an Admission instance")
@@ -897,7 +900,10 @@ async def bind_session(
 
                 publish = _publish
 
-            result = await bind_session_impl(
+            bind = bind_session_impl
+            if turn_card_intent_id is not None:
+                bind = functools.partial(bind_session_impl, turn_card_intent_id=turn_card_intent_id)
+            result = await bind(
                 deps,
                 admission,
                 tenant_id=tenant_id,
@@ -1119,6 +1125,7 @@ async def bind_session_impl(
     _on_orphan: Callable[[PreparedTurn], Awaitable[None]] | None = None,
     worker: ResolvedWorkerSpec | None = None,
     before_native: Callable[[], Awaitable[None]] | None = None,
+    turn_card_intent_id: uuid.UUID | None = None,
 ) -> PreparedTurn:
     """Find-or-create the MA session for this turn and bind its recorder.
 

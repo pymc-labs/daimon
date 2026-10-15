@@ -378,10 +378,11 @@ class ThreadParticipationSettings(BaseModel):
         description="How many earlier thread messages the classifier sees before deciding.",
     )
     classifier_model: str = Field(
-        default="claude-haiku-4-5",
+        default="claude-haiku-5-5",
         description=(
             "Model that decides whether a burst of unprompted messages deserves a reply. "
-            "One short call per quiet burst; a small, fast model is the point."
+            "One short call per quiet burst; a small, fast model is the point. The call "
+            "sets effort low, so pick a model that supports the effort parameter."
         ),
     )
 

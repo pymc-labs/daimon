@@ -447,6 +447,22 @@ class TeamsChannelSubscriptionRow(BaseModel):
     last_message_at: datetime | None
 
 
+class TeamsMessageAdmissionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    message_id: str
+    conversation_id: str
+    user_id: str | None
+    owner_key: int
+    handled: bool
+    message: dict[str, JsonValue] | None
+    notice_sent: bool
+    sent_at: datetime
+    created_at: datetime
+
+
 class SlackUserTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

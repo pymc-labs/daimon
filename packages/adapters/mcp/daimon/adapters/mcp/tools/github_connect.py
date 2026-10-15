@@ -19,12 +19,14 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
+from daimon.adapters.mcp.tools.teams._direct import send_card_to_caller
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.github_connect_cards import (
     CONNECT_GITHUB_EMOJI,
     connect_attachment,
     discord_embed_payload,
     resolve_connect_card,
+    teams_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.github_panel import requester_manages_agent
@@ -52,6 +54,7 @@ from daimon.core.stores.github_connect import (
     set_invitation_encrypted_token,
 )
 from daimon.core.stores.security_audit import append_event
+from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -137,6 +140,31 @@ async def _post_slack_connect_card(
     )
 
 
+async def _post_teams_connect_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    url: str,
+    agent_name: str,
+    requested_repo: str | None = None,
+) -> None:
+    # Teams has no message only its sender sees, and the link is a bearer link:
+    # it goes to the requester's 1:1 chat, never the channel.
+    card = await resolve_connect_card(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        platform="teams",
+        workspace_id=auth.external_id or "",
+        agent_name=agent_name,
+        requested_repo=requested_repo,
+    )
+    await send_card_to_caller(
+        runtime, auth, conversation_id=channel_id, card=teams_connect_card(url, card=card)
+    )
+
+
 async def _github_connect_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -149,8 +177,8 @@ async def _github_connect_impl(
     required_ability: Literal["read", "write"] = "read",
     confirmed: bool = False,
 ) -> ConnectResult:
-    if auth.platform not in ("discord", "slack") or auth.platform_user_id is None:
-        raise ToolError("GitHub setup from chat is available in Discord and Slack.")
+    if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
+        raise ToolError("GitHub setup from chat is available in Discord, Slack and Teams.")
     if auth.is_external:
         raise ToolError("GitHub setup is for members of this workspace.")
     root = runtime.settings.mcp.app_root_url
@@ -375,6 +403,16 @@ async def _github_connect_impl(
                 agent_name=agent.name,
                 requested_repo=repo_name.strip() if repo_name else None,
             )
+        elif auth.platform == "teams":
+            assert token is not None
+            await _post_teams_connect_card(
+                runtime,
+                auth,
+                channel_id=origin.parent_channel_id,
+                url=f"{root}/oauth/github/connect/{token}",
+                agent_name=agent.name,
+                requested_repo=repo_name.strip() if repo_name else None,
+            )
         else:
             assert token is not None
             await _post_slack_connect_card(
@@ -395,7 +433,30 @@ async def _github_connect_impl(
                 await revoke_invitation(session, token=token)
         return ConnectResult(
             status="delivery_failed",
-            message="I couldn't show the GitHub connection button. Try again.",
+            message=(
+                "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
+                "Open a chat with me in Teams, then try again."
+                if auth.platform == "teams"
+                else "I couldn't show the GitHub connection button. Try again."
+            ),
+        )
+    if auth.platform == "teams":
+        lead = f"I can't see {repo_name.strip()} yet. " if repo_name else ""
+        where, line = (
+            ("is posted in this chat", "Use the Connect GitHub card.")
+            if conversation_of(origin.thread_id) == origin.parent_channel_id
+            else (
+                "went to the requester's 1:1 chat with you, not here,",
+                "I sent the Connect GitHub link to our 1:1 chat.",
+            )
+        )
+        return ConnectResult(
+            status="sent",
+            message=(
+                f"The Connect GitHub card {where} and already lists the page steps. "
+                f"Reply with at most this line: {lead}{line} "
+                "Never say done, connected, pending or a tool name."
+            ),
         )
     say = f"I can't see {repo_name.strip()} yet." if repo_name else "Use the button below."
     return ConnectResult(
@@ -410,7 +471,7 @@ async def _github_connect_impl(
 
 
 def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def github_connect(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str = "",
@@ -425,9 +486,10 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Show a single-use connection button bound to the selected agent to a
         server admin, or to a channel admin who manages that agent; repos
         connected this way are for that agent only. Other members get Ask an
-        admin and a recorded request. Never repeat a private
-        link in a shared reply. For a setup target, pass its current name and
-        MA id from turn_controls; otherwise this defaults to the responder.
+        admin and a recorded request. On Teams the card goes to the requester's
+        1:1 chat. Never repeat a private link in a shared reply. For a setup
+        target, pass its current name and MA id from turn_controls; otherwise
+        this defaults to the responder.
         When GitHub access interrupted a task, pass a short restatement as
         requested_work so the task resumes after connection. Leave it empty
         when someone only asks to connect GitHub.

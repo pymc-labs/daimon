@@ -24,7 +24,6 @@ from aioresponses import aioresponses
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import github_app as github_app_module
 from daimon.adapters.mcp.tools.github_app import (
     PostAppInstallLinkResult,
     _post_app_install_link_impl,  # pyright: ignore[reportPrivateUsage]
@@ -405,7 +404,7 @@ async def test_post_app_install_link_uses_the_github_app_slug_when_the_legacy_on
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_post_app_install_link_rejects_unset_slug(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,
@@ -423,34 +422,30 @@ async def test_post_app_install_link_rejects_unset_slug(
     assert "DAIMON_" not in str(refused.value), "operator refusal must not expose settings names"
 
 
-async def test_teams_git_setup_has_no_install_link(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_teams_install_link_posts_the_app_link_as_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teams gets the real install link: it is public, unlike a Connect GitHub link."""
     from unittest.mock import AsyncMock
 
-    posted = AsyncMock(return_value="activity-1")
-    monkeypatch.setattr(github_app_module, "_post_teams_app_install_link_impl", posted)
+    delivered = AsyncMock(return_value=SimpleNamespace(activity_id="activity-2"))
+    monkeypatch.setattr(teams_send_module, "_teams_send_message_impl", delivered)
     result = await _post_app_install_link_impl(
-        _runtime(app_slug=None),
+        _runtime(app_slug="acme-app"),
         _auth_identity(platform="teams"),
         channel_id="222",
         purpose="reading a private repo",
     )
-    assert result.install_url is None
-    assert result.message_id == "activity-1"
-    posted.assert_awaited_once()
-
-    delivered = AsyncMock(return_value=SimpleNamespace(activity_id="activity-2"))
-    monkeypatch.setattr(teams_send_module, "_teams_send_message_impl", delivered)
-    activity_id = await teams_send_module._post_teams_app_install_link_impl(  # pyright: ignore[reportPrivateUsage]
-        _runtime(app_slug=None),
-        _auth_identity(platform="teams"),
-        channel_id="222",
-        slug="",
-        purpose="",
+    assert result.message_id == "activity-2", "the posted activity id should come back"
+    assert result.install_url == "https://github.com/apps/acme-app/installations/new", (
+        "Teams should report the link it posted"
     )
-    assert activity_id == "activity-2"
-    assert delivered.await_args.kwargs["content"] == (
-        "GitHub setup isn't in Teams yet. Set it up from Discord or Slack."
-    )
+    content = delivered.await_args.kwargs["content"]
+    assert content.startswith("reading a private repo\n\n"), "the purpose leads the message"
+    assert "[Install the GitHub App](https://github.com/apps/acme-app/installations/new)" in (
+        content
+    ), "the install link should be a markdown link"
+    assert "Discord or Slack" not in content, "Teams must not be sent elsewhere"
 
 
 async def test_post_app_install_link_rejects_caller_without_send_permission(

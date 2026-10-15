@@ -181,10 +181,17 @@ def _error(
 
 
 def _back_to_chat(platform: str, workspace_id: str) -> str:
+    """How to get back to chat; empty (so "You can close this tab.") for Teams."""
     if platform == "discord":
         target = f"https://discord.com/channels/{html.escape(workspace_id, quote=True)}"
         return f'<a class="gh-primary" href="{target}">{icon("discord")}Back to Discord</a>'
+    if platform == "teams":
+        return ""
     return "In Slack, run <code>/github</code>."
+
+
+def _place_label(platform: str) -> str:
+    return {"discord": "Server", "teams": "Organisation"}.get(platform, "Workspace")
 
 
 def _repo_count(count: int) -> str:
@@ -277,6 +284,8 @@ def _done_page(
             "<p>The repos are connected. Choose which agents use them in GitHub setup.</p>"
             '<div class="gh-actions">' + back + "</div>"
             if platform == "discord"
+            else "<p>The repos are connected. In Teams, ask me which agents should use them.</p>"
+            if platform == "teams"
             else "<p>In Slack, run <code>/github</code> to choose which agents use them.</p>"
         )
     else:
@@ -752,7 +761,7 @@ def _agent_editor_page(
     ]
     working = next((repo for repo in grants if repo.is_working_repo), None)
     may_change_working = working is None or working.repo_id in usable
-    place = "Server" if platform == "discord" else "Workspace"
+    place = _place_label(platform)
     options = [
         _PickerOption(
             repo_id=repo.repo_id,
@@ -1168,7 +1177,7 @@ def _confirmation_page(
     before it can drop its old GitHub token: ticked, and still changeable.
     """
     needed = needed or {}
-    place = "Server" if platform == "discord" else "Workspace"
+    place = _place_label(platform)
     context = (
         f'<div class="gh-context">{platform_mark(platform)}'
         f"<span>{place}: {html.escape(workspace)}</span></div>"
@@ -2353,8 +2362,7 @@ def build_oauth_github_routes(
             installations=installations,
             clients_present=clients_present,
             platform=requester.platform,
-            workspace=workspace
-            or ("this server" if requester.platform == "discord" else "this workspace"),
+            workspace=workspace or f"this {_place_label(requester.platform).lower()}",
             agent_name=invitation.agent_name,
             already_added=already_added,
             needed=needed,

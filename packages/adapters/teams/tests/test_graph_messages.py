@@ -15,15 +15,17 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from daimon.adapters.teams.admissions import admission_channel
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
-from daimon.adapters.teams.identity import delivery_key
+from daimon.adapters.teams.identity import DENIED
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.tenants import set_plain_text_mentions
 from daimon.core.teams_graph import GraphMessage
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import MessageActivity
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -38,6 +40,18 @@ from .conftest import (
 )
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
+
+
+@pytest.fixture
+def db_session_factory(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+) -> async_sessionmaker[AsyncSession]:
+    """A connection per session, as in production: admission claims overlap other writes.
+
+    `db_session` wipes the schema first.
+    """
+    return async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 PRIVATE = "19:private-1@thread.tacv2"
@@ -238,15 +252,12 @@ async def test_a_guest_is_classified_by_the_roster_not_by_graphs_tenant(
 async def test_while_draining_a_message_is_not_taken_and_a_replay_runs_once(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The draining instance claims nothing, so the next one runs Graph's replays once."""
+    """The draining instance claims nothing, so the next one runs a catch-up's read once."""
     draining = Routed(_app(db_session_factory))
     draining.teams.draining = True
     message = _graph("1700000000003", "<p>any thoughts?</p>")
     taken = await draining.teams.handle_graph_message(message, CHANNEL)
     assert taken is False and draining.paths == [], "nothing taken, nothing run"
-    assert delivery_key(PRIVATE, message.id) not in draining.teams._seen, (  # pyright: ignore[reportPrivateUsage]
-        "and nothing claimed"
-    )
     successor = Routed(_app(db_session_factory))
     await successor.graph(message)
     await successor.graph(message)
@@ -264,10 +275,11 @@ def _private_reply(activity_id: str, *, mention: bool) -> dict[str, object]:
 async def test_a_message_from_both_sources_runs_once_whichever_comes_first(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Bot Framework and Graph claim the same key; a repeated notification runs nothing."""
-    assert delivery_key(f"{PRIVATE};messageid={ROOT}", "1700000000003") == delivery_key(
-        PRIVATE, "1700000000003"
-    ), "a thread reply's activity key equals its Graph message's"
+    """Bot Framework and Graph claim the same admission row, so a repeated notification,
+    or one read again after a restart, runs nothing."""
+    assert admission_channel(f"{PRIVATE};messageid={ROOT}") == PRIVATE, (
+        "a thread reply's activity is keyed under its channel, as its Graph message is"
+    )
     routed = Routed(_app(db_session_factory))
     await routed.bot_framework(_private_reply("1700000000003", mention=False))
     await routed.graph(_graph("1700000000003", "<p>any thoughts?</p>"))
@@ -278,6 +290,36 @@ async def test_a_message_from_both_sources_runs_once_whichever_comes_first(
         "1700000000003",
         "1700000000004",
     ], "each message runs once, from whichever source claimed it"
+    restarted = Routed(_app(db_session_factory))
+    await restarted.graph(_graph("1700000000003", "<p>any thoughts?</p>"))
+    assert restarted.paths == [], "the admission outlives the process"
+
+
+async def test_a_refusal_from_graph_is_sent_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A refused Reply to the bot is answered after its receipt is recorded, once."""
+    sender = FakeSender()
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={},
+        bot_token=bot_token,
+    )
+    reference = {"messageSender": {"application": {"id": BOT_CLIENT_ID}}}
+    quote = {"id": "1700000000002", "contentType": "messageReference"}
+    unverified = {"user": {"id": "not-a-uuid", "displayName": "Ada"}}
+    message = _graph(
+        "1700000000003",
+        '<attachment id="1700000000002"></attachment><p>why?</p>',
+        sender=unverified,
+        attachments=[quote | {"content": json.dumps(reference)}],
+    )
+    for _ in range(2):
+        assert await teams.handle_graph_message(message, CHANNEL), "a refusal is taken"
+    assert [(conversation, activity.text) for conversation, activity, _ in sender.sent] == [
+        (f"{PRIVATE};messageid={ROOT}", DENIED)
+    ], "one refusal, in the message's thread"
 
 
 async def test_an_at_mention_from_graph_is_left_to_bot_framework(

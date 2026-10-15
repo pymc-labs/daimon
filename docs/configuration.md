@@ -617,10 +617,11 @@ How many earlier thread messages the classifier sees before deciding.
 
 ### `DAIMON_THREAD_PARTICIPATION__CLASSIFIER_MODEL`
 
-`str` · optional · default `claude-haiku-4-5`
+`str` · optional · default `claude-haiku-5-5`
 
 Model that decides whether a burst of unprompted messages deserves a reply. One short
-call per quiet burst; a small, fast model is the point.
+call per quiet burst; a small, fast model is the point. The call sets effort low, so
+pick a model that supports the effort parameter.
 
 ## Slack
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import io
 import re
 import time
 from collections.abc import Callable, Coroutine
@@ -19,6 +20,7 @@ from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
     FILE_INFO_CONTENT_TYPE,
+    OFFER_TTL_S,
     TeamsOutputDelivery,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -29,6 +31,7 @@ from daimon.core.teams_graph import GraphClient, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from microsoft_teams.api import Attachment, FileConsentCard, FileConsentInvokeActivity
+from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -70,8 +73,11 @@ def _harness(
     db_factory: async_sessionmaker[AsyncSession],
     listing: list[FileMetadata] | None = None,
     channel_files: ChannelFiles | None = None,
+    contents: dict[str, bytes] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> _Harness:
-    """MA serves `listing` (a small CSV by default) minus deleted entries."""
+    """MA serves `listing` (a small CSV by default) minus deleted entries;
+    a file's bytes come from `contents` by id, else a small CSV."""
     files = listing if listing is not None else [_csv()]
     deletes: list[str] = []
     uploads: list[httpx.Request] = []
@@ -98,8 +104,11 @@ def _harness(
 
     router = MARouter()
     router.add("GET", r"/v1/files", on_list)
+    bodies = contents or {}
     router.add(
-        "GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"a,b\n")
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda r, m: httpx.Response(200, content=bodies.get(m.group(1), b"a,b\n")),
     )
     router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
     runtime = build_teams_runtime(
@@ -109,7 +118,12 @@ def _harness(
     )
     sender = FakeSender()
     delivery = TeamsOutputDelivery(
-        runtime=runtime, sender=sender, spawn=spawn, files=channel_files, sleep=no_sleep
+        runtime=runtime,
+        sender=sender,
+        spawn=spawn,
+        files=channel_files,
+        clock=clock,
+        sleep=no_sleep,
     )
     return _Harness(delivery, sender, deletes, uploads, tasks)
 
@@ -154,6 +168,15 @@ def _csv(file_id: str = "file_csv", size: int = 4, filename: str = "data.csv") -
         type="file",
         downloadable=True,
     )
+
+
+def _png(file_id: str, filename: str = "chart.png") -> tuple[FileMetadata, bytes]:
+    """A small chart output and its bytes."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 32), "navy").save(buffer, format="PNG")
+    content = buffer.getvalue()
+    meta = _csv(file_id, size=len(content), filename=filename)
+    return meta.model_copy(update={"mime_type": "image/png"}), content
 
 
 def _card(sender: FakeSender, index: int) -> Attachment:
@@ -697,3 +720,221 @@ async def test_a_channel_with_file_access_keeps_an_oversize_output(
     await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
 
     assert harness.deletes == ["file_csv"], "the uploaded file leaves; the oversize one stays"
+
+
+async def test_dm_image_output_is_previewed_right_before_its_consent_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A chart shows inline once, then its card; a deferred re-sweep sends neither again."""
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], contents={"file_png": content})
+
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    preview, card = harness.sender.activities
+    [image] = preview.attachments or []
+    assert image.content_type == "image/png", "the preview is an inline image attachment"
+    assert (image.content_url or "").startswith("data:image/png;base64,"), "as a data URI"
+    assert card.attachments and card.attachments[0].content_type == FILE_CONSENT_CONTENT_TYPE
+    assert harness.deletes == [], "the preview does not change the consent card's ledger"
+
+
+async def test_dm_image_reoffered_after_its_card_expires_is_not_previewed_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A re-offer repeats the consent card only: the chart is already on screen."""
+    meta, content = _png("file_png")
+    now = [0.0]
+    harness = _harness(
+        db_session_factory, [meta], contents={"file_png": content}, clock=lambda: now[0]
+    )
+
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    now[0] += OFFER_TTL_S + 1
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    kinds = [(a.attachments or [])[0].content_type for a in harness.sender.activities]
+    assert kinds == ["image/png", FILE_CONSENT_CONTENT_TYPE, FILE_CONSENT_CONTENT_TYPE], (
+        "one preview, then a fresh card per offer"
+    )
+
+
+async def test_dm_image_reoffered_after_a_failed_upload_is_previewed_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An answered offer is done with: the next offer is a fresh one, preview included."""
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], contents={"file_png": content})
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+    card = _card(harness.sender, 1).content
+    assert isinstance(card, FileConsentCard)
+    harness.sender.fail_on.add(2)
+
+    await harness.delivery.handle_consent(
+        _consent("accept", cast("dict[str, str]", card.accept_context)["offer"])
+    )
+    with pytest.raises(httpx.ConnectError):
+        await harness.settle()
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    kinds = [(a.attachments or [])[0].content_type for a in harness.sender.activities]
+    assert kinds == [
+        "image/png",
+        FILE_CONSENT_CONTENT_TYPE,
+        FILE_INFO_CONTENT_TYPE,
+        "image/png",
+        FILE_CONSENT_CONTENT_TYPE,
+    ], "the output stays listed, and its next offer shows the chart again"
+
+
+async def test_failed_dm_preview_still_sends_the_consent_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A preview Teams refuses is logged; the file is still offered."""
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], contents={"file_png": content})
+    harness.sender.fail_on.add(0)
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    assert _card(harness.sender, 1).content_type == FILE_CONSENT_CONTENT_TYPE, "card still sent"
+    assert any(e["event"] == "teams.output_preview.send_failed" for e in logs), "logged"
+
+
+async def test_channel_image_outputs_are_previewed_after_the_links(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Links ride on the answer; up to four charts follow in one message, in delivery order."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(5)]
+    listing = [_csv(), *(meta for meta, _ in images)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(db_session_factory, listing, _channel_files(_uploaded), contents)
+    appended: list[str] = []
+
+    async def append(text: str) -> bool:
+        appended.append(text)
+        return True
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    assert len(appended) == 1 and appended[0].count("](https://") == 6, "every file is linked"
+    [(conversation, message, _)] = harness.sender.sent
+    assert conversation == THREAD_ID, "the previews go in the same thread"
+    names = [a.name for a in message.attachments or []]
+    assert names == ["chart0.png", "chart1.png", "chart2.png", "chart3.png"], "first four"
+    assert len(harness.deletes) == 6, "every delivered file leaves the listing"
+
+
+async def test_failed_channel_preview_leaves_the_delivery_alone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A 413 on the preview message is logged; the files are saved and linked as before."""
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], _channel_files(_uploaded), {"file_png": content})
+    harness.sender.refuse_on.add(0)
+
+    async def append(_: str) -> bool:
+        return True
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    assert any(e["event"] == "teams.output_preview.send_failed" for e in logs), "logged"
+    assert harness.deletes == ["file_png"], "the saved file still leaves the listing"
+
+
+@pytest.mark.parametrize("status", [400, 413])
+async def test_refused_channel_previews_are_retried_one_per_message(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
+) -> None:
+    """Several previews may be too big together: each is retried alone, failures only logged."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(3)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(
+        db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
+    )
+    harness.sender.refuse_on.add(0)
+    harness.sender.refuse_status = status
+    harness.sender.fail_on.add(2)
+
+    async def append(_: str) -> bool:
+        return True
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    names = [[a.name for a in activity.attachments or []] for activity in harness.sender.activities]
+    assert names == [
+        ["chart0.png", "chart1.png", "chart2.png"],
+        ["chart0.png"],
+        ["chart1.png"],
+        ["chart2.png"],
+    ], "the refused combined message is retried one preview at a time, in order"
+    failures = [e for e in logs if e["event"] == "teams.output_preview.send_failed"]
+    assert len(failures) == 1, "only the preview refused on its own is logged"
+    assert len(harness.deletes) == 3, "the files are delivered whatever the previews do"
+
+
+@pytest.mark.parametrize("status", [403, 429])
+async def test_channel_previews_refused_for_another_reason_are_not_resent(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
+) -> None:
+    """Only 400 and 413 can mean the combined message was too large."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(2)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(
+        db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
+    )
+    harness.sender.refuse_on.add(0)
+    harness.sender.refuse_status = status
+
+    async def append(_: str) -> bool:
+        return True
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    previews = [a for a in harness.sender.activities if a.attachments]
+    assert len(previews) == 1, "the combined preview message is sent once, never split"
+
+
+@pytest.mark.parametrize("timeout_index", [0, 1], ids=["asyncio", "httpx"])
+async def test_timed_out_channel_previews_are_not_resent(
+    db_session_factory: async_sessionmaker[AsyncSession], timeout_index: int
+) -> None:
+    """A timed-out send may have landed: resending one by one could show each twice."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(2)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(
+        db_session_factory, [meta for meta, _ in images], _channel_files(_uploaded), contents
+    )
+    # The links message takes index 0 when the answer cannot carry them.
+    harness.sender.timeout_on.add(timeout_index)
+
+    async def append(_: str) -> bool:
+        return timeout_index == 0
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    previews = [a for a in harness.sender.activities if a.attachments]
+    assert len(previews) == 1, "the combined preview message is sent once, never retried"
+    assert any(e["event"] == "teams.output_preview.send_failed" for e in logs), "logged"
+
+
+async def test_an_unprompted_channel_turn_posts_no_previews(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An unprompted turn posts its answer and nothing else, previews included."""
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], _channel_files(_uploaded), {"file_png": content})
+
+    async def append(_: str) -> bool:
+        return True
+
+    unprompted = dataclasses.replace(_in_channel(), unprompted=True)
+    await harness.delivery.sweep(unprompted, "sesn_1", append=append)
+
+    assert harness.sender.sent == [], "no preview message after an unprompted answer"
+    assert harness.deletes == ["file_png"], "the file was still saved"

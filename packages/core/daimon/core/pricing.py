@@ -3,7 +3,7 @@
 Anthropic's API doesn't expose rates; update this module when prices change
 or new models ship. Rates are in USD per million tokens.
 
-Pure module — no I/O, no DB, no module-level state beyond MODEL_PRICING.
+Pure module — no I/O or DB; provider tariffs are immutable dated list rates.
 Per `guideline:architecture` "Functional core, imperative shell".
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
@@ -20,7 +20,7 @@ from typing import Protocol
 from mux.contracts.config import ResolvedBackend
 from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import get_profile
+from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
 
 
 class LegacyUsage(Protocol):
@@ -282,8 +282,24 @@ class ProviderPrice:
     cache_read: Decimal
     cache_write: Decimal | None = None
     verified: bool = True
+    max_priced_input_tokens: int | None = None
+    valid_before: date | None = None
+
+    def current_on(self, on: date) -> bool:
+        """A verified source row applies only within its known date window."""
+        return (
+            self.verified
+            and self.checked_on <= on
+            and (self.valid_before is None or on < self.valid_before)
+        )
 
     def __post_init__(self) -> None:
+        if self.max_priced_input_tokens is not None and (
+            type(self.max_priced_input_tokens) is not int or self.max_priced_input_tokens < 0
+        ):
+            raise ValueError("pricing input threshold requires a nonnegative integer")
+        if self.valid_before is not None and self.valid_before <= self.checked_on:
+            raise ValueError("pricing validity must extend beyond its checked date")
         if not self.provider or not self.model:
             raise ValueError("provider pricing requires provider and model identity")
         for rate in (self.input, self.output, self.cache_read, self.cache_write):
@@ -339,7 +355,12 @@ def provider_cost_of(
     when the split is unreported. No missing native count is filled in.
     """
     tokens = provider_usage_tokens(usage, price)
-    if not price.verified or infrastructure_usd is None:
+    if not price.current_on(usage.observed_at.date()) or infrastructure_usd is None:
+        return None
+    if price.max_priced_input_tokens is not None and (
+        usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens
+    ):
+        # An aggregate cannot establish the pricing tier of its requests.
         return None
     if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
         raise ValueError("actual infrastructure cost must be finite and nonnegative")
@@ -387,7 +408,7 @@ def minimum_cost_of(
             usage.model.id,
         ) != (rates.provider, rates.provider, rates.model):
             raise ValueError("usage and dated provider pricing identity differ")
-        if not rates.verified or rates.checked_on > usage.observed_at.date():
+        if not rates.current_on(usage.observed_at.date()):
             return None
         variants = (rates,)
     elif rates.long_context is None:
@@ -517,3 +538,67 @@ def resolved_worker_prices(
         if rate is not None:
             prices[key] = rate
     return MappingProxyType(prices)
+
+
+# Paid Standard direct-API text rates, verified against these official sources.
+# Agents inference follows the underlying model rates; tool/storage/container
+# charges remain separate. Luna's base row is a floor at either context tier;
+# exact pricing above the threshold requires per-request tier attribution.
+PROVIDER_PRICING_CHECKED_ON = date(2026, 10, 14)
+PROVIDER_PRICING_SOURCES = (
+    "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "https://developers.openai.com/api/docs/guides/agents-api/observability",
+    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://ai.google.dev/gemini-api/docs/antigravity-agent",
+)
+_PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
+    {
+        PERSISTENT_WORKSPACE.profile_id: (
+            ProviderPrice(
+                PERSISTENT_WORKSPACE.provider,
+                "gpt-6-luna",
+                PROVIDER_PRICING_CHECKED_ON,
+                Decimal("0.10"),
+                Decimal("0.50"),
+                Decimal("0.01"),
+                Decimal("0.125"),
+                max_priced_input_tokens=272_000,
+            ),
+        ),
+        INLINE_REUSE.profile_id: (
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-3.5-flash-lite",
+                PROVIDER_PRICING_CHECKED_ON,
+                Decimal("0.30"),
+                Decimal("2.50"),
+                Decimal("0.03"),
+            ),
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-3.8-flash",
+                PROVIDER_PRICING_CHECKED_ON,
+                Decimal("0.75"),
+                Decimal("3.75"),
+                Decimal("0.075"),
+                valid_before=date(2027, 1, 1),
+            ),
+        ),
+    }
+)
+
+
+def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
+    """Cold immutable native tariffs, shared by admission and usage owners.
+
+    Unsupported profiles/models are absent. This supplies Standard token
+    rates, not a whole-bill proof, native request limit or authority grant.
+    """
+    on = datetime.now(UTC).date()
+    return MappingProxyType(
+        {
+            (price.provider, price.model): price
+            for price in _PROVIDER_PRICING.get(profile, ())
+            if price.current_on(on)
+        }
+    )

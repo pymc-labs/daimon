@@ -1,4 +1,4 @@
-"""Migration 0101 creates the channel subscription table, and its downgrade drops it."""
+"""Migration 0102 creates the channel subscription table, and its downgrade drops it."""
 
 import importlib.util
 from pathlib import Path
@@ -19,7 +19,7 @@ async def test_teams_channel_subscriptions_upgrade_matches_the_model(
     """Rebuilt by the migration, the table serves the store; downgrade removes it."""
     tenant = await make_tenant(db_session)
     await db_session.execute(text("DROP TABLE teams_channel_subscriptions"))
-    path = Path(__file__).parents[1] / "alembic/versions/0101_teams_channel_subscriptions.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0102_teams_channel_subscriptions.py"
     spec = importlib.util.spec_from_file_location("migration_teams_subscriptions", path)
     assert spec and spec.loader, "the migration module must load"
     migration = importlib.util.module_from_spec(spec)
@@ -29,7 +29,9 @@ async def test_teams_channel_subscriptions_upgrade_matches_the_model(
     def run(sync_conn: Connection, step: str) -> bool:
         with Operations.context(MigrationContext.configure(sync_conn)):
             getattr(migration, step)()
-        return inspect(sync_conn).has_table("teams_channel_subscriptions")
+        # The worker schema's, not a migrated `public` one also on the search path.
+        here = sync_conn.scalar(text("SELECT current_schema()"))
+        return inspect(sync_conn).has_table("teams_channel_subscriptions", schema=here)
 
     assert await conn.run_sync(run, "upgrade"), "upgrade creates the table"
     rows = await list_teams_channel_subscriptions(db_session, tenant_id=tenant.id)

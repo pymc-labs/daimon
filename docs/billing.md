@@ -1229,3 +1229,28 @@ totals additionally permit the existing independently proven disjoint child
 inventory; this does not enable delegation configuration. Usage DTOs carry only
 a provider, so accounting reads the registered profiles' shared mode and refuses
 an ambiguous declaration rather than picking a different billing protocol.
+
+
+Production native runtime registrars obtain paid Standard direct-API text rates
+from `daimon.core.pricing.provider_prices(profile)`. Their provider identities come from the existing profile owner, and validity
+is evaluated against the UTC date. These immutable source rows
+were checked on 2026-10-14 against the official OpenAI model/Agents usage pages
+and Gemini pricing/Antigravity pages listed in `PROVIDER_PRICING_SOURCES`.
+Coverage is `gpt-6-luna`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`;
+unsupported models stay unpriced. Flash promotional rates expire at 2027-01-01.
+These token rates exclude tool, cache-storage and container/session charges.
+The runtime still needs complete measured infrastructure before exact billing.
+
+Luna's Standard short-context row is a token floor across its context tiers.
+Exact cost from this row requires inclusive input at most 272,000 tokens; a
+larger turn/session aggregate cannot identify its individual request tiers and
+remains unknown. Missing cache-write counters also keep exact cost unknown.
+The tariff does not enforce an input cap or convert a token floor into a bill.
+Fast, Batch, Flex, regional and FedRAMP pricing are outside this supplier's
+request-tier contract; a registrar selecting them must refuse this supplier.
+
+The installed OpenAI and Gemini runtime callbacks pass these same price objects
+to the fleet pricing context and their native usage recorders. Default fleet
+startup discovers the callbacks without credentials or provider calls. Missing
+model rows do not reserve worker funds, and supplying a token tariff leaves
+unknown infrastructure and incomplete native counters pending.

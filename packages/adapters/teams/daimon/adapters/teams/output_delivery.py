@@ -15,6 +15,9 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
+Image outputs also travel as inline previews (`image_preview`): in a channel,
+up to MAX_PREVIEWS in delivery order in one message after the links; in a 1:1
+chat, each just before its first consent card. A failed preview is only logged.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -31,6 +34,7 @@ import hashlib
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -41,6 +45,7 @@ from daimon.adapters.teams.attachments import FetchRefused
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
@@ -150,12 +155,61 @@ class TeamsOutputDelivery:
         self._offers: dict[str, _Offer] = {}
         # Files whose click is being handled: still listed, never offered again.
         self._claimed: set[str] = set()
+        # Files already previewed in a 1:1 chat: a re-offer (expired card, failed send)
+        # repeats only the card. Per process, so a restart previews once more.
+        self._previewed: set[str] = set()
         self._neutral_claimed_bytes: dict[str, int] = {}
         self._sweeps: dict[str, asyncio.Task[Any]] = {}
+        # A decode can take hundreds of MB: at most two at once across all sweeps. Its own
+        # pool, so queued decodes never fill the loop's default executor (to_thread, DNS).
+        self._decoder = ThreadPoolExecutor(max_workers=2, thread_name_prefix="teams-preview")
 
     async def _say(self, conversation_id: str, service_url: str | None, text: str) -> None:
         await self._sender.send(
             conversation_id, MessageActivityInput(text=text), service_url=service_url
+        )
+
+    def close(self) -> None:
+        """Drop queued decodes; one already running finishes on its thread."""
+        self._decoder.shutdown(wait=False, cancel_futures=True)
+
+    async def _preview(self, name: str, file: DeliverableFile) -> Attachment | None:
+        # Off the event loop: decoding and re-encoding a large image would stall other turns.
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._decoder, preview_attachment, name, file.content, file.mime_type
+        )
+
+    async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
+        # An extra, never the file itself: a failure is logged and the delivery stands.
+        if not previews:
+            return
+        try:
+            await self._send_attachments(inbound, previews)
+            return
+        except httpx.HTTPStatusError as err:
+            # Bot Framework's message size cap is undocumented: several previews together
+            # may be refused (413, 400) where each alone fits. Only those are retried
+            # one by one; any other status is not about size.
+            status = err.response.status_code
+            if len(previews) == 1 or status not in (400, 413):
+                log.warning("teams.output_preview.send_failed", count=len(previews), status=status)
+                return
+        except TEAMS_SEND_ERRORS:
+            # A timed-out or dropped send may have landed: a retry could show them twice.
+            log.warning("teams.output_preview.send_failed", count=len(previews), exc_info=True)
+            return
+        for preview in previews:
+            try:
+                await self._send_attachments(inbound, [preview])
+            except TEAMS_SEND_ERRORS:
+                log.warning("teams.output_preview.send_failed", count=1, exc_info=True)
+
+    async def _send_attachments(self, inbound: TeamsInbound, attachments: list[Attachment]) -> None:
+        await self._sender.send(
+            inbound.conversation_id,
+            MessageActivityInput().add_attachments(*attachments),
+            service_url=inbound.service_url,
         )
 
     async def sweep(
@@ -195,6 +249,8 @@ class TeamsOutputDelivery:
             # Zero sends every file down the skip path: a log line, then a
             # delete for a file that fits the cap. A file over it is kept,
             # as on every other path: no channel could take it either.
+            # No preview here: the skip path never downloads the bytes, and
+            # the agent's reply already says the files could not be saved.
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
@@ -206,9 +262,14 @@ class TeamsOutputDelivery:
             )
             return
         links: list[str] = []
+        previews: list[Attachment] = []
 
         async def upload(file: DeliverableFile) -> None:
             name = display_filename_for(file.filename, file.mime_type)
+            preview = None
+            if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
+                # Before the upload: a preview error must never re-upload a saved file.
+                preview = await self._preview(name, file)
             try:
                 item = await files.upload(inbound, name, file.content)
             except GraphUnavailable as err:
@@ -226,6 +287,8 @@ class TeamsOutputDelivery:
                     raise
                 return
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
+            if preview is not None:
+                previews.append(preview)
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -234,8 +297,13 @@ class TeamsOutputDelivery:
             on_skip=_log_skip,
             sleep=self._sleep,
         )
-        if not links:
-            return
+        if links:
+            await self._post_links(inbound, links, append)
+        await self._send_previews(inbound, previews)
+
+    async def _post_links(
+        self, inbound: TeamsInbound, links: list[str], append: AppendToAnswer | None
+    ) -> None:
         text = "\n".join([_SAVED, *links])
         if append is not None and await append(text):
             return
@@ -333,8 +401,12 @@ class TeamsOutputDelivery:
         pending = {offer.file_id for offer in self._offers.values()} | self._claimed
         if file.file_id in pending:
             raise OutputDeliveryDeferred(file.file_id)  # Still waiting on the last card.
-        token = secrets.token_urlsafe(24)
         name = display_filename_for(file.filename, file.mime_type)
+        if file.file_id not in self._previewed:
+            self._previewed.add(file.file_id)
+            if (preview := await self._preview(name, file)) is not None:
+                await self._send_previews(inbound, [preview])
+        token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(
             file_id=file.file_id,
             filename=name,
@@ -383,6 +455,7 @@ class TeamsOutputDelivery:
             return
         del self._offers[token]
         self._claimed.add(offer.file_id)
+        self._previewed.discard(offer.file_id)
         if offer.content is not None:
             self._neutral_claimed_bytes[offer.file_id] = len(offer.content)
         upload = activity.value.upload_info

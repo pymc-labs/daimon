@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import BadRequestError
-from anthropic.types import Message, TextBlock, Usage
+from anthropic.types import Message, StopReason, TextBlock, Usage
 from daimon.core.thread_naming import (
     _SYSTEM_PROMPT,  # pyright: ignore[reportPrivateUsage]
     THREAD_NAME_MAX_CHARS,
@@ -196,14 +196,14 @@ def test_parse_thread_name_hard_cuts_when_no_space_before_cap() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _message_payload(text: str) -> dict[str, Any]:
+def _message_payload(text: str, stop_reason: StopReason = "end_turn") -> dict[str, Any]:
     return Message(
         id="msg_thread_name",
         type="message",
         role="assistant",
         model=THREAD_NAMING_MODEL,
         content=[TextBlock(type="text", text=text)],
-        stop_reason="end_turn",
+        stop_reason=stop_reason,
         stop_sequence=None,
         usage=Usage(
             input_tokens=120,
@@ -234,6 +234,9 @@ async def test_suggest_thread_name_wraps_truncated_message_as_data_and_maps_usag
     ), "usage must come from the response, with an absent cache count mapped to 0"
     assert len(seen) == 1, "exactly one model call per suggestion"
     assert seen[0]["model"] == THREAD_NAMING_MODEL, "the pinned, priced model must be requested"
+    assert seen[0]["thinking"] == {"type": "disabled"}, (
+        "thinking counts toward the 60-token cap, so it must be off or no title text fits"
+    )
     assert seen[0]["messages"][0]["content"] == f"<message>\n{message_text[:40]}\n</message>", (
         "the opening message must be cut at max_input_chars and wrapped in <message> tags, "
         "so the model summarizes it instead of answering it"
@@ -253,6 +256,17 @@ async def test_suggest_thread_name_returns_none_name_but_usage_when_model_answer
     assert suggestion.usage.output_tokens == 9, (
         "a blank answer still cost tokens; usage must be reported so the caller meters it"
     )
+
+
+async def test_suggest_thread_name_returns_none_name_but_usage_when_model_refuses() -> None:
+    payload = _message_payload("Partial title", stop_reason="refusal")
+    suggestion = await suggest_thread_name(
+        build_fake_anthropic(lambda _r: httpx.Response(200, json=payload)),
+        message_text="hey",
+        max_input_chars=2000,
+    )
+    assert suggestion.name is None, "a refusal must map to no title, even with partial text"
+    assert suggestion.usage.output_tokens == 9, "a refused call still cost tokens and is metered"
 
 
 async def test_suggest_thread_name_propagates_api_errors() -> None:

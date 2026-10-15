@@ -119,15 +119,43 @@ async def test_a_redirect_is_never_followed() -> None:
 
 
 async def test_a_timeout_or_bad_body_is_unavailable_not_an_error() -> None:
+    seen: list[httpx.Request] = []
+
     def slow(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=request)
 
     with pytest.raises(GraphUnavailable, match="ReadTimeout"):
-        await _client(slow).list_replies(GROUP, CHANNEL, "100")
+        await _client(slow, seen).list_replies(GROUP, CHANNEL, "100")
+    assert len(seen) == 2, "a read gives up after one retry"
     with pytest.raises(GraphUnavailable, match="unexpected body"):
         await _client(lambda _: httpx.Response(200, json={"value": "nope"})).list_replies(
             GROUP, CHANNEL, "100"
         )
+
+
+async def test_a_read_retries_once_after_a_transport_error() -> None:
+    seen: list[httpx.Request] = []
+
+    def stalls_once(request: httpx.Request) -> httpx.Response:
+        if len(seen) == 1:  # `seen` already holds this request
+            raise httpx.ConnectError("reset", request=request)
+        return httpx.Response(200, json={"value": [_message("101")]})
+
+    page = await _client(stalls_once, seen).list_replies(GROUP, CHANNEL, "100")
+    assert [m.id for m in page.value] == ["101"], "the retry's page is returned"
+    assert len(seen) == 2, "one failed request, one retry"
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+async def test_a_write_is_never_retried(method: str) -> None:
+    seen: list[httpx.Request] = []
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(GraphUnavailable, match="ReadTimeout"):
+        await _client(slow, seen).send(method, f"https://graph.microsoft.com{REPLIES}", body={})
+    assert len(seen) == 1, "a write that may have landed is not sent again"
 
 
 async def test_a_token_failure_is_unavailable_and_sends_nothing() -> None:

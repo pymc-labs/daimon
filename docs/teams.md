@@ -324,6 +324,13 @@ setting off the routes answer 404 and nothing is subscribed.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
+- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
+  Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
+  re-encoded under 512 KiB (PNG, else JPEG). In a 1:1 chat each image comes
+  just before its consent card; in a channel up to four, in delivery order,
+  follow the links in one message (not after an unprompted answer, nor in a
+  channel without file access). Animated GIFs get no preview, and a preview
+  Teams refuses is only logged (`teams.output_preview.send_failed`).
   Where they are unavailable, `files_hint` tells the agent, asked for a file or
   to turn files on, to call `enable_channel_files` first rather than offer an
   artifact, report or notebook; the bot posts the Enable files card (below)
@@ -428,6 +435,12 @@ registration:
   (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and Daimon, named by Entra object ID.
+- **GitHub setup.** `github_connect` sends the Connect GitHub card to the
+  requester's 1:1 chat, never the channel, since its link is single-use and
+  private; if that chat cannot be opened, the link is withdrawn and the agent
+  says so. Work that waited on the repo resumes once it is connected.
+  `set_working_repo` and `remove_repo` work as on Discord and Slack. Access
+  requests to admins (`request_github_access`) are not on Teams yet.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
@@ -473,6 +486,21 @@ cancels them. The next boot edits every card a restart cut off to an
 interrupted notice before admitting new turns. A channel card whose send never
 returned an id is found by reading its thread through Graph; one in a 1:1 chat,
 which cannot be read back, is left as is.
+
+Every incoming message is admitted once, by Teams activity id, in a database
+receipt shared by every adapter process, so a redelivery, a second process or
+a restart never runs it twice. A message whose turn had not started when the
+restart began (queued behind a running turn, or arriving during the 15
+seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
+this up as soon as I'm back." note, and the next process runs it once, in
+order, through the usual admission checks. One more than 10 minutes old by
+then gets "I restarted for an update and couldn't get to this in time. Please
+send it again." instead. A turn that had started is never rerun: its card is
+marked interrupted as above. Nothing is said about a message until its receipt
+is written: while the database is unreachable the chat hears nothing, and a
+message whose start could not be recorded is tried again every 30 seconds. A message's
+text is stored only until its turn starts or it is answered, and the
+content-free receipt is deleted after 24 hours.
 
 Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import random
 import re
 import subprocess
 import sys
+import tarfile
 import uuid
 from pathlib import Path
 
@@ -16,10 +18,13 @@ from daimon.core.checkpoint_prompt import (
     CHECKPOINT_OUTPUTS_DIR,
     CHECKPOINT_SCRATCH_DIR,
     HANDOFF_FILENAME_PREFIX,
+    HANDOFF_LEFT_OUT_MARKER,
+    HANDOFF_LEFT_OUT_MORE_MARKER,
     HANDOFF_MAX_BYTES,
     HANDOFF_TOO_LARGE_MARKER,
     build_checkpoint_prompt,
     checkpoint_head_lines,
+    checkpoint_left_out,
     checkpoint_too_large_bytes,
     handoff_filename,
     is_handoff_filename,
@@ -56,8 +61,9 @@ def test_prompt_names_the_exact_archive_path_and_filename() -> None:
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
     filename = handoff_filename(TRANSFER_ID)
-    assert f"tar czf /mnt/session/outputs/{filename}" in prompt, (
-        "the archive must be written flat into the outputs directory"
+    assert f"tar czf /tmp/{filename} " in prompt, "tar writes outside the outputs directory"
+    assert f"cp /tmp/{filename} /mnt/session/outputs/{filename} &&" in prompt, (
+        "and the final archive is copied in flat, never renamed inside that mount"
     )
     assert f"ls -l /mnt/session/outputs/{filename}" in prompt, (
         "the reply has to show the archive so the transfer can read the size back"
@@ -69,26 +75,24 @@ def test_prompt_excludes_every_configured_path_and_glob() -> None:
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
     for path in CHECKPOINT_EXCLUDED_PATHS:
-        assert f"--exclude='{path.lstrip('/')}'" in prompt, (
+        assert f"-path '{path.lstrip('/')}'" in prompt, (
             f"{path} is a destination-owned mount and must never enter the bundle"
         )
     for glob in CHECKPOINT_EXCLUDED_GLOBS:
-        assert f"--exclude='*/{glob}'" in prompt, f"{glob} must be excluded at any depth"
-    assert "--exclude='*.env'" in prompt, "credential files must never enter the bundle"
+        assert f"-path '*/{glob}'" in prompt, f"{glob} must be excluded at any depth"
+    assert "-path '*.env'" in prompt, "credential files must never enter the bundle"
 
 
-def test_prompt_writes_an_oversize_exclude_list_before_tarring() -> None:
+def test_prompt_leaves_out_files_over_the_cap_from_what_travels() -> None:
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=7
     )
-    find_index = prompt.index(
-        "find root mnt/session/outputs tmp/work mnt/repo/analytics -type f -size +7M"
-    )
-    tar_index = prompt.index("tar czf")
-    assert find_index < tar_index, "the exclude list must exist before tar reads it"
-    exclude_list = prompt[find_index:].split(">", 1)[1].split("\n", 1)[0].strip()
-    assert f"--exclude-from={exclude_list}" in prompt, (
-        "tar must read back the same exclude list the find step wrote"
+    assert (
+        "members() { find . root mnt/session/outputs tmp/work mnt/repo/analytics -mindepth 1 "
+        "\\( -path './*' ! -type f -o -path './.*' -o -type f -size +7M" in prompt
+    ), "one find lists what travels, never a file too large to carry"
+    assert "  pack() { members -printf '%p\\0' | tar czf" in prompt, (
+        "tar packs exactly what that find lists"
     )
 
 
@@ -123,7 +127,7 @@ def test_prompt_captures_repo_state_without_a_repo_omitting_the_git_steps() -> N
     assert with_repo.count(f"git -C {REPO} rev-parse HEAD") == 2, (
         "HEAD is echoed before and after the archive so a commit is detectable"
     )
-    assert "-C / root mnt/session/outputs tmp/work mnt/repo/analytics" in with_repo, (
+    assert "find . root mnt/session/outputs tmp/work mnt/repo/analytics " in with_repo, (
         "the repo mount is archived alongside $HOME, the outputs directory and /tmp"
     )
 
@@ -132,7 +136,7 @@ def test_prompt_captures_repo_state_without_a_repo_omitting_the_git_steps() -> N
     )
     assert "git -C" not in without_repo, "no repo means no git commands"
     assert "NEVER RUN GIT" not in without_repo, "and no repo prohibition to state"
-    assert "-C / root mnt/session/outputs tmp/work" in without_repo, (
+    assert "find . root mnt/session/outputs tmp/work " in without_repo, (
         "the home directory, the outputs directory and /tmp are archived either way"
     )
 
@@ -142,7 +146,7 @@ def test_prompt_numbers_steps_consecutively_when_the_repo_step_is_skipped() -> N
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
     )
     headers = re.findall(r"^Step (\d+) - ", without_repo, re.MULTILINE)
-    assert headers == ["1", "2", "3", "4"], "steps are renumbered, not left with a hole"
+    assert headers == ["1", "2", "3"], "steps are renumbered, not left with a hole"
 
 
 def test_prompt_honours_a_non_default_home_dir() -> None:
@@ -154,11 +158,11 @@ def test_prompt_honours_a_non_default_home_dir() -> None:
     )
     assert "/home/claude/HANDOFF.md" in prompt, "the note goes in the given home directory"
     assert "/home/claude/uncommitted.patch" in prompt, "so does the patch"
-    assert "-C / home/claude mnt/session/outputs tmp/work mnt/repo/analytics" in prompt, (
-        "the tar roots are the given home directory, the outputs directory, /tmp and the "
+    assert "find . home/claude mnt/session/outputs tmp/work mnt/repo/analytics " in prompt, (
+        "the archived roots are the given home directory, the outputs directory, /tmp and the "
         "repo, relative to /"
     )
-    assert "--exclude='home/claude/.*'" in prompt, (
+    assert "-path 'home/claude/.*'" in prompt, (
         "the dot-entry exclusion follows the home directory it was given"
     )
     assert "/root/" not in prompt, "the default home directory must not leak in"
@@ -191,7 +195,8 @@ def test_prompt_is_deterministic_and_under_the_word_budget() -> None:
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
     assert first == second, "the same transfer must produce byte-identical prompts"
-    assert len(first.split()) < 600, "a long checkpoint prompt costs tokens on a billed turn"
+    # The partial rebuild added ~100 words of commands; the prose stays lean.
+    assert len(first.split()) < 720, "a long checkpoint prompt costs tokens on a billed turn"
 
 
 def test_checkpoint_head_lines_reads_the_two_echoed_hashes() -> None:
@@ -237,7 +242,7 @@ def test_prompt_captures_uncommitted_changes_when_the_answer_is_copy_or_absent()
         assert f"git -C {REPO} ls-files --others --exclude-standard" in prompt, (
             "untracked files are part of the work being captured"
         )
-        assert "-C / root mnt/session/outputs tmp/work mnt/repo/analytics" in prompt, (
+        assert "find . root mnt/session/outputs tmp/work mnt/repo/analytics " in prompt, (
             "and the checkout itself travels"
         )
 
@@ -250,13 +255,10 @@ def test_prompt_leaves_uncommitted_changes_behind_when_the_answer_is_leave() -> 
         "the person chose to leave the changes, so nothing captures them as a patch"
     )
     assert "ls-files --others" not in prompt, "nor lists the untracked files to carry"
-    assert "-C / root mnt/session/outputs tmp/work --null -T -\n" in f"{prompt}\n", (
+    assert "find . root mnt/session/outputs tmp/work -mindepth 1 " in prompt, (
         "the checkout must not be tarred either, or the changes would come across anyway"
     )
-    assert "-C / root mnt/session/outputs mnt/repo" not in prompt, "the repo is not a root here"
-    assert "find root mnt/session/outputs tmp/work -type f" in prompt, (
-        "and the oversize scan covers only what is archived"
-    )
+    assert "mnt/repo/analytics -mindepth" not in prompt, "the repo is not a root here"
     assert "deliberately being left behind" in prompt, (
         "the prompt has to say the omission is the person's decision, not a failure"
     )
@@ -340,8 +342,8 @@ def test_prompt_archives_the_outputs_directory_and_skips_only_the_bundles() -> N
     assert CHECKPOINT_OUTPUTS_DIR not in CHECKPOINT_EXCLUDED_PATHS, (
         "the outputs directory is where the task's own files are, not a destination mount"
     )
-    assert "-C / root mnt/session/outputs tmp/work" in prompt, "so it is a tar root"
-    assert f"--exclude='mnt/session/outputs/{HANDOFF_FILENAME_PREFIX}*'" in prompt, (
+    assert "find . root mnt/session/outputs tmp/work " in prompt, "so it is an archived root"
+    assert f"-path 'mnt/session/outputs/{HANDOFF_FILENAME_PREFIX}*'" in prompt, (
         "the archive being written, and any bundle an earlier transfer left, stay out"
     )
 
@@ -353,42 +355,36 @@ def test_prompt_excludes_every_dot_entry_directly_under_home() -> None:
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
     )
-    assert "--exclude='root/.*'" in prompt, (
+    assert "-path 'root/.*'" in prompt, (
         "every dot entry directly under $HOME - .ssh, .bun, .cargo, .rustup, .gradle, "
         ".npm, .local, .config - is excluded with its subtree"
     )
 
 
 def test_prompt_generates_the_whole_tar_command_exactly() -> None:
-    """The tar line is the contract with the sandbox: daimon cannot inspect
-    what the session built, so the bytes it asks for are the only guarantee.
-    Pinned in full, once, so a careless edit to the list has to be deliberate."""
+    """The find and tar lines are the contract with the sandbox: daimon cannot
+    inspect what the session built, so the bytes it asks for are the only
+    guarantee. Pinned in full, once, so a careless edit has to be deliberate."""
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=REPO, max_bundle_mib=20
     )
-    archive = f"/mnt/session/outputs/{handoff_filename(TRANSFER_ID)}"
+    archive = f"/tmp/{handoff_filename(TRANSFER_ID)}"
     expected = "\n".join(
         [
-            "  find / -maxdepth 1 -type f ! -name '.*' ! -size +20M -printf './%P\\0' "
-            f"| tar czf {archive} \\",
-            "    --no-wildcards --exclude-from=/tmp/daimon-handoff-excludes.txt --wildcards \\",
-            "    --exclude='root/.*' \\",
-            "    --exclude='tmp/work/.*' \\",
-            "    --exclude='tmp/daimon-handoff-excludes.txt' \\",
-            "    --exclude='mnt/session/outputs/daimon-handoff-*' \\",
-            "    --exclude='mnt/session/uploads' \\",
-            "    --exclude='mnt/memory' \\",
-            "    --exclude='mnt/skills' \\",
-            "    --exclude='*/.git/objects' \\",
-            "    --exclude='*/node_modules' \\",
-            "    --exclude='*/.venv' \\",
-            "    --exclude='*/__pycache__' \\",
-            "    --exclude='*/.cache' \\",
-            "    --exclude='*.env' \\",
-            "    -C / root mnt/session/outputs tmp/work mnt/repo/analytics --null -T -",
+            "  members() { find . root mnt/session/outputs tmp/work mnt/repo/analytics -mindepth 1 "
+            "\\( -path './*' ! -type f -o -path './.*' -o -type f -size +20M \\",
+            "    -o -path 'root/.*' -o -path 'tmp/work/.*' "
+            "-o -path 'mnt/session/outputs/daimon-handoff-*' \\",
+            "    -o -path 'mnt/session/uploads' -o -path 'mnt/memory' -o -path 'mnt/skills' \\",
+            "    -o -path '*/.git/objects' -o -path '*/node_modules' -o -path '*/.venv' "
+            "-o -path '*/__pycache__' -o -path '*/.cache' -o -path '*.env' \\",
+            '    \\) -prune -o "$@"; }',
+            f"  pack() {{ members -printf '%p\\0' | tar czf {archive} --no-recursion --anchored "
+            "--no-wildcards --exclude-from=/tmp/daimon-handoff-left-out.txt --null -T -; }",
+            "  pack",
         ]
     )
-    assert expected in prompt, "the generated tar command changed"
+    assert expected in prompt, "the generated find and tar commands changed"
 
 
 def test_prompt_deletes_an_over_cap_archive_and_reports_the_size_instead() -> None:
@@ -400,12 +396,16 @@ def test_prompt_deletes_an_over_cap_archive_and_reports_the_size_instead() -> No
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
     )
     archive = f"/mnt/session/outputs/{handoff_filename(TRANSFER_ID)}"
+    scratch = f"/tmp/{handoff_filename(TRANSFER_ID)}"
+    assert f'  size=$(stat -c %s {scratch}); if [ "$size" -gt 20971520 ]; then\n' in prompt, (
+        "an over-cap archive is rebuilt first"
+    )
     assert (
-        f'  size=$(stat -c %s {archive}); if [ "$size" -gt 20971520 ]; '
-        f'then rm -f {archive}; echo "HANDOFF_TOO_LARGE $size"; '
-        f"else ls -l {archive}; fi" in prompt
-    ), "the size guard, the delete and the listing are one command"
-    assert "do not retry, shrink or rebuild it" in prompt, (
+        f'  if [ "$size" -gt 20971520 ]; then echo "HANDOFF_TOO_LARGE $size"; '
+        f"else cp {scratch} {archive} && ls -l {archive} || rm -f {archive}; fi\n"
+        "  rm -f /tmp/daimon-handoff-*\n" in prompt
+    ), "only an archive under the cap reaches the outputs, and the scratch files go after"
+    assert "do not retry, shrink or rebuild the archive yourself" in prompt, (
         "an over-cap archive is a final answer, not an invitation to a second attempt"
     )
 
@@ -437,27 +437,21 @@ def test_checkpoint_too_large_bytes_ignores_an_echo_of_the_command() -> None:
     )
 
 
-def test_prompt_archives_the_scratch_directory_minus_its_own_exclude_list() -> None:
+def test_prompt_archives_the_scratch_directory_minus_its_dot_entries() -> None:
     """Issue 2 of the round-2 acceptance run: asked to "create a file called
     notes.md", the agent ran `mkdir -p /tmp/work && … > /tmp/work/notes.md` —
     outside every archived root, so even a compliant checkpoint would have lost
-    it. /tmp is a root now; its dot entries (sandbox sockets and locks) and this
-    transfer's own oversize list are what stay out of it."""
+    it. /tmp/work is a root now; its dot entries (sandbox sockets and locks)
+    stay out of it."""
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
     )
     assert CHECKPOINT_SCRATCH_DIR == "/tmp/work"
-    assert "-C / root mnt/session/outputs tmp/work" in prompt, (
+    assert "find . root mnt/session/outputs tmp/work " in prompt, (
         "a working file the agent put in /tmp/work has to travel with the rest"
     )
-    assert "--exclude='tmp/work/.*'" in prompt, (
+    assert "-path 'tmp/work/.*'" in prompt, (
         "only the non-hidden entries travel, exactly as under $HOME"
-    )
-    assert "--exclude='tmp/daimon-handoff-excludes.txt'" in prompt, (
-        "the list tar is reading must not end up inside the archive tar is writing"
-    )
-    assert "find root mnt/session/outputs tmp/work -type f -size +20M" in prompt, (
-        "and the oversize scan covers every root it will tar"
     )
 
 
@@ -492,7 +486,7 @@ def test_a_file_written_in_the_shell_working_directory_travels_and_restores(
     prompt = build_checkpoint_prompt(
         transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
     )
-    archive_step = prompt[prompt.index("  cd /\n") : prompt.index("The find step lists")]
+    archive_step = prompt[prompt.index("  cd /\n") : prompt.index("members lists what travels")]
     # Every absolute path in the step, re-rooted at the fake /.
     script = re.sub(r"(?<=[\s=(])/", f"{old}/", archive_step).replace("\\\n", " ")
     subprocess.run(["bash", "-euc", script], check=True, capture_output=True)
@@ -534,4 +528,221 @@ def test_a_file_written_in_the_shell_working_directory_travels_and_restores(
         assert (new / name).read_text() == f"task file {name}\n", f"{name!r} travels as itself"
     assert (new / "etc" / "system-config").read_text() == "new system\n", (
         "and restoring it touches no system path"
+    )
+
+
+def _run_archive_step(prompt: str, root: Path) -> str:
+    """Run the prompt's archive step with real bash, find and tar against a fake /."""
+    archive_step = prompt[prompt.index("  cd /\n") : prompt.index("members lists what travels")]
+    # Every absolute path in the step, re-rooted at the fake /.
+    script = re.sub(r"(?<=[\s=(])/", f"{root}/", archive_step).replace("\\\n", " ")
+    done = subprocess.run(["bash", "-euc", script], check=True, capture_output=True, text=True)
+    return done.stdout
+
+
+def _noise(path: Path, size: int) -> None:
+    """Incompressible bytes, so the archive is as large as the file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(random.Random(size).randbytes(size))
+
+
+def _fake_root(tmp_path: Path) -> Path:
+    old = tmp_path / "old"
+    (old / "mnt" / "session" / "outputs").mkdir(parents=True)
+    (old / "tmp").mkdir()
+    (old / "root" / "work").mkdir(parents=True)
+    (old / "root" / "HANDOFF.md").write_text("- Files: /root/work\n")
+    for n in range(20):
+        (old / "root" / "work" / f"table{n}.csv").write_text("a,b\n" * 50)
+    return old
+
+
+def _members(bundle: Path) -> set[str]:
+    listed = subprocess.run(["tar", "tzf", str(bundle)], check=True, capture_output=True)
+    return set(listed.stdout.decode().splitlines())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_an_over_cap_archive_is_rebuilt_without_its_largest_files(tmp_path: Path) -> None:
+    """A workspace over the cap used to lose every file. The rebuild drops the
+    largest files until the rest fits, so the note and the small outputs travel,
+    and names each dropped file; a name tar would read as a pattern is dropped
+    as itself, and one with a newline, which tar cannot be told, is kept."""
+    old = _fake_root(tmp_path)
+    _noise(old / "[big] *.bin", 600_000)
+    _noise(old / "root" / "work" / "model.pkl", 500_000)
+    _noise(old / "root" / "work" / "fit.nc", 300_000)
+    _noise(old / "root" / "work" / "odd\nname.bin", 700_000)
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    output = _run_archive_step(prompt, old)
+
+    paths, more = checkpoint_left_out(output)
+    assert paths == (
+        f"{old}/[big] *.bin",
+        f"{old}/root/work/model.pkl",
+        f"{old}/root/work/fit.nc",
+    ), "largest first, and only as many as the budget needs"
+    assert more == 0, "every left-out file is listed by name"
+    bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
+    assert bundle.stat().st_size <= 1024 * 1024, "the rebuilt archive fits the cap"
+    members = _members(bundle)
+    assert {"root/HANDOFF.md", "root/work/table0.csv", "root/work/table19.csv"} <= members, (
+        "the note and the small working files always travel"
+    )
+    # `tar t` prints a newline in a name as `\n`.
+    assert "root/work/odd\\nname.bin" in members, "a name tar cannot exclude stays in"
+    assert not {"./[big] *.bin", "root/work/model.pkl", "root/work/fit.nc"} & members, (
+        "every listed file is really gone from the archive"
+    )
+    assert HANDOFF_TOO_LARGE_MARKER not in output, "a partial archive is not a rejection"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_the_rebuild_never_drops_a_file_tar_would_keep_under_another_name(tmp_path: Path) -> None:
+    """tar trims trailing whitespace from an exclude name, so that file stays
+    in. A hard-linked file's bytes are stored once however many of its names
+    travel, and it would travel under any name kept, so it counts its full
+    size once, even with a name outside the archive, and its names go
+    together. Either mistake leaves the archive over the cap."""
+    old = _fake_root(tmp_path)
+    work = old / "root" / "work"
+    _noise(work / "trailing.bin ", 500_000)
+    _noise(work / "linked.bin", 400_000)
+    (work / "linked-too.bin").hardlink_to(work / "linked.bin")
+    (old / "root" / ".stash").mkdir()
+    (old / "root" / ".stash" / "linked.bin").hardlink_to(work / "linked.bin")
+    _noise(work / "model.pkl", 200_000)
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    output = _run_archive_step(prompt, old)
+
+    paths, more = checkpoint_left_out(output)
+    assert (set(paths), more) == ({f"{work}/linked.bin", f"{work}/linked-too.bin"}, 0), (
+        "both archived names of the linked file go, and only they"
+    )
+    bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
+    assert bundle.stat().st_size <= 1024 * 1024, "the rebuilt archive fits the cap"
+    members = _members(bundle)
+    assert {"root/work/trailing.bin ", "root/work/model.pkl", "root/HANDOFF.md"} <= members, (
+        "the kept names and the small working files travel"
+    )
+    assert not {"root/work/linked.bin", "root/work/linked-too.bin"} & members, (
+        "the linked file travels under neither name"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_an_archive_still_over_the_cap_after_the_rebuild_is_deleted(tmp_path: Path) -> None:
+    """Files the rebuild cannot leave out keep it over the cap: the legacy
+    rejection still applies, and nothing is left in the outputs directory."""
+    old = _fake_root(tmp_path)
+    _noise(old / "root" / "work" / "a\n.bin", 700_000)
+    _noise(old / "root" / "work" / "b\n.bin", 700_000)
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    output = _run_archive_step(prompt, old)
+
+    assert checkpoint_too_large_bytes(output) is not None, "the rejection is reported"
+    assert list((old / "mnt" / "session" / "outputs").iterdir()) == [], (
+        "the over-cap archive never reaches the outputs directory"
+    )
+    assert [p.name for p in (old / "tmp").iterdir()] == ["work"], "nor stays in scratch"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_an_archive_under_the_cap_is_built_once_and_leaves_nothing_out(tmp_path: Path) -> None:
+    old = _fake_root(tmp_path)
+    _noise(old / "root" / "work" / "model.pkl", 300_000)
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    output = _run_archive_step(prompt, old)
+
+    assert checkpoint_left_out(output) == ((), 0), "nothing is left out under the cap"
+    bundle = old / "mnt" / "session" / "outputs" / handoff_filename(TRANSFER_ID)
+    assert "root/work/model.pkl" in _members(bundle), "every file travels"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the sandbox shell runs GNU find and tar")
+def test_the_archive_step_carries_only_the_task_files_and_cleans_up(tmp_path: Path) -> None:
+    """One real run over a fake / with every kind of entry the find prunes."""
+    old = _fake_root(tmp_path)
+    work = old / "root" / "work"
+    outputs = old / "mnt" / "session" / "outputs"
+    for path in (
+        old / "root" / ".config" / "tool.json",
+        old / "tmp" / "work" / ".lock",
+        work / "app" / "node_modules" / "pkg" / "index.js",
+        work / "app" / ".env",
+        work / "repo" / ".git" / "objects" / "ab" / "cdef",
+        work / "repo" / ".git" / "HEAD",
+        old / "tmp" / "work" / "notes.md",
+        outputs / "report.csv",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{path.name}\n")
+    (outputs / f"{HANDOFF_FILENAME_PREFIX}earlier.tar.gz").write_text("old bundle\n")
+    (work / "huge.bin").write_bytes(bytes(2 * 1024 * 1024 + 1))
+    (work / "latest.csv").symlink_to("table0.csv")
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=1
+    )
+
+    _run_archive_step(prompt, old)
+
+    with tarfile.open(outputs / handoff_filename(TRANSFER_ID)) as bundle:
+        members = {member.name: member for member in bundle.getmembers()}
+    assert {
+        "root/HANDOFF.md",
+        "root/work/repo/.git/HEAD",
+        "tmp/work/notes.md",
+        "mnt/session/outputs/report.csv",
+    } <= members.keys(), "the task's own files travel"
+    left_behind = {
+        "root/.config/tool.json",
+        "tmp/work/.lock",
+        "root/work/app/node_modules/pkg/index.js",
+        "root/work/app/.env",
+        "root/work/repo/.git/objects/ab/cdef",
+        "root/work/huge.bin",
+    }
+    assert not left_behind & members.keys(), "dot dirs, caches, secrets and oversize files stay"
+    assert not [name for name in members if HANDOFF_FILENAME_PREFIX in name], (
+        "neither an earlier bundle nor the archive itself is packed"
+    )
+    assert members["root/work/latest.csv"].issym(), "a symlink travels as a link"
+    assert [path.name for path in (old / "tmp").iterdir()] == ["work"], (
+        "no scratch file is left behind"
+    )
+
+
+def test_checkpoint_left_out_reads_whole_lines_and_the_overflow_count() -> None:
+    reply = (
+        "Archive rebuilt.\n"
+        f"{HANDOFF_LEFT_OUT_MARKER} /root/work/model.pkl\n"
+        f"  {HANDOFF_LEFT_OUT_MARKER} /my notes, v2.txt  \n"
+        f"{HANDOFF_LEFT_OUT_MARKER} /root/work/model.pkl\n"
+        f"{HANDOFF_LEFT_OUT_MORE_MARKER} 12\n"
+        "-rw-r--r-- 1 root root 19000000 bundle.tar.gz\n"
+    )
+    assert checkpoint_left_out(reply) == (
+        ("/root/work/model.pkl", "/my notes, v2.txt"),
+        12,
+    ), "each path once, in order, plus the count of the ones not named"
+
+
+def test_checkpoint_left_out_ignores_an_echo_of_the_command() -> None:
+    prompt = build_checkpoint_prompt(
+        transfer_id=TRANSFER_ID, repo_mount_path=None, max_bundle_mib=20
+    )
+    assert checkpoint_left_out(prompt) == ((), 0), (
+        "quoting back the commands is not evidence that anything was left out"
     )

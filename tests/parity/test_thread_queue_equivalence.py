@@ -65,6 +65,10 @@ class Replay:
             _track_processing_task=lambda thread_id: None,
         )
         self.obj._thread_queue = ThreadQueue(self.obj._processing, self.obj._pending)
+        # Teams' admission fence and drain hold: always clear here, and recorded if reached.
+        self.obj._replay_queued = {}
+        self.obj._finish = self.finish
+        self.obj._hold = self.hold
         names = {
             "discord": [
                 "_queue_behind_inflight_turn",
@@ -136,6 +140,12 @@ class Replay:
 
     async def barrier(self):
         self.effects.append(("recovery",))
+
+    async def finish(self, items):
+        return items
+
+    async def hold(self, items):
+        self.effects.extend(("held", item.activity_id) for item in items)
 
     async def turn_cap(self, tenant):
         self.effects.append(("cap", self.cap))
@@ -438,9 +448,8 @@ def test_teams_last_carrier_content_files_and_message_ids_match_base(authors):
     run = Replay("teams", True)
     queued = [run.message(a, n) for n, a in enumerate(authors, 1)]
     before = run.namespace["_compose_queued"](queued)
-    assert [dataclasses.asdict(i) for i in teams._compose_queued(queued)] == [
-        dataclasses.asdict(i) for i in before
-    ]
+    after = [teams._compose(items) for items in teams._by_author(queued)]
+    assert [dataclasses.asdict(i) for i in after] == [dataclasses.asdict(i) for i in before]
 
 
 @pytest.mark.parametrize("platform", MODULES)

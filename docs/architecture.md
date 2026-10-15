@@ -368,6 +368,16 @@ Channels whose ledger predates the replay window scan that whole window using
 per-message dedupe. Legacy-only channels retain their stored answer boundary
 during the first rollout.
 
+Teams admits every message through `teams_message_admissions`, keyed by
+tenant, channel (a thread's conversation id without `;messageid=`) and
+activity id, which is also the Graph message id, so a Graph notification of
+the same message collides. The row keeps the message only until its turn
+starts or it is answered (the finish fence); the owner is a per-process
+advisory lock, as for Discord. Boot, and a 30-second pass after it, replay
+unfinished rows whose owner exited, oldest first per chat, through the normal
+intake; rows older than 10 minutes are closed first and then told to resend.
+That pass also reruns this process's messages whose fence hit a database error.
+
 Rollout and rollback procedure: on the first deployment of this ledger, set
 `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES=0`. Keep that setting for at least the
 intended replay window while the new image records live admissions, then

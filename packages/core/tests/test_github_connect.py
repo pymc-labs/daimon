@@ -116,6 +116,53 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
 
 
 @pytest.mark.asyncio
+async def test_teams_connect_followup_queues_the_task_wake_in_its_thread(
+    db_session: AsyncSession,
+) -> None:
+    """Teams resumes interrupted work through the wake poller, like Discord and Slack."""
+    tenant_id, admin_id, agent_id = (uuid.uuid4() for _ in range(3))
+    db_session.add(Tenant(id=tenant_id, platform="teams", external_id="entra-tenant"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        requester_platform_user_id="aad-1",
+        agent_id=agent_id,
+        agent_name="ResearchBot",
+        origin_platform="teams",
+        origin_parent_channel_id="19:c@thread.tacv2",
+        origin_thread_id="19:c@thread.tacv2;messageid=1",
+        origin_ma_agent_id="ma-agent",
+        origin_responder_name="CallingBot",
+        requested_work="Review the issue",
+    )
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+    assert invitation is not None
+    assert invitation.workspace_label == "this Teams organisation", "Teams is no Slack workspace"
+    row = await db_session.get(GitHubConnectInvitation, invitation.token_hash)
+    assert row is not None
+    row.used_at = datetime.now(UTC)
+    row.activation_status = "activated"
+    await db_session.flush()
+    repo = github_connect.RepoConfirmation(
+        repo_id=1, owner_id=1, installation_id=1, full_name="private/secret", max_access="write"
+    )
+    await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
+    wake = await get_continuation(
+        db_session,
+        idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"github-connect:{invitation.token_hash}"),
+    )
+    assert wake is not None, "a Teams connect should queue the interrupted task"
+    assert (wake.platform, wake.thread_id) == ("teams", "19:c@thread.tacv2;messageid=1"), (
+        "the wake should run in the Teams thread that asked"
+    )
+    assert wake.available_at is not None, "the Teams wake poller only picks up due rows"
+
+
+@pytest.mark.asyncio
 async def test_bare_connect_notice_claim_is_single_and_failure_retries(
     db_session: AsyncSession,
 ) -> None:

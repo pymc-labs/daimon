@@ -29,7 +29,7 @@ async def mark_workspace_disposable(client: AsyncAnthropic) -> str:
     if existing is not None:
         return existing.id
     created = await client.beta.agents.create(
-        model="claude-haiku-4-5",
+        model="claude-haiku-5-5",
         name=WORKSPACE_SENTINEL_AGENT_NAME,
         description=(
             "Marks this workspace as disposable: daimon's contract-test cleanup "

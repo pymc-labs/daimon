@@ -1094,6 +1094,31 @@ def test_pages_only_offer_actions_with_a_route() -> None:
     assert "In Slack, run /github" in slack.body.decode()
 
 
+def test_teams_pages_never_send_people_to_slack_or_discord() -> None:
+    """A Teams requester has no /github command and no Discord server to go back to."""
+    back = oauth_github._back_to_chat("teams", "entra-tenant")
+    pages = {
+        "cancelled": oauth_github._cancelled_page(back),
+        "already connected": oauth_github._already_connected_page(
+            2, back, agent_name="ResearchBot"
+        ),
+        "done": oauth_github._done_page(
+            count=2,
+            platform="teams",
+            external_id="entra-tenant",
+            requester_label="Alex",
+            same_person=True,
+            agent_name=None,
+            update_pending=False,
+        ),
+    }
+    for name, page in pages.items():
+        body = page.body.decode()
+        assert "Slack" not in body and "Discord" not in body, f"{name} page names another platform"
+    assert "You can close this tab." in pages["cancelled"].body.decode(), "cancel should close"
+    assert "In Teams, ask me" in pages["done"].body.decode(), "done should point back to Teams"
+
+
 def _agent_done(**changes: object) -> str:
     args: dict[str, object] = {
         "count": 2,

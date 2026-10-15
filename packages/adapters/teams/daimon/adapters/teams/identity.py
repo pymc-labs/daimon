@@ -78,7 +78,8 @@ def canonical_uuid(value: object) -> str | None:
 
 @dataclass(frozen=True)
 class TeamsInbound:
-    """Verified facts about one message. Content is never persisted by the adapter.
+    """Verified facts about one message. Content is persisted only while a restart
+    may replay it (`admissions`).
 
     `conversation_id` is where replies go: a channel thread's id
     (`19:…;messageid=<root>`) or a personal chat's. `thread_id` is the session
@@ -160,15 +161,6 @@ def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: s
         if isinstance(candidate, str) and candidate.strip() and canonical_uuid(candidate) != ours:
             return canonical_uuid(candidate) or candidate.strip()
     return None
-
-
-def delivery_key(conversation_id: str, message_id: str) -> tuple[str, str]:
-    """What a message is claimed under so it runs once, from Bot Framework or Graph alike.
-
-    Whether a thread id names its root differs by source, so the key is the
-    channel (or chat) and the message id, which Teams keeps unique within it.
-    """
-    return conversation_id.split(";", 1)[0], message_id
 
 
 def channel_thread_id(conversation_id: str, activity_id: str) -> str:

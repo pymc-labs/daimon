@@ -1063,7 +1063,7 @@ async def test_preallocation_gate_refuses_unfunded_claim_then_accepts_real_reser
     assert accepted.admitted and accepted.worker_exposure_usd == 1
 
 
-@pytest.mark.parametrize("price_state", ["missing", "unverified", "future", "valid"])
+@pytest.mark.parametrize("price_state", ["missing", "unverified", "future", "expired", "valid"])
 async def test_funded_unbound_preallocation_revalidates_tariff_and_keeps_hold(sm, price_state):
     from daimon.core.channel_budget import require_fleet_worker_admission
 
@@ -1079,6 +1079,12 @@ async def test_funded_unbound_preallocation_revalidates_tariff_and_keeps_hold(sm
         prices = {}
     elif price_state == "unverified":
         prices[key] = replace(prices[key], verified=False)
+    elif price_state == "expired":
+        prices[key] = replace(
+            prices[key],
+            checked_on=datetime.now(UTC).date() - timedelta(days=1),
+            valid_before=datetime.now(UTC).date(),
+        )
     elif price_state == "future":
         prices[key] = replace(prices[key], checked_on=datetime.now(UTC).date() + timedelta(days=1))
     async with sm() as db, db.begin():
@@ -1865,7 +1871,7 @@ async def test_bound_input_guard_requires_funding_running_row_and_native_session
     assert refused.worker_exposure_usd == (0 if fault == "unfunded" else 1)
 
 
-@pytest.mark.parametrize("price_state", ["missing", "unverified", "future", "valid"])
+@pytest.mark.parametrize("price_state", ["missing", "unverified", "future", "expired", "valid"])
 async def test_bound_input_guard_rechecks_tariff_and_retains_unknown_bound(sm, price_state):
     from daimon.core.channel_budget import require_fleet_worker_admission
 
@@ -1877,6 +1883,12 @@ async def test_bound_input_guard_rechecks_tariff_and_retains_unknown_bound(sm, p
         prices = {}
     elif price_state == "unverified":
         prices[key] = replace(prices[key], verified=False)
+    elif price_state == "expired":
+        prices[key] = replace(
+            prices[key],
+            checked_on=datetime.now(UTC).date() - timedelta(days=1),
+            valid_before=datetime.now(UTC).date(),
+        )
     elif price_state == "future":
         prices[key] = replace(prices[key], checked_on=datetime.now(UTC).date() + timedelta(days=1))
     async with sm.begin() as db:

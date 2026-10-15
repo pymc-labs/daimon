@@ -8,8 +8,8 @@ with due handoffs and timers. Unmentioned thread replies go to organic thread
 participation (`participation.py`), whose turns run here, silently on failure.
 In private and shared channels, where Teams delivers only @mentions, the
 other messages arrive from Graph (`channel_subscriptions.py`) and are routed
-the same way (`handle_graph_message`). Every message is claimed once by its
-`delivery_key`, whichever source brings it first.
+the same way (`handle_graph_message`). Every message claims one admission
+row (`admissions.py`), whichever source brings it first.
 """
 
 from __future__ import annotations
@@ -29,6 +29,13 @@ import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams.admissions import (
+    HOLDING,
+    NOT_HELD,
+    RECLAIM_INTERVAL_S,
+    TeamsAdmissions,
+    too_old_to_replay,
+)
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
@@ -58,7 +65,6 @@ from daimon.adapters.teams.identity import (
     Refusal,
     TeamsInbound,
     canonical_uuid,
-    delivery_key,
     live_tenant_id,
     parse_graph_message,
     parse_inbound,
@@ -153,7 +159,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
-from daimon.core.turn.protection import protection_state
+from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
@@ -205,6 +211,7 @@ _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left t
 _CANCELLING = "Cancelling…"
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
+_DB_ERRORS = (SQLAlchemyError, OSError)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
 TEAMS_REFUSAL_NOUNS = RefusalNouns(
     scope="organisation",
@@ -242,17 +249,24 @@ LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
 HandoffFactory = Callable[[ContinuityOutcome], HandoffNotice]
 
 
-def _compose_queued(queued: list[TeamsInbound]) -> list[TeamsInbound]:
-    """One turn per author, replying where that author's last message came from."""
-    return [
-        dataclasses.replace(
-            items[-1],
-            text="\n\n".join(item.text for item in items),
-            files=tuple(file for item in items for file in item.files),
-            composed_ids=tuple(item.activity_id for item in items[:-1]),
-        )
-        for items in group_by_author(queued, lambda item: item.user_id)
-    ]
+def _as_mention(inbound: TeamsInbound) -> TeamsInbound:
+    """A typed "@<bot name>" read as a mention: the tenant's switch is on."""
+    text = strip_typed_name(inbound.text, inbound.bot_name)
+    return dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
+
+
+def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
+    return group_by_author(queued, lambda item: item.user_id)
+
+
+def _compose(items: list[TeamsInbound]) -> TeamsInbound:
+    """One author's messages as one turn, replying where the last came from."""
+    return dataclasses.replace(
+        items[-1],
+        text="\n\n".join(item.text for item in items),
+        files=tuple(file for item in items for file in item.files),
+        composed_ids=tuple(item.activity_id for item in items[:-1]),
+    )
 
 
 def _admission_refusal(
@@ -366,6 +380,14 @@ class TeamsApp:
         # Built on first use: the classifier names the bot as the activity's recipient does.
         self._participation: TeamsParticipation | None = None
         self.draining = False
+        # Exactly-once admission across deliveries and restarts (`admissions`).
+        self._admissions = TeamsAdmissions(runtime.sessionmaker, self._tenant_id, runtime.owner_key)
+        self._reclaimer: asyncio.Task[None] | None = None
+        # A replayed message's (conversation, activity) -> set once it holds its
+        # place in the thread queue, so the chat's next replay may follow.
+        self._replay_queued: dict[tuple[str, str], asyncio.Event] = {}
+        # Messages whose fence hit a database error: the reclaim loop runs them again.
+        self._unfenced: list[TeamsInbound] = []
 
     @property
     def in_flight(self) -> int:
@@ -395,6 +417,9 @@ class TeamsApp:
                     should_stop=lambda: self.draining,
                 )
                 self._wake_poller = asyncio.create_task(poller, name="teams.wake-poller")
+                self._reclaimer = asyncio.create_task(
+                    self._reclaim_loop(), name="teams.admission-reclaim"
+                )
                 if self._routine_poster is not None:
                     deliveries = run_delivery_poller(
                         self.runtime.sessionmaker,
@@ -439,12 +464,216 @@ class TeamsApp:
                     now=datetime.now(UTC),
                     find_card=self._find_card,
                 )
-                return
+                break
             except Exception:
                 # Admission waits on this sweep: retry rather than wedge turns.
                 log.exception("teams.turn.orphan_recovery_failed", retry_delay_s=delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _RECOVERY_MAX_RETRY_DELAY_S)
+        if self._teams.enabled:
+            await self._reclaim()
+
+    async def _reclaim(self) -> None:
+        """Replay what an exited process admitted but never handled, oldest first per chat.
+
+        At boot it runs inside the sweep, which turns wait for; a chat's replays
+        keep their order, but a message sent since may still run before them.
+        A failed pass leaves the rows for the next one.
+        """
+        try:
+            reclaimed = await self._admissions.reclaim(now=datetime.now(UTC))
+        except _DB_ERRORS as exc:
+            log.error("teams.admission.reclaim_failed", exc_info=exc)
+            return
+        if not reclaimed.replay and not reclaimed.stale:
+            return
+        log.info(
+            "teams.admission.reclaimed",
+            replayed=len(reclaimed.replay),
+            stale=len(reclaimed.stale),
+        )
+        if reclaimed.stale:
+            self.spawn(self._tell_stale(reclaimed.stale), name="teams.admission-stale")
+        for inbound in reclaimed.replay:
+            # The pre-filter learns it too, so a redelivery here is dropped cheaply.
+            root = inbound.conversation_id.removesuffix(f";messageid={inbound.activity_id}")
+            for conversation in {inbound.conversation_id, root}:
+                self._first_delivery(conversation, inbound.activity_id)
+        self._replay(reclaimed.replay)
+
+    def _replay(self, items: list[TeamsInbound]) -> None:
+        chats: dict[str, list[TeamsInbound]] = {}
+        for inbound in items:
+            chats.setdefault(inbound.conversation_id, []).append(inbound)
+        for queue in chats.values():
+            self.spawn(self._replay_chat(queue), name="teams.replay")
+
+    async def _tell_stale(self, stale: list[TeamsInbound]) -> None:
+        """Ask a too-old message's chat to resend it; a typed name only while it still asks.
+
+        Only where Daimon may post: a protected or unreadable policy gets nothing.
+        """
+        if any(i.by_name for i in stale) and await self._plain_text_mentions_on():
+            stale = [_as_mention(i) if i.by_name else i for i in stale]
+        may_post: dict[str, bool] = {}
+        for i in stale:
+            if not i.by_name and i.conversation_id not in may_post:
+                may_post[i.conversation_id] = await self._may_post(i.channel_id, i.thread_id)
+        await self._tell([i for i in stale if may_post.get(i.conversation_id)], NOT_HELD)
+
+    async def _reclaim_loop(self) -> None:
+        """Catch rows of a predecessor still draining at boot, once it exits; retry
+        messages whose fence failed; prune."""
+        while not self.draining:
+            await asyncio.sleep(RECLAIM_INTERVAL_S)
+            await self._reclaim()
+            await self._retry_unfenced()
+            try:
+                await self._admissions.prune(now=datetime.now(UTC))
+            except _DB_ERRORS as exc:
+                log.warning("teams.admission.prune_failed", error_type=type(exc).__name__)
+
+    async def _retry_unfenced(self) -> None:
+        """Run again what a failed fence or an unread policy left unhandled; its intake
+        passes the fence first. One too old to replay is closed and told as a stale one.
+
+        A message the fence did hold (its turn started) stays done, never rerun.
+        """
+        unfenced, self._unfenced = self._unfenced, []
+        if not unfenced:
+            return
+        try:
+            pending = await self._admissions.unhandled(unfenced)
+        except _DB_ERRORS as exc:
+            log.error("teams.admission.retry_failed", exc_info=exc)
+            self._unfenced[:0] = unfenced
+            return
+        if dropped := len(unfenced) - len(pending):
+            # Handled after all (an unacknowledged commit), rowless or another owner's.
+            log.warning("teams.admission.retry_dropped", count=dropped)
+        now = datetime.now(UTC)
+        if stale := [i for i in pending if too_old_to_replay(i, now)]:
+            self.spawn(self._close_stale(stale), name="teams.admission-stale")
+        self._replay([i for i in pending if not too_old_to_replay(i, now)])
+
+    async def _close_stale(self, stale: list[TeamsInbound]) -> None:
+        """Fence each chat's too-old retries (a fence is one chat's), then tell them."""
+        chats: dict[str, list[TeamsInbound]] = {}
+        for inbound in stale:
+            chats.setdefault(inbound.conversation_id, []).append(inbound)
+        closed = [i for chat in chats.values() for i in await self._finish(chat)]
+        await self._tell_stale(closed)
+
+    async def _replay_chat(self, queue: list[TeamsInbound]) -> None:
+        """Feed one chat's replays through the intake in order, each queued behind
+        the last before the next starts."""
+        for inbound in queue:
+            key = (inbound.conversation_id, inbound.activity_id)
+            queued = self._replay_queued[key] = asyncio.Event()
+            intake = self.spawn(self._intake(inbound), name="teams.turn")
+            waiter = asyncio.ensure_future(queued.wait())
+            try:
+                await asyncio.wait({intake, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                waiter.cancel()
+                self._replay_queued.pop(key, None)
+
+    async def _hold(self, items: list[TeamsInbound]) -> None:
+        """Leave never-started messages for the next boot; tell each chat once.
+
+        They are already stored (`_admit`); the notice is recorded before it is
+        sent, so a second drain stays silent. An unrecorded notice is not sent.
+        """
+        chats: dict[str, list[TeamsInbound]] = {}
+        for item in items:
+            if not item.unprompted:
+                chats.setdefault(item.conversation_id, []).append(item)
+        for chat in chats.values():
+            try:
+                owed = await self._admissions.mark_notice(chat)
+            except _DB_ERRORS as exc:
+                log.error("teams.admission.notice_unrecorded", exc_info=exc)
+                continue
+            if owed:
+                await self._tell(chat[-1:], HOLDING)
+
+    async def _tell(self, items: list[TeamsInbound], notice: str) -> None:
+        """One `notice` per chat, best effort: a failed send is not retried."""
+        told: set[str] = set()
+        for item in items:
+            if item.unprompted or item.conversation_id in told:
+                continue
+            told.add(item.conversation_id)
+            with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                await self._say(item, notice)
+
+    async def _hold_arrival(self, activity: MessageActivity, service_url: str | None) -> None:
+        """A message landing while the process drains: admit and hold it if it would
+        start a turn."""
+        parsed = parse_inbound(
+            activity, configured_tenant=self._teams.tenant_id, service_url=service_url
+        )
+        if isinstance(parsed, Refusal):
+            return
+        if parsed.by_name:
+            if not await self._plain_text_mentions_on():
+                return
+            parsed = _as_mention(parsed)
+        # Unaddressed chatter is not held: the participation it could feed is cancelled.
+        if parsed.unprompted:
+            return
+        state = await self._post_state(parsed.channel_id, parsed.thread_id)
+        if state is ProtectionState.PROTECTED:
+            return
+        try:
+            claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
+        except _DB_ERRORS as exc:
+            # Unrecorded, a redelivery could be answered too: stay silent.
+            log.error("teams.admission.claim_failed", exc_info=exc)
+            return
+        if claimed and state.may_post:
+            # An unread policy is still kept: its replay reads it again before any post.
+            await self._hold([parsed])
+
+    async def _admit(self, parsed: TeamsInbound) -> None:
+        """Claim the message's admission, then run the intake; a duplicate stops here.
+
+        Claimed first, so a drain during a slow boot sweep leaves it for the next boot.
+        """
+        try:
+            claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
+        except _DB_ERRORS as exc:
+            # Unrecorded, a redelivery could be answered too: stay silent.
+            log.error("teams.admission.claim_failed", exc_info=exc)
+            return
+        if not claimed:
+            log.info("teams.message.duplicate", conversation_type=parsed.kind)
+            return
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)  # a predecessor's replays go first
+        await self._intake(parsed)
+
+    async def _intake(self, parsed: TeamsInbound) -> None:
+        """Route an admitted message as a fresh one: a replay takes this path too."""
+        if parsed.by_name:
+            await self._route_by_name(parsed)
+        elif parsed.unprompted:
+            await self._observe(parsed)
+        else:
+            await self._handle(parsed)
+
+    async def _finish(self, items: list[TeamsInbound]) -> list[TeamsInbound]:
+        """The admission fence before a turn or an answer: the items this process may act on.
+
+        On a database error none: they stay unhandled and silent, kept for the reclaim
+        loop to run again.
+        """
+        try:
+            return await self._admissions.finish(items)
+        except _DB_ERRORS as exc:
+            log.error("teams.admission.finish_failed", exc_info=exc)
+            self._unfenced.extend(items)
+            return []
 
     async def _provision(self) -> None:
         settings = self.runtime.settings
@@ -469,7 +698,8 @@ class TeamsApp:
         self.draining = True
         if self._participation is not None:
             self._participation.cancel_all()
-        for poller in (self._wake_poller, self._delivery_poller, self._renewals):
+        pollers = (self._wake_poller, self._delivery_poller, self._reclaimer, self._renewals)
+        for poller in pollers:
             if poller is not None:
                 # Wake dispatches drain with the turns; due rows wait for the next boot, and
                 # a delivery cut short settles as interrupted, never posted twice.
@@ -478,13 +708,13 @@ class TeamsApp:
         tasks = set(self._tasks)
         if self._recovery is not None and not self._recovery.done():
             tasks.add(self._recovery)
-        if not tasks:
-            return
-        _done, pending = await asyncio.wait(tasks, timeout=timeout)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        self.outputs.close()
 
     def _role(self, inbound: TeamsInbound) -> Role:
         # Someone from another organisation is never an admin, whatever ids are configured.
@@ -521,11 +751,7 @@ class TeamsApp:
         return dataclasses.replace(inbound, is_external=True) if stored else inbound
 
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
-        """Claim a message once, from either source.
-
-        In memory for now: a retry or a Graph read after a restart runs again.
-        """
-        key = delivery_key(conversation_id, activity_id)
+        key = (conversation_id, activity_id)
         if key in self._seen:
             return False
         self._seen[key] = None
@@ -536,7 +762,10 @@ class TeamsApp:
     async def handle_message(self, ctx: ActivityContext[MessageActivity]) -> None:
         """SDK message handler: verify, then hand off. Returns before any turn work."""
         activity = ctx.activity
-        if self.draining or not self._first_delivery(activity.conversation.id, activity.id):
+        if not self._first_delivery(activity.conversation.id, activity.id):
+            return
+        if self.draining:
+            await self._hold_arrival(activity, ctx.conversation_ref.service_url)
             return
         if self._installs is not None:
             # Inline: a no-op once the team is recorded in this process.
@@ -550,6 +779,7 @@ class TeamsApp:
             await self._refuse(
                 parsed,
                 activity.conversation.id,
+                activity.id,
                 activity.conversation.conversation_type,
                 ctx.reply,
             )
@@ -572,12 +802,13 @@ class TeamsApp:
     async def handle_graph_message(
         self, message: GraphMessage, channel: TeamsChannelSubscriptionRow
     ) -> bool:
-        """A message Graph reported from a subscribed channel: claimed once, then routed.
+        """A message Graph reported from a subscribed channel, admitted as a Bot Framework one.
 
-        The claim follows the parse, which drops @mentions: Bot Framework
-        delivers those, and claiming one here would lose it. False, while
-        draining, means the message was not taken (nor claimed): the caller
-        leaves its watermark so a replay or catch-up still runs it.
+        Its admission row is keyed like the activity's (`admission_channel`), so a
+        message seen both ways runs once, across restarts too. The parse drops
+        @mentions first: Bot Framework delivers those. False, while draining,
+        means the message was not taken (nor claimed): the caller leaves its
+        watermark so the next boot's catch-up still reads it.
         """
         if self.draining:
             return False
@@ -587,11 +818,9 @@ class TeamsApp:
             configured_tenant=self._teams.tenant_id,
             bot_app_id=self._teams.client_id,
         )
-        if isinstance(parsed, Refusal) and parsed.text is None:
-            return True
-        if not self._first_delivery(channel.channel_id, message.id):
-            return True
-        if isinstance(parsed, Refusal):
+        if not isinstance(parsed, Refusal):
+            self._dispatch_inbound(parsed)
+        elif parsed.text is not None:
             thread = f"{channel.channel_id};messageid={message.reply_to_id or message.id}"
 
             async def reply(text: str) -> object:
@@ -599,19 +828,18 @@ class TeamsApp:
                     thread, MessageActivityInput(text=text), service_url=channel.service_url
                 )
 
-            await self._refuse(parsed, thread, "channel", reply)
-            return True
-        self._dispatch_inbound(parsed)
+            await self._refuse(parsed, thread, message.id, "channel", reply)
         return True
 
     async def _refuse(
         self,
         refusal: Refusal,
         conversation_id: str,
+        message_id: str,
         conversation_type: str | None,
         reply: Callable[[str], Awaitable[object]],
     ) -> None:
-        """Answer a refused message where it was posted, or drop it silently."""
+        """Answer a refused message where it was posted, once, or drop it silently."""
         # Type and reason only, never the text: these drops are otherwise invisible.
         if refusal.text is None:
             # Debug: with channel-message consent Teams delivers every channel post.
@@ -623,7 +851,17 @@ class TeamsApp:
             return
         if refusal.by_name and not await self._plain_text_mentions_on():
             return  # a typed name with the switch off asked nothing
-        if await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
+        if not await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
+            return
+        try:
+            fresh = await self._admissions.claim_receipt(
+                conversation_id, message_id, now=datetime.now(UTC)
+            )
+        except _DB_ERRORS as exc:
+            # Unrecorded, another process could send it too: stay silent.
+            log.warning("teams.admission.claim_failed", error_type=type(exc).__name__)
+            return
+        if fresh:
             try:
                 await asyncio.wait_for(reply(refusal.text), SEND_TIMEOUT_S)
             except TEAMS_SEND_ERRORS as exc:
@@ -634,17 +872,12 @@ class TeamsApp:
                 )
 
     def _dispatch_inbound(self, parsed: TeamsInbound) -> None:
-        """Hand a verified message to the mention, typed-name or participation path."""
-        if parsed.by_name:
-            self.spawn(self._route_by_name(parsed), name="teams.by-name")
+        """Admit a verified message for the mention, typed-name or participation path."""
+        participation = self.runtime.settings.thread_participation.mode
+        if parsed.unprompted and not parsed.by_name and participation is ParticipationMode.DISABLED:
+            log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
             return
-        if parsed.unprompted:
-            if self.runtime.settings.thread_participation.mode is ParticipationMode.DISABLED:
-                log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
-                return
-            self.spawn(self._observe(parsed), name="teams.participation")
-            return
-        self.spawn(self._handle(parsed), name="teams.turn")
+        self.spawn(self._admit(parsed), name="teams.turn")
 
     async def _plain_text_mentions_on(self) -> bool:
         """Read the tenant's switch for a message that already names the bot as text."""
@@ -661,12 +894,11 @@ class TeamsApp:
         """A typed "@<bot name>": a mention with the tenant's switch on, else as before."""
         if await self._plain_text_mentions_on():
             log.info("plain_text_mention.accepted", conversation_type="channel")
-            text = strip_typed_name(inbound.text, inbound.bot_name)
-            await self._handle(
-                dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
-            )
+            await self._handle(_as_mention(inbound))
             return
         # Off: a root post stays unanswered and a thread reply is screened as before.
+        if not await self._finish([inbound]):
+            return
         if (
             inbound.unprompted
             and self.runtime.settings.thread_participation.mode is not ParticipationMode.DISABLED
@@ -776,6 +1008,9 @@ class TeamsApp:
 
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
         """True only for an unprotected target; a protected or unreadable one gets nothing."""
+        return (await self._post_state(channel_id, thread_id)).may_post
+
+    async def _post_state(self, channel_id: str, thread_id: str) -> ProtectionState:
         state = await protection_state(
             self.runtime.sessionmaker,
             tenant_id=self._tenant_id,
@@ -789,14 +1024,19 @@ class TeamsApp:
                 thread_id=thread_id,
                 state=state.value,
             )
-        return state.may_post
+        return state
 
     async def _handle(self, inbound: TeamsInbound) -> None:
         """Error boundary around tenant lookup, routing, commands and the turn loop.
 
         May-post is decided first, so no post below (denial, pointer, shed, error) skips it.
         """
-        if not await self._may_post(inbound.channel_id, inbound.thread_id):
+        state = await self._post_state(inbound.channel_id, inbound.thread_id)
+        if state is ProtectionState.UNKNOWN:
+            self._unfenced.append(inbound)  # the policy went unread: retried, not dropped
+            return
+        if not state.may_post:
+            await self._finish([inbound])  # nothing to answer, so nothing to replay
             return
         # For the billing card's names; in the background, never failing the turn.
         remember_inbound(self.runtime.sessionmaker, self._tenant_id, inbound)
@@ -813,21 +1053,25 @@ class TeamsApp:
         except _TURN_ERRORS as exc:
             log.error("teams.message.failed", conversation_id=inbound.conversation_id, exc_info=exc)
             capture_exception_with_scope(exc)
-            with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._say(inbound, _FAILED)
+            if await self._finish([inbound]):  # unfinished, it replays: say nothing
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await self._say(inbound, _FAILED)
 
     async def _route(self, inbound: TeamsInbound) -> None:
         if self._recovery is not None:
             await asyncio.shield(self._recovery)
         tenant_id = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
         if tenant_id is None:
-            await self._say(inbound, DENIED)
+            if await self._finish([inbound]):
+                await self._say(inbound, DENIED)
             return
         inbound = await self._stored_external(inbound, tenant_id)
         # Someone from another organisation gets no command: the agent hears their words,
         # and a command's 1:1 chat cannot be opened across organisations.
         command = None if inbound.is_external else parse_command(inbound.text, self._commands)
         if command is not None:
+            if not await self._finish([inbound]):
+                return
             name, args = command
             asked_in = None
             if inbound.kind != "dm" and name == "new":
@@ -903,6 +1147,8 @@ class TeamsApp:
         key = inbound.conversation_id
         # Read first: no await may split the queue check from the claim below.
         cap = await self._turn_cap(tenant_id)
+        if replayed := self._replay_queued.get((key, inbound.activity_id)):
+            replayed.set()  # wakes only at the next await, after the claim or enqueue
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._thread_queue.enqueue(key, inbound)
@@ -926,7 +1172,8 @@ class TeamsApp:
                 cap=cap,
                 reason="queue_full",
             )
-            await self._say(inbound, _SHED)
+            if await self._finish([inbound]):
+                await self._say(inbound, _SHED)
             return
         self._last_message_at[key] = datetime.now(UTC)
         self._supersede_batch(inbound)
@@ -951,21 +1198,41 @@ class TeamsApp:
                 yield
         finally:
             self._release(key)
-            for item in self._pending.pop(key, []):
-                with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._say(item, _FAILED)
+            unstarted = self._pending.pop(key, [])
+            if self.draining:
+                if unstarted:
+                    await self._hold(unstarted)
+            elif unstarted:
+                for item in await self._finish(unstarted):
+                    with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                        await self._say(item, _FAILED)
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
         return ThreadQueue(self._processing, self._pending)
 
-    async def _run_turns(self, key: str, tenant_id: uuid.UUID, turns: list[TeamsInbound]) -> None:
-        async def run(queued: TeamsInbound) -> None:
-            turn = await route_to_setup(self.runtime.sessionmaker, queued, tenant_id)
+    async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
+        """One turn per author, composed of the messages its fence still held."""
+
+        async def run(batch: list[TeamsInbound]) -> None:
+            if self.draining:
+                # A turn started now would be cut off: `_holding` holds these instead.
+                self._pending.setdefault(key, []).extend(batch)
+                return
+            kept = await self._finish(batch)  # one another process has drops alone
+            if not kept:
+                return
+            turn = await route_to_setup(self.runtime.sessionmaker, _compose(kept), tenant_id)
             await self._run_turn_guarded(turn, tenant_id)
             await self._dispatch_continuations(turn.thread_id, tenant_id, turn.service_url)
 
-        await self._thread_queue.drain(key, initial=turns, compose=_compose_queued, run=run)
+        def compose(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
+            if self.draining and queued:
+                self._pending.setdefault(key, []).extend(queued)
+                return []
+            return _by_author(queued)
+
+        await self._thread_queue.drain(key, initial=_by_author(queued), compose=compose, run=run)
 
     async def _run_turn_guarded(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
         """Error boundary for failures before the status card exists."""
@@ -1567,7 +1834,9 @@ class TeamsApp:
         async with self._holding(conversation_id, ticket):
 
             async def drain() -> None:
-                queued = _compose_queued(self._pending.pop(conversation_id, []))
+                if self.draining:
+                    return  # `_holding` holds what is queued
+                queued = self._pending.pop(conversation_id, [])
                 await self._run_turns(conversation_id, tenant_id, queued)
 
             await dispatch_and_drain(

@@ -256,7 +256,7 @@ async def test_a_burst_is_one_classifier_call_over_the_window_around_it(
         "so what does the posterior look like?",
         "and the prior?",
     ], "the whole burst is judged in one call, in order"
-    assert call["model"] == "claude-haiku-4-5", "the configured classifier model decides"
+    assert call["model"] == "claude-haiku-5-5", "the configured classifier model decides"
 
 
 async def test_classifier_silence_is_final(
@@ -367,7 +367,7 @@ async def test_the_classifier_call_is_metered_to_the_caller(
         rows = await usage_events.list_for_tenant(session, tenant_id=tenant.id)
         ledger = await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id)
     (row,) = rows
-    assert row.model == "claude-haiku-4-5" and row.platform_user_id == str(ALICE_ID), (
+    assert row.model == "claude-haiku-5-5" and row.platform_user_id == str(ALICE_ID), (
         "one usage row, priced at the classifier model, attributed to the caller"
     )
     debits = [entry for entry in ledger if entry.reason == "classifier_debit"]

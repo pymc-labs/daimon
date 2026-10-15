@@ -161,7 +161,7 @@ async def ingress(
                 "id": "msg_c4_owned_title",
                 "type": "message",
                 "role": "assistant",
-                "model": "claude-haiku-4-5",
+                "model": "claude-haiku-5-5",
                 "content": [{"type": "text", "text": "QA permission check"}],
                 "stop_reason": "end_turn",
                 "stop_sequence": None,
@@ -568,7 +568,7 @@ async def test_default_host_naming_post_is_present_and_excluded(
         receipt = await hook.mention(ingress.message)
     writes = [r for r in ingress.native.requests if r.method not in ("GET", "HEAD")]
     assert [(r.method, r.path) for r in writes] == [HOST_THREAD_NAMING_REQUEST]
-    assert json.loads(writes[0].body)["model"] == "claude-haiku-4-5"
+    assert json.loads(writes[0].body)["model"] == "claude-haiku-5-5"
     assert ingress.gateway.typing_channels and set(ingress.gateway.typing_channels) == {101}
     assert json.loads(receipt.creation.request_json)["name"] == "QA permission check"
     assert receipt.native_send_count == 0 and evaluate_new14(receipt).zero_native_sends

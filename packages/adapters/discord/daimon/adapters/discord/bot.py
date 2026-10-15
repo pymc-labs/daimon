@@ -4324,18 +4324,20 @@ class DaimonBot(commands.Bot):
             platform="discord",
             channel_id=str(message.channel.id),
         ):
-            return await self._orchestrate_observed(
-                message,
-                guild_id,
-                tenant_id,
-                content_override=content_override,
-                created_thread_ids=created_thread_ids,
-                attachments_override=attachments_override,
-                admitted_message_ids=admitted_message_ids,
-                query_messages=query_messages,
-                unprompted=unprompted,
-                failure_surface=failure_surface,
-            )
+            async with contextlib.AsyncExitStack() as origins:
+                return await self._orchestrate_observed(
+                    message,
+                    guild_id,
+                    tenant_id,
+                    origins=origins,
+                    content_override=content_override,
+                    created_thread_ids=created_thread_ids,
+                    attachments_override=attachments_override,
+                    admitted_message_ids=admitted_message_ids,
+                    query_messages=query_messages,
+                    unprompted=unprompted,
+                    failure_surface=failure_surface,
+                )
 
     async def _orchestrate_observed(
         self,
@@ -4343,6 +4345,7 @@ class DaimonBot(commands.Bot):
         guild_id: str,
         tenant_id: uuid.UUID,
         *,
+        origins: contextlib.AsyncExitStack | None = None,
         content_override: str | None = None,
         created_thread_ids: list[int] | None = None,
         attachments_override: list[discord.Attachment] | None = None,
@@ -4370,6 +4373,22 @@ class DaimonBot(commands.Bot):
         to end its status card, so an error raised past this point is shown
         there (see `_render_turn_error`).
         """
+        if origins is None:
+            async with contextlib.AsyncExitStack() as owned_origins:
+                return await DaimonBot._orchestrate_observed(
+                    self,
+                    message,
+                    guild_id,
+                    tenant_id,
+                    origins=owned_origins,
+                    content_override=content_override,
+                    created_thread_ids=created_thread_ids,
+                    attachments_override=attachments_override,
+                    admitted_message_ids=admitted_message_ids,
+                    query_messages=query_messages,
+                    unprompted=unprompted,
+                    failure_surface=failure_surface,
+                )
         surface = failure_surface if failure_surface is not None else _TurnFailureSurface()
         # Serialize every turn against the boot snapshot, including a turn
         # that arrives before on_ready, so a marker written by this process
@@ -4827,10 +4846,41 @@ class DaimonBot(commands.Bot):
         # so nobody reuses another caller's session identity.
         session_account_id = admission.account_id
 
+        origin_context = turn_origin(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=parent_channel_id,
+            thread_id=str(thread.id),
+            responder_ma_agent_id=str(agent.id),
+            responder_name=admission.config.agent_name or agent.name,
+            configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
+            configuration_target_name=admission.config.configuration_target_name,
+            role=role,
+            is_setup=admission.config.thread_binding_kind == "setup",
+            message_text=message.content,
+            queued_message=content_override is not None,
+            keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
+        )
+        prepared_origin = None
+        if self.runtime.turn_deps.fleet_enabled:
+            from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+
+            grant = await read_agent_fleet_grant(
+                self.runtime.turn_deps, admission, now=datetime.now(UTC)
+            )
+            if grant is not None:
+                prepared_origin = await origins.enter_async_context(origin_context)
+
+        bind = bind_session
+        if prepared_origin is not None:
+            bind = functools.partial(bind_session, turn_card_intent_id=turn_card_intent.id)
+
         # --- Stage two: bind_session (find-or-create, mapping write,
         # recorder binding) -- bind_session(). ---
         try:
-            prepared = await bind_session(
+            prepared = await bind(
                 self.runtime.turn_deps,
                 admission,
                 tenant_id=tenant_id,
@@ -5265,23 +5315,12 @@ class DaimonBot(commands.Bot):
         archive_after = False
         watch.phase = "running"
         try:
-            async with turn_origin(
-                self.runtime.sessionmaker,
-                tenant_id=tenant_id,
-                account_id=admission.account_id,
-                platform="discord",
-                parent_channel_id=parent_channel_id,
-                thread_id=str(thread.id),
-                responder_ma_agent_id=str(agent.id),
-                responder_name=admission.config.agent_name or agent.name,
-                configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
-                configuration_target_name=admission.config.configuration_target_name,
-                role=role,
-                is_setup=admission.config.thread_binding_kind == "setup",
-                message_text=message.content,
-                queued_message=content_override is not None,
-                keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
-            ) as origin:
+            async with contextlib.AsyncExitStack() as running_origin:
+                if prepared_origin is None:
+                    origin = await running_origin.enter_async_context(origin_context)
+                else:
+                    await running_origin.enter_async_context(origins.pop_all())
+                    origin = prepared_origin
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,

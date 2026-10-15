@@ -24,7 +24,7 @@ from anthropic.types import TextBlock
 from daimon.core.name_mentions import strip_name_mentions
 
 # Priced in AGENT_MODEL_PRICING; a title must never run on an unmetered model.
-THREAD_NAMING_MODEL = "claude-haiku-4-5"
+THREAD_NAMING_MODEL = "claude-haiku-5-5"
 THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
@@ -169,19 +169,24 @@ async def suggest_thread_name(
     ``message_text`` must be non-empty; the caller skips a bare mention with
     no text and no file rather than paying for a call with nothing to title.
     SDK errors propagate: the adapter boundary decides what a failed
-    naming means (fall back to the message-derived title).
+    naming means (fall back to the message-derived title). A refusal is
+    treated like a blank answer: no title, usage still reported.
     """
     response = await anthropic.messages.create(
         model=THREAD_NAMING_MODEL,
         max_tokens=_MAX_OUTPUT_TOKENS,
+        # Haiku 5.5 thinks by default and thinking counts toward max_tokens,
+        # which would leave a 60-token cap with no title text.
+        thinking={"type": "disabled"},
         system=_SYSTEM_PROMPT,
         messages=[
             {"role": "user", "content": _USER_TURN.format(text=message_text[:max_input_chars])}
         ],
     )
     raw = "".join(block.text for block in response.content if isinstance(block, TextBlock))
+    refused = response.stop_reason == "refusal"
     return ThreadNameSuggestion(
-        name=parse_thread_name(raw),
+        name=None if refused else parse_thread_name(raw),
         usage=ThreadNamingUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,

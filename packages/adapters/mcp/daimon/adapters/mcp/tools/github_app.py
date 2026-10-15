@@ -55,13 +55,6 @@ async def _post_app_install_link_impl(
 ) -> PostAppInstallLinkResult:
     if auth.platform_user_id is None:
         raise ToolError("posting the install link requires a platform-bound identity")
-    if auth.platform == "teams":
-        message_id = await _post_teams_app_install_link_impl(
-            runtime, auth, channel_id=channel_id, slug="", purpose=""
-        )
-        return PostAppInstallLinkResult(
-            channel_id=channel_id, message_id=message_id, install_url=None
-        )
     # The App that GitHub setup uses wins; the older setting covers deployments without it.
     slug = runtime.settings.github_app.app_slug or runtime.settings.github.app_slug
     if slug is None:
@@ -72,6 +65,7 @@ async def _post_app_install_link_impl(
         )
     post_button = {
         "slack": _post_slack_app_install_button_impl,
+        "teams": _post_teams_app_install_link_impl,
     }.get(auth.platform or "", _post_app_install_button_impl)
     message_id = await post_button(
         runtime,

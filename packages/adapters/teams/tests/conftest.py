@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import functools
 import json
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -377,14 +379,17 @@ def build_teams_client(fake: TeamsApiFake) -> Client:
 @dataclasses.dataclass
 class FakeSender:
     """A `TeamsSender` recording every send. Indices in `fail_on` raise; in
-    `timeout_on` they time out after landing (odd: httpx, even: asyncio). An
-    edit Teams would refuse answers 400, as Teams does."""
+    `refuse_on` they answer `refuse_status`; in `timeout_on` they time out after landing
+    (odd: httpx, even: asyncio). An edit Teams would refuse answers 400, as
+    Teams does."""
 
     sent: list[tuple[str, MessageActivityInput, str | None]] = dataclasses.field(
         default_factory=list[tuple[str, MessageActivityInput, str | None]]
     )
     fail_on: set[int] = dataclasses.field(default_factory=set[int])
     timeout_on: set[int] = dataclasses.field(default_factory=set[int])
+    refuse_on: set[int] = dataclasses.field(default_factory=set[int])
+    refuse_status: int = 413
 
     async def send(
         self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
@@ -395,6 +400,10 @@ class FakeSender:
             raise httpx.ConnectError("unreachable")
         if index in self.timeout_on:
             raise httpx.ReadTimeout("slow") if index % 2 else TimeoutError()
+        if index in self.refuse_on:
+            request = httpx.Request("POST", f"https://teams.test/conversations/{conversation_id}")
+            response = httpx.Response(self.refuse_status, request=request)
+            raise httpx.HTTPStatusError("refused", request=request, response=response)
         body = activity.model_dump(mode="json", by_alias=True, exclude_none=True)
         if activity.id is not None and (refused := teams_update_error(body)) is not None:
             request = httpx.Request("PUT", f"https://teams.test/activities/{activity.id}")
@@ -498,6 +507,20 @@ async def running_service(
         yield service
 
 
+async def settle(teams: TeamsApp) -> None:
+    """Wait until every task `teams` spawned has ended."""
+    async with asyncio.timeout(10):
+        while teams._tasks:
+            await asyncio.gather(*list(teams._tasks))
+            await asyncio.sleep(0)  # lets a finished task's done callback drop it
+
+
+async def finish_turns(teams: TeamsApp) -> None:
+    """Let every turn run, then drain: one reaching its start during a drain is held."""
+    await settle(teams)
+    await teams.drain(timeout=30)
+
+
 async def post_activity(service: TeamsHttpService, payload: dict[str, object]) -> Any:
     """POST one activity to `/api/messages`; the invoke response body, if any."""
     transport = httpx.ASGITransport(app=service.app)
@@ -553,6 +576,13 @@ def no_delivery_poller() -> Iterator[AsyncMock]:
     """The routine delivery poller would share the test connection too."""
     with patch("daimon.adapters.teams.app.run_delivery_poller", new_callable=AsyncMock) as poller:
         yield poller
+
+
+@pytest.fixture(autouse=True)
+def no_admission_reclaimer() -> Iterator[AsyncMock]:
+    """The periodic reclaim would share the test connection too; boot's pass still runs."""
+    with patch("daimon.adapters.teams.app.TeamsApp._reclaim_loop", new_callable=AsyncMock) as loop:
+        yield loop
 
 
 @pytest.fixture

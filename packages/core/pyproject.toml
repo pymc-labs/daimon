@@ -37,3 +37,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["daimon"]
+
+[project.entry-points."daimon.turn_runtimes"]
+"openai.persistent_workspace" = "daimon.core.turn.openai_deployment:register_runtime"
+"gemini.inline_reuse" = "daimon.core.turn.gemini_deployment:register_runtime"

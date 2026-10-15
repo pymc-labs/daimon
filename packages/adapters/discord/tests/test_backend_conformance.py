@@ -304,7 +304,7 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "bind_session"
+            and node.func.id == "bind"
         ):
             for keyword in node.keywords:
                 if keyword.arg == "reuse_existing":

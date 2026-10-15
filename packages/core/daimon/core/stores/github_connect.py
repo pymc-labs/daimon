@@ -309,7 +309,9 @@ async def mint_invitation(
             tenant_id=tenant_id,
             requester_account_id=requester_account_id,
             workspace_label=workspace_label
-            or ("this Discord server" if tenant.platform == "discord" else "this Slack workspace"),
+            or {"discord": "this Discord server", "teams": "this Teams organisation"}.get(
+                tenant.platform, "this Slack workspace"
+            ),
             requester_label=requester_label or str(requester_account_id),
             requester_platform_user_id=requester_platform_user_id,
             agent_id=agent_id,
@@ -572,10 +574,13 @@ async def activate_confirmed_agent(
 async def queue_connect_followup(
     session: AsyncSession, *, invitation: Invitation, repos: list[RepoConfirmation]
 ) -> None:
-    """Queue one private notice or one task continuation after activation commits."""
+    """Queue one private notice or one task continuation after activation commits.
+
+    Teams has no notice poller, so only its continuation (a wake) reaches the chat.
+    """
     if (
         invitation.operator_issued
-        or invitation.origin_platform not in ("discord", "slack")
+        or invitation.origin_platform not in ("discord", "slack", "teams")
         or invitation.requester_platform_user_id is None
     ):
         return

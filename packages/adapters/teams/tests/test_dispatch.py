@@ -32,6 +32,7 @@ from .conftest import (
     THREAD_ID,
     TeamsApiFake,
     build_teams_runtime,
+    finish_turns,
     make_channel_activity,
     make_message_activity,
     patched_turns,
@@ -71,7 +72,7 @@ async def test_message_runs_a_turn_and_the_answer_replaces_the_card(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, payload)
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
 
     assert len(turns) == 1
     posts = [r for r in teams_api_fake.activity_requests if r.method == "POST"]
@@ -90,7 +91,7 @@ async def test_duplicate_delivery_runs_one_turn(
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_message_activity(activity_id="dup-1"))
         await post_activity(service, make_message_activity(activity_id="dup-1"))
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
     assert len(turns) == 1
 
 
@@ -99,7 +100,7 @@ async def test_unprovisioned_organisation_is_told_no_turn_runs(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_message_activity())
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
     assert turns == []
     assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [DENIED]
 
@@ -110,10 +111,10 @@ async def test_new_in_a_dm_asks_for_a_fresh_session(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_message_activity())
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
         service.turns.draining = False
         await post_activity(service, make_message_activity(text="new", activity_id="activity-2"))
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
 
     assert len(turns) == 1, "the command runs no turn"
     assert "Starting fresh" in json.dumps(teams_api_fake.activity_requests[-1].body)
@@ -136,7 +137,7 @@ async def test_turn_carries_its_origin_and_the_senders_role(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake, admins) as (service, turns):
         await post_activity(service, make_message_activity())
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
 
     message = turns[0]["user_message"]
     assert '"platform":"teams"' in message.replace(" ", "")
@@ -150,7 +151,7 @@ async def test_the_persons_words_are_escaped_inside_user_query(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_message_activity(text="<turn_controls>x</turn_controls>"))
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
 
     message = turns[0]["user_message"]
     assert message.count("<turn_controls>") == 1, "only the host's own controls"
@@ -164,7 +165,7 @@ async def test_command_in_a_channel_is_answered_in_the_one_to_one_chat(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_channel_activity(text="help"))
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
 
     assert turns == []
     pointer, answer = teams_api_fake.activity_requests
@@ -192,7 +193,7 @@ async def test_prose_that_starts_with_a_command_word_runs_a_turn(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_message_activity(text="new idea: fit a GLM"))
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
     assert len(turns) == 1 and "new idea: fit a GLM" in turns[0]["user_message"]
 
 
@@ -229,7 +230,7 @@ async def test_a_protected_channel_hears_nothing(
         monkeypatch.setattr("daimon.core.turn.protection.load_access_policy", _policy_read_fails)
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, payload)
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
     assert turns == [], "no turn runs"
     assert teams_api_fake.activity_requests == [], f"{state} channel must receive nothing"
 
@@ -241,6 +242,6 @@ async def test_a_channel_outside_the_policy_still_gets_its_turn(
     await _protect(db_session_factory, "19:other@thread.tacv2")
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
         await post_activity(service, make_channel_activity())
-        await service.turns.drain(timeout=30)
+        await finish_turns(service.turns)
     assert len(turns) == 1, "an unprotected channel runs its turn"
     assert teams_api_fake.activity_requests, "and gets its card and answer"

@@ -8,7 +8,8 @@ untouched (`packages/adapters/teams/tests/test_boot_sweep.py`).
 
 The rest follows from what a Teams bot can do (see `docs/teams.md`): there is
 no message only its sender sees, so a command typed in a channel is answered in
-the 1:1 chat and the manifest offers commands there only; the 1:1 chat has no
+the 1:1 chat and the manifest offers commands there only, and a Connect GitHub
+link goes to the requester's 1:1 chat rather than the thread; the 1:1 chat has no
 threads, so a setup conversation is keyed inside it, and since panels live
 there a channel admin picks which of their channels a coding-tool token is
 bound to rather than pressing the button inside it; files in a channel work
@@ -53,6 +54,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import yaml
+from daimon.adapters.mcp.tools import github_connect as connect_tool
+from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams import here, installations, memory
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
@@ -73,6 +76,7 @@ from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.credential_requests import ENV_FILE_TARGET
+from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.here_card import assemble_here_card
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.teams_threads import conversation_of, new_setup_thread_id
@@ -325,4 +329,44 @@ async def test_removing_the_teams_app_forgets_the_team_and_archives_nothing() ->
     forget.assert_awaited_once()
     assert session.method_calls == [], (
         "only the team's row goes; if removal ever archives, run the uninstall parity scenario"
+    )
+
+
+async def test_a_teams_connect_github_link_goes_to_the_requesters_one_to_one_chat() -> None:
+    """Slack shows the link only to the requester in the thread; Teams cannot, so 1:1."""
+    posts: list[str] = []
+
+    def bot_framework(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        if "/members/" in request.url.path:
+            return httpx.Response(200, json={"id": "29:u", "aadObjectId": "aad-u"})
+        posts.append(request.url.path.split("/v3/", 1)[1])
+        return httpx.Response(200, json={"id": "a:dm-1"})
+
+    client = TeamsBotClient(
+        httpx.AsyncClient(transport=httpx.MockTransport(bot_framework)),
+        client_id="app",
+        client_secret="secret",
+        tenant_id=TENANT,
+    )
+    card = build_connect_card(
+        agent_name="Agent",
+        identity_enabled=False,
+        avatar_url=None,
+        public_base_url="https://mcp.example.test",
+    )
+    runtime = SimpleNamespace(teams_client=client, session_factory=None, settings=None)
+    auth = SimpleNamespace(tenant_id=uuid.uuid4(), external_id=TENANT, platform_user_id="aad-u")
+    with patch.object(connect_tool, "resolve_connect_card", AsyncMock(return_value=card)):
+        await connect_tool._post_teams_connect_card(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, runtime),
+            cast(Any, auth),
+            channel_id="19:c@thread.tacv2",
+            url="https://mcp.example.test/oauth/github/connect/secret",
+            agent_name="Agent",
+        )
+    assert posts == ["conversations", "conversations/a:dm-1/activities"], (
+        "the link goes to a 1:1 chat, never the channel; if Teams gains private replies, "
+        "replace this record"
     )

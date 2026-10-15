@@ -464,9 +464,8 @@ async def _produce_fleet_budget(
         unavailable = price is None or (
             isinstance(price, ProviderPrice)
             and (
-                not price.verified
+                not price.current_on(datetime.now(UTC).date())
                 or (price.provider, price.model) != (member.backend, member.model)
-                or price.checked_on > datetime.now(UTC).date()
             )
         )
         if isinstance(price, ModelRates):
