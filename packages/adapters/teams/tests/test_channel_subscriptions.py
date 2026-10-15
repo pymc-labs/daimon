@@ -18,6 +18,7 @@ import pytest
 import structlog
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.channel_subscriptions import (
+    BOOT_CATCH_UP_WINDOW,
     LIFECYCLE_PATH,
     NOTIFICATIONS_PATH,
     RENEW_MARGIN,
@@ -46,13 +47,14 @@ from daimon.core.teams_graph import (
     GraphUnavailable,
     TeamGroups,
 )
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import (
     ConversationUpdateActivity,
     MessageActivityInput,
     UninstalledActivity,
 )
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -86,6 +88,17 @@ CHANNEL = SeenChannel(
 )
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
+
+
+@pytest.fixture
+def db_session_factory(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+) -> async_sessionmaker[AsyncSession]:
+    """A connection per session, as in production: admission claims overlap other writes.
+
+    `db_session` wipes the schema first.
+    """
+    return async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
 
 
 def _message(id: str, created: datetime, *, reply_to: str | None = None) -> dict[str, Any]:
@@ -546,8 +559,9 @@ async def test_a_failed_recreation_retries_after_the_retry_delay(
     try:
         for _ in range(100):
             await asyncio.sleep(0.01)
-            if len(graph.calls("POST")) == 2:
-                break
+            current = await harness.row()
+            if current is not None and current.subscription_id == "sub-1":
+                break  # recorded, not just requested
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -623,7 +637,7 @@ async def test_another_refused_send_keeps_the_subscription(
 async def test_catch_up_overlapping_a_live_notification_runs_each_message_once(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Both routes hand the same message to the app; its delivery claim runs it once."""
+    """Both routes hand the same message to the app; its admission row runs it once."""
     teams = TeamsApp(
         runtime=build_teams_runtime(db_session_factory),
         sender=FakeSender(),
@@ -675,8 +689,42 @@ async def test_a_message_not_taken_while_draining_leaves_the_watermark(
     stored = await harness.row()
     assert harness.delivered == [], "a message refused while draining is not taken"
     assert stored is not None and stored.last_message_id is None, (
-        "the watermark stays before it, so a `missed` catch-up would still read it"
+        "the watermark stays before it, so the next boot's catch-up still reads it"
     )
+
+
+async def test_a_boot_catches_up_once_within_its_window(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A drain may have dropped messages Graph never resends: each boot reads once for
+    them, but not further back than the window, however old the watermark."""
+    graph = FakeGraph()
+    graph.page = [
+        _message("103", NOW - timedelta(minutes=2)),
+        _message("102", NOW - BOOT_CATCH_UP_WINDOW - timedelta(minutes=1)),
+    ]
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    async with db_session_factory.begin() as session:
+        await record_teams_channel_watermark(
+            session,
+            tenant_id=TENANT,
+            channel_id=PRIVATE,
+            message_id="101",
+            at=NOW - timedelta(hours=1),
+        )
+    task = asyncio.create_task(harness.subscriptions.run())
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if harness.delivered:
+                break
+        await asyncio.sleep(0.05)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert [m.id for m in harness.delivered] == ["103"], "only what the window holds"
+    assert len(graph.calls("GET")) == 1, "one read, then no polling"
 
 
 async def test_a_failed_watermark_write_does_not_stop_the_batch(

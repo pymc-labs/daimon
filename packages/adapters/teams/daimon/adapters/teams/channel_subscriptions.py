@@ -15,7 +15,9 @@ verified by its client-state secret, of which only a hash is stored. A new
 message costs one GET (`includeResourceData` is off, so no certificate) and
 goes to `deliver`, where the adapter routes it as a Bot Framework message.
 Only `created` changes are read, so an edit never runs anything again. A
-`missed` notice reads the channel's newest page since the last message handled.
+`missed` notice reads the channel's newest page since the last message handled;
+so does each boot, at most `BOOT_CATCH_UP_WINDOW` back, for what a drain left.
+The adapter's admission row keeps a message read twice from running twice.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from typing import Any, Protocol
 
 import httpx
 import structlog
+from daimon.adapters.teams.admissions import REPLAY_MAX_AGE
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.teams_channel_subscriptions import (
@@ -79,6 +82,8 @@ RENEW_MARGIN = timedelta(hours=12)
 RETRY_DELAY = timedelta(minutes=10)
 # A channel Graph refused (no consent, app not in it) is not tried again for this long.
 REFUSED_BACKOFF_S = 3600.0
+# How far back a boot's catch-up reads: older messages would be answered too late.
+BOOT_CATCH_UP_WINDOW = REPLAY_MAX_AGE
 MAX_NOTIFICATION_BYTES = 256 * 1024
 _MAX_VALIDATION_TOKEN = 4096
 _RESOURCE = re.compile(
@@ -87,7 +92,7 @@ _RESOURCE = re.compile(
 )
 _CHANNEL_ID = re.compile(r"^19:[^/?#'\s]+$")
 
-# True when the message was taken; False (only while draining) leaves it for a replay.
+# True when the message was taken; False (only while draining) leaves it for a catch-up.
 Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
 ChannelTypeLookup = Callable[[str, str], Awaitable[str | None]]
 # Bot Framework's 403 code for a conversation the bot is not in. No read tells:
@@ -511,11 +516,16 @@ class ChannelSubscriptions:
             await self.catch_up(row)
         self._wake.set()
 
-    async def catch_up(self, row: TeamsChannelSubscriptionRow) -> None:
-        """Deliver what the channel's newest page holds since the last message handled."""
+    async def catch_up(
+        self, row: TeamsChannelSubscriptionRow, *, floor: datetime | None = None
+    ) -> None:
+        """Deliver what the channel's newest page holds since the last message handled
+        (and since `floor`). One read: the page bounds it."""
         since = row.last_message_at
         if since is None:
             return  # nothing handled yet, so nothing to have missed after
+        if floor is not None:
+            since = max(since, floor)
         try:
             page = await self._graph.list_channel_messages(
                 row.group_id, row.channel_id, expand_replies=True
@@ -538,9 +548,8 @@ class ChannelSubscriptions:
         for message in messages:
             if not await self._deliver(message, row):
                 # Draining began after this batch was answered 202 (mid-GET, or mid-catch-up):
-                # Graph never resends it, and only a `missed` notice runs a catch-up, so
-                # these messages are lost unless one comes. The watermark stays before
-                # them so that catch-up would still read them.
+                # Graph never resends it. The watermark stays before these messages, so
+                # the next boot's catch-up (or a `missed` notice) still reads them.
                 return
             if (created := _created(message)) is None:
                 continue
@@ -555,11 +564,13 @@ class ChannelSubscriptions:
                     )
             except SQLAlchemyError as err:
                 # The message was taken; a stale watermark only widens a later catch-up,
-                # which the delivery claim keeps from running anything twice.
+                # which the admission row keeps from running anything twice.
                 log.warning("teams.channel_watermark.write_failed", error=type(err).__name__)
 
     async def run(self) -> None:
-        """Renew each subscription before it expires; sleeps in between, never polls."""
+        """Catch up once, then renew each subscription before it expires; sleeps in
+        between, never polls."""
+        await self._catch_up_at_boot()
         while True:
             self._wake.clear()
             try:
@@ -580,6 +591,19 @@ class ChannelSubscriptions:
             delay = seconds_until((self._due_at(row) for row in rows), now)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), delay)
+
+    async def _catch_up_at_boot(self) -> None:
+        """Read each channel once for what a predecessor answered 202 but never took
+        before it exited, within `BOOT_CATCH_UP_WINDOW`."""
+        try:
+            async with self._sessionmaker() as session:
+                rows = await list_teams_channel_subscriptions(session, tenant_id=self._tenant_id)
+        except SQLAlchemyError as err:
+            log.warning("teams.channel_subscription.list_failed", error=type(err).__name__)
+            return
+        floor = self._now() - BOOT_CATCH_UP_WINDOW
+        for row in rows:
+            await self.catch_up(row, floor=floor)
 
     def _due_at(self, row: TeamsChannelSubscriptionRow) -> datetime:
         return renewal_due_at(
