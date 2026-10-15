@@ -501,7 +501,9 @@ async def test_a_failed_turn_start_answers_once(
         await teams.handle_message(_message(payload))
         await _settle(teams)
     with patch.object(TeamsApp, "_run_turn", AsyncMock()) as turn:
-        await _app(db_session_factory, sender).handle_message(_message(payload))
+        again = _app(db_session_factory, sender)
+        await again.handle_message(_message(payload))
+        await _settle(again)
 
     turn.assert_not_awaited()
     assert _texts(sender) == [app_module._FAILED], "one error notice, then nothing"
