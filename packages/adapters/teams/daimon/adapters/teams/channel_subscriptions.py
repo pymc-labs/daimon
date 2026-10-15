@@ -294,7 +294,8 @@ class ChannelSubscriptions:
             return True  # `run` keeps it alive
         try:
             group = await self._groups.group_id(channel.team_id, known=channel.team_group_id)
-            await self._subscribe(channel, group, kind.strip().lower(), replacing=None)
+            if await self._subscribe(channel, group, kind.strip().lower(), replacing=None):
+                return True
         except GraphUnavailable as err:
             self._refused_until[channel.channel_id] = self._clock() + REFUSED_BACKOFF_S
             # The permission is tenant-wide, so a 403 means the admin consent is missing.
@@ -305,7 +306,15 @@ class ChannelSubscriptions:
                 channel_type=kind,
             )
             return False
-        return True
+        # Lost the insert, or Graph answered 409. Settled only if a winner's row holds it:
+        # a 409 for an orphan (a failed `_delete_remote`) would otherwise leave it deaf for days.
+        async with self._sessionmaker() as session:
+            winner = await get_teams_channel_subscription(
+                session, tenant_id=self._tenant_id, channel_id=channel.channel_id
+            )
+        if winner is None:
+            self._refused_until[channel.channel_id] = self._clock() + REFUSED_BACKOFF_S
+        return winner is not None
 
     async def _lookup_type(self, channel: SeenChannel) -> str | None:
         try:
@@ -322,7 +331,7 @@ class ChannelSubscriptions:
 
         A subscription that cannot be recorded is deleted again: nothing would renew it.
         False when another process wrote the row first, which keeps its subscription,
-        or Graph answered 409 for one it already holds.
+        or Graph answered 409 for one it already holds: a winner's, or an orphan.
         """
         secret = self._new_secret()
         try:
@@ -336,7 +345,8 @@ class ChannelSubscriptions:
         except GraphUnavailable as err:
             if err.status != 409:
                 raise
-            # Graph already holds one for this channel and URL: another process's.
+            # Graph already holds one for this channel and URL: another process's, or an
+            # orphan a failed `_delete_remote` left. The caller tells them apart by the row.
             log.info("teams.channel_subscription.superseded", status=409)
             return False
         try:
@@ -586,6 +596,9 @@ class ChannelSubscriptions:
         except GraphUnavailable as err:
             log.warning("teams.channel_catch_up.read_failed", status=err.status)
             return
+        roots = [created for post in page.value if (created := _created(post)) is not None]
+        if page.next_link and roots and min(roots) > since:
+            log.warning("teams.channel_subscription.catch_up_truncated", posts=len(page.value))
         newer: list[tuple[datetime, GraphMessage]] = []
         for post in page.value:
             for message in (post, *post.replies):
@@ -776,7 +789,8 @@ class ChannelSubscriptions:
         else:
             if recorded:
                 log.info("teams.channel_subscription.recreated")
-            return
+                return
+            # A 409 or a lost update: retry by the old id, which `_retry_at` clears for a winner.
         self._recreate_at[row.channel_id] = (row.subscription_id, self._now() + RETRY_DELAY)
 
 

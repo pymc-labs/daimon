@@ -23,6 +23,7 @@ from daimon.adapters.teams.channel_subscriptions import (
     LIFECYCLE_PATH,
     MAX_MESSAGE_READS,
     NOTIFICATIONS_PATH,
+    REFUSED_BACKOFF_S,
     RENEW_MARGIN,
     RETRY_DELAY,
     ChannelSubscriptions,
@@ -122,7 +123,7 @@ class FakeGraph:
     """Graph's subscription and channel-message endpoints, recording each request.
 
     `status` answers a method with that status instead; `messages` are what
-    message reads find, `page` what a channel listing returns.
+    message reads find, `page` what a channel listing returns, with `next_link`.
     """
 
     def __init__(self) -> None:
@@ -130,6 +131,7 @@ class FakeGraph:
         self.status: dict[str, int] = {}
         self.messages: dict[str, dict[str, Any]] = {}
         self.page: list[dict[str, Any]] = []
+        self.next_link: str | None = None
         self._ids = 0
 
     def calls(self, method: str) -> list[httpx.Request]:
@@ -156,7 +158,8 @@ class FakeGraph:
         if request.method == "DELETE":
             return httpx.Response(204)
         if path.endswith("/messages"):
-            return httpx.Response(200, json={"value": self.page})
+            more = {"@odata.nextLink": self.next_link} if self.next_link else {}
+            return httpx.Response(200, json={"value": self.page, **more})
         found = self.messages.get(path.rsplit("/", 1)[1])
         return httpx.Response(200, json=found) if found else httpx.Response(404)
 
@@ -208,6 +211,7 @@ class Harness:
         self.delivered: list[GraphMessage] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.now = NOW
+        self.clock = 1000.0
         self.database = FlakyDatabase(factory)
 
         async def lookup(_team: str, _channel: str) -> str | None:
@@ -231,7 +235,7 @@ class Harness:
             tenant_id=TENANT,
             public_url=PUBLIC_URL,
             now=lambda: self.now,
-            clock=lambda: 1000.0,
+            clock=lambda: self.clock,
             new_secret=lambda: SECRET,
         )
         self._factory = factory
@@ -378,6 +382,28 @@ async def test_a_refused_subscription_is_logged_and_not_retried_at_once(
     harness.subscriptions.notice(CHANNEL)
     assert harness.tasks[1:] == [] and len(graph.calls("POST")) == 1, "backed off, not retried"
     assert await harness.row() is None, "nothing recorded for a refused subscription"
+
+
+async def test_a_first_create_409_with_no_winning_row_backs_off_then_retries(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A 409 for an orphan Graph still holds, with no row: not settled, so a later sight retries."""
+    graph = FakeGraph()
+    graph.status["POST"] = 409
+    harness = Harness(db_session_factory, graph)
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    assert await harness.row() is None, "nothing recorded for the 409"
+    harness.subscriptions.notice(CHANNEL)
+    assert len(harness.tasks) == 1, "backed off, not retried at once"
+
+    del graph.status["POST"]
+    harness.clock += REFUSED_BACKOFF_S
+    harness.subscriptions.notice(CHANNEL)
+    await harness.settle()
+    row = await harness.row()
+    assert len(graph.calls("POST")) == 2, "the next sight after the backoff creates it again"
+    assert row is not None and row.subscription_id == "sub-1", "and records it"
 
 
 async def test_removing_the_bot_deletes_the_row_and_the_graph_subscription(
@@ -528,6 +554,24 @@ async def test_missed_reads_only_what_came_after_the_watermark(
     assert listing.url.params["$expand"] == "replies", "one page read, replies included"
 
 
+async def test_a_catch_up_page_with_more_past_the_watermark_logs_the_drop(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only one page is read: when its oldest root is still newer, the rest is dropped, loudly."""
+    graph = FakeGraph()
+    graph.page = [_message("103", NOW + timedelta(minutes=3))]
+    graph.next_link = "https://graph.example/next?$skiptoken=abc"
+    harness = Harness(db_session_factory, graph)
+    await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
+    row = await harness.row()
+    assert row is not None, "the stored subscription is read back"
+    with structlog.testing.capture_logs() as logs:
+        await harness.subscriptions.catch_up(row, floor=NOW, notified=True)
+    events = [entry["event"] for entry in logs]
+    assert "teams.channel_subscription.catch_up_truncated" in events, "the drop is logged"
+    assert [m.id for m in harness.delivered] == ["103"], "the page read is still delivered"
+
+
 async def test_the_renewal_task_renews_what_is_due_then_sleeps(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -586,16 +630,18 @@ async def test_a_repeated_subscription_removed_notice_recreates_once(
     assert current is not None and current.subscription_id == "sub-1", "the row holds it"
 
 
+@pytest.mark.parametrize("status", [409, 503])
 async def test_a_failed_recreation_retries_after_the_retry_delay(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
 ) -> None:
-    """Graph removed it and the recreation failed: the retry comes in minutes, not at renewal."""
+    """Graph removed it and the recreation failed: the retry comes in minutes, not at renewal.
+    A 409 with no winner in the row is an orphan's, so it retries too."""
     graph = FakeGraph()
     harness = Harness(db_session_factory, graph)
     await _stored(db_session_factory, expires_at=NOW + timedelta(days=3))
     row = await harness.row()
     assert row is not None, "the stored subscription is read back"
-    graph.status["POST"] = 503
+    graph.status["POST"] = status
     await harness.subscriptions.on_lifecycle(_notice(lifecycleEvent="subscriptionRemoved"), row)
     assert await harness.row() is not None, "a transient failure keeps the row"
 
@@ -623,7 +669,7 @@ async def test_a_failed_recreation_never_retries_over_another_process_replacemen
     db_session_factory: async_sessionmaker[AsyncSession], status: int
 ) -> None:
     """Another process replaced it while this one's create failed: its retry is cleared and the
-    winner's subscription renewed as usual, never deleted. A 409 is that winner's: no retry."""
+    winner's subscription renewed as usual, never deleted. A 409 retries only without a winner."""
     graph = RacedGraph("POST", _replaced_elsewhere(db_session_factory))
     graph.status["POST"] = status
     harness = Harness(db_session_factory, graph)

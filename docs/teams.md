@@ -289,7 +289,8 @@ notification must carry the channel's secret, compared in constant time; one
 that does not is ignored, and a request with no valid entry and a wrong
 secret gets 401, and an entry whose subscription id is not a GUID is
 ignored. A batch naming more than 100 new messages reads each channel's
-newest page once instead of each message. Graph does not resend a batch it
+newest page once instead of each message; older messages beyond that page
+are dropped with a `catch_up_truncated` warning. Graph does not resend a batch it
 saw accepted, so a Reply quoting the bot or a typed name read while the
 service shuts down is held like a Bot Framework message and runs on the next
 instance (see Restart behaviour); a followed-thread reply or a refusal read
