@@ -338,6 +338,17 @@ class FleetOrchestrator:
             now=now,
             backend=backend,
             overrides=overrides,
+            # Source memory is a host-owned binding already bounded by the
+            # retained root. The resolver validates its scope, native payload,
+            # read-only policy and explicit drops before materialization.
+            resources=tuple(
+                binding
+                for binding in parent.resources
+                if captured_source is not None
+                and binding.resource is not None
+                and binding.resource.kind == "memory_store"
+                and binding.resource.id == captured_source.memory_store_id
+            ),
             limits=limits,
             captured_source=captured_source,
         )

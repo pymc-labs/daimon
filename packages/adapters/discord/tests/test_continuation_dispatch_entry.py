@@ -449,9 +449,10 @@ async def _run_continuation(
             session, id=run_turn.await_args.kwargs["turn_card_intent_id"]
         )
     assert intent is not None
-    assert (intent.tenant_id, intent.platform, intent.thread_id) == (
+    assert (intent.tenant_id, intent.platform, intent.channel_id, intent.thread_id) == (
         tenant.id,
         "discord",
+        row.parent_channel_id,
         str(thread.id),
     )
     user_message = run_turn.await_args.kwargs["user_message"]

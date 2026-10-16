@@ -454,3 +454,87 @@ def test_external_bundles_reject_invalid_skill_text_and_file_directory_collision
 ) -> None:
     with pytest.raises(ValueError):
         validate_bundle(SkillUpload(files=files), external=True)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        None,
+        "unlocked",
+        "expired",
+        "hold_only",
+        "missing",
+        "generation",
+        "bytes",
+        "extra",
+        "repeated_cursor",
+    ],
+)
+async def test_retained_storage_is_verified_live_with_locked_retention(monkeypatch, defect):
+    from hashlib import sha256
+
+    from mux.drivers.gemini.skill_deployment import verify_retained_deployments
+
+    version = "a" * 64
+    name = f"skills/{version}/SKILL.md"
+    body = b"original skill bytes"
+    receipt = GCSBundleDeployment(
+        "t",
+        "a",
+        "project",
+        version,
+        f"gs://owned/skills/{version}/",
+        (("SKILL.md", sha256(body).hexdigest()),),
+    )
+    calls = []
+
+    def handle(call):
+        calls.append(call)
+        assert call.method == "GET" and call.url.host == "storage.googleapis.com"
+        assert call.headers["authorization"] == "Bearer explicit-offline-read-only"
+        if call.url.params.get("alt") == "media":
+            assert call.url.params["generation"] == "123"
+            return httpx.Response(200, content=b"changed" if defect == "bytes" else body)
+        item = {
+            "name": name,
+            "bucket": "owned",
+            "generation": "123",
+            "retention": {"mode": "Locked", "retainUntilTime": "2026-10-18T00:00:00Z"},
+        }
+        if defect == "unlocked":
+            item["retention"]["mode"] = "Unlocked"
+        elif defect == "expired":
+            item["retention"]["retainUntilTime"] = "2026-10-15T00:00:00Z"
+        elif defect == "hold_only":
+            del item["retention"]
+            item["temporaryHold"] = True
+        elif defect == "generation":
+            item["generation"] = None
+        result = {"items": [] if defect == "missing" else [item]}
+        if defect == "extra":
+            result["items"].append({**item, "name": name + ".extra"})
+        elif defect == "repeated_cursor":
+            result["items"] = []
+            result["nextPageToken"] = "same"
+        return httpx.Response(200, json=result)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    if defect:
+        with pytest.raises(ProviderError, match="skill_deployment_readback_mismatch"):
+            await verify_retained_deployments(
+                (receipt,),
+                token="explicit-offline-read-only",
+                retained_until=datetime(2026, 10, 17, tzinfo=UTC),
+            )
+    else:
+        await verify_retained_deployments(
+            (receipt,),
+            token="explicit-offline-read-only",
+            retained_until=datetime(2026, 10, 17, tzinfo=UTC),
+        )
+        assert len(calls) == 2

@@ -3851,6 +3851,7 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             thread_id=row.thread_id,
             make_lifecycle=_make_lifecycle,
+            channel_id=row.parent_channel_id,
             owner_key=self.runtime.owner_key,
         )
         self._track_live_turn_card(turn_card_intent.id)
@@ -4737,6 +4738,7 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             thread_id=str(thread.id),
             message_ids=admitted_message_ids or (str(message.id),),
+            channel_id=parent_channel_id,
             make_lifecycle=_make_lifecycle,
             owner_key=self.runtime.owner_key,
         )

@@ -63,6 +63,7 @@ async def post_initial_turn_card(
     *,
     tenant_id: UUID,
     thread_id: str,
+    channel_id: str | None = None,
     message_ids: tuple[str, ...] = (),
     owner_key: int | None = None,
     make_lifecycle: Callable[
@@ -85,6 +86,7 @@ async def post_initial_turn_card(
             tenant_id=tenant_id,
             platform="discord",
             thread_id=thread_id,
+            channel_id=channel_id,
             turn_token=uuid4(),
             owner_key=owner_key,
         )

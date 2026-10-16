@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
 from typing import cast
@@ -51,6 +51,7 @@ from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Authorization
+from mux.drivers.openai.mcp_auth import MCPSecretResolver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import Transport
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
@@ -79,6 +80,7 @@ class OpenAIHostRuntime(TurnRuntime):
     session_plan: Callable[[ProviderPreparationRequest], Awaitable[SessionSpec]]
     authorization: Authorization
     controls: SessionControls
+    mcp_secrets: MCPSecretResolver | None = field(default=None, kw_only=True)
     price: ProviderPrice | None = None
     infrastructure: Callable[[UsageObservation], Awaitable[Decimal | None]] = unknown_infrastructure
 
@@ -131,6 +133,7 @@ def driver(
         authorization=runtime.authorization,
         binding_lookup=lookup,
         session_controls=runtime.controls,
+        mcp_secrets=runtime.mcp_secrets,
     )
 
 

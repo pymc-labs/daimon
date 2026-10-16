@@ -22,6 +22,7 @@ PERSISTENT_WORKSPACE = Profile(
     implicit_execution=True,
     mcp_policy_keys=("allowed_tools", "required"),
     tool_readback="compiled",
+    skill_digest="content",
     support={
         "neutral_catalog": "native",
         "agent_delete": "native",

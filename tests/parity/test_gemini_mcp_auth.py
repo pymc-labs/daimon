@@ -1062,3 +1062,316 @@ async def test_both_gemini_mcp_test_clients_refuse_names_before_http_allocation(
         with pytest.raises(ValueError, match="refuses ambient"):
             async with mcp_sdk(httpx.MockTransport(Wire().handle)):
                 raise AssertionError("Gemini MCP test admitted ambient options")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("followup", [False, True])
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_private_gcs_mount_auth_is_fresh_exact_and_memory_only(
+    sdk_wire: tuple[SDKTransport, Wire],
+    caplog: pytest.LogCaptureFixture,
+    followup: bool,
+    fallback: bool,
+) -> None:
+    from mux.drivers.gemini.core import compile_agent
+
+    sdk, wire = sdk_wire
+    resolver = Resolver()
+    expected = compile_agent(
+        AgentSpec(
+            name="owned",
+            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+            tools=TOOLS,
+            mcp_servers=(CONNECTION,),
+        ),
+        authenticated_mcp=True,
+    )
+    source = "gs://private-skills/immutable/version/"
+    expected["environment"] = {
+        "type": "remote",
+        "sources": [{"type": "gcs", "source": source, "target": ".agents/skills/owned"}],
+    }
+    calls = []
+
+    async def storage(scope: Scope, sources: tuple[str, ...]) -> str:
+        assert (scope, sources) == (SCOPE, (source,))
+        calls.append(sources)
+        return f"offline-private-storage-{len(calls)}"
+
+    overrides: Object = {
+        "input": [{"type": "text", "text": "Use the full skill bundle."}],
+        "background": True,
+        "store": True,
+    }
+    if followup:
+        overrides.update({"environment": "owned-environment", "previous_interaction_id": "prior"})
+    caplog.set_level(logging.DEBUG)
+    request = await authenticated_template(
+        SCOPE,
+        expected,
+        expected,
+        (CONNECTION,),
+        resolver.resolve,
+        overrides=overrides,
+        gcs_secrets=storage,
+    )
+    assert "offline-private-storage" not in repr(request)
+    assert "offline-private-storage" not in json.dumps(expected)
+    if fallback:
+        wire.statuses = [503, 200]
+    dispatch = FlashTransport(sdk, Accounting()) if fallback else sdk
+    await dispatch.create(request)
+    body = json.loads(wire.requests[-1].content)
+    assert body["environment"]["network"] == {
+        "allowlist": [
+            {
+                "domain": "storage.googleapis.com",
+                "transform": {"Authorization": f"Bearer offline-private-storage-{len(calls)}"},
+            }
+        ]
+    }
+    if followup:
+        assert body["environment"] == {
+            "type": "remote",
+            "environment_id": "owned-environment",
+            "network": body["environment"]["network"],
+        }
+    else:
+        assert body["environment"]["sources"] == expected["environment"]["sources"]
+    assert len(calls) == 1 + len(wire.requests) == (3 if fallback else 2)
+    for index, post in enumerate(wire.requests, start=2):
+        assert f"Bearer offline-private-storage-{index}" in post.content.decode()
+    assert "offline-private-storage" not in caplog.text
+    assert "offline-private-storage" not in repr(wire.saved)
+    # A later read must recognize the actual freshly dispatched token even if
+    # the provider echoes it under another field, without a network transform.
+    identity = f"interaction-{wire.counter}"
+    wire.saved[identity]["headers"] = {
+        "Authorization": f"Bearer offline-private-storage-{len(calls)}"
+    }
+    with pytest.raises(ProviderError, match="gcs_token_echo"):
+        await sdk.get(identity)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["domain", "extra_rule", "unbound", "changed_source", "expired"])
+async def test_private_gcs_changed_or_unavailable_auth_never_dispatches(
+    sdk_wire: tuple[SDKTransport, Wire], defect: str
+) -> None:
+    from mux.drivers.gemini.core import compile_agent
+
+    sdk, wire = sdk_wire
+    resolver = Resolver()
+    expected = compile_agent(
+        AgentSpec(
+            name="owned",
+            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+            tools=TOOLS,
+            mcp_servers=(CONNECTION,),
+        ),
+        authenticated_mcp=True,
+    )
+    expected["environment"] = {
+        "type": "remote",
+        "sources": [
+            {
+                "type": "gcs",
+                "source": "gs://private-skills/immutable/version/",
+                "target": ".agents/skills/owned",
+            }
+        ],
+    }
+    revoked = False
+
+    async def storage(scope: Scope, sources: tuple[str, ...]) -> str:
+        if revoked:
+            raise ValueError("private expired credential")
+        return "offline-private-storage"
+
+    request = await authenticated_template(
+        SCOPE,
+        expected,
+        expected,
+        (CONNECTION,),
+        resolver.resolve,
+        overrides={"input": []},
+        gcs_secrets=storage,
+    )
+    assert isinstance(request["environment"], dict)
+    environment = request["environment"]
+    network = environment["network"]
+    assert isinstance(network, dict) and isinstance(network["allowlist"], list)
+    rule = network["allowlist"][0]
+    assert isinstance(rule, dict)
+    if defect == "domain":
+        rule["domain"] = "foreign.invalid"
+    elif defect == "extra_rule":
+        network["allowlist"].append({"domain": "*"})
+    elif defect == "unbound":
+        rule["transform"] = {"Authorization": "Bearer offline-private-storage"}
+    elif defect == "changed_source":
+        environment["sources"] = [
+            {"type": "gcs", "source": "gs://foreign/version/", "target": ".agents/skills/owned"}
+        ]
+    else:
+        revoked = True
+    with pytest.raises((UnsupportedCapability, ProviderError)):
+        await sdk.create(request)
+    assert wire.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "get", "cancel"])
+async def test_protected_response_refuses_network_transform_echo_without_exposing_it(
+    operation: str, caplog: pytest.LogCaptureFixture, recwarn: pytest.WarningsRecorder
+) -> None:
+    echoed = "offline-mount-token-must-not-escape"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **interaction("native"),
+                "environment": {
+                    "network": {
+                        "allowlist": [
+                            {
+                                "domain": "storage.googleapis.com",
+                                "transform": {"Authorization": "Bearer " + echoed},
+                            }
+                        ]
+                    }
+                },
+            },
+        )
+
+    caplog.set_level(logging.DEBUG)
+    async with mcp_sdk(httpx.MockTransport(handle)) as client:
+        sdk = SDKTransport(client, protect_storage_credentials=True)
+        with pytest.raises(ProviderError, match="gcs_transform_echo") as error:
+            if operation == "create":
+                await sdk.create({"agent": "antigravity-preview-05-2026", "tools": [], "input": []})
+            else:
+                await getattr(sdk, operation)("native")
+    assert echoed not in str(error.value) and echoed not in caplog.text
+    assert not any(echoed in str(warning.message) for warning in recwarn)
+
+
+@pytest.mark.asyncio
+async def test_protected_stream_refuses_transform_echo_without_serializer_warning(
+    caplog: pytest.LogCaptureFixture, recwarn: pytest.WarningsRecorder
+) -> None:
+    echoed = "offline-stream-mount-token-must-not-escape"
+    frame = {
+        "event_type": "interaction.created",
+        "interaction": {
+            **interaction("native"),
+            "environment": {
+                "network": {
+                    "allowlist": [
+                        {
+                            "domain": "storage.googleapis.com",
+                            "transform": {"Authorization": "Bearer " + echoed},
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=("data: " + json.dumps(frame) + "\n\n").encode(),
+        )
+
+    caplog.set_level(logging.DEBUG)
+    async with mcp_sdk(httpx.MockTransport(handle)) as client:
+        opened = await SDKTransport(client, protect_storage_credentials=True).open_stream("native")
+        with pytest.raises(ProviderError, match="gcs_transform_echo"):
+            await anext(opened)
+    assert echoed not in caplog.text
+    assert not any(echoed in str(warning.message) for warning in recwarn)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "get", "cancel"])
+@pytest.mark.parametrize("echo", [True, False])
+async def test_protected_raw_token_echo_refuses_before_sdk_serialization(
+    operation, echo, caplog, recwarn
+):
+    from mux.drivers.gemini.mcp_auth import RedactedCredential
+
+    token = RedactedCredential("offline-cab-token-never-log")
+
+    # The provider may echo a credential outside network.transform, including
+    # in an unknown environment shape that triggers SDK serialization warnings.
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                **interaction("native"),
+                "environment": {
+                    "headers": {"Authorization": "Bearer " + token if echo else "safe"}
+                },
+            },
+        )
+
+    caplog.set_level(logging.DEBUG)
+    async with mcp_sdk(httpx.MockTransport(handle)) as client:
+        sdk = SDKTransport(client, protect_storage_credentials=True, storage_tokens={token})
+
+        async def run():
+            if operation == "create":
+                return await sdk.create(
+                    {"agent": "antigravity-preview-05-2026", "tools": [], "input": []}
+                )
+            return await getattr(sdk, operation)("native")
+
+        if echo:
+            with pytest.raises(ProviderError, match="gcs_token_echo") as error:
+                await run()
+            assert token not in str(error.value)
+        else:
+            assert (await run())["id"] == "native"
+    assert token not in caplog.text
+    assert not any(token in str(warning.message) for warning in recwarn)
+
+
+def test_storage_echo_token_collection_is_exact_and_redacted():
+    from mux.drivers.gemini.transport import storage_request_token
+
+    token = storage_request_token(
+        {
+            "environment": {
+                "network": {
+                    "allowlist": [
+                        {
+                            "domain": "storage.googleapis.com",
+                            "transform": {"Authorization": "Bearer offline-cab"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert token == "offline-cab"
+    assert "offline-cab" not in repr({token})
+    assert (
+        storage_request_token(
+            {
+                "environment": {
+                    "network": {
+                        "allowlist": [
+                            {
+                                "domain": "other.invalid",
+                                "transform": {"Authorization": "Bearer offline-cab"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        is None
+    )

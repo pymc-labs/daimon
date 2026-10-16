@@ -1066,3 +1066,10 @@ interaction for the worker, including after restart, so these are aggregate
 worker ceilings. No second turn, tool result, model fallback or replacement on
 uncertain delivery can obtain another envelope. Omitting token ceilings retains
 the existing managed worker path and ordinary Gemini turns.
+
+Explicit Gemini catalog deployments can carry caller-bound MCP references when
+an MCP resolver is injected. Catalog compilation and native readback preserve
+only destination and allowlist; bearer values are resolved afresh for interaction
+requests. `RetainedSkillDeployments` implements the existing publisher contract
+for independently provisioned immutable GCS directories, verifying the complete
+scope, version and every retained file digest without making storage writes.

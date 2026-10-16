@@ -1006,3 +1006,75 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
         assert all(r.method == "GET" for r in transport.requests[before:])
     finally:
         await ports.close()
+
+
+@pytest.mark.parametrize("retained_budget_root_turn", ["recorded_i7"], indirect=True)
+async def test_spawn_preserves_memory_from_actual_retained_root_capture(retained_budget_root_turn):
+    from decimal import Decimal
+
+    from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
+    from daimon.core.memory_resource import memory_mount
+    from daimon.core.neutral_resources import resolve_worker_spec
+    from daimon.core.stores.fleet import WorkerPool
+    from mux.contracts.config import BackendConfig
+
+    value = (await default_source_turn(retained_budget_root_turn))[0]
+    deps, _, _, intent, _, scope, *_ = value
+    await freeze(value)
+    parent, policy = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    observed = []
+
+    class AdmissionBoundary(Exception):
+        pass
+
+    class ObserveAdmission(HostFleetPorts):
+        async def admit(self, parent, resolved, **kwargs):
+            # Everything through source capture/resolution is the real owner;
+            # stop before cash reservation, native allocation or background send.
+            observed.append(resolved)
+            raise AdmissionBoundary
+
+    ports = ObserveAdmission(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        captured = await ports.capture_source(parent)
+        assert captured.memory_required is True
+        assert captured.memory_store_id == "warm-root-memory"
+        assert len(parent.resources) == 1
+        backend = BackendConfig.model_validate(parent.backend_grants[0].model_dump(mode="json"))
+        limits = parent.limits.for_provider(parent.spec.model.provider)
+        precheck = resolve_worker_spec(
+            parent,
+            parent.spec,
+            policy=policy,
+            now=datetime.now(UTC),
+            backend=backend,
+            limits=limits,
+            resources=parent.resources,
+            environment=parent.environment,
+            captured_source=captured,
+        )
+        with pytest.raises(AdmissionBoundary):
+            await FleetOrchestrator(ports).spawn(
+                parent,
+                policy,
+                now=datetime.now(UTC),
+                operation_key="retained-memory",
+                role="research",
+                backend=backend,
+                limits=limits,
+                agent=parent.spec,
+            )
+        assert len(observed) == 1
+        assert observed[0].resources == precheck.resources == parent.resources
+        assert observed[0].permissions.memory_read_only
+        assert observed[0].resources[0].native.value == {
+            "resource": memory_mount("warm-root-memory", read_only=True)
+        }
+    finally:
+        await ports.close()

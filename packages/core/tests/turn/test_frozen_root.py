@@ -55,7 +55,12 @@ from .conftest import make_status_idle
 
 @pytest.fixture
 async def root_turn(
-    db_preflight, db_nullpool_engine, *, live_root=False, null_environment_description=False
+    db_preflight,
+    db_nullpool_engine,
+    *,
+    live_root=False,
+    null_environment_description=False,
+    resolved_model=False,
 ):
     sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
@@ -99,6 +104,16 @@ async def root_turn(
                 "version": 10,
             }
         )
+        if resolved_model:
+            native = native.model_copy(
+                update={
+                    "model": {
+                        "id": "claude-haiku-5-5",
+                        "speed": "standard",
+                        "effort": {"type": "medium"},
+                    }
+                }
+            )
         # Validate the actual readback shape before the router serves it.
         native = type(native).model_validate(native.model_dump(mode="json"))
         environment = BetaEnvironment.model_validate(
@@ -391,6 +406,8 @@ async def test_real_native_ack_root_join_is_shared_by_intent_and_origin(root_tur
         "expired",
         "intent_retired",
         "intent_foreign",
+        "intent_parent_missing",
+        "intent_parent_wrong",
         "responder",
         "binding",
         "principal",
@@ -418,6 +435,15 @@ async def test_root_join_refuses_missing_foreign_stale_and_retargeted_authority(
                 update(TurnOrigin)
                 .where(TurnOrigin.id == origin.id)
                 .values(responder_ma_agent_id="other")
+            )
+        elif change in ("intent_parent_missing", "intent_parent_wrong"):
+            from daimon.core._models import TurnCardIntent
+            from sqlalchemy import update
+
+            await db.execute(
+                update(TurnCardIntent)
+                .where(TurnCardIntent.id == intent.id)
+                .values(channel_id=None if change == "intent_parent_missing" else "other")
             )
     if change == "expired":
         now = origin.expires_at + timedelta(seconds=1)
@@ -484,6 +510,20 @@ async def test_real_run_retains_root_before_native_input(root_turn):
     retained, _ = await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
     assert retained.fleet.root.thread_id == origin.thread_id
     assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+
+
+async def test_fresh_channel_admission_reaches_root_freeze(root_turn):
+    from daimon.core.authz import build_turn_place
+
+    deps, prepared, *rest = root_turn
+    grant = prepared.admission.grant
+    place = build_turn_place(channel_id=grant.channel_id, thread_id=None)
+    admission = replace(
+        prepared.admission,
+        grant=replace(grant, thread_id=None, turn_place=place, run_place=place),
+    )
+    value = (deps, replace(prepared, admission=admission), *rest)
+    await run_root_input(value)
 
 
 async def test_disabled_root_projection_does_not_read_or_write_a_carrier(root_turn):
@@ -1512,3 +1552,698 @@ async def test_retention_never_extends_existing_database_expiry(root_turn):
             await db.scalar(select(TurnOrigin.expires_at).where(TurnOrigin.id == origin.id))
             == earlier
         )
+
+
+@pytest.fixture
+async def recorded_fresh_root(db_preflight, db_nullpool_engine):
+    async for value in root_turn.__wrapped__(
+        db_preflight,
+        db_nullpool_engine,
+        live_root=True,
+        null_environment_description=True,
+        resolved_model=True,
+    ):
+        yield value
+
+
+@pytest.mark.parametrize(
+    ("category_id", "category_unresolved"),
+    [(None, False), ("1558361838960382032", False), (None, True)],
+    ids=["uncategorized", "recorded-category", "unresolved-category"],
+)
+@pytest.mark.parametrize("configured_channel", [False, True])
+@pytest.mark.parametrize("funded_root", [False, True])
+async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send(
+    recorded_fresh_root,
+    configured_channel,
+    funded_root,
+    category_id,
+    category_unresolved,
+):
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+    from daimon.adapters.discord.turn_card_recovery import post_initial_turn_card
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn.runtime_manifest import read_frozen_preparation
+    from daimon.testing.ma import make_fake_memory_store_handler
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+
+    deps, original, _, _, _, _, old_binding, _ = recorded_fresh_root
+    tenant_id = original.admission.grant.tenant_id
+    native, environment = original.admission.agent, original.admission.environment
+    thread_id = "fresh-" + str(uuid4())
+    session_id = "fresh-native-" + str(uuid4())
+    channel_id = old_binding.thread.channel.channel_id
+    async with deps.sessionmaker.begin() as db:
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant_id,
+            delta_usd=Decimal("10"),
+            reason="test",
+            idempotency_key="fresh-credit:" + str(tenant_id),
+        )
+    if configured_channel:
+        from daimon.core.channel_backend import set_channel_backend
+
+        async with deps.sessionmaker.begin() as db:
+            await set_channel_backend(db, old_binding.thread.channel, BackendConfig())
+    if funded_root:
+        service = AgentBackendService(deps.sessionmaker, enabled=True)
+        source = original._source
+        value = await service.read_fleet_grant(tenant_id, source.agent_id, now=datetime.now(UTC))
+        value = value.model_copy(
+            update={
+                "native_root_budget_usd": Decimal("0.02"),
+                "root_cash_budget_usd": Decimal("0.06"),
+            }
+        )
+        preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+        await service.set_fleet_grant(
+            source,
+            value,
+            preview.setting_revision,
+            BackendActor(tenant_id, original.admission.account_id, Subject(is_admin=True)),
+            expected_preview_digest=preview.digest,
+            now=datetime.now(UTC),
+        )
+    router = MARouter()
+    router.add_agent(native)
+    router.add_agent_list(native)
+    router.add_environment(environment)
+    router.add_environment_list(environment)
+    memory = make_fake_memory_store_handler()
+    router.add("POST", r"/v1/memory_stores", lambda req, _: memory(req))
+    snapshot = ma_session(id=session_id, agent=native, environment_id=environment.id)
+    session_readback = snapshot.model_dump(mode="json")
+
+    def create_session(request, _match):
+        import json
+
+        submitted = json.loads(request.content)
+        for key in ("budget", "metadata", "resources"):
+            if key in submitted:
+                session_readback[key] = submitted[key]
+        return httpx.Response(200, json=session_readback)
+
+    router.add("POST", r"/v1/sessions", create_session)
+    router.add(
+        "GET", rf"/v1/sessions/{session_id}", lambda *_: httpx.Response(200, json=session_readback)
+    )
+    sent = asyncio.Event()
+
+    def send(_request, _match):
+        sent.set()
+        return send_events_response()
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await sent.wait()
+            yield sse_response(
+                [make_status_idle(event_id="fresh-idle").model_dump(mode="json")]
+            ).content
+
+    router.add("POST", rf"/v1/sessions/{session_id}/events", send)
+    router.add(
+        "GET",
+        rf"/v1/sessions/{session_id}/events",
+        lambda *_: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add(
+        "GET",
+        rf"/v1/sessions/{session_id}/events/stream",
+        lambda *_: httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=Stream()
+        ),
+    )
+    transport = ScriptedTransport(router=router)
+    async with transport.client() as client:
+        deps = replace(
+            deps,
+            anthropic=client,
+            channel_backends=True,
+            agent_backends=True,
+            deployment_default=DeploymentDefault(
+                agent_name="root", environment_name=environment.metadata[MA_METADATA_KEY_NAME]
+            ),
+        )
+        admission = await admit(
+            deps,
+            tenant_id=tenant_id,
+            platform="discord",
+            external_user_id="requester",
+            channel_id=channel_id,
+            thread_id=None,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+            now=datetime.now(UTC),
+        )
+        assert admission.backend_revision_origin == ("channel" if configured_channel else None)
+        assert (admission.backend_revision is not None) == configured_channel
+        assert admission.grant.thread_id is None
+
+        async def send_card(**_kwargs):
+            return SimpleNamespace(id=900)
+
+        async def edit_card(_message, **_kwargs):
+            pass
+
+        intent, _ = await post_initial_turn_card(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+            channel_id=channel_id,
+            make_lifecycle=lambda turn_id, on_first_post: DiscordTurnLifecycle(
+                send=send_card,
+                edit=edit_card,
+                agent_name="root",
+                model_id=native.model.id,
+                turn_id=turn_id,
+                on_first_post=on_first_post,
+            ),
+        )
+        async with turn_origin(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=channel_id,
+            thread_id=thread_id,
+            responder_ma_agent_id=native.id,
+            responder_name="root",
+            role=Role.USER,
+        ) as origin:
+            prepared = await bind_session_impl(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_user_id="requester",
+                thread_id=thread_id,
+                session_account_id=admission.account_id,
+                reuse_existing=False,
+                turn_card_intent_id=intent.id,
+            )
+            assert not prepared.reused and prepared.ma_session_id == session_id
+            lifecycle = RecordingLifecycle()
+
+            async def reseed():
+                return "fresh root input"
+
+            await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform="discord",
+                thread_id=thread_id,
+                external_user_id="requester",
+                user_message="fresh root input",
+                lifecycle=lifecycle,
+                cancel=asyncio.Event(),
+                reseed_user_message=reseed,
+                recovery_lifecycle=lambda _: lifecycle,
+                turn_card_intent_id=intent.id,
+            )
+            assert sent.is_set()
+            scope = prepared._source.resource_scope
+            parent, _ = await read_frozen_root(
+                deps, scope, origin_id=origin.id, now=datetime.now(UTC)
+            )
+            async with deps.sessionmaker() as db:
+                record = await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id)
+            if configured_channel:
+                assert "default_backend_revision" not in record.result
+                assert record.result["preparation"]["admission"][
+                    "backend_revision"
+                ] == admission.backend_revision.model_dump(mode="json")
+            else:
+                assert record.result["default_backend_revision"] == ConfigRevision.create(
+                    parent.fleet.root.channel, 0, resolve_default(None)
+                ).model_dump(mode="json")
+            request = await read_frozen_preparation(
+                deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+            )
+            assert request.admission.agent.model == native.model
+            assert request.admission.backend_revision == admission.backend_revision
+            assert request.admission.backend_revision_origin == admission.backend_revision_origin
+            assert request.admission.grant.thread_id == thread_id
+            assert request.admission.grant.turn_place == request.admission.grant.run_place
+            assert parent.fleet.place.category_id == category_id
+            assert parent.fleet.place.category_unresolved == category_unresolved
+            assert request.admission.grant == replace(
+                admission.grant,
+                thread_id=thread_id,
+                turn_place=replace(
+                    admission.grant.turn_place,
+                    channel_id=thread_id,
+                    parent_channel_id=channel_id,
+                ),
+                run_place=replace(
+                    admission.grant.run_place,
+                    channel_id=thread_id,
+                    parent_channel_id=channel_id,
+                ),
+            )
+            assert request.admission.account_id == admission.account_id
+            assert request.admission.origin_channel_id == admission.origin_channel_id
+            assert request.admission.origin_thread_id == admission.origin_thread_id
+            assert request.admission.origin_seal_ids == admission.origin_seal_ids
+            assert request.session_account_id == admission.account_id
+            assert request.tenant_id == tenant_id
+            assert request.thread_id == thread_id
+
+            from daimon.core.fleet_orchestration import HostFleetPorts
+            from daimon.core.neutral_resources import resolve_worker_spec
+            from daimon.core.stores.fleet import WorkerPool
+            from daimon.core.turn.runtime_manifest import prepare_source
+
+            ports = HostFleetPorts(
+                deps.sessionmaker,
+                deps=deps,
+                prices={},
+                markup=Decimal("1"),
+                pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+            )
+            try:
+                async with ports._load_preparation(parent) as retained:
+                    _, policy = await read_frozen_root(
+                        deps, scope, origin_id=origin.id, now=datetime.now(UTC)
+                    )
+                    resolved = resolve_worker_spec(
+                        parent,
+                        parent.spec,
+                        policy=policy,
+                        now=datetime.now(UTC),
+                        resources=parent.resources,
+                        environment=parent.environment,
+                        limits=parent.limits.for_provider(parent.spec.model.provider),
+                        captured_source=retained.source,
+                    )
+                    worker_request = await retained.for_worker(parent, resolved)
+                    selected = await prepare_source(worker_request)
+                    assert selected.target_spec == resolved.spec
+                    assert selected.admission.grant == request.admission.grant
+                    assert selected.scope == resolved.permissions.fleet.scope
+                    assert resolved.permissions.fleet.place == parent.fleet.place
+                    assert resolved.permissions.fleet.root == parent.fleet.root
+                    assert resolved.permissions.fleet.origin_id == origin.id
+                    assert resolved.permissions.fleet.account_id == admission.account_id
+                    assert resolved.spec.extensions == parent.spec.extensions
+            finally:
+                await ports.close()
+
+
+@pytest.mark.parametrize("fault", ["missing", "digest", "origin"])
+async def test_default_root_refuses_changed_or_missing_retained_configuration(root_turn, fault):
+    import copy
+
+    from sqlalchemy import update
+
+    await freeze(root_turn)
+    deps, _, _, _, origin, scope, _, transport = root_turn
+    async with deps.sessionmaker.begin() as db:
+        operation = await db.scalar(
+            select(MuxOperation).where(
+                MuxOperation.tenant_id == origin.tenant_id,
+                MuxOperation.key == f"fleet_root:{origin.id}:root:0",
+            )
+        )
+        body = copy.deepcopy(operation.record)
+        if fault == "missing":
+            body["result"].pop("default_backend_revision")
+        elif fault == "digest":
+            body["result"]["default_backend_revision"]["digest"] = "changed"
+        else:
+            body["result"]["preparation"]["admission"]["backend_revision_origin"] = "agent"
+        await db.execute(
+            update(MuxOperation)
+            .where(
+                MuxOperation.tenant_id == operation.tenant_id,
+                MuxOperation.account_id == operation.account_id,
+                MuxOperation.key == operation.key,
+            )
+            .values(record=body)
+        )
+    before = len(transport.requests)
+    with pytest.raises(WorkerSpecRefused):
+        await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    assert len(transport.requests) == before
+
+
+async def test_fresh_root_rechecks_new_thread_policy_before_retaining_or_sending(root_turn):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.authz import build_turn_place
+    from daimon.core.turn.errors import AdmissionDenied
+
+    deps, prepared, _, _, origin, _, _, transport = root_turn
+    place = build_turn_place(channel_id=prepared.admission.grant.channel_id, thread_id=None)
+    grant = replace(prepared.admission.grant, thread_id=None, turn_place=place, run_place=place)
+    prepared = replace(prepared, admission=replace(prepared.admission, grant=grant))
+    async with deps.sessionmaker.begin() as db:
+        await access_policy.set_access_policy(
+            db,
+            tenant_id=grant.tenant_id,
+            policy=POLICY.model_copy(
+                update={"channel_rules": {origin.thread_id: ChannelRule(writers="none")}}
+            ),
+        )
+    before = len(transport.requests)
+    with pytest.raises(AdmissionDenied):
+        await freeze((deps, prepared, *root_turn[2:]))
+    assert len(transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == grant.tenant_id)
+            )
+            == 0
+        )
+
+
+@pytest.mark.parametrize("fault", ["wrong_channel", "reused_request", "new_seal"])
+async def test_fresh_root_rebind_refuses_incompatible_execution_before_retention(
+    root_turn, fault, monkeypatch
+):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.authz import build_turn_place
+    from daimon.core.turn import admission as admission_owner
+
+    deps, prepared, _, intent, origin, scope, _, transport = root_turn
+    reauthorizations = []
+    real_reauthorize = admission_owner.reauthorize
+
+    async def observe_reauthorize(deps, admission):
+        reauthorizations.append(admission)
+        return await real_reauthorize(deps, admission)
+
+    monkeypatch.setattr(admission_owner, "reauthorize", observe_reauthorize)
+    channel_id = "foreign-channel" if fault == "wrong_channel" else origin.parent_channel_id
+    place = build_turn_place(channel_id=channel_id, thread_id=None)
+    grant = replace(
+        prepared.admission.grant,
+        channel_id=channel_id,
+        thread_id=None,
+        turn_place=place,
+        run_place=place,
+    )
+    prepared = replace(prepared, admission=replace(prepared.admission, grant=grant))
+    if fault == "reused_request":
+        prepared = replace(
+            prepared, _preparation=replace(prepared._preparation, reuse_existing=True)
+        )
+    elif fault == "new_seal":
+        assert not prepared.admission.memory_read_only and not prepared.admission.origin_seal_ids
+        async with deps.sessionmaker.begin() as db:
+            await access_policy.set_access_policy(
+                db,
+                tenant_id=grant.tenant_id,
+                policy=POLICY.model_copy(
+                    update={"channel_rules": {origin.thread_id: ChannelRule(readers="inside")}}
+                ),
+            )
+    before = len(transport.requests)
+    reason = "stale" if fault == "new_seal" else "unbound"
+    with pytest.raises(WorkerSpecRefused, match=f"origin: {reason}"):
+        await freeze((deps, prepared, *root_turn[2:]))
+    if fault == "new_seal":
+        assert len(reauthorizations) == 1
+        assert reauthorizations[0].grant.thread_id == origin.thread_id
+    else:
+        assert reauthorizations == []
+    assert len(transport.requests) == before
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(FleetRun)
+                .where(FleetRun.tenant_id == grant.tenant_id)
+            )
+            == 0
+        )
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesis(
+    recorded_fresh_root, provider, monkeypatch, tmp_path
+):
+    import json
+
+    from daimon.core.channel_backend import set_channel_backend
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.openai_codec import PROFILE as OPENAI_PROFILE
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn.runtimes import build_channel_runtime
+    from daimon.core.turn.state import extract_final_response
+    from mux.contracts.config import BackendConfig
+    from mux.contracts.ids import ThreadRef
+    from mux.drivers.gemini.flash import FLASH_PRIMARY
+    from mux.drivers.openai import deployment
+    from mux.state.lease import Slot
+
+    from . import test_openai_host
+    from .test_gemini_codec import interaction
+    from .test_gemini_runtime_transport import clients_for
+    from .test_openai_deployment import manifest
+    from .test_openai_host import Wire
+
+    deps, original, _, _, _, _, old_binding, _ = recorded_fresh_root
+    tenant_id, account_id = original.admission.grant.tenant_id, original.admission.account_id
+    native, environment = original.admission.agent, original.admission.environment
+    thread_id = "fresh-foreign-" + str(uuid4())
+    channel = old_binding.thread.channel
+    profile = OPENAI_PROFILE if provider == "openai" else "gemini.inline_reuse"
+    model = "gpt-6-luna" if provider == "openai" else FLASH_PRIMARY
+    service = AgentBackendService(deps.sessionmaker, enabled=True)
+    source = original._source
+    quote = await service.preview_fleet_grant(source, None, now=datetime.now(UTC))
+    await service.revoke_fleet_grant(
+        source,
+        quote.setting_revision,
+        BackendActor(tenant_id, account_id, Subject(is_admin=True)),
+        expected_preview_digest=quote.digest,
+        now=datetime.now(UTC),
+    )
+    async with deps.sessionmaker.begin() as db:
+        revision = await set_channel_backend(
+            db, channel, BackendConfig(backend=provider, profile=profile, model=model)
+        )
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant_id,
+            delta_usd=Decimal("10"),
+            reason="test",
+            idempotency_key="fresh-foreign:" + str(tenant_id),
+        )
+    row = {
+        "profile": profile,
+        "tenant_id": str(tenant_id),
+        "platform": channel.platform,
+        "channel_id": channel.channel_id,
+        "account_id": str(account_id),
+        "config_digest": revision.digest,
+        "project": "offline-project",
+        "api_key_env": "N11_FRESH_CHANNEL_KEY",
+    }
+    if provider == "openai":
+        row.update(agent_id="native-agent", environment_id="native-template")
+    else:
+        row.update(
+            records_path=str(tmp_path / "records.sqlite"),
+            holds_path=str(tmp_path / "holds.sqlite"),
+            hold_usd="0.05",
+            cap_usd="0.25",
+            agent_name="fresh-gemini",
+            tools=[],
+            environment={"name": "no-execution", "execution": "none"},
+            max_output_tokens=4096,
+        )
+    manifest(monkeypatch, tmp_path / "runtime.json", [row])
+    monkeypatch.setenv("N11_FRESH_CHANNEL_KEY", "offline-only")
+    router = MARouter()
+    router.add_agent(native)
+    router.add_agent_list(native)
+    router.add_environment(environment)
+    router.add_environment_list(environment)
+    transport = ScriptedTransport(router=router)
+    calls = []
+    freezes = []
+    real_freeze = runtime_manifest.freeze_prepared_root
+
+    async def observe_freeze(deps, prepared, *, intent_id, now):
+        await real_freeze(deps, prepared, intent_id=intent_id, now=now)
+        freezes.append(
+            (
+                prepared.admission.backend_revision,
+                prepared.admission.backend_revision_origin,
+                intent_id,
+            )
+        )
+
+    monkeypatch.setattr(runtime_manifest, "freeze_prepared_root", observe_freeze)
+
+    class OwnedWire(Wire):
+        def session(self):
+            return {**super().session(), "metadata": {"mux_tenant": str(tenant_id)}}
+
+    wire = OwnedWire(session_id="fresh-openai-" + str(uuid4()))
+    wire.expected_spend_limit = None
+
+    def openai_request(request):
+        calls.append(request)
+        if request.method == "GET" and request.url.path.endswith("/agents/native-agent"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "native-agent",
+                    "metadata": {"mux_tenant": str(tenant_id)},
+                    "multi_agent": {"enabled": False},
+                },
+            )
+        return wire.handle(request)
+
+    def gemini_request(request):
+        calls.append(request)
+        assert request.url.host == "generativelanguage.googleapis.com"
+        assert request.headers["x-goog-api-key"] == "offline-only"
+        if request.method == "POST":
+            body = json.loads(request.content)
+            assert body["model"] == FLASH_PRIMARY and body["tools"] == []
+            assert body["generation_config"] == {"max_output_tokens": 4096}
+        response = interaction("fresh-interaction")
+        response.pop("environment_id")
+        return httpx.Response(200, json=response)
+
+    async with transport.client() as client:
+        if provider == "openai":
+            monkeypatch.setattr(test_openai_host, "SESSION_ID", f"fresh-openai-{tenant_id}")
+            monkeypatch.setattr(
+                deployment, "_http_transport", lambda: httpx.MockTransport(openai_request)
+            )
+        else:
+            clients_for(monkeypatch, gemini_request)
+        deps = replace(
+            deps,
+            anthropic=client,
+            channel_backends=True,
+            agent_backends=False,
+            turn_runtime_factory=build_channel_runtime,
+            deployment_default=DeploymentDefault(
+                agent_name="root", environment_name=environment.metadata[MA_METADATA_KEY_NAME]
+            ),
+        )
+        admission = await admit(
+            deps,
+            tenant_id=tenant_id,
+            platform=channel.platform,
+            external_user_id="requester",
+            channel_id=channel.channel_id,
+            thread_id=None,
+            now=datetime.now(UTC),
+        )
+        assert admission.grant.thread_id is None
+        assert admission.backend_revision == revision
+        assert admission.backend_revision_origin == "channel"
+        assert admission.backend_agent_revision is None
+        async with deps.sessionmaker.begin() as db:
+            intent = await turn_card_intents.create_turn_card_intent(
+                db,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                channel_id=channel.channel_id,
+                thread_id=thread_id,
+                turn_token=uuid4(),
+            )
+        async with turn_origin(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=channel.platform,
+            parent_channel_id=channel.channel_id,
+            thread_id=thread_id,
+            responder_ma_agent_id=native.id,
+            responder_name="root",
+            role=Role.USER,
+        ):
+            prepared = await bind_session_impl(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                external_user_id="requester",
+                thread_id=thread_id,
+                session_account_id=account_id,
+                reuse_existing=False,
+                turn_card_intent_id=intent.id,
+            )
+            assert not prepared.reused and prepared.session_ref.provider == provider
+            if provider == "openai":
+                assert prepared.session_ref.id == wire.session_id
+
+            async def reseed():
+                pytest.fail("fresh foreign turn attempted native root recovery")
+
+            outcome = await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                thread_id=thread_id,
+                external_user_id="requester",
+                user_message="fresh question",
+                lifecycle=RecordingLifecycle(),
+                cancel=asyncio.Event(),
+                reseed_user_message=reseed,
+                recovery_lifecycle=lambda _: RecordingLifecycle(),
+                turn_card_intent_id=intent.id,
+            )
+            assert outcome.state.error is None and not outcome.recovered
+            assert extract_final_response(outcome.state.content) == (
+                "answer turn-1" if provider == "openai" else "answer"
+            )
+            assert prepared.admission.backend_revision == revision
+            assert prepared.admission.backend_revision_origin == "channel"
+            binding = await deps.state_store.get_binding(
+                Slot(
+                    thread=ThreadRef(channel=channel, thread_id=thread_id),
+                    account_id=str(account_id),
+                )
+            )
+            assert binding is not None and binding.config_revision == revision.local
+            assert (
+                binding.provider == provider
+                and binding.native_refs["session"] == prepared.session_ref.id
+            )
+            async with deps.sessionmaker() as db:
+                assert (
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(MuxOperation)
+                        .where(
+                            MuxOperation.tenant_id == tenant_id,
+                            MuxOperation.key.startswith("fleet_root:"),
+                        )
+                    )
+                    == 0
+                )
+                assert (
+                    await db.scalar(
+                        select(func.count())
+                        .select_from(FleetRun)
+                        .where(FleetRun.tenant_id == tenant_id)
+                    )
+                    == 0
+                )
+    assert freezes == [(revision, "channel", intent.id)]
+    assert any(call.method == "POST" for call in calls)
+    assert not any(call.method == "POST" for call in transport.requests)

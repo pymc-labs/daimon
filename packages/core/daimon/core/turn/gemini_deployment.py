@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core import pricing
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.stores.domain import BackendAgent
@@ -38,9 +40,11 @@ from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_p
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
+    SourceCapabilities,
     fixed_plan_origin_allowed,
     materialize_counterpart,
     read_counterpart,
+    represented_source,
     select_runtime_manifest,
     validate_counterpart_pins,
     validate_counterpart_request,
@@ -51,6 +55,11 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY
+from mux.drivers.gemini.skill_deployment import (
+    GCSBundleDeployment,
+    RetainedSkillDeployments,
+    verify_retained_deployments,
+)
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import (
     INLINE_REUSE,
@@ -62,10 +71,31 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
+    field_validator,
     model_validator,
 )
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
+
+
+def _private_storage_credential(
+    path: Path, *, storage_until: datetime, current: datetime
+) -> tuple[str, datetime]:
+    from mux.drivers.gemini.mcp_auth import credential
+
+    value = cast(JsonValue, json.loads(read_private_credential_bytes(path)))
+    if not isinstance(value, dict) or set(value) != {"access_token", "expires_at"}:
+        raise ValueError("storage credential requires exact token/expiry fields")
+    expiry = value["expires_at"]
+    if not isinstance(expiry, str):
+        raise ValueError("storage credential expiry must be a timestamp")
+    expires = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+    if expires.tzinfo is None or not storage_until + timedelta(
+        seconds=30
+    ) < expires <= current + timedelta(hours=1):
+        raise ValueError("storage credential expiry does not cover the bounded turn")
+    return credential(value["access_token"]), expires
 
 
 class GeminiPlan(BaseModel):
@@ -101,12 +131,61 @@ class GeminiPlan(BaseModel):
     max_output_tokens: Annotated[int, Field(gt=0, le=65_536, strict=True)] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    source_capabilities: SourceCapabilities | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    mcp_credential_file: Path | None = Field(default=None, exclude_if=lambda value: value is None)
+    gcs_credential_file: Path | None = Field(default=None, exclude_if=lambda value: value is None)
+    gcs_mount_bucket: Nonblank | None = Field(default=None, exclude_if=lambda value: value is None)
+    gcs_mount_prefix: Nonblank | None = Field(default=None, exclude_if=lambda value: value is None)
+    skill_deployments: tuple[GCSBundleDeployment, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+
+    @field_validator("skill_deployments", mode="before")
+    @classmethod
+    def _closed_deployments(cls, value: object) -> object:
+        fields = {"tenant_id", "account_id", "account_scope_id", "version", "source", "files"}
+        if isinstance(value, (tuple, list)) and any(
+            isinstance(item, dict) and set(cast(dict[str, object], item)) != fields
+            for item in cast(tuple[object, ...] | list[object], value)
+        ):
+            raise ValueError("skill deployment receipt fields must be exact")
+        return cast(object, value)
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        if self.source_capabilities is not None:
+            if (
+                self.worker_materialization
+                or self.max_output_tokens is not None
+                or self.mcp_credential_file is None
+                or not self.mcp_credential_file.is_absolute()
+                or self.source_capabilities.model
+                != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
+                or tuple(item.target.id for item in self.source_capabilities.skills)
+                != self.skill_ids
+                or self.gcs_credential_file is None
+                or not self.gcs_credential_file.is_absolute()
+                or self.gcs_mount_bucket is None
+                or self.gcs_mount_prefix is None
+                or not self.skill_deployments
+            ):
+                raise ValueError(
+                    "full source capabilities require scoped deployment and credential inputs"
+                )
+            RetainedSkillDeployments(self.skill_deployments)
+        elif (
+            self.mcp_credential_file is not None
+            or self.gcs_credential_file is not None
+            or self.gcs_mount_bucket is not None
+            or self.gcs_mount_prefix is not None
+            or self.skill_deployments
+        ):
+            raise ValueError("capability dependencies require a verified source capability plan")
         if (
             not self.records_path.is_absolute()
             or not self.holds_path.is_absolute()
@@ -122,6 +201,8 @@ class GeminiPlan(BaseModel):
         self, worker: ResolvedWorkerSpec, revision: ConfigRevision
     ) -> GeminiDeployment:
         """Compile the resolved worker without adding resources or implicit execution."""
+        if self.source_capabilities is not None:
+            raise AdmissionDenied(reason="backend_unsupported")
         spec, drops = worker.spec, worker.declared_drops
         worker.limits.require_profile(INLINE_REUSE)
         bounded = worker.limits.max_input_tokens is not None
@@ -211,6 +292,12 @@ class GeminiPlan(BaseModel):
         target, source = request.target_spec, request.source
         from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
+        represented = (
+            represented_source(source, target)
+            if source is not None and self.source_capabilities is not None
+            else None
+        )
+        full = self.source_capabilities is not None
         if (
             request.admission.backend_revision_origin != "agent"
             or target is None
@@ -224,16 +311,21 @@ class GeminiPlan(BaseModel):
             or "memory" not in target.declared_drops
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
-            or target.tools != ()
-            or target.skills != ()
-            or target.mcp_servers != ()
+            or (full and represented is None)
+            or (full and {"tools", "skills", "mcp"}.intersection(target.declared_drops))
+            or (not full and target.tools != ())
+            or (not full and target.skills != ())
+            or (not full and target.mcp_servers != ())
             or target.extensions
-            or self.tools
-            or self.skill_ids
+            or (not full and self.tools)
+            or (not full and self.skill_ids)
+            or (full and tuple(target.tools or ()) != self.tools)
+            or (full and tuple(pin.id for pin in target.skills or ()) != self.skill_ids)
+            or (full and request.worker is not None)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         try:
-            compile_agent(target)
+            compile_agent(target, authenticated_mcp=full)
             if compile_environment(self.environment) != {"type": "remote", "sources": []}:
                 raise AdmissionDenied(reason="backend_unsupported")
         except UnsupportedCapability as error:
@@ -273,6 +365,12 @@ class GeminiPlan(BaseModel):
                 )
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
+            if self.source_capabilities is not None:
+                mounted = await adapter.skill_deployments(request.scope, checked.agent)
+                if set(mounted) != set(self.skill_deployments) or len(mounted) != len(
+                    self.skill_deployments
+                ):
+                    raise AdmissionDenied(reason="backend_unsupported")
 
         return await read_counterpart(
             self,
@@ -294,6 +392,8 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
     if revision is None or revision.profile != PROFILE:
         raise AdmissionDenied(reason="backend_unsupported")
     plan = select_runtime_manifest(request, GeminiPlan)
+    if plan.source_capabilities is not None and origin != "agent":
+        raise AdmissionDenied(reason="backend_unsupported")
     if origin == "agent":
         validate_counterpart_request(
             plan, request, worker_materialization=plan.worker_materialization
@@ -350,6 +450,86 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             max_output_tokens=plan.max_output_tokens,
         )
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
+    counterpart_verified = False
+
+    async def verify_storage() -> str | None:
+        if plan.source_capabilities is None:
+            return
+        if plan.gcs_credential_file is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        try:
+            source_token, expires_at = _private_storage_credential(
+                plan.gcs_credential_file, storage_until=request.deadline, current=request.now()
+            )
+        except (OSError, ValueError):
+            raise ScopeViolation(
+                "skill-deployment", "invalid explicit storage credential"
+            ) from None
+        from mux.drivers.gemini.deployment import downscoped_storage_token
+
+        if plan.gcs_mount_bucket is None or plan.gcs_mount_prefix is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        token = await asyncio.to_thread(
+            downscoped_storage_token,
+            token=source_token,
+            expires_at=expires_at,
+            retained_until=request.deadline,
+            bucket=plan.gcs_mount_bucket,
+            prefix=plan.gcs_mount_prefix,
+            sources=tuple(item.source for item in plan.skill_deployments),
+        )
+        await verify_retained_deployments(
+            plan.skill_deployments,
+            token=token,
+            retained_until=request.deadline + timedelta(days=7),
+        )
+        return token
+
+    async def resolve_storage(authorized: Scope, sources: tuple[str, ...]) -> str:
+        if (
+            not counterpart_verified
+            or authorized != scope
+            or sources != tuple(item.source for item in plan.skill_deployments)
+        ):
+            raise ScopeViolation(
+                "skill-deployment", "storage credential has no verified source binding"
+            )
+        token = await verify_storage()
+        if token is None:
+            raise ScopeViolation("skill-deployment", "storage credential unavailable")
+        return token
+
+    async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
+        expected = f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{plan.source_agent_id}"
+        public_url = request.deps.mcp.public_url
+        if (
+            not counterpart_verified
+            or authorized != scope
+            or reference != expected
+            or public_url is None
+            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or plan.mcp_credential_file is None
+            or request.deps.mcp.jwt_secret is None
+            or plan.source_agent_id is None
+        ):
+            raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        try:
+            assert plan.source_capabilities is not None
+            token = await resolve_agent_mcp_credential(
+                request.deps.sessionmaker,
+                path=plan.mcp_credential_file,
+                secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+                scope=scope,
+                agent_id=plan.source_agent_id,
+                destination=destination,
+                tools=plan.source_capabilities.mcp_tools,
+                chat_execution=True,
+                now=request.now(),
+            )
+            await verify_storage()
+            return token
+        except (OSError, ValueError):
+            raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
     def transport(config: ConfigRevision, authorized: Scope) -> GeminiTransportRuntime:
         if config != revision or authorized != scope:
@@ -360,13 +540,22 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         from mux.drivers.gemini.deployment import configured_catalog_transport, configured_transport
 
         return GeminiTransportRuntime(
-            configured_transport(api_key=secret),
+            configured_transport(api_key=secret, protect_storage_credentials=True)
+            if plan.source_capabilities is not None
+            else configured_transport(api_key=secret),
             configured_catalog_transport(api_key=secret)
             if request.admission.backend_revision_origin == "agent"
+            else None,
+            mcp_secrets=resolve_mcp if plan.source_capabilities is not None else None,
+            gcs_secrets=resolve_storage if plan.source_capabilities is not None else None,
+            skill_bundle_publisher=RetainedSkillDeployments(plan.skill_deployments)
+            if plan.source_capabilities is not None
             else None,
         )
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
+        nonlocal counterpart_verified
+        counterpart_verified = False
         validate_counterpart_request(
             plan, preparation, worker_materialization=plan.worker_materialization
         )
@@ -387,9 +576,12 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 or "",
                 actual_agent=preparation.admission.agent,
             )
-        return await plan.read_counterpart(
+        checked = await plan.read_counterpart(
             preparation, source=source, resources=resources(preparation)
         )
+        await verify_storage()
+        counterpart_verified = True
+        return checked
 
     def resources(preparation: ProviderPreparationRequest) -> NeutralResourceHost:
         if plan.worker_materialization:

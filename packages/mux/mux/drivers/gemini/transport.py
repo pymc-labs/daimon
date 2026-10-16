@@ -12,7 +12,12 @@ from google.genai._interactions import APIConnectionError, APIError, APIStatusEr
 from pydantic import JsonValue
 
 from mux.contracts.errors import ProviderErrorCategory
-from mux.drivers.gemini.mcp_auth import model_request, refresh_bound_request
+from mux.drivers.gemini.mcp_auth import (
+    RedactedCredential,
+    contains_secret,
+    model_request,
+    refresh_bound_request,
+)
 from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
@@ -43,6 +48,43 @@ def object_value(value: JsonValue) -> Object:
 def string(value: JsonValue) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("expected a provider identity")
+    return value
+
+
+def network_transform_present(value: JsonValue, *, in_network: bool = False) -> bool:
+    """Presence-only inspection; never serialize a potentially echoed secret."""
+    if isinstance(value, dict):
+        return (in_network and "transform" in value) or any(
+            network_transform_present(child, in_network=in_network or key == "network")
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(network_transform_present(child, in_network=in_network) for child in value)
+    return False
+
+
+def storage_request_token(request: Mapping[str, JsonValue]) -> RedactedCredential | None:
+    """Remember only the dispatched mount credential, within the transport lifetime."""
+    environment = request.get("environment")
+    network = environment.get("network") if isinstance(environment, dict) else None
+    rules = network.get("allowlist") if isinstance(network, dict) else None
+    for rule in rules if isinstance(rules, list) else []:
+        if not isinstance(rule, dict) or rule.get("domain") != "storage.googleapis.com":
+            continue
+        transform = rule.get("transform")
+        header = transform.get("Authorization") if isinstance(transform, dict) else None
+        if isinstance(header, str) and header.startswith("Bearer ") and header[7:]:
+            return RedactedCredential(header[7:])
+    return None
+
+
+def checked_storage_response(
+    value: Object, *, protected: bool, tokens: set[RedactedCredential] | None = None
+) -> Object:
+    if protected and network_transform_present(value):
+        raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
+    if protected and tokens and any(contains_secret(value, token) for token in tokens):
+        raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
     return value
 
 
@@ -120,13 +162,33 @@ class SDKTransport:
     supplied base client's HttpRetryOptions(attempts=1).
     """
 
-    def __init__(self, client: genai.Client) -> None:
+    def __init__(
+        self,
+        client: genai.Client,
+        *,
+        protect_storage_credentials: bool = False,
+        storage_tokens: set[RedactedCredential] | None = None,
+    ) -> None:
+        self._protect_storage_credentials = protect_storage_credentials
+        self._storage_tokens: set[RedactedCredential] = (
+            storage_tokens if storage_tokens is not None else set()
+        )
         # google-genai 2.7 forwards attempts as Stainless max_retries, so
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
         self._interactions = nextgen.with_options(max_retries=0).interactions
         self._files = client.aio.files
         self._models = client.aio.models
+
+    def _check_storage_response(self, response: httpx.Response) -> None:
+        # Inspect bytes before JSON/SDK parsing can render an unexpected value.
+        if any(token.encode() in response.content for token in self._storage_tokens):
+            raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
+        checked_storage_response(
+            object_value(cast(JsonValue, response.json())),
+            protected=True,
+            tokens=self._storage_tokens,
+        )
 
     async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
         from google.genai.types import CountTokensConfig, HttpOptions
@@ -187,9 +249,17 @@ class SDKTransport:
                 "invalid_request", retryable=False, native_code="explicit_tools_required"
             )
         bounded = await refresh_bound_request(bounded)
+        token = storage_request_token(bounded)
+        if token is not None:
+            self._storage_tokens.add(token)
+        protected = (
+            self._protect_storage_credentials
+            or bool(self._storage_tokens)
+            or network_transform_present(bounded)
+        )
         if model_request(bounded):
             response = await provider_call(
-                self._interactions.create(
+                self._interactions.with_raw_response.create(
                     model=string(bounded["model"]),
                     input=[],
                     background=True,
@@ -200,7 +270,7 @@ class SDKTransport:
             )
         else:
             response = await provider_call(
-                self._interactions.create(
+                self._interactions.with_raw_response.create(
                     agent=string(bounded["agent"]),
                     input=[],
                     background=True,
@@ -209,25 +279,34 @@ class SDKTransport:
                     extra_headers={"Api-Revision": API_REVISION},
                 )
             )
-        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
+        if protected:
+            self._check_storage_response(response.http_response)
+        parsed = await response.parse()
+        return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
     async def get(self, interaction_id: str) -> Object:
         response = await provider_call(
-            self._interactions.get(
+            self._interactions.with_raw_response.get(
                 id=interaction_id,
                 extra_headers={"Api-Revision": API_REVISION},
             )
         )
-        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
+        if self._protect_storage_credentials or self._storage_tokens:
+            self._check_storage_response(response.http_response)
+        parsed = await response.parse()
+        return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
     async def cancel(self, interaction_id: str) -> Object:
         response = await provider_call(
-            self._interactions.cancel(
+            self._interactions.with_raw_response.cancel(
                 id=interaction_id,
                 extra_headers={"Api-Revision": API_REVISION},
             )
         )
-        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
+        if self._protect_storage_credentials or self._storage_tokens:
+            self._check_storage_response(response.http_response)
+        parsed = await response.parse()
+        return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None
@@ -246,9 +325,20 @@ class SDKTransport:
         async def records() -> AsyncIterator[Object]:
             try:
                 async for event in source:
-                    yield object_value(
-                        cast(JsonValue, event.model_dump(mode="json", exclude_none=True))
-                    )
+                    if self._protect_storage_credentials or self._storage_tokens:
+                        value = object_value(
+                            cast(
+                                JsonValue,
+                                event.model_dump(mode="json", exclude_none=True, warnings=False),
+                            )
+                        )
+                        yield checked_storage_response(
+                            value, protected=True, tokens=self._storage_tokens
+                        )
+                    else:
+                        yield object_value(
+                            cast(JsonValue, event.model_dump(mode="json", exclude_none=True))
+                        )
             except (APIError, httpx.HTTPError) as error:
                 raise normalize_error(error) from None
             finally:

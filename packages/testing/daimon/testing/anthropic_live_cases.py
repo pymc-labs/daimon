@@ -18,7 +18,7 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.anthropic_live import MODEL, LiveContext, LiveRefused, explicit_secret
+from daimon.testing.anthropic_live import MODEL, LiveContext, LiveRefused
 from daimon.testing.conformance.default_capability import (
     DEFAULT_SKILLS,
     DEFAULT_TOOLS,
@@ -30,6 +30,7 @@ from daimon.testing.conformance.recording import Recorder
 from daimon.testing.conformance.runner import run_default_capability
 from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.f2_mcp_binding import AgentMCPBinding
 from daimon.testing.f2_native_bounds import install_f2_bounds, verify_tools
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.actions import UserMessage
@@ -282,7 +283,12 @@ class NativeCapabilityEvidence:
 
 
 class VaultSessions(AnthropicSessions):
-    def __init__(self, context: LiveContext, vault: ResourceRef) -> None:
+    def __init__(
+        self, context: LiveContext, vault: ResourceRef, credential: AgentMCPBinding, vaults: Vaults
+    ) -> None:
+        self.context = context
+        self.credential = credential
+        self.vaults = vaults
         self.vault = vault
         super().__init__(
             context.client,
@@ -294,6 +300,21 @@ class VaultSessions(AnthropicSessions):
     async def create(
         self, scope: Scope, spec: SessionSpec, *, key: str, initial: UserMessage | None = None
     ) -> Session:
+        # run_default_capability has acknowledged and independently read back
+        # this exact agent before it asks the session owner to create anything.
+        await self.credential.bind(spec.agent)
+        await self.vaults.put(
+            scope,
+            self.vault,
+            CredentialBinding(
+                name="daimon-mcp",
+                kind="static_bearer",
+                credential_ref="host:f2-owned-mcp",
+                mcp_server_url=self.context.admission.binding.mcp_url,
+            ),
+            expected=None,
+            key="f2-mcp",
+        )
         ext = ExtensionConfig(
             namespace="anthropic.session_create", version=1, value={"vault_ids": [self.vault.id]}
         )
@@ -303,10 +324,13 @@ class VaultSessions(AnthropicSessions):
 
 async def f2_default(context: LiveContext) -> Mapping[str, object]:
     binding = context.admission.binding
-    if binding.mcp_url is None or binding.mcp_bearer_file is None:
-        raise LiveRefused("provider-reachable MCP binding is missing")
-    bearer = explicit_secret(binding.mcp_bearer_file)
-    context.redaction_secrets += (bearer,)
+    if (
+        binding.mcp_url is None
+        or binding.database_url is None
+        or binding.mcp_signing_secret_file is None
+    ):
+        raise LiveRefused("after-ACK MCP binding authority is missing")
+    credential = AgentMCPBinding(context)
     install_f2_bounds(context.client)
     root = Path(__file__).resolve().parents[4]
     manifest = default_manifest(root, binding.mcp_url)
@@ -315,7 +339,10 @@ async def f2_default(context: LiveContext) -> Mapping[str, object]:
     def resolve(scope: Scope, reference: str) -> str:
         if scope != binding.scope or reference != secret_ref:
             raise LiveRefused("MCP credential reference is outside the admitted binding")
-        return bearer
+        if credential.token is None:
+            raise LiveRefused("F2 MCP secret requested before its agent ACK binding")
+        recorder.secrets = context.redaction_secrets
+        return credential.token
 
     native = AnthropicManagedAgents(
         context.client,
@@ -329,40 +356,30 @@ async def f2_default(context: LiveContext) -> Mapping[str, object]:
     )
 
     async def retire() -> None:
-        # Only IDs acknowledged as CREATED during this run may be retired.
-        # Cleanup remains inside run_live's reserved wall-clock deadline.
-        for kind, id_ in sorted(context.transport.authorization.created):
-            if kind == "agent":
-                await native.agents.archive(
-                    binding.scope, context.ref(id_, kind), key="f2-agent-cleanup"
-                )
-            elif kind == "skill":
-                await native.skills.delete(binding.scope, id_, key="f2-skill-cleanup")
-
-        await vaults.archive(binding.scope, vault.ref, key="f2-vault-cleanup")
+        try:
+            for kind, id_ in sorted(context.transport.authorization.created):
+                if kind == "agent":
+                    await native.agents.archive(
+                        binding.scope, context.ref(id_, kind), key="f2-agent-cleanup"
+                    )
+                elif kind == "skill":
+                    await native.skills.delete(binding.scope, id_, key="f2-skill-cleanup")
+            await vaults.archive(binding.scope, vault.ref, key="f2-vault-cleanup")
+        finally:
+            await credential.close()
 
     context.retire = retire
-    await vaults.put(
-        binding.scope,
-        vault.ref,
-        CredentialBinding(
-            name="daimon-mcp",
-            kind="static_bearer",
-            credential_ref=secret_ref,
-            mcp_server_url=binding.mcp_url,
-        ),
-        expected=None,
-        key="f2-mcp",
-    )
     native = AnthropicManagedAgents(
         context.client,
         account_scope_id=binding.account_scope_id,
         authorization=context.transport.authorization,
         secrets=resolve,
-        sessions=VaultSessions(context, vault.ref),
+        sessions=VaultSessions(context, vault.ref, credential, vaults),
     )
     context.driver = native
-    recorder = Recorder(secrets=(bearer, context.client.api_key or ""))
+    # Include the dynamically minted bearer before any recorded turn; the same
+    # Recorder is passed through provisioning and session creation.
+    recorder = Recorder(secrets=context.redaction_secrets)
 
     result = await run_default_capability(
         manifest,

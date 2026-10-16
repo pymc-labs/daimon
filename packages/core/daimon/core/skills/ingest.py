@@ -217,19 +217,31 @@ def _declared_entries(data: bytes) -> int:
     return total
 
 
-def _read_zip(data: bytes) -> dict[str, bytes]:
+def retained_archive_files(data: bytes) -> dict[str, bytes]:
+    """Read a retained provider archive without applying new-upload name policy.
+
+    Existing provider skill names can predate that policy. Preserve every file
+    while reusing the same bounded archive/path checks; never filter bytes.
+    """
+    files = _strip_wrapper(_read_zip(data, preserve_all=True))
+    if "SKILL.md" not in files or len(files) > MAX_FILES:
+        raise SkillIngestError("A retained archive needs one complete skill bundle.")
+    return files
+
+
+def _read_zip(data: bytes, *, preserve_all: bool = False) -> dict[str, bytes]:
     if _declared_entries(data) > MAX_FILES * 2:
         raise SkillIngestError(f"A skill may hold at most {MAX_FILES} files.")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            return _read_entries(archive)
+            return _read_entries(archive, preserve_all=preserve_all)
     except (zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError) as exc:
         raise SkillIngestError(
             "That zip is damaged or uses a compression that can't be read."
         ) from exc
 
 
-def _read_entries(archive: zipfile.ZipFile) -> dict[str, bytes]:
+def _read_entries(archive: zipfile.ZipFile, *, preserve_all: bool = False) -> dict[str, bytes]:
     files: dict[str, bytes] = {}
     budget = MAX_UNCOMPRESSED_BYTES
     entries = [info for info in archive.infolist() if not info.is_dir()]
@@ -241,7 +253,7 @@ def _read_entries(archive: zipfile.ZipFile) -> dict[str, bytes]:
             raise SkillIngestError(f"{path} is a symlink; skills may not hold links.")
         if info.flag_bits & 0x1:
             raise SkillIngestError(f"{path} is encrypted.")
-        if _is_junk(path):
+        if not preserve_all and _is_junk(path):
             continue
         _require_safe_path(path)
         if path in files:

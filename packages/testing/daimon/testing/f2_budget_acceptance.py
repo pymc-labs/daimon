@@ -175,7 +175,7 @@ def admit_probe(args: argparse.Namespace) -> AcceptanceAdmission:
         ):
             raise LiveRefused("probe installation or recipe evidence changed")
     binding = LiveBinding.model_validate_json(args.live_binding.read_text())
-    binding.verify("F2-Anthropic")
+    binding.verify("F2-Anthropic", f2_session_binding=False)
     if binding.agent is None or args.output.exists():
         raise LiveRefused("probe needs an owned existing F2 agent and fresh output")
     return AcceptanceAdmission(

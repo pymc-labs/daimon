@@ -840,6 +840,7 @@ async def test_initial_card_intent_is_committed_before_send_and_retired_after_ca
         assert len(intents) == 1, "intent must be committed and visible before Discord send"
         intent = intents[0]
         observed["intent_id"] = intent.id
+        assert intent.channel_id == "123" and intent.thread_id == "456"
         view = kwargs["view"]
         observed["custom_id"] = view.cancel_button.custom_id
         return SimpleNamespace(id=900)
@@ -862,6 +863,7 @@ async def test_initial_card_intent_is_committed_before_send_and_retired_after_ca
         db_session_factory,
         tenant_id=tenant.id,
         thread_id="456",
+        channel_id="123",
         make_lifecycle=make_lifecycle,
     )
     assert observed["intent_id"] == intent.id, "the durable row should back the posted button"
@@ -870,7 +872,7 @@ async def test_initial_card_intent_is_committed_before_send_and_retired_after_ca
     )
     async with db_session_factory() as session:
         rows = await list_recoverable_turn_card_intents(session, platform="discord")
-    assert len(rows) == 1 and rows[0].message_id == "900", (
+    assert len(rows) == 1 and rows[0].message_id == "900" and rows[0].channel_id == "123", (
         "the Discord response ID should be committed before post_initial_turn_card returns"
     )
 

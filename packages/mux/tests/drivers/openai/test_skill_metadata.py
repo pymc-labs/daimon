@@ -64,3 +64,16 @@ def test_unbounded_pin_list_still_refuses_before_native_io() -> None:
     context = Context(FakeTransport(), "offline", "openai.persistent_workspace", None)
     with pytest.raises(UnsupportedCapability):
         encode_metadata(tuple(SkillRef(id="x" * 500, version="1") for _ in range(12)), context)
+
+
+def test_eleven_native_versions_retain_independent_content_pins() -> None:
+    original = tuple(pin.model_copy(update={"digest": "a" * 64}) for pin in pins())
+    context = Context(FakeTransport(), "offline", "openai.persistent_workspace", None)
+    assert decode(encode_metadata(original, context)) == original
+
+
+@pytest.mark.parametrize("version,digest", [(None, "a" * 64), ("1", "not-a-digest")])
+def test_content_pins_require_concrete_version_and_sha256(version, digest) -> None:
+    context = Context(FakeTransport(), "offline", "openai.persistent_workspace", None)
+    with pytest.raises(UnsupportedCapability):
+        encode_metadata((SkillRef(id="native", version=version, digest=digest),), context)

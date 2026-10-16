@@ -648,6 +648,7 @@ async def run_wizard_submit_turn_observed(
             bot.runtime.sessionmaker,
             tenant_id=row.tenant_id,
             thread_id=thread_id,
+            channel_id=parent_channel_id,
             make_lifecycle=_make_lifecycle,
             # Owned like the marker, so a successor's card recovery leaves a
             # live owner's card alone exactly as its orphan sweep does.

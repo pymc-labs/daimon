@@ -12,15 +12,16 @@ nothing here retries or swallows — a server that cannot be discovered raises
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_oauth.models import AuthorizationServerMetadata, ProtectedResourceMetadata
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 _PROTOCOL_VERSION = "2025-06-18"
 _INITIALIZE_BODY = {
@@ -191,3 +192,100 @@ async def discover_authorization_server(
     raise McpOAuthDiscoveryError(
         f"no OAuth authorization server metadata for {mcp_server_url} (tried {', '.join(tried)})"
     )
+
+
+async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[str]:
+    """Read the caller's actual, paginated MCP catalogue without executing tools.
+
+    The configured destination is the only authority; redirects are disabled.
+    Both JSON and the protocol's SSE response form are accepted.
+    """
+    import json
+
+    assert_public_https_url(mcp_server_url, what="mcp server url")
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": _PROTOCOL_VERSION,
+        "Authorization": f"Bearer {bearer_token}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
+
+            async def rpc(body: Mapping[str, object]) -> dict[str, JsonValue]:
+                response = await http.post(mcp_server_url, json=body, headers=headers)
+                if response.status_code != 200 or len(response.content) > 1024 * 1024:
+                    raise ValueError("MCP catalogue read refused")
+                session = response.headers.get("mcp-session-id")
+                if session:
+                    headers["Mcp-Session-Id"] = session
+                try:
+                    if response.headers.get("content-type", "").startswith("text/event-stream"):
+                        frames = [
+                            cast(JsonValue, json.loads(line[5:].strip()))
+                            for line in response.text.splitlines()
+                            if line.startswith("data:")
+                        ]
+                        results = [
+                            item
+                            for item in frames
+                            if isinstance(item, dict) and item.get("id") == body["id"]
+                        ]
+                        if len(results) != 1:
+                            raise ValueError("MCP catalogue response is ambiguous")
+                        payload = results[0]
+                    else:
+                        payload = cast(JsonValue, response.json())
+                    if (
+                        not isinstance(payload, dict)
+                        or payload.get("id") != body["id"]
+                        or "error" in payload
+                    ):
+                        raise ValueError("invalid MCP catalogue response")
+                    result = payload.get("result")
+                    if not isinstance(result, dict):
+                        raise ValueError("invalid MCP catalogue result")
+                    return result
+                except (ValueError, KeyError):
+                    raise ValueError("invalid MCP catalogue response") from None
+
+            await rpc(_INITIALIZE_BODY)
+            response = await http.post(
+                mcp_server_url,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                },
+            )
+            if response.status_code not in (200, 202, 204):
+                raise ValueError("MCP initialization refused")
+            names: set[str] = set()
+            cursor: str | None = None
+            seen: set[str] = set()
+            for page in range(100):
+                result = await rpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": page + 2,
+                        "method": "tools/list",
+                        "params": {"cursor": cursor} if cursor else {},
+                    }
+                )
+                tools = result.get("tools")
+                if not isinstance(tools, list):
+                    raise ValueError("invalid MCP tool catalogue")
+                for tool in tools:
+                    name = tool.get("name") if isinstance(tool, dict) else None
+                    if not isinstance(name, str) or not name or name in names:
+                        raise ValueError("invalid or duplicate MCP tool")
+                    names.add(name)
+                following = result.get("nextCursor")
+                if following is None:
+                    return frozenset(names)
+                if not isinstance(following, str) or not following or following in seen:
+                    raise ValueError("invalid MCP catalogue cursor")
+                seen.add(following)
+                cursor = following
+            raise ValueError("MCP catalogue exceeds page limit")
+    except httpx.HTTPError:
+        raise ValueError("MCP catalogue read failed") from None

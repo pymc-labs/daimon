@@ -548,3 +548,47 @@ async def test_mint_cli_mcp_token_registers_an_expiring_row(db_session: AsyncSes
     row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
     assert row is not None and row.kind == "cli", "a cli registry row exists"
     assert row.scopes == () and row.max_issued_usd is None, "cli tokens carry no scopes"
+
+
+@pytest.mark.parametrize("ttl_s", [0, -1, 901, 90 * 86400])
+async def test_registered_chat_execution_refuses_unbounded_or_expanded_lifetime(
+    db_session: AsyncSession, ttl_s: int
+) -> None:
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    with pytest.raises(ValueError, match="at most 900 seconds"):
+        await mint_agent_mcp_token(
+            db_session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label="chat",
+            secret=b"s" * 32,
+            now=dt.datetime.now(dt.UTC),
+            ttl_days=ttl_s / 86400,
+            chat_execution=True,
+        )
+
+
+async def test_registered_chat_execution_claims_and_registry_share_exact_agent(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    agent_id, secret, now = uuid.uuid4(), b"s" * 32, dt.datetime.now(dt.UTC)
+    token = await mint_agent_mcp_token(
+        db_session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        label="chat",
+        secret=secret,
+        now=now,
+        ttl_days=900 / 86400,
+        chat_execution=True,
+    )
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    assert set(claims) == {"sub", "chat_agent_id", "jti", "exp"}
+    assert claims["sub"] == str(account_id) and claims["chat_agent_id"] == str(agent_id)
+    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None and row.kind == "agent" and row.agent_id == str(agent_id)
+    assert row.account_id == account_id and row.tenant_id == tenant_id
+    assert claims["exp"] == int((now + dt.timedelta(seconds=900)).timestamp())

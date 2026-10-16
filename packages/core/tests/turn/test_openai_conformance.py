@@ -130,22 +130,7 @@ class NativeWire(Wire):
             source = NativeStream(self)
             self.native_streams.append(source)
             return httpx.Response(200, stream=source, headers={"Content-Type": "text/event-stream"})
-        translated = httpx.Request(
-            req.method,
-            req.url.copy_with(path=req.url.path.replace(NEW_SESSION, SESSION_ID)),
-            headers=req.headers,
-            content=req.content,
-        )
-        response = super().handle(translated)
-        self.requests[-1] = req
-        # These are fixture-native resources, not neutral projections/receipts.
-        for root in self.turns:
-            root["session_id"] = self.session_id
-        return httpx.Response(
-            response.status_code,
-            content=response.content.replace(SESSION_ID.encode(), self.session_id.encode()),
-            headers=response.headers,
-        )
+        return super().handle(req)
 
 
 @pytest.fixture(autouse=True)

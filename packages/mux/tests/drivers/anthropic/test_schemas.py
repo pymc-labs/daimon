@@ -157,3 +157,41 @@ async def test_duplicate_native_config_namespaces_fail_before_io():
                 key="key",
             )
     assert transport.requests == []
+
+
+@pytest.mark.parametrize("defect", [None, "disabled", "ask", "unknown", "unresolved", "duplicate"])
+def test_exact_mcp_toolset_representation_requires_resolved_catalogue_authority(defect):
+    catalogue = frozenset({"describe_agent", "list_my_sessions"})
+    defaults = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    configs = []
+    if defect == "disabled":
+        configs = [{"name": "describe_agent", "enabled": False}]
+    elif defect == "ask":
+        configs = [{"name": "describe_agent", "permission_policy": {"type": "always_ask"}}]
+    elif defect == "unknown":
+        configs = [{"name": "not_on_the_server", "enabled": True}]
+    elif defect == "unresolved":
+        defaults = {}
+    elif defect == "duplicate":
+        configs = [{"name": "describe_agent"}, {"name": "describe_agent"}]
+    native = AgentToolsConfig.model_validate(
+        {
+            "tools": [
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "daimon-mcp",
+                    "configs": configs,
+                    "default_config": defaults,
+                }
+            ]
+        }
+    )
+    # Legacy/worker projection remains unchanged, even when a full-mode proof exists.
+    assert native.intent() == () and native.has_unrepresented_toolset()
+    if defect:
+        with pytest.raises(ValueError):
+            native.intent(exact=True, mcp_catalogues={"daimon-mcp": catalogue})
+    else:
+        tools = native.intent(exact=True, mcp_catalogues={"daimon-mcp": catalogue})
+        assert len(tools) == 1 and tools[0].kind == "mcp_toolset" and tools[0].permission == "auto"
+        assert not native.has_unrepresented_toolset(mcp_catalogues={"daimon-mcp": catalogue})

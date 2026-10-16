@@ -17,6 +17,7 @@ from mux.contracts.resources import MCPConnection
 from mux.errors import ProviderError, UnsupportedCapability
 
 MCPSecretResolver = Callable[[Scope, str, str], Awaitable[str]]
+GCSSecretResolver = Callable[[Scope, tuple[str, ...]], Awaitable[str]]
 type Object = dict[str, JsonValue]
 _REF = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}\Z")
@@ -29,6 +30,8 @@ class Binding:
     connection: MCPConnection
     resolver: MCPSecretResolver
     request_json: str
+    gcs_resolver: GCSSecretResolver | None = None
+    gcs_sources: tuple[str, ...] = ()
 
 
 class RedactedCredential(str):
@@ -147,6 +150,7 @@ async def authenticated_template(
     resolver: MCPSecretResolver | None,
     *,
     overrides: Object,
+    gcs_secrets: GCSSecretResolver | None = None,
 ) -> Object:
     validate_intent(persisted, expected, connections, enabled=resolver is not None)
     if set(overrides) - {"input", "background", "store", "previous_interaction_id", "environment"}:
@@ -154,6 +158,8 @@ async def authenticated_template(
     request = {**copy.deepcopy(expected), **copy.deepcopy(overrides)}
     bound = [c for c in connections if c.credential_ref is not None]
     if not bound:
+        if gcs_secrets is not None:
+            refuse("gcs_mount_requires_authenticated_source")
         return request
     if len(bound) != 1 or resolver is None:
         refuse("one_resolver_bound_mcp_server")
@@ -172,11 +178,97 @@ async def authenticated_template(
     tools = request["tools"]
     if not isinstance(tools, list):
         refuse("mcp_tool_list")
-    binding = Binding(scope, connection, resolver, json.dumps(request, sort_keys=True))
+    sources = gcs_sources(expected) if gcs_secrets is not None else ()
+    if gcs_secrets is not None and not sources:
+        refuse("gcs_mount_sources")
+    binding = Binding(
+        scope, connection, resolver, json.dumps(request, sort_keys=True), gcs_secrets, sources
+    )
+    if gcs_secrets is not None:
+        await authenticate_storage(request, binding, bound=True)
     for tool in tools:
         if isinstance(tool, dict) and tool.get("type") == "mcp_server":
             tool["headers"] = {"Authorization": BoundCredential("Bearer " + secret, binding)}
     return request
+
+
+def gcs_sources(request: Object) -> tuple[str, ...]:
+    environment = request.get("environment")
+    if not isinstance(environment, dict):
+        refuse("gcs_mount_environment")
+    sources = environment.get("sources")
+    if not isinstance(sources, list):
+        refuse("gcs_mount_sources")
+    result: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict) or source.get("type") != "gcs":
+            refuse("gcs_mount_sources")
+        uri = source.get("source")
+        if not isinstance(uri, str) or not uri.startswith("gs://") or not uri.endswith("/"):
+            refuse("gcs_mount_sources")
+        result.append(uri)
+    if not result or len(set(result)) != len(result):
+        refuse("gcs_mount_sources")
+    return tuple(result)
+
+
+async def authenticate_storage(request: Object, binding: Binding, *, bound: bool) -> None:
+    resolver = binding.gcs_resolver
+    if resolver is None:
+        return
+    environment = request.get("environment")
+    if isinstance(environment, str) and environment:
+        refreshed: Object = {"type": "remote", "environment_id": environment}
+        request["environment"] = refreshed
+        environment = refreshed
+    if not isinstance(environment, dict) or "network" in environment:
+        refuse("gcs_mount_environment")
+    try:
+        secret = credential(await resolver(binding.scope, binding.gcs_sources))
+    except Exception:
+        raise ProviderError(
+            "permission", retryable=False, native_code="gcs_secret_unavailable"
+        ) from None
+    if contains_secret(request, secret):
+        raise ProviderError("permission", retryable=False, native_code="gcs_secret_outside_binding")
+    value = "Bearer " + secret
+    header = BoundCredential(value, binding) if bound else RedactedCredential(value)
+    network: Object = {
+        "allowlist": [{"domain": "storage.googleapis.com", "transform": {"Authorization": header}}]
+    }
+    environment["network"] = network
+
+
+def strip_storage_authentication(request: Object, binding: Binding) -> None:
+    if binding.gcs_resolver is None:
+        return
+    environment = request.get("environment")
+    if not isinstance(environment, dict):
+        refuse("gcs_mount_environment")
+    network = environment.pop("network", None)
+    if not isinstance(network, dict) or set(network) != {"allowlist"}:
+        refuse("unbound_gcs_authentication")
+    rules = network["allowlist"]
+    if not isinstance(rules, list) or len(rules) != 1:
+        refuse("unbound_gcs_authentication")
+    rule = rules[0]
+    if (
+        not isinstance(rule, dict)
+        or set(rule) != {"domain", "transform"}
+        or rule["domain"] != "storage.googleapis.com"
+    ):
+        refuse("unbound_gcs_authentication")
+    headers = rule["transform"]
+    if not isinstance(headers, dict) or set(headers) != {"Authorization"}:
+        refuse("unbound_gcs_authentication")
+    header = headers["Authorization"]
+    if not isinstance(header, BoundCredential) or header.binding is not binding:
+        refuse("unbound_gcs_authentication")
+    expected = json.loads(binding.request_json)["environment"]
+    if isinstance(expected, str):
+        if environment != {"type": "remote", "environment_id": expected}:
+            refuse("changed_gcs_request_intent")
+        request["environment"] = expected
 
 
 def credential(value: object) -> str:
@@ -277,6 +369,9 @@ async def refresh_bound_request(request: Object) -> Object:
                     if isinstance(value, BoundCredential):
                         marked.append(value)
     if not marked:
+        environment = request.get("environment")
+        if isinstance(environment, dict) and "network" in environment:
+            refuse("unbound_gcs_authentication")
         validate_tools(tools)
         return request
     if len(marked) != 1:
@@ -300,6 +395,7 @@ async def refresh_bound_request(request: Object) -> Object:
             target = tool
             del tool["headers"]
     validate_tools(fresh_tools)
+    strip_storage_authentication(fresh, binding)
     expected = cast(Object, json.loads(binding.request_json))
     if (
         stable_request(fresh) != stable_request(expected)
@@ -320,6 +416,7 @@ async def refresh_bound_request(request: Object) -> Object:
         ) from None
     if contains_secret(fresh, secret):
         raise ProviderError("permission", retryable=False, native_code="mcp_secret_outside_binding")
+    await authenticate_storage(fresh, binding, bound=False)
     target["headers"] = {"Authorization": RedactedCredential("Bearer " + secret)}
     return fresh
 

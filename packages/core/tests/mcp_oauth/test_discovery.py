@@ -203,3 +203,67 @@ async def test_probe_refuses_to_contact_a_private_address() -> None:
             _client(httpx.MockTransport(handler)), mcp_server_url="https://10.0.0.5:6379/"
         )
     assert calls == [], "the request is refused before it leaves"
+
+
+@pytest.mark.parametrize("wire", ["json", "sse"])
+@pytest.mark.parametrize(
+    "defect", [None, "denied", "unknown_shape", "duplicate", "repeated_cursor"]
+)
+async def test_live_tool_catalogue_uses_authenticated_paginated_protocol(monkeypatch, wire, defect):
+    import json
+
+    from daimon.core.mcp_oauth.discovery import list_mcp_tools
+
+    calls = []
+
+    def handle(call):
+        calls.append(call)
+        assert call.headers["authorization"] == "Bearer caller-only-offline"
+        body = json.loads(call.content)
+        if defect == "denied":
+            return httpx.Response(403)
+        if body["method"] == "notifications/initialized":
+            assert call.headers["mcp-session-id"] == "owned-read-session"
+            return httpx.Response(202)
+        result = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "serverInfo": {"name": "owned", "version": "1"},
+        }
+        if body["method"] == "tools/list":
+            assert call.headers["mcp-session-id"] == "owned-read-session"
+            second = body["params"].get("cursor") is not None
+            name = "list_my_sessions" if second else "describe_agent"
+            if defect == "duplicate":
+                name = "describe_agent"
+            result = {"tools": [{"name": name}], **({} if second else {"nextCursor": "next"})}
+            if defect == "unknown_shape":
+                result["tools"] = [None]
+            elif defect == "repeated_cursor":
+                result = {"tools": [], "nextCursor": "next"}
+        payload = {"jsonrpc": "2.0", "id": body["id"], "result": result}
+        if wire == "sse":
+            return httpx.Response(
+                200,
+                text="event: message\ndata: " + json.dumps(payload) + "\n\n",
+                headers={
+                    "content-type": "text/event-stream",
+                    "mcp-session-id": "owned-read-session",
+                },
+            )
+        return httpx.Response(200, json=payload, headers={"mcp-session-id": "owned-read-session"})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    if defect:
+        with pytest.raises(ValueError):
+            await list_mcp_tools(_MCP_URL, "caller-only-offline")
+    else:
+        assert await list_mcp_tools(_MCP_URL, "caller-only-offline") == frozenset(
+            {"describe_agent", "list_my_sessions"}
+        )
+        assert len(calls) == 4 and all(call.method == "POST" for call in calls)

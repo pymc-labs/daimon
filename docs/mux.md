@@ -3100,3 +3100,216 @@ worker lifetime; subsequent turns refuse, including after restart. This mode
 has no fallback to another model. Worker limits remain monotonic under the
 existing permission resolver. Other profiles and uncapped Gemini turns retain
 their existing behavior.
+
+### Explicit source capability representations for Gemini
+
+An agent-origin Gemini plan may supply `source_capabilities` in the existing
+provider runtime manifest. This is separate from accepting portable losses:
+preview and preparation read the original immutable skill versions and compare
+**every retained file byte**, then map supported automatic filesystem operations
+to the profile execution tool. No skills, tools or MCP loss can be accepted in
+this mode. Unknown native controls, publishing approval, foreign credentials,
+non-automatic tools and incomplete source inventories still refuse. Memory and
+the original sandbox remain explicit losses; no existing workspace is copied.
+
+`source_capabilities` contains the complete `source_pin`, target `model`,
+`mcp_tools` allowlist and one `skills` entry per source skill. Each entry provides
+concrete `source` and `target` SkillRefs plus an absolute retained ZIP `archive`.
+The target version and digest name the canonical full-byte SkillUpload. Provider
+archive names retain their original spelling, including older underscore names.
+Derived representation evidence is excluded from the source pin, so existing
+consent pins and deployments without this configuration keep their meaning.
+
+The plan also supplies `skill_ids`, `skill_deployments` and an absolute
+`mcp_credential_file`. Provision target skills through the existing Skills port
+using `RetainedSkillDeployments`; each receipt pins tenant, account, project,
+version, credential-free immutable GCS directory and the entire path/SHA-256
+manifest. The provisioner must upload and independently read back every object
+before supplying a receipt. The adapter performs no GCS upload or credential
+discovery. Missing or changed deployment/file receipts refuse.
+
+Publish the counterpart through the existing NeutralResourceHost and record its
+native ACK/readback before invoking the credential owner. Persistent native
+agent definitions contain the MCP URL and allowlist, never bearer headers.
+`mcp_credential_file` must be an owned regular 0600 file with a short-lived
+registered chat-execution caller token for the original canonical agent
+(`{sub, chat_agent_id, jti, exp}`). The after-ACK owner must select
+`AgentMCPAuthority.chat_execution=True`; its default remains the restricted
+external agent-key surface, which full mode refuses. The runtime checks
+signature, exact claims, account/tenant/agent, registry expiry and revocation
+before each provider exposure, after independent native counterpart verification.
+It does not mint or store a bearer in a catalog or runtime manifest.
+
+This mode requires agent-origin preparation and all existing source/catalog/
+configuration pins; channel plans and workers cannot activate it. Unconfigured
+turns remain cold and the explicit Gemini worker token envelope is unchanged.
+
+A representation row applies only to its exact agent-origin platform, channel,
+account, source version and backend profile. Verified public backend previews
+explicitly use their existing channel context before a backend revision exists;
+the preview owner considers the evidence only for the requested target. Ordinary
+headless captures do not select this preview context. DMs, routines without that binding,
+workers and other profiles keep their original source capture. Invalid or stale
+representation evidence is discarded; the full deployment independently refuses
+without it. Capture never substitutes a reduced target after that refusal.
+
+The profile's execution mapping requires all six automatic filesystem capabilities
+(`bash`, `read`, `edit`, `grep`, `glob`, `write`). A read-only subset, missing
+capability or permission prompt cannot acquire general `code_execution` authority.
+When the source also enables `web_fetch` or `web_search` (including native
+enabled defaults), the same profile mapping retains them as `url_context` and
+`google_search`. They are never silently omitted to fit a token-only quote;
+provider web-tool fees need their own finance terms before a live attempt.
+The native per-toolset schema represents MCP only with an explicitly verified
+catalogue and fully resolved automatic enablement; legacy and worker projections
+still exclude native-only MCP toolsets. Capture authenticates to the configured
+server using a registered short-lived chat-execution credential from the existing
+MCP mint/registry owner, reads `tools/list`, and revokes that preview credential
+in a finally block before returning. This retains the ordinary source caller
+visibility, including search collapse. Runtime uses the same registered authority
+mode, account and canonical agent after its native ACK. An enabled automatic
+`daimon-mcp` entry must actually exist in the source; a credential binding alone
+cannot synthesize tool authority. The operator allowlist and any source connection
+allowlist must equal the complete actual server catalogue. A source restricted to
+`describe_agent` and `list_my_sessions` cannot be claimed equivalent to the ordinary
+chat catalogue (`search_tools`/`call_tool` and any directly exposed approval tools);
+it refuses full mode rather than dropping those capabilities. Before
+provider exposure the registered target credential must see the same catalogue.
+Unknown names, silent narrowing, unresolved policies and unexpected toolsets
+therefore cannot count as preserved capabilities.
+
+Full plans additionally require an absolute `gcs_credential_file`, read using the
+same owned regular 0600/no-follow credential reader as MCP. It supplies an explicit
+source OAuth access token in an exact JSON object with `access_token` and
+timezone-aware RFC3339 `expires_at`. Its expiry must cover the admitted turn plus
+30 seconds and be no more than one hour from the current check; a raw token,
+unknown field, missing file or expired/insufficient lifetime refuses. The owner
+rotates the protected file explicitly; there is no ambient credential discovery
+or source-token minting. Full plans also require explicit `gcs_mount_bucket` and
+`gcs_mount_prefix`; every verified deployment must lie inside that exact boundary.
+The prefix must equal the complete component-wise common directory of the
+verified deployment sources; an operator cannot widen it to an ancestor prefix.
+The private transport uses `google.auth.downscoped.Credentials` to exchange the
+source token at Google's STS for a token with exactly one Credential Access
+Boundary rule: `inRole:roles/storage.objectViewer` on that bucket, conditioned on
+object names and `storage.googleapis.com/objectListPrefix` starting with the
+approved nonempty prefix. No permission is available on other buckets or prefixes,
+even if the source worker has broader roles. The source bearer never goes to the
+sandbox. Exchange failure, unsupported scope, an unchanged/missing result, or
+insufficient returned lifetime refuses; there is no unscoped fallback. STS uses
+one explicit TLS-verified POST with no ambient proxy, redirect, ADC or retry.
+On each
+native counterpart read and each provider credential exposure, the runtime lists
+every configured GCS prefix, rejects missing/extra/duplicate objects, requires
+locked object retention through the admitted deadline plus the seven-day inline
+environment lifetime, and downloads each current generation to check SHA-256.
+Receipt metadata alone is insufficient. The storage read path never writes or
+modifies retention. Provisioners must grant creation only to the explicit
+provisioner during upload, then revoke that grant and all other effective create
+permissions under published prefixes before final inventory verification. Retain
+read-back bucket/project/inherited IAM evidence that the provisioner and runtime
+principals cannot append objects through cleanup. Locked retention prevents
+replacement/deletion, not new objects. A readback is a point-in-time observation,
+not a transactional directory mount.
+
+Private mounts use only the exchanged downscoped token in Gemini's
+managed environment egress proxy, scoped to the exact `storage.googleapis.com`
+domain through `environment.network.allowlist[].transform.Authorization`. The
+existing bound session credential seam refreshes and revalidates both MCP and
+GCS credentials at each SDK dispatch, including fallback attempts. It binds the
+exact admitted GCS sources and caller scope; unsupported or modified network
+rules refuse. Credentials exist only in transient, repr-redacted dispatch memory,
+never in retained native definitions or host session requests. Follow-up turns
+refresh the same environment using `type=remote`, its actual `environment_id`,
+and the fresh network rule, without remounting or resetting files. Ordinary
+turns without the full-source resolver retain their existing request shape.
+The credential's actual identity needs only bucket-scoped read authority; a
+Gemini-project service agent is not required for this explicit OAuth mechanism.
+Storage-owner IAM evidence must establish the principal and read-only scope;
+local source-token expiry metadata is not an IAM attestation. CAB restricts the
+exchanged authority regardless of those broader source permissions; the actual
+exchange and access boundary must still be checked in the authorized preflight.
+The one-domain allowlist blocks all other sandbox egress, including pip installs
+and external URL fetches. This is an explicit sandbox restriction: the canonical
+default-capability scenario only reads its skill, performs local file operations
+and bash printf, and invokes provider-side MCP; it needs no other sandbox egress.
+Other skill workflows must not assume unrestricted networking. Verify MCP and
+local builtin operations on the exact image.
+
+For protected interactions the SDK edge inspects the raw create/GET JSON before
+SDK parsing/serialization. Any `network.transform` presence refuses with a fixed
+error, preventing serializer warnings or host records from echoing a bearer.
+The zero-dollar preflight's existing HTTP response observer asserts the same
+presence-only check and records a boolean, never bodies or credentials. A POST
+stopped at the paid-send fence produces no response and proves no echo property;
+never report an unobserved response as a negative observation.
+Verify the real mount on
+the exact deployed image before any paid send. See Google's
+[private-source and credential refresh documentation](https://ai.google.dev/gemini-api/docs/agent-environment#private-sources)
+and [Credential Access Boundary listing conditions](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials#limit_permissions_when_listing_objects).
+
+Capture currently re-downloads the attached source versions and verifies the
+retained archives on every matching capture, including preview and follow-up.
+This deliberately fails closed for full deployments on source unavailability or
+drift, and adds cross-provider latency and rate-limit dependency. There is no
+process-global success cache that could outlive a changed pin or credential.
+Storage verification likewise incurs listing and download operations on every
+use; quote these separately from model tokens.
+
+The existing MCP token is bound to tenant/account/canonical agent and registry
+JTI, with expiry at most 900 seconds (or the provisioning deadline when shorter),
+not to a provider session ID. This mode does not assert session isolation between
+threads sharing that caller/agent binding. A single-session live fixture must use
+its isolated account/channel and revoke the exact JTI at cleanup. No automatic
+refresh exists: expiry or revocation refuses further exposure, and continuing
+requires a newly authorized credential through the existing mint owner.
+
+### Preserving source capabilities in an OpenAI hosted workspace
+
+An agent-origin `openai.persistent_workspace` deployment can use the same
+`source_capabilities` proof as the inline profile. This is explicit operator
+configuration; unconfigured channels and conversation-only workers keep their
+existing paths. Preview and preparation capture the actual source again and
+check the same source pin, account, agent version, channel and exact MCP
+catalogue. All six automatic filesystem builtins map through the profile's
+hosted bash capability. Unknown tools, confirmation policies and unrepresented
+web capabilities refuse instead of acquiring an implicit mapping.
+
+Each skill mapping contains its concrete source version, an absolute retained
+archive path, and the native OpenAI skill ID and numeric version. The target's
+`digest` is the hash of the canonical `SkillUpload` (files sorted by path),
+independent of the native version number and ZIP timestamps. Capture compares
+all retained archive bytes with the actual source version. The OpenAI driver
+independently downloads `/skills/{id}/versions/{version}/content` and verifies
+every file against that digest before publishing the agent or attaching skills
+to a session. Existing pins without a digest keep their request shape.
+
+Optional `source_capabilities.environment` must exactly equal the captured
+canonical hosted environment policy, including explicit network and packages.
+This evidence lets the existing preview/classifier retain that sandbox rather
+than declare its removal. Preparation reads the operator's actual native
+`environment_id` and checks that policy; source ownership labels are checked
+by capture and do not become execution authority. Unrepresentable environment
+configuration still refuses.
+
+The deployment also needs all target `skill_ids`, normal counterpart catalogue
+pins and an absolute `mcp_credential_file`. The credential file must be a regular
+file, owned by the runtime user, mode 0600. Provisioners use the existing
+provider-neutral after-ACK credential binding with `chat_execution=True` against
+the retained canonical source; they must not mint a token before the native agent has been acknowledged
+and read back. The real host factory passes the scoped resolver into the OpenAI
+driver. Only session creation receives the bearer: its registered identity,
+account/tenant, expiry, revocation and exact authenticated catalogue are checked
+before exposure to the captured destination. Agent metadata and runtime
+manifests contain the credential reference, never the bearer itself.
+
+Memory has no native preservation mapping in this profile and remains an
+explicit preview/consent loss. Model controls, repositories and any other source
+obligations retain their existing classification. Preserving skills, filesystem
+tools and authenticated MCP does not discharge those separate obligations.
+
+The MCP allowlist must equal the ordinary chat catalogue after the server's
+search transform (normally `search_tools` and `call_tool`). A recorded source
+restricted to direct `describe_agent`/`list_my_sessions` is refused; preserving
+those operations through the proxy requires explicit consent to the actual
+source catalogue, rather than narrowing or expanding authority during a switch.

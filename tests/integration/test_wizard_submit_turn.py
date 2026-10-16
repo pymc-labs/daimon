@@ -336,13 +336,17 @@ async def test_submitting_a_form_resumes_the_threads_existing_session(
     async with db_session_factory() as session:
         intent = (
             await session.execute(
-                sql_text("SELECT status, message_id FROM turn_card_intents WHERE id = :intent_id"),
+                sql_text(
+                    "SELECT status, message_id, channel_id, thread_id "
+                    "FROM turn_card_intents WHERE id = :intent_id"
+                ),
                 {"intent_id": UUID(view.cancel_button.custom_id.removeprefix("daimon:cancel:"))},
             )
         ).one_or_none()
     assert intent is not None and intent.status == "retired" and intent.message_id == "42", (
         "a normally completed wizard turn must persist its response ID and retire the intent"
     )
+    assert (intent.channel_id, intent.thread_id) == (str(channel.parent_id), str(channel.id))
 
 
 async def test_the_wizard_turn_posts_through_the_agent_post_transport(

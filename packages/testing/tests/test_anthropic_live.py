@@ -347,7 +347,10 @@ def test_changed_go_and_financial_envelope_refuse_without_effects(tmp_path):
     assert not (tmp_path / "output").exists()
 
 
-async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lost_credential_ack", [False, True])
+async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(
+    tmp_path, monkeypatch, lost_credential_ack
+):
     """Same executable callback as live; only HTTP replies/credentials are synthetic."""
     import importlib.util
     from pathlib import Path
@@ -393,12 +396,30 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_p
         binding=args.binding.model_copy(
             update={
                 "mcp_url": manifest.mcp.url,
-                "mcp_bearer_file": bearer,
+                "mcp_signing_secret_file": bearer,
                 "environment": ref(script_module.ENVIRONMENT.id, "environment"),
             }
         ),
     )
     calls = []
+    from daimon.testing.f2_mcp_binding import AgentMCPBinding
+
+    async def bind(credential, agent):
+        assert ("agent", agent.id) in credential.context.transport.authorization.created
+        assert ("POST", "/v1/agents") in calls
+        assert ("GET", "/v1/agents/" + agent.id) in calls
+        assert not any(path == "/v1/sessions" for _, path in calls)
+        calls.append(("OWNER", "mint"))
+        credential.token = "offline-only-bearer"
+        credential.context.redaction_secrets += (credential.token,)
+        return credential.token
+
+    async def close(credential):
+        calls.append(("OWNER", "revoke"))
+        credential.token = None
+
+    monkeypatch.setattr(AgentMCPBinding, "bind", bind)
+    monkeypatch.setattr(AgentMCPBinding, "close", close)
 
     async def handler(request):
         path = request.url.path
@@ -418,6 +439,8 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_p
         if path == "/v1/vaults/vault_f2/credentials":
             body = json.loads(request.content)
             assert body["auth"]["token"] == "offline-only-bearer"
+            if lost_credential_ack:
+                raise httpx.ReadError("credential acknowledgement lost", request=request)
             return httpx.Response(
                 200,
                 json={
@@ -464,7 +487,21 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(tmp_p
         secret_loader=lambda _: "offline-key",
         transport_factory=lambda: httpx.MockTransport(handler),
     )
+    assert calls.count(("OWNER", "mint")) == 1
+    assert calls.count(("OWNER", "revoke")) == 1
+    assert calls.count(("POST", "/v1/vaults/vault_f2/credentials")) == 1
+    assert calls.index(("OWNER", "mint")) < calls.index(("POST", "/v1/vaults/vault_f2/credentials"))
+    assert ("POST", "/v1/vaults/vault_f2/archive") in calls
+    if lost_credential_ack:
+        assert result["result"]["status"] == "fail"
+        assert ("POST", "/v1/sessions") not in calls
+        assert "offline-only-bearer" not in (args.output / "receipt.json").read_text()
+        assert guard.report()[0].held_usd == Decimal(".65")
+        return
     assert result["result"]["status"] == "pass", result
+    assert calls.index(("POST", "/v1/vaults/vault_f2/credentials")) < calls.index(
+        ("POST", "/v1/sessions")
+    )
     assert calls.count(("POST", "/v1/skills")) == 11
     assert calls.count(("POST", "/v1/sessions")) == 1
     assert ("POST", "/v1/sessions/sess_f1/archive") in calls
@@ -599,11 +636,8 @@ async def test_second_session_requires_first_archive_ack_and_third_is_refused(
 def test_missing_go_live_cli_pending_never_reads_key_or_reserves(tmp_path, monkeypatch, package):
     import argparse
 
-    from daimon.testing import anthropic_live_cases
-
     loader = Mock(side_effect=AssertionError("no key read"))
     monkeypatch.setattr(live, "explicit_secret", loader)
-    monkeypatch.setattr(anthropic_live_cases, "explicit_secret", loader)
     args = argparse.Namespace(
         live_binding=None,
         authorization=None,
@@ -831,7 +865,7 @@ def test_exact_signed_admission_and_stale_pins(tmp_path, package, corruption, si
             agent=ref("agent-test", "agent"),
             database_url="postgresql+asyncpg://fixture:fixture@localhost/daimon_test_nc_offline",
             mcp_url="https://mcp.owned.example/mcp",
-            mcp_bearer_file=tmp_path / "never-read-bearer",
+            mcp_signing_secret_file=tmp_path / "never-read-signer",
         ).model_dump_json()
     )
     recipe = tmp_path / "reviewed-recipe.json"
@@ -916,61 +950,6 @@ async def test_export_credential_refusal_preserves_settlement_and_no_secret(tmp_
     assert "offline-guarded-key" not in receipt
     assert json.loads(receipt)["guard_settlement_persisted"] is True
     assert guard.report()[0].held_usd == Decimal(".35")
-
-
-async def test_f2_lost_credential_ack_retires_vault_without_retry_or_session(tmp_path, monkeypatch):
-    from daimon.testing.anthropic_live_cases import f2_default
-
-    args, guard, _ = admission(tmp_path, monkeypatch, "F2-Anthropic")
-    bearer = tmp_path / "synthetic-bearer"
-    bearer.write_text("offline-only-bearer")
-    bearer.chmod(0o600)
-    args = replace(
-        args,
-        binding=args.binding.model_copy(
-            update={
-                "mcp_url": "https://mcp.owned.example/mcp",
-                "mcp_bearer_file": bearer,
-            }
-        ),
-    )
-    calls = []
-
-    async def handler(request):
-        path = request.url.path
-        calls.append((request.method, path))
-        if path == "/v1/vaults":
-            return httpx.Response(
-                200,
-                json={
-                    "id": "vault-lost",
-                    "type": "vault",
-                    "display_name": "offline",
-                    "created_at": "2026-10-11T12:00:00Z",
-                    "updated_at": "2026-10-11T12:00:00Z",
-                    "metadata": {},
-                },
-            )
-        if path == "/v1/vaults/vault-lost/credentials":
-            raise httpx.ReadError("credential acknowledgement lost", request=request)
-        if path == "/v1/vaults/vault-lost/archive":
-            return httpx.Response(200, json={})
-        raise AssertionError("unexpected provider request after credential failure")
-
-    result = await live.run_live(
-        args,
-        f2_default,
-        secret_loader=lambda _: "offline-key",
-        transport_factory=lambda: httpx.MockTransport(handler),
-    )
-    assert result["result"]["status"] == "failed"
-    assert calls == [
-        ("POST", "/v1/vaults"),
-        ("POST", "/v1/vaults/vault-lost/credentials"),
-        ("POST", "/v1/vaults/vault-lost/archive"),
-    ]
-    assert guard.report()[0].held_usd == Decimal(".65")
-    assert len(receipts(guard)) == 2
 
 
 async def test_caught_stream_stop_cannot_start_a_second_leg_after_archive(tmp_path, monkeypatch):
@@ -2750,3 +2729,111 @@ async def test_duplicate_shape_valid_late_identity_is_hashed_and_closes_enrichme
     assert result["verdict"] == "PASS" and result["sidecars"] == 2
     assert result["late_errors"] == ["RecordingError"]
     assert result["ledger_rows"] == 2
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_agent_mcp_binding_refuses_unacknowledged_or_foreign_agent(
+    tmp_path, monkeypatch, foreign
+):
+    from types import SimpleNamespace
+
+    from daimon.testing import f2_mcp_binding as owner
+
+    args, _, _ = admission(tmp_path, monkeypatch, "F2-Anthropic")
+    agent = ref("agent-actual", "agent")
+    created = set()
+    if foreign:
+        created.add(("agent", agent.id))
+        agent = agent.model_copy(update={"account_scope_id": "foreign"})
+    context = SimpleNamespace(
+        admission=args,
+        transport=SimpleNamespace(authorization=SimpleNamespace(created=created)),
+        redaction_secrets=(),
+    )
+    read = Mock(side_effect=AssertionError("signer must not be read before owned ACK"))
+    monkeypatch.setattr(live, "explicit_secret", read)
+    credential = owner.AgentMCPBinding(context)
+    with pytest.raises(live.LiveRefused, match="acknowledged agent"):
+        await credential.bind(agent)
+    await credential.close()
+    read.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "gemini", "openai"])
+async def test_agent_mcp_binding_commits_scoped_owner_token_and_revokes(
+    db_preflight, db_engine, db_clean, tmp_path, monkeypatch, provider
+):
+    from types import SimpleNamespace
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mcp_auth import token_jti
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+    from daimon.testing import f2_mcp_binding as owner
+    from daimon.testing.factories import make_account
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sm.begin() as db:
+        account = await make_account(db)
+    args, _, _ = admission(tmp_path, monkeypatch, "F2-Anthropic")
+    signer = tmp_path / "signer"
+    signer.write_text("offline-signer-with-sufficient-length-for-HS256")
+    signer.chmod(0o600)
+    scope = SCOPE.model_copy(
+        update={"tenant_id": str(account.tenant_id), "account_id": str(account.id)}
+    )
+    args = replace(
+        args,
+        binding=args.binding.model_copy(update={"scope": scope, "mcp_signing_secret_file": signer}),
+    )
+    args.output.mkdir()
+    agent = ref("agent-acknowledged", "agent").model_copy(
+        update={"tenant_id": scope.tenant_id, "account_id": scope.account_id}
+    )
+    context = SimpleNamespace(
+        admission=args,
+        transport=SimpleNamespace(authorization=SimpleNamespace(created={("agent", agent.id)})),
+        redaction_secrets=(),
+    )
+    monkeypatch.setattr(owner, "create_async_engine", lambda *a, **kw: db_engine)
+    canonical = agent
+    if provider == "anthropic":
+        credential = owner.AgentMCPBinding(context)
+    else:
+        agent = agent.model_copy(update={"provider": provider, "id": "foreign-native-id"})
+        credential = owner.AgentMCPBinding(
+            authority=owner.AgentMCPAuthority(
+                provider=provider,
+                scope=scope,
+                account_scope_id=agent.account_scope_id,
+                output=args.output,
+                deadline_s=args.deadline_s,
+                database_url=args.binding.database_url,
+                mcp_signing_secret_file=signer,
+                acknowledged=lambda actual: actual == agent,
+                redact=lambda values: setattr(
+                    context, "redaction_secrets", context.redaction_secrets + values
+                ),
+                canonical_source=canonical,
+            )
+        )
+    token = await credential.bind(agent)
+    assert token in context.redaction_secrets
+    async with sm() as db:
+        row = await get_mcp_token(db, jti=token_jti(token))
+    assert row is not None and row.revoked_at is None and not row.scopes
+    assert row.kind == "agent" and row.account_id == account.id
+    assert row.agent_id == str(
+        derive_agent_uuid(tenant_id=account.tenant_id, ma_agent_id=canonical.id)
+    )
+    assert (row.expires_at - row.created_at).total_seconds() <= 900
+    with pytest.raises(live.LiveRefused, match="replayed"):
+        await credential.bind(agent)
+    await credential.close()
+    async with sm() as db:
+        row = await get_mcp_token(db, jti=token_jti(token))
+    assert row.revoked_at is not None and credential.token is None
+    for name in ("f2-mcp-token-intent.json", "f2-mcp-token-cleanup.json"):
+        receipt = args.output / name
+        assert receipt.stat().st_mode & 0o777 == 0o600
+        assert token not in receipt.read_text() and signer.read_text() not in receipt.read_text()

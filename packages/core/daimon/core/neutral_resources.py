@@ -1059,6 +1059,28 @@ def _worker_subset(
         raise WorkerSpecRefused(field, "not_subset")
 
 
+def _worker_read_only_memory(resource: ResourceBinding) -> ResourceBinding:
+    """Attenuate only a canonical native memory mount; retain all binding authority."""
+    from daimon.core.memory_resource import memory_mount
+
+    native, ref = resource.native, resource.resource
+    if (
+        resource.kind == "native"
+        and ref is not None
+        and ref.kind == "memory_store"
+        and native is not None
+        and native.namespace == f"{MANAGED_AGENTS.provider}.session_resource_create"
+        and native.version == 1
+    ):
+        readonly = {"resource": memory_mount(ref.id, read_only=True)}
+        if native.value == readonly:
+            return resource
+        if native.value != {"resource": memory_mount(ref.id, read_only=False)}:
+            raise WorkerSpecRefused("files", "unsupported")
+        return resource.model_copy(update={"native": native.model_copy(update={"value": readonly})})
+    return resource
+
+
 def _worker_tools(requested: AgentSpec, granted: AgentSpec) -> None:
     available = {(tool.kind, tool.name): tool for tool in granted.tools or ()}
     if len(available) != len(granted.tools or ()):
@@ -1461,6 +1483,10 @@ def resolve_worker_spec(
         if overrides is not None:
             raise WorkerSpecRefused("overrides", "unsupported")
         source = spec
+        if "metadata" not in source.model_fields_set:
+            # Fresh workers inherit host-owned stamps; supplied metadata must
+            # still pass the exact parent comparison below.
+            source = source.model_copy(update={"metadata": parent.spec.metadata})
     try:
         normalized_source, _ = worker_spec_ceiling(source)
     except ValueError:
@@ -1611,7 +1637,12 @@ def resolve_worker_spec(
         if pin.version is None:
             raise WorkerSpecRefused("skills", "unbound")
     _worker_subset("skills", tuple(resolved.skills or ()), tuple(parent.spec.skills or ()))
-    _worker_subset("files", resources, parent.resources)
+    # A previously attenuated worker mount remains a subset on preparation replay.
+    _worker_subset(
+        "files",
+        resources,
+        parent.resources + tuple(_worker_read_only_memory(item) for item in parent.resources),
+    )
     for resource in resources:
         ref = resource.resource
         if ref is not None and (ref.tenant_id, ref.account_id) != (
@@ -1658,6 +1689,7 @@ def resolve_worker_spec(
             or profile.support.get("memory_stores") != "native"
         ):
             raise WorkerSpecRefused("files", "unsupported")
+    resources = tuple(_worker_read_only_memory(item) for item in resources)
     environment = environment if environment is not None else parent.environment
     if "sandbox" in drops:
         environment = None
@@ -1772,7 +1804,7 @@ def resolve_worker_spec(
         ),
         "scope": fleet.scope.model_dump(mode="json"),
         "seals": sorted(parent.seal_ids),
-        "memory_read_only": parent.memory_read_only,
+        "memory_read_only": True,
     }
     if captured_source is not None:
         body["capture"] = TypeAdapter(object).dump_python(dict(captured_source), mode="json")
@@ -1796,6 +1828,7 @@ def resolve_worker_spec(
         limits=cap,
         source_agents=(),
         source_revisions=(),
+        memory_read_only=True,
     )
     source_agent = (spec.ref, spec.revision) if isinstance(spec, Agent) else None
     return ResolvedWorkerSpec(

@@ -12,6 +12,8 @@ from mux.contracts.resources import Agent, AgentFilter, AgentSpec
 from mux.drivers.gemini.bundles import owned_skill, skill_sources, validate_bundle, validate_targets
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.core import GeminiAgents, compile_agent, now, page_values, refuse
+from mux.drivers.gemini.mcp_auth import MCPSecretResolver
+from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
 from mux.drivers.gemini.storage import Records, Storage, owner
 from mux.drivers.gemini.transport import Object, Transport, object_value
 from mux.errors import ProviderError, ScopeViolation
@@ -32,7 +34,13 @@ def require_scope(scope: Scope) -> None:
 
 
 def native_definition(
-    records: Records, scope: Scope, account: str, spec: AgentSpec, id_: str
+    records: Records,
+    scope: Scope,
+    account: str,
+    spec: AgentSpec,
+    id_: str,
+    *,
+    authenticated_mcp: bool = False,
 ) -> Object:
     """Keep an explicit native model/tools list and every concrete bundle byte."""
     # Persistent native definitions cannot safely store per-session credentials.
@@ -44,9 +52,13 @@ def native_definition(
         "gemini-3.5-flash-lite",
     ):
         refuse("native_catalog_model")
-    if any(connection.credential_ref is not None for connection in spec.mcp_servers or ()):
+    if not authenticated_mcp and any(
+        connection.credential_ref is not None for connection in spec.mcp_servers or ()
+    ):
         refuse("named_agent_session_credentials")
-    request = compile_agent(spec)
+    # Compilation contains destination/allowlist only. The existing session
+    # resolver attaches bearer material to each interaction, never this object.
+    request = compile_agent(spec, authenticated_mcp=authenticated_mcp)
     for pin in spec.skills or ():
         record = owned_skill(records, scope, account, pin.id)
         if pin.version in (None, "latest") or (
@@ -130,10 +142,11 @@ class GeminiCatalogAdapter(GeminiAgents):
         catalog_transport: AgentCatalogTransport,
         *,
         enabled: bool = False,
+        mcp_secrets: MCPSecretResolver | None = None,
     ) -> None:
         if type(enabled) is not bool or not account_scope_id.strip():
             raise ValueError("an explicit bool capability and account scope are required")
-        super().__init__(transport, storage, account_scope_id)
+        super().__init__(transport, storage, account_scope_id, mcp_secrets=mcp_secrets)
         self.enabled = enabled
         self._catalog_transport = catalog_transport
 
@@ -149,7 +162,14 @@ class GeminiCatalogAdapter(GeminiAgents):
     async def compile(self, scope: Scope, spec: AgentSpec, *, id_: str) -> Object:
         self._admit_catalog(scope)
         async with self._storage.transaction() as records:
-            return native_definition(records, scope, self._account, spec, id_)
+            return native_definition(
+                records,
+                scope,
+                self._account,
+                spec,
+                id_,
+                authenticated_mcp=self._mcp_secrets is not None,
+            )
 
     async def create(self, scope: Scope, spec: AgentSpec, *, key: str) -> Agent:
         self._admit_catalog(scope)
@@ -171,7 +191,14 @@ class GeminiCatalogAdapter(GeminiAgents):
             )[:40]
         )
         async with self._storage.transaction() as records:
-            definition = native_definition(records, scope, self._account, spec, id_)
+            definition = native_definition(
+                records,
+                scope,
+                self._account,
+                spec,
+                id_,
+                authenticated_mcp=self._mcp_secrets is not None,
+            )
             digest = request_digest(
                 {"kind": MODE, "spec": spec.model_dump(mode="json"), "definition": definition}
             )
@@ -236,13 +263,45 @@ class GeminiCatalogAdapter(GeminiAgents):
             if agent is None or agent.ref != ref:
                 raise ScopeViolation(ref.id, "no owned native catalog agent")
             expected = deepcopy(self._owned(agent, scope))
-            compiled = native_definition(records, scope, self._account, agent.spec, ref.id)
+            compiled = native_definition(
+                records,
+                scope,
+                self._account,
+                agent.spec,
+                ref.id,
+                authenticated_mcp=self._mcp_secrets is not None,
+            )
             if expected != compiled:
                 raise ProviderError(
                     "conflict", retryable=False, native_code="catalog_compiler_drift"
                 )
         verify_definition(await self._catalog_transport.get_agent(ref.id), expected)
         return agent
+
+    async def skill_deployments(
+        self, scope: Scope, retained: Agent
+    ) -> tuple[GCSBundleDeployment, ...]:
+        """Read the owned deployments actually mounted by this verified agent.
+
+        The host's storage readback must check these directories, rather than
+        accepting an unrelated operator receipt with the same version label.
+        """
+        self._admit_catalog(scope)
+        self._owned(retained, scope)
+        async with self._storage.transaction() as records:
+            if records.agents.get(retained.ref.id) != retained:
+                raise ScopeViolation(retained.ref.id, "skill deployment agent differs")
+            skill_sources(records, scope, self._account, retained.spec.skills)
+            deployments: list[GCSBundleDeployment] = []
+            for pin in retained.spec.skills or ():
+                record = owned_skill(records, scope, self._account, pin.id)
+                deployment = record.deployments.get(pin.version or "")
+                if deployment is None:
+                    raise ProviderError(
+                        "conflict", retryable=False, native_code="skill_deployment_missing"
+                    )
+                deployments.append(deployment)
+            return tuple(deployments)
 
     async def verify(self, scope: Scope, retained: Agent) -> Agent:
         """The host edge compares its separate authored row with native readback."""

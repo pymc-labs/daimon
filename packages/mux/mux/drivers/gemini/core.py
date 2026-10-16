@@ -42,6 +42,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
 from mux.drivers.gemini.mcp_auth import (
+    GCSSecretResolver,
     MCPSecretResolver,
     authenticated_template,
     compile_mcp,
@@ -106,6 +107,7 @@ class Base:
         account_scope_id: str,
         *,
         mcp_secrets: MCPSecretResolver | None = None,
+        gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
@@ -121,6 +123,7 @@ class Base:
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
+        self._gcs_secrets = gcs_secrets
 
     def _mcp_request(self, records: Records, scope: Scope, spec: SessionSpec) -> Object:
         """Rebuild owned intent before authentication; never trust a saved tool list."""
@@ -730,6 +733,7 @@ class GeminiEvents(Base):
         state_store: StateStore,
         model_for_interaction: Callable[[str], ModelRef | None] | None = None,
         mcp_secrets: MCPSecretResolver | None = None,
+        gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
@@ -740,6 +744,7 @@ class GeminiEvents(Base):
             storage,
             account_scope_id,
             mcp_secrets=mcp_secrets,
+            gcs_secrets=gcs_secrets,
             native_agent=native_agent,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
@@ -842,6 +847,7 @@ class GeminiEvents(Base):
                             connections,
                             self._mcp_secrets,
                             overrides={},
+                            gcs_secrets=self._gcs_secrets,
                         )
                         raw = await self._get(record, receipt.input_ids[0])
                         self._accept(record, raw, receipt.turn_id, events)
@@ -917,6 +923,7 @@ class GeminiEvents(Base):
                 connections,
                 self._mcp_secrets,
                 overrides=overrides,
+                gcs_secrets=self._gcs_secrets,
             )
             if record.current is not None and authenticated:
                 # Admission/authentication precedes this native history read.

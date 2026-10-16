@@ -74,8 +74,9 @@ class LiveBinding(BaseModel):
     database_url: str | None = None
     mcp_url: str | None = None
     mcp_bearer_file: Path | None = None
+    mcp_signing_secret_file: Path | None = None
 
-    def verify(self, package: Package) -> None:
+    def verify(self, package: Package, *, f2_session_binding: bool = True) -> None:
         if self.scope.is_platform or self.scope.is_legacy_host_authorized:
             raise LiveRefused("live probes require an authorized tenant/account scope")
         for ref, kind in ((self.environment, "environment"), (self.agent, "agent")):
@@ -92,8 +93,13 @@ class LiveBinding(BaseModel):
         if package == "A7" and (self.agent is None or self.database_url is None):
             raise LiveRefused("A7 requires an owned DB and authorized disposable agent")
         if package == "F2-Anthropic":
-            if not self.mcp_url or not self.mcp_bearer_file:
+            if not self.mcp_url:
                 raise LiveRefused("F2 requires a provider-reachable owned MCP binding")
+            if f2_session_binding:
+                if not self.database_url or not self.mcp_signing_secret_file:
+                    raise LiveRefused("F2 requires DB/signing authority for after-ACK MCP binding")
+            elif not self.mcp_bearer_file:
+                raise LiveRefused("F2 acceptance requires its owned bootstrap MCP bearer")
             url = httpx.URL(self.mcp_url)
             if (
                 url.scheme != "https"

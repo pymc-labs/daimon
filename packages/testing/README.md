@@ -1043,3 +1043,26 @@ including exact role/model/cash terms and durable dispatch claims. The Gemini
 worker term pins `gemini-3.8-flash`; the $0.49 hold and all other cash terms
 remain unchanged. Quote runtime-enforced worker caps with `ModelPrice.reserve`
 and `TokenLimits`; a signed cash hold alone is not a native token envelope.
+
+The after-ACK `AgentMCPBinding` owner also accepts `AgentMCPAuthority` for other
+providers. The selected caller must verify actual native ACK/readback and its
+association to the original canonical source. Foreign native ids never become
+Daimon agent ids. The owner reuses the existing registered token mint, private
+pending-intent receipt, readback and exact-JTI revocation lifecycle. Its legacy
+Anthropic LiveContext input retains the same ACK gate and behavior. This is a
+provisioning callback, not authorization to allocate sessions or send prompts.
+For source-preserving Gemini full mode select `chat_execution=True` on the
+explicit authority. It uses the same registered mint and revocation owner but
+signs `chat_agent_id`, retaining ordinary chat visibility and search collapse.
+The default `False` continues to sign `agent_id` and retains the restricted
+external agent-chat surface. Full mode refuses that different authority. Both
+source catalogue capture and runtime require the exact registered chat authority;
+preview credentials are short-lived and revoked immediately after discovery.
+A source with an absent/disabled daimon-mcp toolset or a catalogue subset cannot
+be made full by the presence of a caller credential.
+
+For a captured shared source, use consent's canonical source reference (transport
+service-account ownership is omitted), and verify the caller's captured resource
+scope and actual source/counterpart association before admitting the callback.
+The logical caller account always comes from the scoped authority, never the
+native source transport account.

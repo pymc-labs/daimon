@@ -93,6 +93,40 @@ def neutral_catalog_profile_for(provider: str, *, profile_id: str | None = None)
     return matches[0] if matches else None
 
 
+def represented_execution_tools(
+    profile: Profile, tools: tuple[ToolSpec, ...]
+) -> tuple[ToolSpec, ...]:
+    """Map supported filesystem capabilities through the profile's execution tool.
+
+    MCP remains a separate capability. Unknown tools and permission prompts
+    cannot acquire an execution mapping by resembling a known tool name.
+    """
+    if profile.profile_id not in (INLINE_REUSE.profile_id, PERSISTENT_WORKSPACE.profile_id):
+        raise InvalidConfig("profile has no source execution mapping")
+    names = {"bash", "read", "edit", "grep", "glob", "write"}
+    web_tools = (
+        {"web_fetch": "url_context", "web_search": "google_search"}
+        if profile.profile_id == INLINE_REUSE.profile_id
+        else {"web_search": "web_search"}
+    )
+    actual = {tool.name for tool in tools}
+    if (
+        len(tools) != len(actual)
+        or not names.issubset(actual)
+        or not actual.issubset(names | web_tools.keys())
+        or any(tool.kind != "builtin" or tool.permission != "auto" for tool in tools)
+    ):
+        raise InvalidConfig("source execution tools are not representable")
+    return (
+        ToolSpec(name=profile.execution_tool, kind="builtin"),
+        *(
+            ToolSpec(name=target, kind="builtin")
+            for source, target in web_tools.items()
+            if source in actual
+        ),
+    )
+
+
 def native_agent_tools(profile: Profile, spec: AgentSpec) -> tuple[ToolSpec, ...]:
     """Compare native readback while retaining the authored tool intent."""
     if profile.tool_readback == "authored":
