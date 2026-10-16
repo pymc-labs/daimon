@@ -17,6 +17,7 @@ from daimon.core.neutral_resources import (
     WorkerLimits,
     WorkerPermissions,
     WorkerSpecRefused,
+    resolve_worker_spec,
 )
 from daimon.core.security_audit import capture_decision
 from mux.contracts.config import BackendConfig
@@ -153,7 +154,22 @@ def worker(result: Event | None = None, **changes: Any) -> FleetWorker:
         error_code=None,
         version=3,
     )
-    return replace(row, **changes)
+    resolved = resolve_worker_spec(
+        parent,
+        parent.spec,
+        policy=POLICY,
+        now=NOW,
+        limits=WorkerLimits(
+            budget_usd=row.budget_usd, deadline=row.deadline_at, max_turns=row.max_turns
+        ),
+    )
+    return replace(
+        row,
+        **(
+            {"spec": resolved.spec.model_dump(mode="json"), "spec_digest": resolved.digest}
+            | changes
+        ),
+    )
 
 
 def ports(*rows: FleetWorker, fleet: FleetRun | None = None) -> Mock:
@@ -890,6 +906,103 @@ async def test_resume_rechecks_the_current_tool_grant_not_the_persisted_digest()
             now=NOW,
         )
     owner.control.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["max_input_tokens", "max_output_tokens", "max_model_requests"])
+@pytest.mark.parametrize("capped_parent", [False, True])
+async def test_resume_never_drops_a_limit_bound_into_the_original_digest(
+    monkeypatch, field, capped_parent
+):
+    from daimon.core import neutral_resources
+
+    # Model a profile that supports the requested hard ceilings. This tests the
+    # shared resolver/control seam without granting any native provider access.
+    profile = get_profile(permissions().backend_grants[0].profile)
+    monkeypatch.setattr(
+        neutral_resources,
+        "get_profile",
+        lambda _: profile.model_copy(
+            update={
+                "support": dict(profile.support)
+                | {
+                    "input_token_limit": "native",
+                    "output_token_limit": "native",
+                    "model_request_limit": "native",
+                }
+            }
+        ),
+    )
+    parent = permissions()
+    if capped_parent:
+        parent = replace(parent, limits=parent.limits.model_copy(update={field: 64}))
+    limits = WorkerLimits(
+        budget_usd=Decimal("0.2"),
+        deadline=NOW + timedelta(minutes=5),
+        max_turns=2,
+        **{field: 32},
+    )
+    original = resolve_worker_spec(parent, parent.spec, policy=POLICY, now=NOW, limits=limits)
+    row = replace(
+        worker(status="running", result=None),
+        spec=original.spec.model_dump(mode="json"),
+        spec_digest=original.digest,
+    )
+    owner = ports(row)
+    with pytest.raises(
+        (WorkerSpecRefused, FleetRefused), match=field if capped_parent else "worker_spec_changed"
+    ):
+        await FleetOrchestrator(owner).control(
+            parent,
+            POLICY,
+            run_id=RUN,
+            worker_id=WORKER,
+            action="resume",
+            expected_version=row.version,
+            operation_key="resume-original",
+            now=NOW,
+        )
+    owner.control.assert_not_awaited()
+
+
+@pytest.mark.parametrize("outcome", ["cancelled", "succeeded", "failed"])
+async def test_worker_completion_only_warns_for_an_actual_failure(outcome):
+    import asyncio
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from structlog.testing import capture_logs
+
+    row = worker(status="running")
+    host = HostFleetPorts(Mock(), prices={}, markup=Decimal(1))
+    started = asyncio.Event()
+
+    async def execute():
+        started.set()
+        if outcome == "cancelled":
+            await asyncio.Event().wait()
+        elif outcome == "failed":
+            raise ValueError("private worker detail must not reach logs")
+
+    task = asyncio.create_task(execute())
+    host._tasks[row.id] = task
+    with capture_logs() as logs:
+        await started.wait()
+        if outcome == "cancelled":
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        host._worker_completed(row, task)
+    assert row.id not in host._tasks
+    if outcome == "failed":
+        assert logs == [
+            {
+                "event": "fleet.worker_task_failed",
+                "log_level": "warning",
+                "run_id": str(row.run_id),
+                "worker_id": str(row.id),
+                "error_class": "ValueError",
+            }
+        ]
+    else:
+        assert logs == []
 
 
 async def test_disabled_backend_never_reaches_atomic_admission():

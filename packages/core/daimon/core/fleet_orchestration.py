@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from daimon.core.access_policy import TenantAccessPolicy
@@ -24,6 +25,9 @@ from mux.contracts.events import AgentMessagePayload, Event, TextPart
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
 from pydantic import JsonValue, TypeAdapter
+from structlog import get_logger
+
+log = get_logger()
 
 if TYPE_CHECKING:
     from daimon.core.fleet import FleetRun, FleetWorker
@@ -490,20 +494,24 @@ class FleetOrchestrator:
                 )
                 if len(choices) != 1:
                     raise FleetRefused("backend_grant_unavailable")
-                prepared.append(
-                    resolve_worker_spec(
-                        parent,
-                        AgentSpec.model_validate(candidate.spec),
-                        policy=policy,
-                        now=now,
-                        backend=BackendConfig.model_validate(choices[0].model_dump(mode="json")),
-                        limits=WorkerLimits(
-                            budget_usd=candidate.budget_usd,
-                            deadline=candidate.deadline_at,
-                            max_turns=candidate.max_turns,
-                        ),
-                    )
+                resolved = resolve_worker_spec(
+                    parent,
+                    AgentSpec.model_validate(candidate.spec),
+                    policy=policy,
+                    now=now,
+                    backend=BackendConfig.model_validate(choices[0].model_dump(mode="json")),
+                    limits=WorkerLimits(
+                        budget_usd=candidate.budget_usd,
+                        deadline=candidate.deadline_at,
+                        max_turns=candidate.max_turns,
+                    ),
                 )
+                # Fresh permission checks remain mandatory. The retained digest
+                # also binds original limits; missing caps must never broaden a
+                # resumed worker even when its parent is currently uncapped.
+                if resolved.digest != candidate.spec_digest:
+                    raise FleetRefused("worker_spec_changed")
+                prepared.append(resolved)
         reply = await self._owner().control(
             parent,
             run,
@@ -824,13 +832,21 @@ class HostFleetPorts:
             task = asyncio.create_task(execute())
             self._tasks[worker.id] = task
 
-            def completed(done: asyncio.Task[None]) -> None:
-                if self._tasks.get(worker.id) is done:
-                    self._tasks.pop(worker.id)
-                if not done.cancelled():
-                    done.exception()
+            task.add_done_callback(partial(self._worker_completed, worker))
 
-            task.add_done_callback(completed)
+    def _worker_completed(self, worker: FleetWorker, done: asyncio.Task[None]) -> None:
+        if self._tasks.get(worker.id) is done:
+            self._tasks.pop(worker.id)
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is not None:
+            log.warning(
+                "fleet.worker_task_failed",
+                run_id=str(worker.run_id),
+                worker_id=str(worker.id),
+                error_class=type(error).__name__,
+            )
 
     async def close(self) -> None:
         for events, finished, _ in self._watches.values():

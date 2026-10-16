@@ -2459,7 +2459,14 @@ sparse `AgentPatch` overrides. The single worker resolver derives their tools,
 models, resources, safety prompt and limits from the root. Arbitrary caller
 `SessionSpec` resources are currently refused until scoped worker preparation is
 bound. Resume rechecks current permissions and keeps the original budget, turn
-and deadline ceilings; it cannot reopen a terminal worker or reset a hold.
+and deadline ceilings, then compares the complete resolved spec digest before
+calling the control owner. That digest also binds token and request caps: if the
+stored worker cannot reconstruct its original envelope or source, resume refuses
+instead of dropping a limit, even under a currently uncapped parent. Such a worker
+needs a separately admitted operation; its original record and holds are retained.
+Resume cannot reopen a terminal worker or reset a hold. Ordinary worker task
+cancellation is not logged as a failure warning; genuine task failures retain
+their worker/run identifiers and error class without logging exception details.
 
 Cross-review attaches the target's verified journal event through the same spawn
 path, with a backend different from the primary's. Admission refuses a same-backend
