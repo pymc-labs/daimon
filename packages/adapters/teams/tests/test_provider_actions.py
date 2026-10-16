@@ -277,6 +277,34 @@ async def test_unbound_or_expired_posts_nothing(invalid: str) -> None:
     assert not sender.sent and not host.pending
 
 
+@pytest.mark.parametrize("still_ours", [True, False])
+async def test_a_closed_group_chat_gets_no_question_card(still_ours: bool) -> None:
+    """A group chat's question waits on the turn's cached roster check: a closed chat sees nothing."""
+    checks: list[bool] = []
+
+    async def roster_open(fresh: bool) -> bool:
+        checks.append(fresh)
+        return still_ours
+
+    sender = FakeSender()
+    host = actions.TeamsProviderActions(sender)
+    hook = host.hook(
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        thread_id="thread",
+        roster_open=roster_open,
+    )
+    waiting = asyncio.ensure_future(hook(prompt()))
+    if still_ours:
+        await pending(host)
+        waiting.cancel()
+    answer = await asyncio.gather(waiting, return_exceptions=True)
+    assert checks == [False], "one cached check: a join evicts the roster"
+    assert bool(sender.sent) is still_ours, "only a chat still ours sees the card"
+    if not still_ours:
+        assert answer == [None] and not host.pending, "unanswered, as on a timeout"
+
+
 @pytest.mark.parametrize("provider", [None, "missing", "anthropic", "openai", "gemini"])
 def test_default_path_attaches_no_new_callback(provider: str | None) -> None:
     ref = SESSION.model_copy(update={"provider": provider}) if provider is not None else None

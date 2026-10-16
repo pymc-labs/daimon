@@ -124,6 +124,7 @@ def _inbound(
         is_external=actor.is_external,
         is_external_known=actor.is_external_known,
         home_tenant_id=actor.home_tenant_id,
+        from_form=True,
     )
 
 

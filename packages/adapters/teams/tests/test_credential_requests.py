@@ -94,6 +94,7 @@ def _runtime(
     managed: bool = False,
     mcp: bool = False,
     updates: list[dict[str, Any]] | None = None,
+    admins: tuple[str, ...] = (),
 ) -> TeamsRuntime:
     """`updates` collects each agent update, for the skill attach."""
     router = MARouter()
@@ -108,7 +109,9 @@ def _runtime(
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
     router.add("POST", rf"/v1/agents/{MA_ID}", update)
-    runtime = build_teams_runtime(db, anthropic=build_fake_anthropic(router.dispatch))
+    runtime = build_teams_runtime(
+        db, anthropic=build_fake_anthropic(router.dispatch), admins=admins
+    )
     if mcp:
         runtime.settings.mcp.public_url = "https://daimon.example.com/mcp"
         runtime.settings.mcp.jwt_secret = SecretStr("j" * 32)
@@ -494,11 +497,7 @@ async def _aws_pair(db: async_sessionmaker[AsyncSession], account_id: uuid.UUID)
 
 
 def _admin_runtime(db: async_sessionmaker[AsyncSession], **kw: Any) -> TeamsRuntime:
-    from .conftest import teams_settings
-
-    runtime = _runtime(db, **kw)
-    runtime.settings.teams = teams_settings(admins=(AAD_OBJECT_ID,))
-    return runtime
+    return _runtime(db, admins=(AAD_OBJECT_ID,), **kw)
 
 
 async def test_an_admin_can_rotate_one_key_of_a_stored_aws_family(

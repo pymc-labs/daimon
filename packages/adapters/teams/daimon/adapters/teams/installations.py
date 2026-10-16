@@ -3,7 +3,8 @@
 Nothing app-only lists the teams an app is in, so every verified channel
 activity records its team (once per process, or again when its name changes)
 in `teams_installations`, with the Entra group Graph addresses it by. An
-install posts a welcome, to the team's General channel or the 1:1 chat; a
+install posts a welcome, to the team's General channel or the 1:1 chat (a
+group chat gets none); a
 removal from a team deletes its row, so channel reads stop finding it.
 """
 
@@ -13,7 +14,7 @@ import asyncio
 import uuid
 
 import structlog
-from daimon.adapters.teams.identity import GROUP_CHAT_UNSUPPORTED, canonical_uuid
+from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.stores.teams_installations import (
@@ -105,6 +106,8 @@ class TeamInstalls:
         if not self.is_ours(activity):
             return
         kind = activity.conversation.conversation_type
+        if kind == "groupChat":
+            return  # no welcome there yet
         is_team = kind == "channel"
         if is_team:
             await self.observe(activity)
@@ -116,10 +119,7 @@ class TeamInstalls:
             )
         bot = activity.recipient.name or "daimon"
         try:
-            text = (
-                GROUP_CHAT_UNSUPPORTED if kind == "groupChat" else welcome_text(bot, team=is_team)
-            )
-            await asyncio.wait_for(ctx.send(text), SEND_TIMEOUT_S)
+            await asyncio.wait_for(ctx.send(welcome_text(bot, team=is_team)), SEND_TIMEOUT_S)
         except TEAMS_SEND_ERRORS as err:
             log.warning("teams.welcome.send_failed", error=type(err).__name__)
 

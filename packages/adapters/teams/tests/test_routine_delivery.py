@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from daimon.adapters.teams.activity_feed import ActivityFeed, chain_id
 from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import DirectMessagePolicy
@@ -32,13 +33,24 @@ class _Teams:
     async def open_chat(self, member_id: str) -> str:
         return f"a:dm-{member_id}"
 
-    async def post(self, conversation_id: str, text: str) -> None:
+    async def post(self, conversation_id: str, text: str) -> str:
         if self.post_status and not conversation_id.startswith("a:"):
             request = httpx.Request("POST", "https://smba.example")
             raise httpx.HTTPStatusError(
                 "refused", request=request, response=httpx.Response(self.post_status)
             )
         self.posts.append((conversation_id, text))
+        return f"m-{len(self.posts)}"
+
+
+class _Notices(ActivityFeed):
+    """Records `notify` calls instead of sending them."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def notify(self, conversation_id: str, message_id: str, **kwargs: object) -> None:  # type: ignore[override]
+        self.calls.append((conversation_id, message_id, kwargs))
 
 
 def _row(**overrides: object) -> RoutineRow:
@@ -67,9 +79,12 @@ def _row(**overrides: object) -> RoutineRow:
 
 
 async def _post(
-    factory: async_sessionmaker[AsyncSession], teams: _Teams, row: RoutineRow
+    factory: async_sessionmaker[AsyncSession],
+    teams: _Teams,
+    row: RoutineRow,
+    feed: ActivityFeed | None = None,
 ) -> DeliveryOutcome:
-    poster = make_teams_routine_poster(factory, teams, tenant_id=TENANT, dm_policies={})
+    poster = make_teams_routine_poster(factory, teams, tenant_id=TENANT, dm_policies={}, feed=feed)
     return await poster(row)
 
 
@@ -168,3 +183,25 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(db_session_
     assert "".join(text for _, text in teams.posts).split("\n\n")[-1] == result
     expected_place = f"a:dm-29:{CREATOR}" if fallback else f"{CHANNEL};messageid=17"
     assert all(where == expected_place for where, _ in teams.posts)
+
+
+async def test_a_channel_result_notifies_its_creator_once_per_routine(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The creator's feed links to the first chunk; one chain per routine."""
+    teams, feed, row = _Teams(), _Notices(), _row()
+    await _post(db_session_factory, teams, row, feed)
+    [(where, message_id, notice)] = feed.calls
+    assert (where, message_id) == (f"{CHANNEL};messageid=17", "m-1"), "the posted result"
+    assert notice["recipient_id"] == CREATOR, "the routine's creator"
+    assert notice["chain"] == chain_id(row.id), "each run replaces the routine's last notice"
+    assert "All green." in str(notice["preview"]), "the result previews"
+
+
+async def test_a_dm_fallback_sends_no_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A result sent to the creator's 1:1 chat notifies by itself."""
+    teams, feed = _Teams(post_status=404), _Notices()
+    await _post(db_session_factory, teams, _row(), feed)
+    assert teams.posts and feed.calls == [], "no notice for a 1:1 chat"

@@ -13,6 +13,7 @@ from daimon.adapters.teams.context import (
     Attached,
     channel_block,
     channel_media,
+    chat_media,
     classifier_window,
     delta_block,
     history_media,
@@ -223,6 +224,42 @@ def test_render_user_message_without_history_has_no_envelope() -> None:
     assert 'is_admin="true">hi &lt;b&gt;</user_query>' in message
 
 
+def test_the_files_hint_promises_no_image_previews_where_files_cannot_be_saved() -> None:
+    """Nothing previews there any more, so neither a mention nor an unprompted turn hears so."""
+    inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
+    for item in (inbound, dataclasses.replace(inbound, unprompted=True)):
+        message = render_user_message(
+            "<controls/>",
+            item,
+            is_admin=False,
+            keys="",
+            prefix="",
+            history=None,
+            channel_files=False,
+        )
+        assert "files_hint=" in message, "the turn still learns files cannot be saved"
+        assert "shows inline" not in message, "and is promised no preview"
+
+
+def test_only_a_direct_chat_turn_hears_about_preview_outputs() -> None:
+    """A 1:1 chat has no Graph thumbnails, so its agent may picture a document itself."""
+    direct = render_user_message(
+        "<controls/>", make_inbound("hi"), is_admin=False, keys="", prefix="", history=None
+    )
+    channel = render_user_message(
+        "<controls/>",
+        make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel"),
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=None,
+        channel_files=True,
+    )
+    assert ".preview.png" in direct, "a 1:1 turn learns the preview output convention"
+    assert "[0].get_pixmap(" in direct, "the recipe renders page one of any document"
+    assert ".preview.png" not in channel, "a channel already gets Graph's thumbnails"
+
+
 def test_a_channel_turn_names_its_thread_and_channel() -> None:
     """The ids `set_thread_participation` keys on, as Discord's `<thread>` and `<channel>`."""
     inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
@@ -299,3 +336,36 @@ def test_unread_history_is_marked_so_the_agent_does_not_guess() -> None:
     )
     assert '<history status="unavailable" reason="http error"' in message
     assert "untrusted" not in message
+
+
+def test_a_group_chat_turn_is_one_place_without_files() -> None:
+    chat = "19:g@thread.v2"
+    inbound = dataclasses.replace(
+        make_inbound("hi", conversation=chat, kind="group"), channel_name="Launch & co"
+    )
+    message = render_user_message(
+        "<controls/>",
+        inbound,
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=unavailable_block("graph 403"),
+    )
+    assert f'<channel platform="teams" id="{chat}" role="group_chat" name="Launch &amp; co"' in (
+        message
+    )
+    assert 'files="unavailable"' in message and "cannot be shared in a group chat" in message
+    assert "offer" not in message, "no tool can send a group chat's file to a 1:1 chat"
+    assert "shows inline" not in message, "no image output previews there"
+    assert "<thread " not in message and "read_thread" not in message
+
+
+def test_chat_media_reads_only_this_messages_hosted_images() -> None:
+    own = "https://graph.microsoft.com/v1.0/chats/19:g@thread.v2/messages/7/hostedContents/a/$value"
+    other = (
+        "https://graph.microsoft.com/v1.0/chats/19:x@thread.v2/messages/7/hostedContents/a/$value"
+    )
+    message = _msg("7", f'<img src="{own}"><img src="{other}">')
+    assert chat_media(message, chat_id="19:g@thread.v2").image_urls == (own,)
+    images, _ = history_media([message], chat_id="19:g@thread.v2")
+    assert images == {"7": (own,)}

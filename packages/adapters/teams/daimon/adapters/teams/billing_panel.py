@@ -26,12 +26,12 @@ Channel budgets are named the same way: the channel listings of those teams,
 else the name stored from a message there, else `General` for a team's own
 id; never the raw `19:…` id.
 
-Typed in a channel, the card is answered in the 1:1 chat with that channel's
-budget under "This channel", as Slack's and Discord's panels show the budget
-of the channel they were opened in. The channel is held here under a token its
-buttons carry, honoured only for the person who typed the command, so a forged
-click cannot read another channel's budget; after a restart a refresh drops
-the line.
+Typed in a channel, the card is answered there for the sender only (or in the
+1:1 chat) with that channel's budget under "This channel", as Slack's and
+Discord's panels show the budget of the channel they were opened in. The
+channel is held here under a token its buttons carry, honoured only for the
+person who typed the command, so a forged click cannot read another channel's
+budget; after a restart a refresh drops the line.
 """
 
 from __future__ import annotations
@@ -545,6 +545,8 @@ class BillingPanel:
 
     async def command(self, context: CommandContext) -> None:
         asked, place = context.asked_in, None
+        if asked is None and context.inbound.kind == "channel":
+            asked = context.inbound  # answered privately where it was typed
         if asked is not None:
             place = secrets.token_urlsafe(16)
             held = self._places.setdefault(asked.user_id, OrderedDict())

@@ -10,16 +10,19 @@ from __future__ import annotations
 import io
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.teams.attachments import InboundFile
+from daimon.adapters.teams.card import OUTSIDER_JOINED_NOTICE
+from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT
 from daimon.adapters.teams.identity import (
     DENIED,
-    GROUP_CHAT_UNSUPPORTED,
     Refusal,
     TeamsInbound,
     parse_inbound,
@@ -28,6 +31,7 @@ from daimon.adapters.teams.output_delivery import FILE_INFO_CONTENT_TYPE
 from daimon.core import output_delivery
 from daimon.core._models import MessageFeedback
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing import build_fake_anthropic, list_response, ma_agent
 from daimon.testing.ma import MARouter
 from microsoft_teams.api import MessageActivity
@@ -44,10 +48,11 @@ from .conftest import (
     build_teams_runtime,
     finish_turns,
     make_inbound,
+    patched_admission,
     patched_turns,
     post_activity,
     running_service,
-    teams_settings,
+    settle,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
@@ -168,6 +173,7 @@ MESSAGES: dict[str, tuple[str, str, str, tuple[InboundFile, ...]]] = {
         (),
     ),
     "channel_mention": ("channel", THREAD_ID, "summarise this week's releases", ()),
+    "group_chat_message": ("group", GROUP_CHAT_ID, "what did we decide?", ()),
     "channel_thread_reply": ("channel", THREAD_ID, "reply to thread", ()),
     "channel_attachments_reply": ("channel", THREAD_ID, "describe these attachments", ()),
     "channel_media_reply": (
@@ -242,10 +248,6 @@ def test_real_messages_parse_to_verified_facts(case: str) -> None:
     assert inbound.files == files, "the text/html sibling is not a file"
 
 
-def test_group_chat_message_is_refused() -> None:
-    assert _parse(_load("group_chat_message")) == Refusal(GROUP_CHAT_UNSUPPORTED)
-
-
 def test_personal_message_without_a_conversation_tenant_is_denied() -> None:
     """The documented 1:1 example predates `conversation.tenantId`; identity fails closed."""
     payload = _load("personal_message")
@@ -255,7 +257,14 @@ def test_personal_message_without_a_conversation_tenant_is_denied() -> None:
 
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
-    "case", ["personal_message", "channel_mention", "channel_thread_reply", "channel_quote_reply"]
+    "case",
+    [
+        "personal_message",
+        "channel_mention",
+        "channel_thread_reply",
+        "channel_quote_reply",
+        "group_chat_message",
+    ],
 )
 async def test_real_message_runs_a_turn_answered_in_its_conversation(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, case: str
@@ -270,15 +279,32 @@ async def test_real_message_runs_a_turn_answered_in_its_conversation(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_group_chat_message_is_answered_with_the_refusal(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+@pytest.mark.parametrize(
+    "outsider",
+    [
+        {"id": "29:x", "aadObjectId": str(uuid.UUID(int=7)), "tenantId": str(uuid.UUID(int=99))},
+        {
+            "id": "29:g",
+            "aadObjectId": str(uuid.UUID(int=8)),
+            "tenantId": ENTRA_TENANT_ID,
+            "userRole": "guest",
+        },
+        {"id": "29:a", "userRole": "anonymous"},
+    ],
+)
+async def test_a_group_chat_holding_an_outsider_gets_only_a_private_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    outsider: dict[str, object],
 ) -> None:
+    teams_api_fake.chat_guests.append(outsider)
     _, turns = await _run(db_session_factory, teams_api_fake, "group_chat_message")
-    assert turns == [], "no turn runs in a group chat"
-    [reply] = teams_api_fake.activity_requests
-    assert str(reply.body.get("text")).endswith(GROUP_CHAT_UNSUPPORTED), "a quoted reply"
+    assert turns == [], "no answer anyone from outside would see"
+    [notice] = teams_api_fake.activity_requests
+    assert notice.body.get("text") == OUTSIDERS_PRESENT
+    assert notice in teams_api_fake.private_requests, "only the sender sees why"
     assert (
-        httpx.URL(reply.url).path == f"{SERVICE_PATH}/v3/conversations/{GROUP_CHAT_ID}/activities"
+        httpx.URL(notice.url).path == f"{SERVICE_PATH}/v3/conversations/{GROUP_CHAT_ID}/activities"
     )
 
 
@@ -334,7 +360,7 @@ async def test_task_fetch_opens_the_dialog_and_task_submit_creates_the_routine(
     runtime = build_teams_runtime(
         db_session_factory,
         anthropic=build_fake_anthropic(router.dispatch),
-        teams=teams_settings(admins=(AAD_OBJECT_ID,)),
+        admins=(AAD_OBJECT_ID,),
     )
     async with running_service(runtime, teams_api_fake) as service:
         opened = await post_activity(service, _load("task_fetch"))
@@ -494,3 +520,64 @@ async def test_an_install_is_acknowledged_and_welcomed_in_the_selected_channel(
     assert response is None and turns == []
     [welcome] = teams_api_fake.activity_requests
     assert "/v3/conversations/19:channel-1@thread.tacv2/activities" in welcome.url
+
+
+_JOINED = {"id": "29:x", "aadObjectId": str(uuid.UUID(int=7)), "tenantId": str(uuid.UUID(int=99))}
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_someone_joining_a_group_chat_closes_it_at_once(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A join drops the cached roster: the next mention gets only the private notice."""
+    message = _load("group_chat_message")
+    joined = {
+        "type": "conversationUpdate",
+        "id": "f:join-1",
+        "channelId": "msteams",
+        "serviceUrl": message["serviceUrl"],
+        "channelData": message["channelData"],
+        "from": message["from"],
+        "recipient": message["recipient"],
+        "conversation": message["conversation"],
+        "membersAdded": [{"id": _JOINED["id"], "aadObjectId": _JOINED["aadObjectId"]}],
+    }
+    with patched_turns() as turns:
+        async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as s:
+            await post_activity(s, message)
+            await settle(s.turns)
+            teams_api_fake.chat_guests.append(_JOINED)
+            await post_activity(s, joined)
+            await post_activity(s, message | {"id": "1700000000021"})
+            await finish_turns(s.turns)
+    assert len(turns) == 1, "the mention after the join runs no turn"
+    notice = teams_api_fake.activity_requests[-1]
+    assert notice.body.get("text") == OUTSIDERS_PRESENT
+    assert notice in teams_api_fake.private_requests, "only the sender sees why"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_group_chat_that_closes_mid_turn_never_sees_the_answer(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The roster is read afresh before the answer: a closed chat gets a bare notice."""
+
+    async def joined_mid_turn(*, lifecycle: Any, **_kwargs: Any) -> TurnState:
+        teams_api_fake.chat_guests.append(_JOINED)
+        state = TurnState(content=[TextBlock(kind="text", text="We decided on plan X.")])
+        await lifecycle.on_terminal_success(state)
+        return state
+
+    with (
+        patched_admission(),
+        patch("daimon.core.turn.run.run_turn", side_effect=joined_mid_turn),
+    ):
+        async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as s:
+            await post_activity(s, _load("group_chat_message"))
+            await finish_turns(s.turns)
+    sent = teams_api_fake.activity_requests
+    assert not any("plan X" in json.dumps(r.body) for r in sent), "the answer never posts"
+    _card, notice, closed = sent
+    assert closed.method == "PUT" and OUTSIDER_JOINED_NOTICE in json.dumps(closed.body)
+    assert notice.body.get("text") == OUTSIDERS_PRESENT
+    assert notice in teams_api_fake.private_requests, "only the asker is told why"

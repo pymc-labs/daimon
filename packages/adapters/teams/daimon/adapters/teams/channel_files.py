@@ -115,6 +115,10 @@ class ChannelFiles:
         self._record(group, inbound, is_available=True)
         return item
 
+    async def thumbnail_url(self, item: DriveItem) -> str | None:
+        """Graph's first-page thumbnail URL of an uploaded `item`; None until it renders one."""
+        return await self._sharepoint.thumbnail_url(item)
+
     async def resolve(self, media: ChannelMedia, *, group_id: str, channel_id: str) -> ChannelMedia:
         """`media` with a download URL on each shared file Graph can reach in the channel's site."""
         files: list[SharedFile] = []

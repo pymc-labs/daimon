@@ -9,6 +9,7 @@ settle floor produces.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import httpx
@@ -582,6 +583,36 @@ async def test_discard_skipped_up_to_deletes_only_files_that_fit() -> None:
     assert deletes == ["file_ok"], "only the file that fits the cap is discarded"
 
 
+async def test_a_skipped_file_carries_its_mime_type() -> None:
+    """A caller that skips everything can still tell an image from the rest."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deletes: list[str] = []
+    skipped: list[SkippedFile] = []
+
+    async def post(file: DeliverableFile) -> None:
+        raise AssertionError("a zero cap posts nothing")
+
+    async def on_skip(file: SkippedFile) -> None:
+        skipped.append(file)
+
+    await sweep_session_outputs(
+        _oversize_then_normal_client(deletes),
+        session_id="sesn_1",
+        post=post,
+        on_skip=on_skip,
+        sleep=sleep,
+        max_bytes=0,
+    )
+
+    assert [(f.file_id, f.mime_type) for f in skipped] == [
+        ("file_big", "video/mp4"),
+        ("file_ok", "text/plain"),
+    ], "each skipped file names its type"
+
+
 async def test_a_kept_original_stays_downloadable_byte_for_byte() -> None:
     """Against the stateful Files API fake: after a failed then retried notice,
     the oversize original is still listed and downloads unchanged, while the
@@ -1116,3 +1147,53 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     assert count == 1, "with no exclusions the bundle is an ordinary output"
     assert posted == ["daimon-handoff-0f9d1c4e.tar.gz"]
     assert deleted == {"file_bundle"}
+
+
+async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
+    """`order` maps the listed filenames to the indexes to post them in."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    names = ["first.pdf", "second.png"]
+    listing = [
+        FileMetadata(
+            id=f"file_{index}",
+            created_at=NOW,
+            filename=name,
+            mime_type="application/octet-stream",
+            size_bytes=3,
+            type="file",
+            downloadable=True,
+        ).model_dump(mode="json")
+        for index, name in enumerate(names)
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/files", lambda request, match: list_response(listing))
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"x"),
+    )
+    router.add(
+        "DELETE",
+        r"/v1/files/([^/]+)",
+        lambda request, match: httpx.Response(
+            200, json={"id": match.group(1), "type": "file_deleted"}
+        ),
+    )
+    seen: list[list[str]] = []
+    posted: list[str] = []
+
+    def reverse(filenames: Sequence[str]) -> list[int]:
+        seen.append(list(filenames))
+        return [1, 0]
+
+    async def post(file: DeliverableFile) -> None:
+        posted.append(file.filename)
+
+    client = build_fake_anthropic(router.dispatch)
+    await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
+
+    assert seen == [names], "order sees the listed names"
+    assert posted == ["second.png", "first.pdf"], "posted in the order given"

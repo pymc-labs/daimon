@@ -289,6 +289,10 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
 - **No broadcasts.** Discord posts with every mention disabled; Slack escapes
   the text the way agent replies are escaped, so `<!channel>` and `<!here>`
   stay literal.
+- **A Teams notice.** A result posted in a Teams channel or thread also sends
+  the creator an activity feed notice linking to it, one feed entry per
+  routine; a DM fallback sends none. A failed notice is only logged and never
+  changes the outcome ([teams.md](teams.md)).
 
 The post reads `Result from <agent>'s <schedule>:` followed by the result, for
 example `Result from team-020-analyst's daily routine at 09:00 UTC:`. The

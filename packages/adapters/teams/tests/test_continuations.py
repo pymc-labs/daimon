@@ -406,9 +406,7 @@ async def test_start_runs_the_teams_wake_poller_until_drain(
     no_boot_provisioning: AsyncMock,
 ) -> None:
     teams = TeamsApp(
-        runtime=build_teams_runtime(
-            db_session_factory, teams=teams_settings(admins=(AAD_OBJECT_ID,))
-        ),
+        runtime=build_teams_runtime(db_session_factory, admins=(AAD_OBJECT_ID,)),
         sender=FakeSender(),
         commands={},
         bot_token=bot_token,
@@ -418,7 +416,7 @@ async def test_start_runs_the_teams_wake_poller_until_drain(
     assert kwargs["platform"] == "teams" and kwargs["open_thread"] == teams._open_wake_thread
     assert kwargs["should_stop"]() is False, "the poller runs while the app admits turns"
     await teams.drain(timeout=1.0)
-    assert no_boot_provisioning.call_args.kwargs["admin_user_ids"] == (AAD_OBJECT_ID,)
+    assert no_boot_provisioning.call_args.kwargs["admin_ids"] == {AAD_OBJECT_ID}, "the owners"
     assert kwargs["should_stop"]() is True, "drain stops the poller"
 
 

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 import anthropic
@@ -82,11 +82,16 @@ class DeliverableFile:
 
 @dataclass(frozen=True)
 class SkippedFile:
-    """An output skipped without downloading it (oversize). No ``content``."""
+    """An output skipped without downloading it (oversize). No ``content``.
+
+    ``mime_type`` lets a caller that skips everything still pick some types
+    to fetch on its own, such as an image to preview where nothing is saved.
+    """
 
     file_id: str
     filename: str
     size_bytes: int
+    mime_type: str = "application/octet-stream"
 
 
 class OutputPostingUnavailable(DaimonError):
@@ -252,8 +257,12 @@ async def sweep_session_outputs(
     scope: Scope | None = None,
     noticed: NoticedFiles | None = None,
     discard_skipped_up_to: int = 0,
+    order: Callable[[Sequence[str]], Sequence[int]] | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
+
+    ``order`` takes the listed filenames and returns the indexes to handle
+    them in; without it they go in listing order.
 
     Raises :class:`OutputPostingUnavailable` when ``post`` signals that
     delivery is impossible for the whole workspace — nothing further is
@@ -280,8 +289,12 @@ async def sweep_session_outputs(
         anthropic_client, session_id=session_id, sleep=sleep, scope=scope
     )
 
+    listed = list(settled.values())
+    if order is not None:
+        listed = [listed[index] for index in order([meta.filename for meta in listed])]
+
     posted = 0
-    for meta in settled.values():
+    for meta in listed:
         if exclude_filename_prefixes and meta.filename.startswith(exclude_filename_prefixes):
             # Left listed on purpose: the owner of this file deletes it.
             _log.info(
@@ -319,6 +332,7 @@ async def sweep_session_outputs(
                             file_id=meta.id,
                             filename=meta.filename,
                             size_bytes=meta.size_bytes,
+                            mime_type=meta.mime_type,
                         )
                     )
                     if noticed is not None:

@@ -8,7 +8,9 @@ never follow a redirect. The app's resource-specific consent
 message reads here, `TeamMember.Read.Group` the owner list
 (`list_team_owner_ids`, for channel admin grants) and `ChannelMember.Read.Group`
 a channel's members (`list_channel_members`, for who is from another
-organisation); `teams_sharepoint` sends its file calls through
+organisation); `ChatMessage.Read.Chat`, granted when the app is added to a
+group chat, the chat reads (`list_chat_messages`, `get_chat_message`);
+`teams_sharepoint` sends its file calls through
 `send`. The subscription calls (`create_subscription` and its renewal and
 delete) watch a private or shared channel, where the resource-specific
 consent does not reach: they need the application permission
@@ -274,8 +276,18 @@ class GraphClient:
             extra["$skiptoken"] = skiptoken
         return _parse(GraphPage, await self._get(url, top=top, extra=extra))
 
+    async def list_chat_messages(self, chat_id: str, *, top: int = MAX_PAGE) -> GraphPage:
+        """A group chat's newest `top` messages, newest first."""
+        url = f"{GRAPH_ROOT}/chats/{path_segment(chat_id)}/messages"
+        extra = {"$orderby": "createdDateTime desc"}
+        return _parse(GraphPage, await self._get(url, top=top, extra=extra))
+
+    async def get_chat_message(self, chat_id: str, message_id: str) -> GraphMessage:
+        url = f"{GRAPH_ROOT}/chats/{path_segment(chat_id)}/messages/{path_segment(message_id)}"
+        return _parse(GraphMessage, await self._get(url))
+
     async def list_team_owner_ids(self, group_id: str) -> frozenset[str]:
-        """The Entra object ids (lower-case) of a team's owners.
+        """The Entra object ids (lower-case) of a team's owners, guests left out.
 
         Needs `TeamMember.Read.Group`; a team that never granted it raises
         `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
@@ -290,7 +302,8 @@ class GraphClient:
             owners.update(
                 member.user_id.lower()
                 for member in page.value
-                if member.user_id and "owner" in member.roles
+                # A guest made an owner in Entra still administers nothing here.
+                if member.user_id and "owner" in member.roles and "guest" not in member.roles
             )
             url, params = page.next_link, None
         if url is None:

@@ -6,9 +6,10 @@ sender's own personal memory only, never anyone else's
 (`daimon.core.memory_view`). Mirrors Slack's
 `/memory`, resolved for the place it was typed the way a turn there resolves
 its agent: a channel post's thread, or the 1:1 chat. Typed in a channel it is
-answered in the 1:1 chat, so a channel whose readers are limited gets a refusal
-instead: Slack answers there privately, and Slack's `/dm` likewise refuses to
-carry such a channel's work outside it.
+answered there for the sender only, as Slack does. When Teams refuses that, it
+is answered in the 1:1 chat, and a channel whose readers are limited gets a
+refusal instead: Slack's `/dm` likewise refuses to carry such a channel's work
+outside it.
 """
 
 from __future__ import annotations
@@ -61,7 +62,9 @@ def _card(title: str, text: str | None = None, hint: str | None = None) -> Adapt
 
 
 async def _kept_inside(context: CommandContext, asked: TeamsInbound) -> bool:
-    """Whether the answer would carry a limited-readers channel's memory to the 1:1 chat."""
+    """Whether the answer would carry a limited-readers channel's memory to the 1:1 chat.
+
+    A private answer in the channel itself (`asked_in` None) stays inside it."""
     if context.asked_in is None:
         return False
     async with context.runtime.sessionmaker() as session:

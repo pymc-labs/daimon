@@ -17,10 +17,13 @@
 #    No API permissions are required: the bot calls the Bot Framework REST
 #    API, which authorizes on the app registration itself, and reads channel
 #    messages through Microsoft Graph under the resource-specific consent
-#    below, which a team owner grants when installing the app in a team.
+#    below, which a team owner grants when installing the app in a team
+#    (group chats: a chat member, when adding the app to the chat).
 #    Channel files optionally need the Graph application permission
-#    Sites.Selected plus a grant per team site (docs/teams.md); this
-#    manifest stays the same.
+#    Sites.Selected plus a grant per team site (docs/teams.md), and
+#    DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED the tenant-wide Graph
+#    application permission ChannelMessage.Read.All with admin consent;
+#    this manifest stays the same either way.
 # 2. Azure portal → Create a resource → Azure Bot:
 #      - Type of App: Single Tenant; point it at the registration above.
 #      - Configuration → Messaging endpoint:
@@ -35,18 +38,26 @@
 #    sideload it.
 #
 # The adapter provisions the tenant for DAIMON_TEAMS__TENANT_ID at boot; there
-# is no install flow. The bot answers in 1:1 chat and when @mentioned in a
-# channel, replaying the thread it is in; group chats are refused, so the
-# manifest does not offer them.
+# is no install flow. The bot answers in 1:1 chat, and when @mentioned in a
+# channel or group chat, replaying the thread or chat it is in. A group chat
+# is answered only while everyone in it is from this organisation.
+#
+# Commands and prompt starters: `supportsTargetedMessages` lets people send
+# the bot a message only it sees, which slash commands need. A channel or
+# group chat command, typed with / or after a mention, is answered for its
+# sender only. Prompt
+# starters are fixed text: Teams lists them in the 1:1 chat ("View prompts")
+# and after an @mention in a channel. A list holds at most 12 commands, and
+# the bot at most 3 lists.
 #
 # Private and shared channels: `supportsChannelFeatures: tier1` lets the app
 # be added to them (manifest 1.25 or later; never `supportedChannelTypes`,
 # which blocks the upload there). Installing the app in a team does not add
 # it to these channels: each one's owner adds it from the channel itself.
 
-manifestVersion: "1.25"
+manifestVersion: "1.30"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.4.1"                       # bump on every change, then re-upload
+version: "0.6.0"                       # bump on every change, then re-upload
 supportsChannelFeatures: tier1          # private and shared channels (see above)
 developer:
   name: daimon
@@ -68,6 +79,8 @@ bots:
     scopes:
       - personal
       - team                            # channels: answers when @mentioned
+      - groupChat                       # group chats: answers when @mentioned
+    supportsTargetedMessages: true      # slash commands and private replies
     commandLists:
       - scopes:
           - personal
@@ -90,6 +103,65 @@ bots:
             description: Usage this month and top-ups.
           - title: support                 # answered only when human support is configured
             description: Ask a person.
+          - title: Explore a dataset
+            description: Load a file, check it and report what it shows.
+            type: prompt
+            prompt: >-
+              I'll attach a data file. Load it, check whether it's fit to analyse,
+              explore it, and tell me the main findings with charts.
+          - title: Build a notebook
+            description: An interactive notebook for your data.
+            type: prompt
+            prompt: >-
+              Build an interactive notebook that explores the data I describe or
+              attach, and send me the link.
+          - title: Set up my workspace
+            description: Repo, keys, skills and routines.
+            type: prompt
+            prompt: >-
+              Help me set up this workspace: the working repo, keys, skills and
+              routines. Start with what is set up now.
+      - scopes:
+          - team
+          - groupChat
+        triggers:
+          - slash
+        commands:                       # answered for the sender only
+          - title: help
+            description: List the commands.
+          - title: here
+            description: Who answers here and what it can read.
+          - title: memory
+            description: Show what the agent remembers.
+          - title: routines
+            description: Show and manage scheduled routines.
+          - title: billing
+            description: Usage this month and top-ups.
+          - title: privacy
+            description: See, export or delete your data.
+      - scopes:
+          - team
+        triggers:
+          - mention
+        commands:                       # posted in the thread after the mention
+          - title: Summarise this thread
+            description: The question, what was decided, what is open.
+            type: prompt
+            prompt: >-
+              Summarise this thread: the question, what was decided, and the open
+              items with who owns them.
+          - title: Analyse the data here
+            description: Check and explore the files in this thread.
+            type: prompt
+            prompt: >-
+              Analyse the data files shared in this thread: check they're fit to
+              use, explore them, and post the main findings with charts.
+          - title: Write it up
+            description: A short readout of the analysis in this thread.
+            type: prompt
+            prompt: >-
+              Write up the analysis in this thread as a short readout: lead with
+              the finding, then the evidence and the caveats.
     supportsFiles: true                 # files shared in 1:1 chats, file consent cards
     isNotificationOnly: false
 permissions:
@@ -112,4 +184,11 @@ authorization:
       # List a channel's members and their home tenants, to tell people from
       # another organisation (shared channels' external participants, guests).
       - name: ChannelMember.Read.Group
+        type: Application
+      # Read the messages and images of the group chats the app is added to.
+      - name: ChatMessage.Read.Chat
+        type: Application
+      # Send activity feed notices for routine results and cards waiting on
+      # someone in the team's channels; without it they are only logged.
+      - name: TeamsActivity.Send.Group
         type: Application

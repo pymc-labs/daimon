@@ -14,6 +14,7 @@ import httpx
 import pytest
 import structlog
 from daimon.adapters.teams import app as app_module
+from daimon.adapters.teams import reactions
 from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
@@ -21,11 +22,12 @@ from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.externals import Membership
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.accounts import set_external
+from daimon.core.stores.accounts import get_account, set_external, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
@@ -46,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    ADMIN_TEAM,
     BOT_ACCOUNT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
@@ -61,6 +64,7 @@ from .conftest import (
     make_message_activity,
     patched_admission,
     patched_turns,
+    settle,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -125,6 +129,172 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     assert ran[1].message_ids == (two.activity_id, three.activity_id), (
         "the composed turn knows every message it answers, for media and history"
     )
+
+
+async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    runtime = build_teams_runtime(db_session_factory)
+    teams = TeamsApp(runtime=runtime, sender=FakeSender(), commands={}, bot_token=bot_token)
+    teams._reactions = reactions.TeamsReactions(
+        react, spawn=lambda coro: teams.spawn(coro, name="r")
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[TeamsInbound] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound)
+        if len(ran) == 1:
+            started.set()
+            await release.wait()
+
+    first, queued = make_inbound("one"), make_inbound("two")
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        running = asyncio.create_task(teams._orchestrate(first, TENANT))
+        await started.wait()
+        await teams._orchestrate(queued, TENANT)
+        await settle(teams)
+        assert made == [(queued.activity_id, reactions.HOURGLASS, True)], (
+            "only the message waiting behind the running turn gets ⌛"
+        )
+        release.set()
+        await running
+    await settle(teams)
+    assert made[1:] == [(queued.activity_id, reactions.HOURGLASS, False)], (
+        "the ⌛ comes off once its turn starts"
+    )
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize(
+    ("policy", "external", "marked"),
+    [
+        (TenantAccessPolicy(), False, True),
+        (TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,)), False, False),
+        (TenantAccessPolicy(protected_channel_ids=(CONVERSATION_ID,)), False, False),
+        (TenantAccessPolicy(), True, False),
+    ],
+    ids=["allowed", "off-the-invoker-allowlist", "protected", "external-not-isolated"],
+)
+async def test_an_hourglass_only_for_a_message_admission_would_let_start(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    policy: TenantAccessPolicy,
+    external: bool,
+    marked: bool,
+) -> None:
+    """⌛ promises an answer, so it waits on the gates the turn itself would meet."""
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        if not started.is_set():
+            started.set()
+            await release.wait()
+
+    queued = dataclasses.replace(make_inbound("two", kind="channel"), is_external=external)
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        running = asyncio.create_task(
+            teams._orchestrate(make_inbound("one", kind="channel"), TENANT)
+        )
+        await started.wait()
+        await teams._orchestrate(queued, TENANT)
+        async with asyncio.timeout(5):
+            while teams._reactions._running:
+                await asyncio.sleep(0.01)
+        added = [(queued.activity_id, reactions.HOURGLASS, True)] if marked else []
+        assert made == added, "⌛ only where admission would let the message start a turn"
+        release.set()
+        await running
+    await teams.drain(timeout=5)
+    removed = [(queued.activity_id, reactions.HOURGLASS, False)] if marked else []
+    assert made[len(added) :] == removed, "a removal only for a ⌛ that was added"
+
+
+def test_a_message_composed_with_a_later_form_keeps_its_reactions() -> None:
+    """A form's id names no message: 👀 and ✅ go on the latest one the person sent."""
+    sent = make_inbound("the question")
+    form = dataclasses.replace(make_inbound("the form"), from_form=True)
+    composed = app_module._compose([sent, form])
+    assert (composed.activity_id, composed.from_form) == (sent.activity_id, False), (
+        "the turn reacts on the person's message"
+    )
+    assert set(composed.message_ids) == {sent.activity_id, form.activity_id}, "it answers both"
+    assert composed.text == "the question\n\nthe form", "in the order they came"
+    forms = app_module._compose([form, dataclasses.replace(form, activity_id="2")])
+    assert forms.from_form, "only forms: nothing to react on"
+
+
+async def test_a_replayed_message_loses_a_predecessors_hourglass(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process that queued it may have exited before its ⌛ came off."""
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    held = make_inbound("held")
+
+    async def _intake(self: TeamsApp, inbound: TeamsInbound) -> None:
+        return None
+
+    with patch.object(TeamsApp, "_intake", _intake):
+        teams._replay([held])
+        await settle(teams)
+    await teams.drain(timeout=5)
+    assert made == [(held.activity_id, reactions.HOURGLASS, False)], "⌛ comes off on replay"
+
+
+async def test_a_reaction_in_flight_does_not_hold_up_a_drain(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    stuck = asyncio.Event()
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        await stuck.wait()
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    teams._reactions.mark_queued(make_inbound())
+    await asyncio.sleep(0)
+    assert teams.in_flight == 0, "a reaction is not app work"
+    async with asyncio.timeout(2):
+        await teams.drain(timeout=30)
+    assert teams._reactions._running == set(), "the unanswered reaction was cancelled"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
@@ -229,6 +399,29 @@ async def test_a_failing_command_is_answered(
     assert [a.text for a in sender.activities] == [app_module._FAILED]
 
 
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_failing_channel_command_is_answered_to_its_sender_alone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A command is the sender's own, so its failure is too, even typed as a mention."""
+    sender = FakeSender()
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={"help": AsyncMock(side_effect=DaimonError("database unavailable"))},
+        bot_token=bot_token,
+    )
+    inbound = dataclasses.replace(
+        make_inbound("help", conversation=THREAD_ID, kind="channel"),
+        channel_id=CHANNEL_ID,
+        sender_id="29:sender",
+    )
+    await teams._handle(inbound)
+    [failed] = sender.activities
+    assert failed.text == app_module._FAILED
+    assert failed.recipient is not None and failed.recipient.is_targeted, "for the sender only"
+
+
 @dataclasses.dataclass
 class _Direct:
     """A `DirectChats` whose member lookup finds the person only when `present`."""
@@ -243,7 +436,7 @@ class _Direct:
     async def open_chat(self, member_id: str) -> str:
         return "a:direct"
 
-    async def post(self, conversation_id: str, text: str) -> None:
+    async def post(self, conversation_id: str, text: str) -> str:
         raise AssertionError("commands answer through the sender")
 
 
@@ -413,10 +606,13 @@ def _click(key: str, clicker: str) -> Any:
     return SimpleNamespace(activity=activity)
 
 
-def _message(payload: dict[str, object], reply: AsyncMock) -> Any:
+def _message(payload: dict[str, object], reply: AsyncMock, send: AsyncMock | None = None) -> Any:
     activity = MessageActivity.model_validate(payload)
     return SimpleNamespace(
-        activity=activity, conversation_ref=SimpleNamespace(service_url=SERVICE_URL), reply=reply
+        activity=activity,
+        conversation_ref=SimpleNamespace(service_url=SERVICE_URL),
+        reply=reply,
+        send=send or AsyncMock(),
     )
 
 
@@ -443,14 +639,12 @@ async def test_a_refusal_that_cannot_be_sent_is_logged(
     teams = _app(db_session_factory, FakeSender())
     reply = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
     with structlog.testing.capture_logs() as logs:
-        await teams.handle_message(
-            _message(make_message_activity(conversation_type="groupChat"), reply)
-        )
+        await teams.handle_message(_message(make_message_activity(aad_object_id=None), reply))
     reply.assert_awaited_once()
     assert {
         "event": "teams.refusal.send_failed",
         "log_level": "warning",
-        "conversation_type": "groupChat",
+        "conversation_type": "personal",
         "reason": "ConnectError",
     } in logs, "a refusal nobody saw is still on record"
 
@@ -635,13 +829,69 @@ async def test_an_external_participants_command_is_not_intercepted(
     )
 
 
-def test_an_external_participant_is_never_an_admin(
+async def test_an_owner_of_the_admin_team_gets_the_admin_role(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     teams = _app(db_session_factory, FakeSender())
-    teams._teams = teams._teams.model_copy(update={"admin_user_ids": [AAD_OBJECT_ID]})
-    assert teams._role(make_inbound()) is Role.ADMIN, "listed and ours"
-    assert teams._role(_external()) is Role.USER, "listed, but from another organisation"
+    teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
+    owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
+    teams.runtime = dataclasses.replace(teams.runtime, team_owners=owners)
+    assert await teams._role(make_inbound()) is Role.ADMIN, "an owner of the admin team"
+    assert await teams._role(_external()) is Role.USER, "an owner, but held as from outside"
+    owners.assert_awaited_with(ADMIN_TEAM)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_turn_reads_its_role_once_for_admission_and_its_origin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two reads could disagree (the cache expiring between them): admit as one, prompt as other."""
+    teams = _app(db_session_factory, FakeSender())
+    role = AsyncMock(side_effect=[Role.ADMIN, Role.USER])
+    origins: list[Role] = []
+    real_origin = app_module.turn_origin
+
+    def recording_origin(*args: Any, **kwargs: Any) -> Any:
+        origins.append(kwargs["role"])
+        return real_origin(*args, **kwargs)
+
+    with (
+        patched_turns("done"),
+        patch.object(app_module, "inbound_role", role),
+        patch.object(app_module, "turn_origin", recording_origin),
+    ):
+        await teams._run_turn(make_inbound(), TENANT)
+    assert role.await_count == 1, "one role read per turn"
+    assert origins == [Role.ADMIN], "the origin carries the role admission recorded"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_turn_while_the_owners_cannot_be_read_keeps_a_stored_admin_role(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An outage runs the turn as a user's but must not write USER over the stored ADMIN."""
+    teams = _app(db_session_factory, FakeSender())
+    teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
+    failing = AsyncMock(side_effect=GroupLookupFailed("http error (status 503)"))
+    teams.runtime = dataclasses.replace(teams.runtime, team_owners=failing)
+    async with db_session_factory.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=TENANT, platform="teams", external_id=AAD_OBJECT_ID
+        )
+        await set_role(session, principal.account_id, Role.ADMIN)
+    roles: list[Role | None] = []
+    real_admit = app_module.admit
+
+    async def recording_admit(*args: Any, **kwargs: Any) -> Any:
+        roles.append(kwargs["role"])
+        return await real_admit(*args, **kwargs)
+
+    with patched_turns("done"), patch.object(app_module, "admit", recording_admit):
+        await teams._run_turn(make_inbound(), TENANT)
+    assert roles == [None], "admission records no role, so the turn is a user's"
+    async with db_session_factory() as session:
+        account = await get_account(session, principal.account_id)
+    assert account is not None and account.role is Role.ADMIN, "the stored role stands"
 
 
 @dataclasses.dataclass
@@ -908,16 +1158,20 @@ async def test_a_typed_bot_name_behaves_as_before_when_the_switch_is_off(
 async def test_an_oversize_typed_bot_name_gets_the_notice_only_when_the_switch_is_on(
     db_session_factory: async_sessionmaker[AsyncSession], on: bool
 ) -> None:
-    """On, it is a mention and owed the too-long notice; off, nobody asked."""
+    """On, it is a mention and owed the too-long notice, for the sender only; off, nobody asked."""
     await _switch(db_session_factory, on=on)
-    teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    teams, reply, send = _app(db_session_factory, FakeSender()), AsyncMock(), AsyncMock()
     text = "@Daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
     with structlog.testing.capture_logs() as logs:
-        await teams.handle_message(_message(_named_post(text, conversation_id=CHANNEL_ID), reply))
+        post = _named_post(text, conversation_id=CHANNEL_ID)
+        await teams.handle_message(_message(post, reply, send))
+    reply.assert_not_awaited()
     if on:
-        reply.assert_awaited_once_with(INPUT_TOO_LONG)
+        (notice,) = send.await_args.args
+        assert notice.text == INPUT_TOO_LONG
+        assert notice.recipient.is_targeted, "only the sender sees a refusal in a channel"
     else:
-        reply.assert_not_awaited()
+        send.assert_not_awaited()
     events = [entry["event"] for entry in logs]
     assert "plain_text_mention.accepted" not in events, "a refusal starts no turn"
 

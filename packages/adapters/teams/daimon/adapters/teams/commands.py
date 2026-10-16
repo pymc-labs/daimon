@@ -1,7 +1,7 @@
 """Text commands (`help`, `new`, `routines`, …): code-routed, no agent turn runs.
 
-Commands answer in a 1:1 chat only. Their replies can carry account and
-tenant details, and a channel reply is visible to everyone in it.
+Their replies can carry account and tenant details, so a channel command is
+answered for its sender only (`private_replies`), or in their 1:1 chat.
 """
 
 from __future__ import annotations
@@ -48,7 +48,9 @@ CommandHandler = Callable[[CommandContext], Awaitable[None]]
 
 def parse_command(text: str, names: Mapping[str, CommandHandler]) -> tuple[str, str] | None:
     """`(name, args)` for a bare command word or `memory` with its arguments
-    (`memory /<path>`, `memory mine`, `memory forget-mine <code>`); other prose is a turn."""
+    (`memory /<path>`, `memory mine`, `memory forget-mine <code>`); other prose is a turn.
+
+    A leading `/` is accepted: a Teams slash command may arrive with it."""
     word, _, args = text.strip().partition(" ")
     name, args = word.lower().lstrip("/"), args.strip()
     if name in names and (not args or (name == "memory" and is_strict_memory_args(args))):

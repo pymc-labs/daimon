@@ -41,6 +41,7 @@ from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams.credential_requests import SUBMIT
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -249,6 +250,20 @@ def _thread_of(channel_id: str) -> str:
     return f"{channel_id};messageid={_ROOT_MESSAGE_ID}"
 
 
+_ADMIN_TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+
+
+def _admin_team(owners: tuple[str, ...]) -> Callable[[str], Awaitable[frozenset[str]]]:
+    """Graph's owner read: `owners` own `_ADMIN_TEAM`; any other team is refused."""
+
+    async def read(group_id: str) -> frozenset[str]:
+        if group_id != _ADMIN_TEAM:
+            raise GroupLookupFailed("not the admin team (status 404)")
+        return frozenset(owners)
+
+    return read
+
+
 @dataclass
 class TeamsDriver:
     """Drives Teams through `/api/messages`, the real Teams entry point."""
@@ -261,7 +276,7 @@ class TeamsDriver:
     _panel_card: dict[str, Any] = field(default_factory=dict[str, Any])
     _panel_message_id: str = ""
     _panel_form: dict[str, Any] = field(default_factory=dict[str, Any])
-    #: Teams reads a caller's role off `DAIMON_TEAMS__ADMIN_USER_IDS`.
+    #: Teams admins: the owners of the admin team (`DAIMON_TEAMS__ADMIN_TEAM_ID`).
     _panel_admins: tuple[str, ...] = ()
     _panel_aliases: dict[str, str] = field(default_factory=dict[str, str])
 
@@ -285,7 +300,7 @@ class TeamsDriver:
             client_secret=SecretStr("parity-secret"),
             tenant_id=entra_tenant,
             enabled=True,
-            admin_user_ids=admins,
+            admin_team_id=_ADMIN_TEAM if admins else None,
         )
         settings.crypto.keys = (SecretStr(self._fernet_key),)
         settings.mcp.public_url = None if turn else "https://mcp.example.com/mcp"
@@ -321,6 +336,7 @@ class TeamsDriver:
                 billing_config=billing_config,  # pyright: ignore[reportArgumentType]
             ),
             deployment_default=default,
+            team_owners=_admin_team(admins) if admins else None,
         )
 
     async def dispatch_turn(

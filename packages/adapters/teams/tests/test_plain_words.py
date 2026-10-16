@@ -7,6 +7,7 @@ from decimal import Decimal
 from daimon.adapters.teams import feedback, memory, wizard
 from daimon.adapters.teams.billing_panel import redeemed_card_text
 from daimon.adapters.teams.help import help_card
+from daimon.adapters.teams.private_replies import NOT_YET_PRIVATE
 from daimon.core.promo_credit import PromoRedeemed
 
 
@@ -31,6 +32,14 @@ def test_help_keeps_registered_commands_and_spaces_the_last_block() -> None:
         "In our 1:1 chat, just type.",
     ]
     assert all(item["spacing"] == "Medium" for item in data["body"][-2:])
+
+
+def test_copy_shown_in_channels_and_group_chats_fits_both() -> None:
+    """A group chat has no thread, and `/` works there as in a channel."""
+    card = help_card(["help"], bot="Daimon").model_dump(by_alias=True)
+    assert "type / in a channel or group chat" in card["body"][1]["text"]
+    assert "Mention Daimon here" in NOT_YET_PRIVATE.format(bot="Daimon")
+    assert "thread" not in NOT_YET_PRIVATE
 
 
 def test_timed_credit_has_the_approved_two_paragraph_reply() -> None:

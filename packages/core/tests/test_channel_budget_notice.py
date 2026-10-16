@@ -111,6 +111,20 @@ async def test_a_channel_without_admins_tells_the_server_admins(db_session: Asyn
     assert await _recipients(db_session, await _claim(db_session, tenant)) == ("u-admin",)
 
 
+async def test_live_server_admins_replace_the_stored_ones(db_session: AsyncSession) -> None:
+    """Teams passes its admin team's owners: they are told, not the stored admin role."""
+    tenant = await _spent_channel(db_session, limit="0")
+    notice = await _claim(db_session, tenant)
+    assert notice is not None, "the window was claimed"
+
+    async def live() -> tuple[str, ...]:
+        return ("owner-b", "owner-a")
+
+    sessionmaker = async_sessionmaker(bind=db_session.bind)
+    recipients = await notice_recipients(sessionmaker, notice, None, live)
+    assert recipients == ("owner-a", "owner-b"), "the live admins, sorted, and not u-admin"
+
+
 async def test_no_notice_while_the_budget_has_room(db_session: AsyncSession) -> None:
     tenant = await _spent_channel(db_session, limit="5")
     assert await _claim(db_session, tenant) is None

@@ -10,13 +10,13 @@ import pytest
 from daimon.adapters.teams.attachments import InboundFile
 from daimon.adapters.teams.identity import (
     DENIED,
-    GROUP_CHAT_UNSUPPORTED,
     INPUT_TOO_LONG,
     MAX_INBOUND_MESSAGE_BYTES,
     TEXT_ONLY,
     Refusal,
     TeamsInbound,
     foreign_tenant,
+    kind_of,
     live_tenant_id,
     parse_inbound,
     strip_typed_name,
@@ -35,9 +35,11 @@ from .conftest import (
     CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
+    GROUP_CHAT_ID,
     SERVICE_URL,
     THREAD_ID,
     make_channel_activity,
+    make_group_activity,
     make_message_activity,
 )
 
@@ -60,6 +62,7 @@ def test_personal_message_is_a_dm_keyed_on_the_chat() -> None:
         activity_id="activity-1",
         text="hello there",
         service_url=SERVICE_URL,
+        sender_id=f"29:{AAD_OBJECT_ID}",
     )
 
 
@@ -87,6 +90,30 @@ def test_channel_root_post_becomes_its_own_thread() -> None:
     assert isinstance(inbound, TeamsInbound)
     assert inbound.conversation_id == f"{CHANNEL_ID};messageid=1700000000009"
     assert inbound.channel_id == CHANNEL_ID
+
+
+def test_a_targeted_thread_reply_is_addressed_and_marked() -> None:
+    """A slash command reaches the bot alone, with no mention: it is still asked of it."""
+    inbound = _parse(make_channel_activity(mention_bot=False, text="/memory", targeted=True))
+    assert isinstance(inbound, TeamsInbound), "a targeted message is addressed to the bot"
+    assert inbound.is_targeted and not inbound.unprompted, "never a participation candidate"
+    assert (inbound.conversation_id, inbound.sender_id) == (THREAD_ID, f"29:{AAD_OBJECT_ID}")
+
+
+def test_a_targeted_root_post_is_answered_in_the_channel_itself() -> None:
+    """A targeted message takes no replies, so its answer cannot thread under it."""
+    payload = make_channel_activity(
+        mention_bot=False, conversation_id=CHANNEL_ID, activity_id="1700000000009", targeted=True
+    )
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound) and inbound.is_targeted
+    assert (inbound.conversation_id, inbound.channel_id) == (CHANNEL_ID, CHANNEL_ID)
+
+
+def test_a_targeted_message_in_a_personal_chat_is_an_ordinary_one() -> None:
+    """Everything in a 1:1 chat is private already."""
+    inbound = _parse(make_message_activity(text="hello", targeted=True))
+    assert isinstance(inbound, TeamsInbound) and not inbound.is_targeted
 
 
 def _quoting(sender_id: str | None, *, text: str = "is this right?") -> dict[str, object]:
@@ -295,15 +322,84 @@ def test_a_deleted_or_unknown_quote_is_marked_unavailable() -> None:
     assert inbound.text == "[quoted message unavailable]\nstill there?"
 
 
+def test_a_group_chat_mention_is_one_conversation_keyed_on_the_chat() -> None:
+    payload = make_group_activity(text="what did we decide?")
+    payload["conversation"]["name"] = "Launch crew"  # type: ignore[index]
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound)
+    assert (inbound.kind, inbound.conversation_id, inbound.channel_id) == (
+        "group",
+        GROUP_CHAT_ID,
+        GROUP_CHAT_ID,
+    ), "a quote-reply or any later message keys on the same chat"
+    assert inbound.thread_id == GROUP_CHAT_ID
+    assert (inbound.text, inbound.channel_name, inbound.unprompted) == (
+        "what did we decide?",
+        "Launch crew",
+        False,
+    )
+    assert inbound.team_id is None and not inbound.is_external
+
+
+def test_a_group_chat_quote_of_the_bot_addresses_it() -> None:
+    payload = _quoting(BOT_ACCOUNT_ID)
+    payload["conversation"] = make_group_activity()["conversation"]
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound) and inbound.kind == "group"
+    assert inbound.conversation_id == GROUP_CHAT_ID and not inbound.unprompted
+
+
+def test_unaddressed_group_chat_messages_start_nothing() -> None:
+    assert _parse(make_group_activity(mention_bot=False)) == Refusal(None), "no organic turns"
+    quoting_someone = _quoting("29:someone-else")
+    quoting_someone["conversation"] = make_group_activity()["conversation"]
+    assert _parse(quoting_someone) == Refusal(None)
+
+
+def test_a_targeted_group_chat_message_is_marked_private() -> None:
+    inbound = _parse(make_group_activity(mention_bot=False, text="/help", targeted=True))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.is_targeted and inbound.conversation_id == GROUP_CHAT_ID
+
+
+def test_a_typed_name_in_a_group_chat_waits_for_the_tenant_switch() -> None:
+    inbound = _parse(_to_named_bot(make_group_activity(mention_bot=False, text="@daimon hi")))
+    assert isinstance(inbound, TeamsInbound)
+    assert inbound.by_name and not inbound.unprompted
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"conversation_type": "groupChat", "is_group": False},
-        {"conversation_type": "personal", "is_group": True},
+        {"channel_tenant_id": str(uuid.UUID(int=99))},
+        {"aad_object_id": None},
+        {"tenant_id": str(uuid.UUID(int=99))},
     ],
 )
-def test_group_chats_are_refused(overrides: dict[str, Any]) -> None:
-    assert _parse(make_message_activity(**overrides)) == Refusal(GROUP_CHAT_UNSUPPORTED)
+def test_a_group_chat_sender_from_elsewhere_is_denied(overrides: dict[str, Any]) -> None:
+    assert _parse(make_group_activity(**overrides)) == Refusal(DENIED)
+
+
+def test_a_group_chat_sender_naming_a_foreign_tenant_is_denied() -> None:
+    payload = make_group_activity()
+    payload["from"]["tenantId"] = str(uuid.UUID(int=99))  # type: ignore[index]
+    assert _parse(payload) == Refusal(DENIED), "a group chat sender is ours, as in a 1:1 chat"
+
+
+@pytest.mark.parametrize("chat", ["19:meeting_abc@thread.skype", "a:not-a-group"])
+def test_a_group_chat_whose_id_is_not_one_is_denied(chat: str) -> None:
+    """A stored turn resumes by its id's kind, so a group chat must look like one."""
+    assert _parse(make_group_activity(conversation_id=chat)) == Refusal(DENIED)
+
+
+def test_a_stored_turn_knows_its_kind_from_its_ids() -> None:
+    assert kind_of(GROUP_CHAT_ID, GROUP_CHAT_ID) == "group", "a group chat keys on itself"
+    assert kind_of(CONVERSATION_ID, CONVERSATION_ID) == "dm"
+    assert kind_of(THREAD_ID, CHANNEL_ID) == "channel"
+
+
+def test_an_unknown_conversation_type_is_denied() -> None:
+    assert _parse(make_message_activity(conversation_type="meeting")) == Refusal(DENIED)
 
 
 @pytest.mark.parametrize(

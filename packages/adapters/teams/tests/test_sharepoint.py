@@ -150,6 +150,24 @@ async def test_upload_refuses_a_session_url_off_sharepoint() -> None:
     assert {r.url.host for r in seen} == {"graph.microsoft.com"}, "nothing went to the other host"
 
 
+async def test_thumbnail_url_reads_the_large_first_page_thumbnail_of_an_upload() -> None:
+    """The reply's drive is filled in from the folder, so the thumbnail lookup can address it."""
+    seen: list[httpx.Request] = []
+    put = "/v1.0/drives/b!drive-1/items/01FOLDER:/deck.pptx:/content"
+    thumbnails = "/v1.0/drives/b!drive-1/items/01ITEM/thumbnails"
+    large = "https://example.sharepoint.com/_api/v2.1/thumbnail?tempauth=x"
+    body = {"value": [{"id": "0", "large": {"url": large, "width": 800, "height": 600}}]}
+    routes = {("PUT", put): _ok({"id": "01ITEM", "name": "deck.pptx"}, 201)}
+    sharepoint = _sharepoint({**routes, ("GET", thumbnails): _ok(body)}, seen)
+
+    item = await sharepoint.upload(FOLDER, "deck.pptx", b"pk")
+
+    assert await sharepoint.thumbnail_url(item) == large, "the first set's large image"
+    assert seen[-1].headers["Authorization"] == "Bearer graph-token", "the token goes to Graph"
+    empty = _sharepoint({("GET", thumbnails): _ok({"value": []})}, [])
+    assert await empty.thumbnail_url(item) is None, "none while Graph is still rendering it"
+
+
 async def test_channel_folder_falls_back_to_the_team_site_when_files_folder_is_refused() -> None:
     """`filesFolder` does not list Sites.Selected: the folder is then found by name in the site."""
     seen: list[httpx.Request] = []

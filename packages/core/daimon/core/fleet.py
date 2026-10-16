@@ -68,8 +68,31 @@ RUN_TRANSITIONS: Final[Mapping[RunStatus, frozenset[RunStatus]]] = {
 EXCERPT_LIMIT: Final = 4096
 
 
+type FleetConflictReason = Literal[
+    "claim_missing",
+    "claim_changed",
+    "admission_claim_invalid",
+    "journal_owner_mismatch",
+    "source_lineage_changed",
+    "intent_changed",
+    "financial_admission_refused",
+    "private_slot_mismatch",
+    "source_intent_changed",
+    "result_journal_missing",
+    "input_reconciliation_required",
+    "input_claim_mismatch",
+    "recovery_reconciliation_required",
+    "retained_revision_changed",
+    "result_not_successful",
+]
+
+
 class FleetConflict(Exception):
     """A lost `version` compare-and-swap, or a status move the transitions refuse."""
+
+    def __init__(self, message: str, *, reason: FleetConflictReason | None = None) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 @dataclass(frozen=True)

@@ -226,6 +226,9 @@ async def test_a_chat_file_is_a_consent_card_with_a_signed_offer(
     [card] = json.loads(post.content)["attachments"]
     assert card["contentType"] == "application/vnd.microsoft.teams.card.file.consent"
     assert card["content"]["sizeInBytes"] == len(b"png-bytes")
+    assert card["content"]["description"] == f"Save {card['name']} to your OneDrive?", (
+        "the adapter's own consent wording"
+    )
     token = card["content"]["acceptContext"]["upload"]
     assert verify_offer(token, secret="secret", now=time.time()) == UploadOffer(
         handle, _CALLER, _CHAT
@@ -237,7 +240,7 @@ async def test_a_chat_file_is_a_consent_card_with_a_signed_offer(
 @pytest.mark.parametrize(
     ("channel_id", "handles", "match"),
     [
-        ("19:group@thread.v2", None, "not a group chat"),
+        ("19:group@thread.v2", None, "group chats"),
         (_CHAT, ["missing"], "not found"),
     ],
 )

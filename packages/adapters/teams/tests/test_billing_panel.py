@@ -69,7 +69,6 @@ from .conftest import (
     AAD_OBJECT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
-    DIRECT_CHAT_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
@@ -79,7 +78,6 @@ from .conftest import (
     make_message_activity,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -93,9 +91,8 @@ def _running(
     admins: tuple[str, ...] = (AAD_OBJECT_ID,),
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     """An admin (AAD_OBJECT_ID) and a member (OTHER_AAD_OBJECT_ID); `mcp` fakes checkout."""
-    settings = teams_settings(admins=admins)
     client = None if mcp is None else httpx.AsyncClient(transport=mcp)
-    runtime = build_teams_runtime(db_factory, teams=settings, http_client=client)
+    runtime = build_teams_runtime(db_factory, http_client=client, admins=admins)
     runtime.settings.mcp.app_root_url = "https://mcp.example"
     runtime.settings.mcp.jwt_secret = SecretStr("test-jwt-secret-at-least-32-chars-long!!")
     return running_service(runtime, fake)
@@ -229,9 +226,7 @@ async def test_a_member_redeems_a_channel_code_into_the_channel_they_typed_in(
     async with _running(db_session_factory, teams_api_fake) as service:
         await post_activity(service, make_channel_activity(text="billing", aad_object_id=member))
         async with asyncio.timeout(10):
-            while not (
-                chat := [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
-            ):
+            while not (chat := teams_api_fake.private_requests):
                 await asyncio.sleep(0.01)
         card = json.dumps(chat[0].body, ensure_ascii=False)
         found = re.search(r'"place": "([^"]+)"', card)
@@ -437,9 +432,7 @@ async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its
     async with _running(db_session_factory, teams_api_fake) as service:
         await post_activity(service, make_channel_activity(text="billing"))
         async with asyncio.timeout(10):
-            while not (
-                chat := [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
-            ):
+            while not (chat := teams_api_fake.private_requests):
                 await asyncio.sleep(0.01)
         card = json.dumps(chat[0].body, ensure_ascii=False)
         found = re.search(r'"place": "([^"]+)"', card)
@@ -478,7 +471,7 @@ async def test_one_persons_billing_commands_never_drop_anothers_channel(
     admins = (AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID)
 
     def direct() -> list[Any]:
-        return [r for r in teams_api_fake.activity_requests if DIRECT_CHAT_ID in r.url]
+        return teams_api_fake.private_requests
 
     async with _running(db_session_factory, teams_api_fake, admins=admins) as service:
         places: list[str] = []

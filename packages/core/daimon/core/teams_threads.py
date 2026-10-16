@@ -19,3 +19,9 @@ def new_setup_thread_id(chat: str) -> str:
 def conversation_of(thread_id: str) -> str:
     """The Bot Framework conversation a thread key posts to."""
     return thread_id.split(_SETUP, 1)[0]
+
+
+def is_group_chat(conversation_id: str) -> bool:
+    """A Teams group (or meeting) chat id, `19:...@thread.v2`, with or without a suffix."""
+    head = conversation_id.split(";", 1)[0]
+    return head.startswith("19:") and head.endswith("@thread.v2")

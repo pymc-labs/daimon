@@ -33,7 +33,7 @@ from daimon.core.github_app_auth import build_app_install_url
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
 from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.teams_threads import conversation_of
+from daimon.core.teams_threads import conversation_of, is_group_chat
 from daimon.core.wizard.render import to_screen
 from daimon.core.wizard.spec import WizardSpec
 from daimon.core.wizard.state import WizardState
@@ -46,6 +46,9 @@ _log = structlog.get_logger()
 # Teams caps a message at about 28 KB; 6,000 four-byte characters stay under it.
 _MAX_CONTENT_CHARS = 6_000
 # Conversation ids (a:…, 19:…@thread.tacv2;messageid=…) go into URL paths.
+GROUP_CHAT_REFUSED = (
+    "Teams tools do not reach group chats yet; in one, answer in your reply instead"
+)
 _CONVERSATION_ID = re.compile(r"[\w:@.;=+-]+")
 _NOT_A_MEMBER = (
     "you are not a member of that Teams conversation, or daimon cannot see it, "
@@ -89,6 +92,8 @@ async def _authorize(
         raise ToolError("Teams tools are not configured on this server")
     if auth.platform_user_id is None:
         raise ToolError("teams tools require a teams-bound identity")
+    if is_group_chat(conversation_id):
+        raise ToolError(GROUP_CHAT_REFUSED)
     channel = conversation_id.split(";", 1)[0]
     try:
         is_member = await client.is_member(channel, auth.platform_user_id)

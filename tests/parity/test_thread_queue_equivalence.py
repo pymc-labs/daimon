@@ -15,6 +15,7 @@ from daimon.adapters.discord.thread_gone import ThreadStops
 from daimon.adapters.slack import app as slack
 from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.reactions import TeamsReactions
 from daimon.core.errors import DaimonError
 from daimon.core.turn.thread_queue import ThreadQueue
 from daimon.core.turn_queue import TurnQueue
@@ -45,6 +46,8 @@ class Replay:
             _processing=set(),
             _pending={},
             _queued_reactions=set(),
+            # Teams' reactions, with no client: every call does nothing.
+            _reactions=TeamsReactions(None),
             _thread_stops=ThreadStops(),
             user=SimpleNamespace(id=999),
             _deferred_dispatch={},
@@ -69,6 +72,7 @@ class Replay:
         self.obj._replay_queued = {}
         self.obj._finish = self.finish
         self.obj._hold = self.hold
+        self.obj._may_start_turn = MethodType(teams.TeamsApp._may_start_turn, self.obj)
         names = {
             "discord": [
                 "_queue_behind_inflight_turn",

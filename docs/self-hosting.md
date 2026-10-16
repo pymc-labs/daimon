@@ -469,8 +469,15 @@ This registration is the identity Daimon signs in as.
 
 You don't need to add any API permissions here. The bot reads channels
 through a team-level permission that a team owner grants when they add the
-app (more on that in step 7). Only the optional channel files need a Graph
-permission.
+app (more on that in step 7), and group chats through a chat-level one
+(`ChatMessage.Read.Chat`) granted when the app is added to the chat. Only two optional features need a Graph
+application permission: channel files (`Sites.Selected`) and private and
+shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
+[below](#private-and-shared-channels-optional)).
+The same team-level consent covers activity feed notices
+(`TeamsActivity.Send.Group`). A team that added a package from before 0.6.0 needs the
+rebuilt one uploaded again (see Updating the app) and an owner to accept it;
+until then its notices are refused and only logged.
 
 ### 2. Create the Azure Bot and connect it to Teams
 
@@ -501,11 +508,13 @@ az bot msteams create -g <resource-group> -n <bot-name>
 
 ### 3. Run the Teams service
 
-**Find your admins.** Teams doesn't tell bots who its admins are, so you list
-Daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
-the person → copy **Object ID**. Admins can create routines, mint
-coding-tool tokens, replace shared keys, top up and see everyone's usage.
-Anyone can create an agent. You can change the list later.
+**Pick your admin team.** The owners of one team are Daimon's admins: they
+can create routines, mint coding-tool tokens, replace shared keys, top up and
+see everyone's usage. Anyone can create an agent. In Teams, open the team's
+⋯ → **Get link to team** and copy the `groupId` parameter from the link. Once
+the service runs, add the app to that team (step 7). To add or remove an
+admin later, change the team's owners; no redeploy. A removed owner loses
+admin within about a minute, everywhere, routines and tools included.
 
 **Add the values to `.env`:**
 
@@ -513,7 +522,7 @@ Anyone can create an agent. You can change the list later.
 DAIMON_TEAMS__CLIENT_ID=<application (client) ID>
 DAIMON_TEAMS__TENANT_ID=<directory (tenant) ID>
 DAIMON_TEAMS__CLIENT_SECRET=<client secret value>
-DAIMON_TEAMS__ADMIN_USER_IDS=["<object ID>","<another object ID>"]
+DAIMON_TEAMS__ADMIN_TEAM_ID=<groupId of the admin team>
 ```
 
 A few things to know:
@@ -521,7 +530,9 @@ A few things to know:
 - **Set the three credentials together.** Once any `DAIMON_TEAMS__` value is
   set, every Daimon process expects the full set. A half-filled block stops
   them all from starting, not just Teams.
-- **The admin list is a JSON array**, not a comma-separated list.
+- **Admins are the admin team's owners.** `DAIMON_TEAMS__ADMIN_USER_IDS` is
+  no longer read, and a leftover value is ignored: make those people owners
+  of the admin team.
 - **`DAIMON_CRYPTO__KEYS` must be set** (see step 1 of this guide).
 - **The `mcp` service reads these same values**, because the agent's Teams
   tools (posting, reading channels, sending files) run there. With Compose,
@@ -582,7 +593,8 @@ Teams installs apps from a zip file holding three files at its top level:
 
 The manifest template is
 [`teams-app-manifest.yaml`](teams-app-manifest.yaml), in manifest version
-1.25 so the app can be added to private and shared channels. Fill in your client ID
+1.30 so the app can be added to private and shared channels and answer
+privately in a thread. Fill in your client ID
 and hostname and convert it to JSON. From the repository root, with any
 Python 3 that has PyYAML:
 
@@ -644,15 +656,18 @@ your apps** → **Upload an app**.
   bot reads the thread it is asked about. The bot then posts a welcome in
   the team. To ask it something, @mention it in a post or a reply. Pick the
   name from the autocomplete list so it turns into a highlighted mention:
-  typed text alone doesn't count.
+  typed text alone doesn't count. Add it to the admin team too, or nobody
+  is an admin.
 - **A private or shared channel:** adding the app to the team doesn't add it
   there. The channel's owner adds it from the channel itself, in the
   channel's apps settings. A package built from an
   older template, before manifest 1.25, can't be added to these channels:
   rebuild it and upload it again (see Updating the app).
 
-Group chats aren't supported: the package doesn't offer them, and the bot
-turns away any that reach it.
+- **A group chat:** add the app from the chat's apps, and allow it to read
+  the chat's messages (`ChatMessage.Read.Chat`) when asked. The bot answers
+  there only while everyone in the chat is from your organisation. See
+  [`teams.md`](teams.md#group-chats).
 
 ### People from another organisation (optional)
 
@@ -751,8 +766,13 @@ Details are in [`teams.md`](teams.md#private-and-shared-channels-optional).
 - **A Reply on a bot message gets no answer in a private channel:** Teams
   sends the bot only the private channel posts that @mention it. Mention it.
 - **Every Daimon process fails at startup after adding Teams:** a
-  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't
-  a JSON array of object IDs.
+  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_TEAM_ID` isn't a
+  group ID.
+- **Nobody is an admin:** `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app
+  isn't installed in that team (`teams.admin_team.lookup_failed` in the logs
+  gives the reason and status). After a failed read the last owners count for
+  up to an hour; once no owner list has been read within an hour, nobody is
+  an admin until the next good read. Re-adding the app restores the owners.
 - **`teams.tenant_reconcile_failed` in the logs:** Daimon couldn't finish
   setting up your organisation, and it refuses turns until it does. The log
   line says why.
@@ -766,7 +786,9 @@ Changes to the manifest only reach Teams in a new package. Bump `version` in
 `manifest.json`, zip it again and upload it over the existing app in the
 Teams admin center (the app → **Upload file**). Teams that already have the
 app pick up the update, and a team owner may be asked to accept new
-permissions.
+permissions. A package from before template version 0.6.0 has no `/`
+commands, prompt starters, private messages to Daimon, group chats or
+activity feed notices: rebuild it.
 
 ## Claude Code login mounts
 

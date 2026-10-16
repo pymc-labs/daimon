@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
 
+- **Teams admins are the owners of one team.** Set
+  `DAIMON_TEAMS__ADMIN_TEAM_ID` to the team's Entra group ID and add the app
+  to that team; its owners, read live and cached for a minute, are Daimon's
+  admins, so adding one needs no redeploy, and a removed one loses admin
+  within about a minute, routines and tools included. Guests and people from
+  another organisation never are. A failed owner read falls back to the last
+  good one for up to an hour and demotes no one; once no owner list has been
+  read within an hour, nobody is an admin until the next good read.
+  Support requests and channel budget notices for the admins reach these
+  owners. Guest owners no longer count for channel-admin team grants
+  (`role_ids`) either.
+
+- **Teams output previews show inside the answer.** Image previews and
+  document first pages are added to the answer's last message, beside its
+  text and file links, instead of following it as separate messages; in a
+  1:1 chat they sit above the consent cards. When the answer cannot take
+  them, such as a closing notice card or an edit Teams refuses, they still
+  come in a message of their own. Channels without file access and group
+  chats no longer show image previews: nothing is saved there, so the agent
+  is no longer told an image will still show.
+
+### Removed
+
+- **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins
+  owners of the admin team; a leftover value is ignored, and anyone not an
+  owner loses the stored admin role at the next owner read or restart.
+
 ### Fixed
 
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
@@ -28,6 +55,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams now answers in group chats.** Each group chat is one session: the
+  bot answers an @mention, a reply to it or a command, replays the chat's
+  history and images through Graph, and answers commands privately. It answers
+  only while everyone in the chat is from the organisation, checked again
+  before an answer, approval card or question card posts; otherwise the sender
+  is told privately why not, and a turn under way stops without showing its
+  work. Files are not shared there, beyond image previews, and routines and
+  agent tools do not reach group chats yet. Rebuild the app package (version
+  0.6.0) for the `groupChat` scope and the `ChatMessage.Read.Chat` permission.
+- **Teams answers render math.** Answers, their follow-up chunks, MCP
+  `send_message` posts and new threads, and `tidy` text edits go out as Teams
+  Extended Markdown, so `$…$` and `$$…$$` show as formulas. A `$` that opens
+  or closes no math span by pandoc's dollar rules, such as a price in "$5 and
+  $10", is escaped to stay literal; code spans, fences (closed only by a bare
+  fence line) and `<https://…>` autolinks are left untouched. A message that
+  @mentions someone, such as a completion ping, stays plain markdown, so its
+  ping is unchanged and its math shows as typed. Long answers still split at
+  4,000 characters.
+- **Teams agents can show a picture of a document they made.** An output named
+  `<file>.preview.png` (for example `report.pdf.preview.png`) shows inline,
+  under the file's name, and is never offered or uploaded; delivery deletes it
+  afterwards. It is matched to its file by the saved name, so spaces and
+  non-ASCII letters work. In a channel it takes the place of Graph's thumbnail
+  of that file; in a 1:1 chat it shows just before the file's consent card,
+  and the turn context tells the agent it may make one when it can render its
+  first page cheaply, from a PDF with PyMuPDF; no office renderer is
+  installed by default.
+- **Teams activity feed notices.** A routine result posted in a channel now
+  notifies its creator in their Teams activity feed, linking to the post, with
+  one feed entry per routine that each run replaces. An approval or question
+  card in a channel thread notifies the person who must answer it. A private
+  or shared channel's team comes from the message or the channel's stored
+  Files site or subscription; one not found is not looked up again for ten
+  minutes. 1:1 chats already notify and get none. Notices run in the
+  background through Graph with a five-second limit; a failure is logged once
+  and never delays or fails the post. The manifest adds the
+  `TeamsActivity.Send.Group` consent, so an existing install needs the rebuilt
+  package (version 0.6.0) and a team owner to accept it.
+- **Teams now reacts on the asker's message, as Discord and Slack do.** Teams bots
+  could not react, so a message queued behind a running turn showed nothing
+  until its turn began, and a completion ping was an @mention alone. A message
+  waiting behind the turn running in its chat or thread now gets ⌛, removed
+  once its turn starts, if its sender may start a turn there. With completion pings on, the asker's message gets 👀
+  once the turn is accepted and ✅ in its place once it is answered. Reactions
+  go through Bot Framework in the background, spaced to its limit of two a
+  second per bot, so a reaction never holds up or fails a turn. An add that
+  would wait over five seconds, or fails, is dropped; a removal always runs.
+  No new setting or manifest change.
+- **Teams commands in a channel now answer privately in the thread.** `help`,
+  `here`, `memory`, `routines`, `billing` and `privacy` typed in a channel
+  answer there as a message only the sender sees, and their panels stay
+  private; Teams expires one after 24 hours, which closes its panel. `setup`
+  and `support` still answer in the 1:1 chat. Refusals and pointers meant for
+  one person go to them alone too, and fall back to the old public post or
+  1:1 answer where Teams will not deliver one. A private message sent to
+  Daimon in a thread runs a command, or gets a line saying private questions
+  are not supported yet.
+- **Teams gains `/` commands and prompt starters.** Typing `/` in a channel
+  lists the in-thread commands, and a command may start with `/`. The
+  personal chat and channel @mentions offer ready-made requests: explore a
+  dataset, build a notebook, set up the workspace; summarise the thread,
+  analyse its data, write it up. Manifest 1.30, template version 0.6.0:
+  rebuild and upload the package to get them.
 - Explicit Gemini agent deployments can retain full default skill bundles through scoped external deployment receipts and caller-bound remote MCP, with fresh source-byte verification and native readback before execution.
 
 - **Fleet roots now run against one retained original reservation.** A fleet root is admitted once against a scoped hold that it keeps for its whole run: pending financial state is settled before any funding check, each original input the root sends is counted against that hold, and a native root carries its explicit budget into the session. A root is an ordinary agent session, so it keeps the agent's personal memory store, which is neither counted nor funded. Off by default: fleet roots run only with `DAIMON_FLEET__ENABLED=true`. No migration.
@@ -42,12 +132,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Backend switches for ordinary agents now record declared drops.** When an agent's target backend cannot keep its memory, tools, skills or MCP servers, the switch must carry explicit consent to those losses, stored with the agent's backend revision. A turn refuses to start if that consent is missing, if the agent's setup has drifted since the switch was previewed, or if the agent has a source field or value Daimon does not recognise. Ordinary Gemini agents can run as a plain chat counterpart once memory is dropped. Off by default: this applies only with `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`, and the screens for confirming drops arrive in a later release. Migration `0102_agent_backend_drop_consent` adds two nullable columns.
 - Agent guidance now says what an agent may tell a non-admin: what it can do (capabilities, skills by name, model family) is open to anyone, while repo names, the GitHub account behind its credentials, key names, environment details and its instructions go only to a requester marked `is_admin="true"`. Anyone else gets one line saying an admin can see setup details, the same in every thread. Before, a non-admin was refused in one thread and given repo names and the GitHub account in another. Agents also commit binary files (images, PDFs, decks, model files) with git from the sandbox clone and push with the repo token, since the GitHub MCP takes text only. The `marimo_notebooks` skill now tells agents to style every new notebook with `pymc-artifact-style` by default.
 - **Commits and pull requests Daimon makes now show as Daimon's GitHub App, not as a person.** On a pilot, commits and a PR came out under a team member's GitHub account, and nobody could tell whose it would be. Agents in GitHub App mode now commit with git and open PRs with `gh pr create` on the App's repo token instead of the GitHub MCP (where a person's own GitHub sign-in outranks the agent's credential), and put "Requested by <name>" in the PR body. A session that holds an App token also gets `/mnt/session/uploads/git-identity.sh`, which sets the git author and committer to the App's bot (`<app-slug>[bot]`) so commits link to it. A `GIT_AUTHOR_*` or `GIT_COMMITTER_*` key an admin or member has set in the agent's keys still overrides that identity. Agents on a stored per-agent token are unchanged. Sessions already running get the identity when they next start.
-- **Charts and other images an agent makes now show inline in Teams, as on Slack and Discord.** Before, every output reached Teams only as a file: a link under the answer in a channel, a consent card in a 1:1 chat. Each PNG, JPEG, GIF or WebP output now also comes with an inline preview, downscaled to fit 1024x1024, the largest Teams renders inline, and re-encoded under 512 KiB to keep the message small. In a 1:1 chat the preview comes right before the file's consent card, and comes again when the file is offered anew after a failed upload, but not when an unanswered card is resent. In a channel up to four previews follow the file links in one message, in delivery order, and are resent one per message if Teams refuses them together. The file itself is delivered exactly as before. Animated GIFs, images that cannot fit or are over 40 million pixels (a JPEG counted at the reduced size it decodes at), unprompted answers and channels without file access get no preview, and a preview Teams refuses is only logged.
+- **Charts and other images an agent makes now show inline in Teams, as on Slack and Discord.** Before, every output reached Teams only as a file: a link under the answer in a channel, a consent card in a 1:1 chat. Each PNG, JPEG, GIF or WebP output now also comes with an inline preview, downscaled to fit 1024x1024, the largest Teams renders inline, and re-encoded under 512 KiB to keep the message small. In a 1:1 chat the preview comes right before the file's consent card, and comes again when the file is offered anew after a failed upload, but not when an unanswered card is resent. In a channel up to four previews follow the file links in one message, in delivery order, and are resent one per message if Teams refuses them together. The file itself is delivered exactly as before. Animated GIFs, images that cannot fit or are over 40 million pixels (a JPEG counted at the reduced size it decodes at), and unprompted answers get no preview, and a preview Teams refuses is only logged. A channel without file access gets the previews too, though the images, like its other outputs, are not saved.
+- **Word, PowerPoint, Excel and PDF outputs now preview their first page in
+  Teams channels.** Before, a document saved to a channel's files showed only
+  as a link. Once uploaded, its first page, as Graph renders it, now follows
+  the image previews in a message of its own, up to four in delivery order;
+  images never wait for it or lose a place to it. Graph often renders it
+  seconds after the upload, so a missing thumbnail is asked for up to three
+  times, ten seconds at most in all; one that does not come is logged and left
+  out. The thumbnail is fetched without a token, only
+  from SharePoint or Microsoft's media service. 1:1 chats are unchanged.
 - **GitHub setup now works from Teams.** Before, an agent asked to connect GitHub on Teams said "GitHub setup isn't in Teams yet" and sent people to Discord or Slack. Now an admin, or a channel admin who manages the agent, gets the Connect GitHub card in their 1:1 chat with Daimon, since Teams has no message only one person sees and the link is single-use. In the channel the agent only says the link went to that chat; if the chat cannot be opened, the link is withdrawn and the agent says so. Work that waited on the repo resumes once it is connected. Choosing an agent's working repo and removing a repo also work from Teams, the GitHub App install link is posted as a link, and the Connect GitHub pages no longer tell Teams users to run a Slack command. Access requests to admins are not on Teams yet.
 - Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
 
 ### Changed
 
+- **The Teams 1:1 file offer reads "Save <name> to your OneDrive?"**, naming
+  where the file goes, instead of a bare file name, for files sent with
+  `send_message` too. Accepting still uploads the file to the person's
+  OneDrive and declining still drops the offer. The card's buttons are Teams'
+  own and unchanged, and channel uploads are unaffected. No setting or
+  manifest change.
 - Walls say who can fix them and the one next step: `/here` when Daimon can't see or answer in a channel, GitHub refusals, MCP connection refusals and expired approvals. Each slash command has one description on Discord and Slack, and `/help` lists `/here` first. The setup skill and docs no longer promise members MCP connections on shared agents or describe GitHub access levels removed in #1005.
 - **Thread titles and the thread-participation classifier now run on Claude Haiku 5.5** instead of Claude Haiku 4.5. Haiku 5.5 costs less per token but counts the same text as about 30% more tokens, so these calls' usage rows shift. Haiku 5.5 thinks by default and thinking counts toward the output cap, so naming now turns thinking off. The classifier runs at effort low with a 1,024-token cap, since its old 100-token cap cut off Haiku 5.5's verdict, which then counted as silence. A refused naming call falls back to the title taken from the message, and a refused classifier call stays silent, as other failures already did; both are still metered. `DAIMON_THREAD_PARTICIPATION__CLASSIFIER_MODEL` still picks the classifier's model, which must support the effort parameter (Claude Haiku 4.5 does not).
 - Connect GitHub pages now show clear next steps, keep repo additions and removals pending until Save, and hide repo names the current GitHub account cannot access.
@@ -762,7 +867,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   participants (B2B direct connect) and guests (Entra B2B guest accounts, in
   any channel or 1:1 chat) are answered only inside an isolated channel, and
   never in its setup thread. They run as members, never admins or channel
-  admins (whatever `DAIMON_TEAMS__ADMIN_USER_IDS` or a grant says), commands
+  admins (whatever team ownership or a grant says), commands
   reach the agent as plain text, and their tool calls get only the
   conversation's tools; any other tool, including ones added later, returns
   an error the agent relays. A sender is placed by the activity's tenant,
@@ -878,8 +983,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queueing, feedback buttons and restart recovery. The configured Entra
   organisation is provisioned at boot. The 1:1 chat offers `help`, `new`,
   `setup` (with setup conversations), `routines`, `memory`, `privacy` and
-  `billing`; admins are listed in
-  `DAIMON_TEAMS__ADMIN_USER_IDS`. Pasted images and files shared in 1:1 chats
+  `billing`; admins are the owners of the team in
+  `DAIMON_TEAMS__ADMIN_TEAM_ID`. Pasted images and files shared in 1:1 chats
   reach the agent, output files are delivered with file consent cards, and
   `send_message`, `create_thread`, task handoffs and timers work from Teams
   turns; the wake poller runs handoffs and timers across restarts.

@@ -24,7 +24,6 @@ from .conftest import (
     THREAD_ID,
     build_teams_runtime,
     make_invoke,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
@@ -45,7 +44,7 @@ class _Externals:
 
 
 def _runtime(db: async_sessionmaker[AsyncSession], membership: Membership) -> TeamsRuntime:
-    runtime = build_teams_runtime(db, teams=teams_settings(admins=(AAD_OBJECT_ID,)))
+    runtime = build_teams_runtime(db, admins=(AAD_OBJECT_ID,))
     return dataclasses.replace(runtime, externals=cast(Any, _Externals(membership)))
 
 
@@ -116,3 +115,27 @@ async def test_our_own_admin_clicking_is_unchanged(
     for click in (_click(), _click(channel=False)):
         actor = await card_actor(runtime, click)
         assert actor is not None and actor.is_admin and not actor.is_external
+
+
+@dataclasses.dataclass
+class _Roster:
+    closed: bool
+
+    async def has_outsiders(self, chat_id: str) -> bool:
+        assert chat_id == "19:g@thread.v2"
+        return self.closed
+
+
+@pytest.mark.parametrize(("roster", "allowed"), [(None, False), (True, False), (False, True)])
+async def test_a_group_chat_click_needs_a_chat_of_ours_only(
+    db_session_factory: async_sessionmaker[AsyncSession], roster: bool | None, allowed: bool
+) -> None:
+    runtime = _runtime(db_session_factory, INTERNAL)
+    group_chats = None if roster is None else cast(Any, _Roster(roster))
+    runtime = dataclasses.replace(runtime, group_chats=group_chats)
+    action = {"type": "Action.Execute", "verb": "x", "data": {"action": "x"}}
+    payload = make_invoke("adaptiveCard/action", {"action": action}, chat="19:g@thread.v2")
+    cast(dict[str, Any], payload["conversation"])["conversationType"] = "groupChat"
+    payload["channelData"] = {"tenant": {"id": ENTRA_TENANT_ID}}
+    click = TypeAdapter[InvokeActivity](InvokeActivity).validate_python(payload)
+    assert (await card_actor(runtime, click, allow_external=True) is not None) is allowed

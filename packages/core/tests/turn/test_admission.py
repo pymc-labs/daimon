@@ -1866,7 +1866,7 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
 ) -> None:
     """Admins are trusted: a DM reaches only them, so the pin doesn't apply there.
 
-    On Teams the adapter passes ADMIN for the deployment's ``admin_user_ids``
+    On Teams the adapter passes ADMIN for an owner of the admin team
     in a personal chat, so the same rule covers them.
     """
     tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)

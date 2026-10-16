@@ -53,6 +53,21 @@ _FILES_HINT_NO_CARD = (
     "daimon its SharePoint site. Say so when someone asks for a file here; do not swap in "
     "an artifact, report or notebook unless they ask for one."
 )
+_GROUP_FILES_HINT = (
+    "Files you make cannot be shared in a group chat. Say so when someone asks for a file "
+    "here; they can ask you for it in their 1:1 chat with you."
+)
+# A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
+# (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
+# document needs a page template. The default environment has no office suite.
+_DIRECT_FILES_HINT = (
+    "When you deliver a .docx, .pptx, .xlsx or .pdf here, you may also save a PNG of its "
+    "first page or slide to your outputs as <file name>.preview.png "
+    "(report.pdf.preview.png for report.pdf): it shows inline as a picture and is never "
+    "offered as a file. Only when you can render one cheaply, such as from a PDF with "
+    "PyMuPDF (pip install pymupdf): pymupdf.open(pdf)[0].get_pixmap(dpi=96).save(png). "
+    "No office renderer is installed by default."
+)
 
 
 @dataclass(frozen=True)
@@ -112,11 +127,20 @@ def channel_media(
     An `<img>` is fetched with the app's token, so only this message's hosted
     content qualifies, never another team's or message's.
     """
+    prefix = f"/v1.0/teams/{group_id}/channels/{channel_id}/messages/{root_id}"
+    if message.id != root_id:
+        prefix += f"/replies/{message.id}"
+    return _media(message, prefix)
+
+
+def chat_media(message: GraphMessage, *, chat_id: str) -> ChannelMedia:
+    """A group chat message's own hosted images and shared files, as `channel_media`."""
+    return _media(message, f"/v1.0/chats/{chat_id}/messages/{message.id}")
+
+
+def _media(message: GraphMessage, prefix: str) -> ChannelMedia:
     images: tuple[str, ...] = ()
     if message.body.content_type == "html":
-        prefix = f"/v1.0/teams/{group_id}/channels/{channel_id}/messages/{root_id}"
-        if message.id != root_id:
-            prefix += f"/replies/{message.id}"
         hosted = (src for src in image_sources(message.body.content or ""))
         images = tuple(
             src for src in hosted if _is_hosted_content(src, f"{prefix}/hostedContents/")
@@ -271,6 +295,26 @@ def _replies_kept(post: GraphMessage) -> tuple[list[GraphMessage], bool]:
     return kept, len(kept) < len(replies) or post.replies_next_link is not None
 
 
+def chat_messages(page: GraphPage, *, skip_ids: frozenset[str]) -> list[GraphMessage]:
+    """What a group chat's first turn replays, oldest first: its newest messages."""
+    return [m for m in _order(page.value) if m.id not in skip_ids and _readable(m)]
+
+
+def chat_block(
+    page: GraphPage,
+    *,
+    skip_ids: frozenset[str],
+    bot_app_id: str,
+    attached: Attached = NOTHING_ATTACHED,
+) -> HistoryBlock:
+    """A group chat's first turn: one page of its newest messages."""
+    messages = chat_messages(page, skip_ids=skip_ids)
+    lines = _lines(messages, bot_app_id=bot_app_id, attached=attached)
+    newest = newest_message_id(m.id for m in page.value)
+    truncated = _truncated(page.next_link is not None)
+    return HistoryBlock("chat_history", lines, truncated, newest, attached)
+
+
 def channel_messages(posts: GraphPage, *, skip_ids: frozenset[str]) -> list[GraphMessage]:
     """What a top-level mention replays: each post, oldest first, then its newest replies."""
     kept: list[GraphMessage] = []
@@ -308,15 +352,26 @@ def channel_block(
 
 
 def history_media(
-    messages: Sequence[GraphMessage], *, group_id: str, channel_id: str
+    messages: Sequence[GraphMessage],
+    *,
+    group_id: str = "",
+    channel_id: str = "",
+    chat_id: str | None = None,
 ) -> tuple[dict[str, tuple[str, ...]], list[SharedFile]]:
-    """The newest replayed images (by message id) and shared files, within the limits."""
+    """The newest replayed images (by message id) and shared files, within the limits.
+
+    `chat_id` reads them as a group chat's messages instead of a channel's.
+    """
     images: dict[str, tuple[str, ...]] = {}
     files: list[SharedFile] = []
     room = HISTORY_IMAGE_LIMIT
     for message in reversed(messages):
-        media = channel_media(
-            message, group_id=group_id, channel_id=channel_id, root_id=root_of(message)
+        media = (
+            chat_media(message, chat_id=chat_id)
+            if chat_id is not None
+            else channel_media(
+                message, group_id=group_id, channel_id=channel_id, root_id=root_of(message)
+            )
         )
         if room and media.image_urls:
             images[message.id] = media.image_urls[:room]
@@ -362,15 +417,18 @@ def render_user_message(
 ) -> str:
     """Host facts and any replayed history, then the person's escaped words.
 
-    A channel turn names its thread too, the id thread-scoped settings such as
+    A group chat is one `role="group_chat"` place without files. A channel turn
+    names its thread too, the id thread-scoped settings such as
     `set_thread_participation` key on, and says with `files` whether a file
     saved now reaches the channel (`channel_files`; None in a chat). Where it
     does not, `files_hint` says what to do when asked for one: offer the
-    Enable files card when the deployment can (`can_enable_files`).
+    Enable files card when the deployment can (`can_enable_files`). In a 1:1
+    chat `files_hint` says how to picture a document inline.
     `unprompted="true"` marks a message nobody addressed to the bot (organic
     thread participation); `external="true"` a sender from another organisation.
     """
-    context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>']
+    hint = quoteattr(_DIRECT_FILES_HINT)
+    context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)} files_hint={hint}/>']
     if inbound.kind == "channel":
         files = ""
         if channel_files is not None:
@@ -392,6 +450,13 @@ def render_user_message(
             f' role="parent_channel"{names}{files}/>',
             f'<thread platform="teams" id={quoteattr(inbound.thread_id)} role="current_thread"/>',
         ]
+    elif inbound.kind == "group":
+        name = f" name={quoteattr(inbound.channel_name)}" if inbound.channel_name else ""
+        hint = quoteattr(_GROUP_FILES_HINT)
+        context = [
+            f'<channel platform="teams" id={quoteattr(inbound.channel_id)} role="group_chat"'
+            f'{name} files="unavailable" files_hint={hint}/>'
+        ]
     author = f" author_name={quoteattr(inbound.user_name)}" if inbound.user_name else ""
     sent = f" timestamp={quoteattr(inbound.timestamp)}" if inbound.timestamp else ""
     query = (
@@ -405,8 +470,12 @@ def render_user_message(
     if history is not None and history.unavailable:
         hint = (
             "daimon could not read this conversation's earlier messages from Microsoft Teams. "
-            "If the request needs them, say so instead of guessing; read_channel or "
-            "read_thread may still reach them."
+            "If the request needs them, say so instead of guessing"
+            + (
+                "."
+                if inbound.kind == "group"
+                else "; read_channel or read_thread may still reach them."
+            )
         )
         reason = quoteattr(history.unavailable)
         replay = (f'<history status="unavailable" reason={reason} hint={quoteattr(hint)}/>',)

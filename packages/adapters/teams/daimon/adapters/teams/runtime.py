@@ -17,6 +17,7 @@ from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
     PostgresError,
 )
 from daimon.adapters.teams.externals import ExternalParticipants
+from daimon.adapters.teams.group_chats import GroupChatRoster
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembers, GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
@@ -52,12 +53,14 @@ class TeamsRuntime:
     deployment_default: DeploymentDefault = field(default_factory=DeploymentDefault)
     # Pre-save check of a pasted MCP token; production wires `probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
-    # A team's owners by Entra group id, for channel admin grants; None (no
+    # A team's owners by Entra group id, for channel grants and the admin team; None (no
     # Graph) admits nobody by team. Production wires `fetch_team_owner_ids`.
     team_owners: GroupMembers | None = None
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # Finds a channel's senders from another organisation; None trusts the activity alone.
     externals: ExternalParticipants | None = None
+    # Whether a group chat holds anyone from outside; None answers in no group chat.
+    group_chats: GroupChatRoster | None = None
     # This process's message admissions; `hold_owner_key` makes it read as alive.
     owner_key: int = field(default_factory=lambda: randbits(63))
 

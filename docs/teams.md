@@ -58,25 +58,35 @@ is supported; government and China clouds use other Bot Framework hosts.
   not seen, and a followed thread gets no unprompted replies; an operator can
   turn all three on (see
   [Private and shared channels](#private-and-shared-channels-optional)). The
-  package declares `supportsChannelFeatures: tier1` (manifest 1.25), but
+  package declares `supportsChannelFeatures: tier1` (manifest 1.30), but
   adding the app to a team does not add it to these channels: each one's
   owner adds it from the channel.
-- **Group chats** get a short refusal.
+- **Group chats** answer an @mention, a reply or a command, only while
+  everyone in the chat is from the organisation (see [Group chats](#group-chats)).
 - **Channels with `writers: none`** (ids look like `19:…@thread.tacv2`) and
   their threads get no reply, notice or tool post. One thread is named by
   adding `;messageid=<root post id>`. Where readers are limited, the agent's
   memory is read-only. See [permissions.md](permissions.md).
 
-A turn shows one status card, edited in place, with a Cancel button only the
+A turn shows one status card, edited in place, with a Stop button only the
 author can use. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. Messages sent while a turn
-runs are queued and run as one follow-up per author. Work an agent hands off
+runs are queued, each marked ⌛ until its turn starts (only where the sender
+may start a turn: not in a protected place, not for someone off the invoker
+allowlist or from another organisation outside an isolated channel), and run
+as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. A retried
 delivery runs once, across restarts too (see Restart behaviour).
 
-### Feedback and Ask a human
+Answers and `send_message` posts go out as Teams Extended Markdown, so `$…$`
+and `$$…$$` render as math. A `$` that opens or closes no math span by
+pandoc's dollar rules, such as a price, is escaped to stay literal; code is
+left as is. A message that @mentions someone (a completion ping) stays plain
+markdown, its math shown as typed.
+
+### Feedback and Ask a person
 
 The card below an answer carries 👍 and 👎 buttons: Teams refuses an edit
 with both text and a card, so they cannot sit on the answer itself. 👍 records
@@ -144,14 +154,24 @@ members, and the lookups only their kind needs are skipped.
 
 ### Commands and admins
 
-Commands answer in the 1:1 chat, since their replies can carry account
-details and Teams has no message only its sender sees. One typed in a channel
-is answered in the sender's 1:1 chat, opened if needed, with a short pointer
-in the channel; `new` there says each post is its own conversation. A message
-is a command only when it is the bare word (or `memory /<path>`); anything
+In a 1:1 chat a command answers there. In a channel or group chat, `help`, `here`,
+`memory`, `routines`, `billing` and `privacy` answer in the thread as a
+private message only the sender sees, and their panels stay private when
+clicked. Teams expires a private message after 24 hours, which closes its
+panel. `setup` and `support` keep their flows in the sender's 1:1 chat,
+opened if needed, with a private pointer in the thread; so does any command
+Teams will not deliver privately, and any command in a channel read through
+Graph. `new` there says each post is its own conversation. Typing `/` in a
+channel lists the in-thread commands. A message is a command only when it is
+the bare word (or `memory /<path>`), with or without a leading `/`; anything
 longer goes to the agent. A message that is exactly a command word runs the
 command, so a reply of just `here` shows the status card rather than reaching
 the agent. None of them runs an agent turn.
+
+A private message sent to Daimon in a thread runs no turn: a command answers
+privately, and anything else gets one private line saying private questions
+are not supported yet. The prompt starters in the compose box (personal
+chat) and after an @mention (channels) fill in a ready-made request to send.
 
 | Command | Does |
 | --- | --- |
@@ -160,7 +180,7 @@ the agent. None of them runs an agent turn.
 | `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
+| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
 | `privacy` | See, export or delete what Daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
@@ -169,17 +189,29 @@ A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
 usual session resumes when `new` or **End** closes it. Opening one runs no turn.
 
-Teams has no workspace-admin flag a bot can read, so admins are listed by
-Entra object ID in `DAIMON_TEAMS__ADMIN_USER_IDS`. Their turns run with the
-admin role, and the panels unlock the admin actions for them. Every card click
-and dialog re-checks the organisation, the clicker and their role. The list
-is read at boot, which also takes the stored admin role, used by routines and
-MCP clients, from anyone no longer on it. There are no ephemeral messages:
-refusals come as toasts, dialog messages or card edits only the clicker sees.
+Daimon's admins are the owners of one team, and nobody else. The team is named
+by its Entra group ID in `DAIMON_TEAMS__ADMIN_TEAM_ID` (the team's ⋯ → **Get link to team** → the
+`groupId` parameter). The app must be installed in that team: its
+`TeamMember.Read.Group` consent is what lets Daimon read the owners. Making
+someone an owner makes them an admin, with no redeploy; the owner list is
+cached for a minute, so a removed owner loses admin within about a minute,
+everywhere: each owner read also takes the stored admin role, which routines,
+tools and MCP clients act on, from anyone no longer an admin. A failed read
+falls back to the last successful one for up to an hour, and demotes no one. If
+the app is removed from the admin team, or no owner list has been read within
+an hour, nobody is an admin in chats and cards until the next good read, while
+stored admin roles stand until then; re-adding the app restores the owners.
+Guests, people from another organisation and anyone in a group chat with
+outsiders are never admins. Admins' turns run with the admin role, and the
+panels unlock the admin actions for them. Every card click and dialog
+re-checks the organisation, the clicker and their role. Boot does the same
+demotion; support requests and budget notices for "the admins" reach the team's owners.
+A refusal in a channel is a private
+message, toast, dialog message or card edit only its sender or clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
-group ID in `role_ids` to admit that team's owners), channel budgets
-(`set_channel_budget`) and channel environments (`set_channel_environment`)
-work as on Discord and Slack. Who answers where lists each channel's
+group ID in `role_ids` to admit that team's owners, guests left out), channel
+budgets (`set_channel_budget`) and channel environments
+(`set_channel_environment`) work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
 or that channel's admins), and its permissions (readers and writers), admins by
@@ -192,6 +224,41 @@ CLI can't read channel names, so a copy it makes is named from the channel id.
 Members see only the responders and agents explicitly allowed at the panel's
 channel/thread. A panel opened in a 1:1 chat has no verified channel and lists
 no agents for members; an admin retains the existing full panel roster.
+
+### Group chats
+
+A group chat is one session, keyed on the chat. The bot answers a message that
+@mentions it, quotes one of its messages, or is a command; with plain-text
+mentions on, a typed name counts too. It never joins in unprompted. A
+targeted message to it runs a command privately, and anything else there
+gets a one-line notice.
+
+Everyone in a group chat sees each answer, so the bot answers only while the
+whole roster is the organisation's: members of the tenant, plus guests listed
+with `--add-member-guest` (or every guest with
+`DAIMON_TEAMS__RESTRICT_GUESTS=false`). Anyone from another tenant, an
+unlisted guest, an anonymous member, or a roster that cannot be read closes
+the chat: the sender gets a private notice and no turn starts. The roster is
+read through Bot Framework and cached for a minute, or until someone joins.
+A running turn checks it again before its card shows any of its work or it
+posts an approval or question card, and reads it afresh before the answer. If
+the chat has closed meanwhile, the turn stops, no such card is posted (the
+approval or question goes unanswered), its card says only that someone from
+outside is in the chat, and the asker gets the private notice once. A group
+chat has no team, so team owners are not its channel admins: those settings
+need a workspace admin there.
+
+A turn replays the chat like a channel thread (Channel history, below): the
+first turn the newest 25 messages, a later one only newer messages, the
+newest 4 images, under the resource-specific consent `ChatMessage.Read.Chat`
+that a chat member grants when adding the app. Without it the agent gets the
+text of the message alone. Those first 25 can predate the app's addition: the
+bot does not record when it joined a chat, so it reads them all. Commands answer privately as in a channel; `new`
+resets the sender's session there, and `setup` and `support` stay in the 1:1
+chat. Files are not shared in group chats: every output, images included, is
+skipped and deleted, and the agent is told so. Routines and
+the agent's Teams tools do not reach group chats yet, and adding the app to
+one posts no welcome.
 
 ### Channel history
 
@@ -209,9 +276,9 @@ be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
-the manifest, plus `TeamMember.Read.Group` for the owner list a team grant of
-channel admins reads (cached for a minute; without it the team's owners are
-not channel admins). A team owner grants them when adding the app to a team, for that
+the manifest, plus `TeamMember.Read.Group` for the owner list the admin team
+and a team grant of channel admins read (cached for a minute; without it the
+team's owners are not admins). A team owner grants them when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
 mention unless their thread is followed. An existing install needs the updated app package uploaded again
@@ -238,7 +305,7 @@ A burst of replies is judged once, after the thread has been quiet for
 `QUIET_SECONDS`, over the thread read through Graph, and capped per thread
 per hour. The turn runs as the burst's newest author and passes the same
 admission and billing gates as a mention, but posts only its answer: no
-status card or Cancel button, and every refusal, notice and error is only
+status card or Stop button, and every refusal, notice and error is only
 logged. No turn posts a status message of its own under its answer, as on
 Slack and Discord: what the person must hear rides on the answer, and only
 cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
@@ -310,7 +377,8 @@ setting off the routes answer 404 and nothing is subscribed.
   passed to the agent. Files shared in a 1:1 chat reach the agent as short-lived
   download links. The manifest must set `supportsFiles: true`.
 - **Out.** Files the agent writes to its outputs are offered in the 1:1 chat
-  with Teams' file consent card (the agent guidance describes this path); accepting uploads the file to the user's
+  with Teams' file consent card, "Save <name> to your OneDrive?" (the agent
+  guidance describes this path); accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
 - **Channels.** Teams sends the bot only a channel message's text, so the bot
@@ -330,21 +398,44 @@ setting off the routes answer 404 and nothing is subscribed.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
-- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
-  Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
-  re-encoded under 512 KiB (PNG, else JPEG). In a 1:1 chat each image comes
-  just before its consent card; in a channel up to four, in delivery order,
-  follow the links in one message (not after an unprompted answer, nor in a
-  channel without file access). Animated GIFs get no preview, and a preview
-  Teams refuses is only logged (`teams.output_preview.send_failed`).
   Where they are unavailable, `files_hint` tells the agent, asked for a file or
   to turn files on, to call `enable_channel_files` first rather than offer an
   artifact, report or notebook; the bot posts the Enable files card (below)
   after that answer, for a Daimon admin who asked.
+- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
+  Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
+  re-encoded under 512 KiB (PNG, else JPEG). Up to four, in delivery order,
+  are added to the answer's last message, beside its text: in a channel in the
+  same edit as the file links (not after an unprompted answer), in a 1:1 chat
+  above the consent cards. When the answer cannot take them (a closing notice
+  card, or Teams refuses the edit, as it may when the message gets too large),
+  they come in a message of their own after it; in a 1:1 chat, one message
+  each below the consent cards, as do any beyond four. A channel without file
+  access shows no previews. Animated GIFs get no preview, and a preview Teams
+  refuses is only logged (`teams.output_preview.send_failed`).
+- **Document previews.** Up to four Word, PowerPoint, Excel or PDF outputs
+  saved to a channel's files show their first page, in delivery order, added
+  to the answer in a second edit after the image previews, which never wait
+  for them or give up a place to them. When the answer would then hold more
+  than four previews, or the edit is refused, they come in a message of their
+  own. Each is Graph's thumbnail of the uploaded file, asked for up to
+  three times while Graph renders it (ten seconds at most for them all),
+  fetched without a token and re-encoded like an image. One that does not come
+  is logged (`teams.output_thumbnail.skipped`, no name) and left out.
+- **Preview outputs.** An output named `<file>.preview.png`, such as
+  `report.pdf.preview.png`, is the agent's own picture of that file. It shows
+  inline like an image, under the file's name, and is never offered or
+  uploaded; delivery deletes it. In a channel it stands in for Graph's
+  thumbnail of that file. In a 1:1 chat it shows with the other previews,
+  and `files_hint` tells the agent it may make one when it can render the
+  first page cheaply (PyMuPDF from a PDF); no office renderer is installed by
+  default.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
-`graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
-every redirect hop is re-checked (Graph reads follow none).
+`graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a
+thumbnail also to Microsoft's media service on `*.svc.ms`, where Graph serves
+SharePoint thumbnails from), and every redirect hop is re-checked (Graph
+reads follow none).
 
 A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
 takes its download link only over https from a SharePoint, OneDrive or Graph
@@ -474,16 +565,35 @@ roster; when they are not, or the post fails, the result goes to their 1:1
 chat if the direct-message policy allows. With completion pings on
 (`DAIMON_COMPLETION_PINGS`), the answer is posted as a new message (in a
 channel, @mentioning the asker) so Teams notifies, and the card then reads
-"Done. The answer is below."; bots cannot react. Teams renders markdown tables
+"Done. The answer is below.". The asker's message also gets 👀 once the turn
+is accepted and ✅ in its place once it is answered, as on Discord. Teams renders markdown tables
 natively, so `DAIMON_TABLE_RENDERING` has nothing to do here.
+
+A routine result posted in a channel also sends its creator an activity feed
+notice that opens it. Each routine keeps one feed entry (its `chainId` comes
+from the routine's id), so a new run replaces the last. A tool approval or
+question card in a channel thread notifies the person who must answer it. A
+1:1 chat notifies on its own and gets none. Notices go through Graph's
+`sendActivityNotification` on the channel's team under the
+`TeamsActivity.Send.Group` consent, in the background within five seconds;
+one that fails is logged (`teams.activity_notice.failed`, status and reason
+only) and dropped, never touching the post. People turn them off under the
+app in their Teams notification settings.
 
 ### Capacity
 
 Each tenant runs three turns at once by default
 (`DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT`). A new thread over the limit
 gets a retry-later reply without starting a turn, and due timers and handoffs
-from the wake poller wait until a turn finishes. A post or edit Teams throttles
-(HTTP 429) is retried once after the wait Teams asks for, up to 10 seconds.
+from the wake poller wait until a turn finishes. A post, edit or reaction Teams
+throttles (HTTP 429) is retried once after the wait Teams asks for, up to 10
+seconds (five for a reaction, its whole call). Reactions (👀, ✅, ⌛) are spaced
+to Bot Framework's
+[limit](https://learn.microsoft.com/en-us/microsoftteams/platform/agents-in-teams/agent-reactions)
+of two a second per bot and sent in the background, so they never hold up a turn. An add that
+would wait over five seconds, or fails, is dropped; a removal always waits its
+turn, so ⌛ and 👀 never stay behind, and is skipped only when its add never
+landed.
 
 ### Restart behaviour
 
@@ -501,7 +611,9 @@ seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
 this up as soon as I'm back." note, and the next process runs it once, in
 order, through the usual admission checks. One more than 10 minutes old by
 then gets "I restarted for an update and couldn't get to this in time. Please
-send it again." instead. A turn that had started is never rerun: its card is
+send it again." instead. Either way its ⌛ comes off once the next process
+picks it up; shutdown never waits on a reaction. A turn that had started is
+never rerun: its card is
 marked interrupted as above. Nothing is said about a message until its receipt
 is written: while the database is unreachable the chat hears nothing, and a
 message whose start could not be recorded is tried again every 30 seconds. A message's
@@ -517,7 +629,7 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported
 
-Group chats, reactions, `/dm` conversations, files in channels whose site is
+`/dm` conversations, files, routines and agent tools in group chats, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 

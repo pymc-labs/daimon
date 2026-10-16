@@ -8,7 +8,10 @@ tenant, and reduces it to `TeamsInbound`. `parse_graph_message` does the
 same for a message Graph reported from a subscribed private or shared channel,
 where Teams sends the bot only @mentions. `live_tenant_id`
 then maps it to the organisation's live daimon tenant; a 1:1 chat names its
-organisation, so it needs no DM workspace choice. Group chats are refused for now.
+organisation, so it needs no DM workspace choice. A group chat (`kind="group"`)
+is one conversation keyed by its chat id: only a mention, a quote of the bot
+or a targeted message addresses it, and its sender must be ours, as in a 1:1
+chat; `group_chats` refuses a chat that holds anyone else.
 
 A channel must be the configured tenant's (`conversation.tenantId`, the host
 tenant), but its sender may be from another one: a shared channel's external
@@ -45,6 +48,7 @@ from daimon.core.teams_graph import (
     message_references,
     message_text,
 )
+from daimon.core.teams_threads import is_group_chat
 from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.activities.utils import StripMentionsTextOptions, strip_mentions_text
 from microsoft_teams.api.models.channel_data import ChannelData
@@ -52,7 +56,6 @@ from microsoft_teams.api.models.entity.quoted_reply_entity import QuotedReplyDat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DENIED = "This agent is not available for this account."
-GROUP_CHAT_UNSUPPORTED = "I answer in channels and in 1:1 chats, not in group chats yet."
 INPUT_TOO_LONG = "That message is too long for this agent. Please shorten it."
 TEXT_ONLY = "Send your question as text, an image or a file."
 MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
@@ -99,9 +102,14 @@ class TeamsInbound:
     come from the activity, General's filled in. `is_external` marks a sender
     answered as from another organisation, `is_external_known` that it rests on
     positive evidence (`externals.Membership`), `home_tenant_id` their tenant.
+    `from_form` marks a submitted form's turn: its `activity_id` names no message.
+    `sender_id` is the sender's Bot Framework id (`29:…`), which a reply only
+    they see is addressed to; Graph-read messages have none. `is_targeted`
+    marks a channel message only the bot sees (a slash command, say): it is
+    answered privately and never enters the thread's session.
     """
 
-    kind: Literal["dm", "channel"]
+    kind: Literal["dm", "channel", "group"]
     entra_tenant_id: str
     user_id: str
     conversation_id: str
@@ -125,6 +133,9 @@ class TeamsInbound:
     is_external: bool = False
     is_external_known: bool = False
     home_tenant_id: str | None = None
+    from_form: bool = False
+    sender_id: str | None = None
+    is_targeted: bool = False
 
     @property
     def thread_id(self) -> str:
@@ -309,12 +320,15 @@ def parse_inbound(
     conversation = activity.conversation
     channel_data = activity.channel_data
     kind = conversation.conversation_type
-    if kind == "groupChat" or conversation.is_group and kind != "channel":
-        return Refusal(GROUP_CHAT_UNSUPPORTED)
-    if kind not in ("personal", "channel"):
+    if kind not in ("personal", "channel", "groupChat"):
         return Refusal(DENIED)
-    addressed = kind != "channel" or activity.is_recipient_mentioned() or quotes_bot(activity)
-    thread_reply = not addressed and _is_thread_reply_by_person(activity)
+    # A targeted message (`supportsTargetedMessages`) is addressed to the bot alone.
+    targeted = kind != "personal" and activity.recipient.is_targeted is True
+    addressed = (
+        kind == "personal" or targeted or activity.is_recipient_mentioned() or quotes_bot(activity)
+    )
+    # A group chat has no threads, so nothing there is screened for participation.
+    thread_reply = not addressed and kind == "channel" and _is_thread_reply_by_person(activity)
     # Typed text, not a mention: whether it counts is the tenant's switch, read later.
     by_name = (
         not addressed
@@ -331,7 +345,7 @@ def parse_inbound(
     user_id = canonical_uuid(activity.from_.aad_object_id)
     home = foreign_tenant(activity.from_, channel_data, ours=tenant) if tenant else None
     # The conversation is always the host's. A channel may hold another
-    # organisation's people; a 1:1 chat holds only ours, as before.
+    # organisation's people; a 1:1 or group chat sender is only ours.
     sender_verified = kind == "channel" or (
         canonical_uuid(channel_tenant) == tenant and home is None
     )
@@ -343,6 +357,8 @@ def parse_inbound(
         and activity.channel_id == "msteams"
         and bool(conversation.id.strip())
         and bool(activity.id.strip())
+        # A stored turn's kind comes from its id (`kind_of`): a group chat must read as one.
+        and (kind != "groupChat" or is_group_chat(conversation.id))
     )
     if not verified or tenant is None or user_id is None:
         return Refusal(DENIED if addressed else None)
@@ -360,12 +376,19 @@ def parse_inbound(
     if kind == "personal":
         conversation_id = channel_id = conversation.id
         team = channel = None
+    elif kind == "groupChat":
+        # One conversation per chat; a quote-reply stays in it.
+        conversation_id = channel_id = conversation.id.split(";", 1)[0]
+        team = channel = None
+    elif targeted and ";messageid=" not in conversation.id:
+        # A targeted root post takes no replies: answers go to the channel itself.
+        conversation_id = channel_id = conversation.id
     else:
         conversation_id = channel_thread_id(conversation.id, activity.id)
         channel_id = conversation_id.split(";", 1)[0]
     team_id = team.id if team is not None else None
     inbound = TeamsInbound(
-        kind="dm" if kind == "personal" else "channel",
+        kind=_KINDS[kind],
         entra_tenant_id=tenant,
         user_id=user_id,
         conversation_id=conversation_id,
@@ -381,14 +404,32 @@ def parse_inbound(
         by_name=by_name,
         user_name=activity.from_.name,
         timestamp=activity.timestamp.isoformat() if activity.timestamp else None,
-        channel_name=_channel_name(channel_id, team_id, channel.name if channel else None),
+        channel_name=conversation.name
+        if kind == "groupChat"
+        else _channel_name(channel_id, team_id, channel.name if channel else None),
         channel_type=channel.type if channel is not None else None,
         team_name=team.name if team is not None else None,
         is_external=home is not None,
         is_external_known=home is not None,
         home_tenant_id=home,
+        sender_id=activity.from_.id or None,
+        is_targeted=targeted,
     )
     return _admitted(inbound, addressed=addressed)
+
+
+_KINDS: dict[str, Literal["dm", "channel", "group"]] = {
+    "personal": "dm",
+    "channel": "channel",
+    "groupChat": "group",
+}
+
+
+def kind_of(conversation_id: str, parent_channel_id: str) -> Literal["dm", "channel", "group"]:
+    """The kind of a stored turn's conversation, from its ids."""
+    if is_group_chat(conversation_id):
+        return "group"
+    return "dm" if conversation_id == parent_channel_id else "channel"
 
 
 def _channel_name(channel_id: str, team_id: str | None, name: str | None) -> str | None:

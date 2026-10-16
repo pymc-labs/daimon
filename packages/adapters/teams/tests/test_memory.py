@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     CHANNEL_ID,
-    DIRECT_CHAT_ID,
     ENTRA_TENANT_ID,
     TeamsApiFake,
     build_teams_runtime,
@@ -116,13 +115,13 @@ async def test_memory_without_a_store_says_so(
 async def _chat_card(
     db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake, anthropic: AsyncAnthropic
 ) -> str:
-    """Send `memory` in a channel post; the JSON of the card answered in the 1:1 chat."""
+    """Send `memory` in a channel post; the JSON of the card only its sender sees there."""
     async with running_service(
         build_teams_runtime(db_factory, anthropic=anthropic), fake
     ) as service:
         await post_activity(service, make_channel_activity(text="memory"))
         async with asyncio.timeout(10):
-            while not (chat := [r for r in fake.activity_requests if DIRECT_CHAT_ID in r.url]):
+            while not (chat := fake.private_requests):
                 await asyncio.sleep(0.01)
     return json.dumps(chat[0].body, ensure_ascii=False)
 
@@ -143,7 +142,7 @@ async def test_memory_typed_in_a_channel_shows_that_channels_agent(
     assert "helper's memory (1 files)" in card, "the channel's agent, not the 1:1 chat's"
 
 
-async def test_memory_typed_in_a_limited_readers_channel_stays_out_of_the_chat(
+async def test_memory_typed_in_a_limited_readers_channel_is_shown_inside_it(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     anthropic = await _anthropic(db_session_factory, {"/secret.md": "inside only"})
@@ -152,8 +151,8 @@ async def test_memory_typed_in_a_limited_readers_channel_stays_out_of_the_chat(
         await set_access_policy(session, tenant_id=TENANT, policy=policy)
     card = await _chat_card(db_session_factory, teams_api_fake, anthropic)
 
-    assert json.dumps(KEPT_INSIDE)[1:-1] in card, "the 1:1 chat is told why nothing is shown"
-    assert "/secret.md" not in card, "no path leaves the channel"
+    assert "/secret.md" in card, "answered privately in the channel, nothing leaves it"
+    assert json.dumps(KEPT_INSIDE)[1:-1] not in card
 
 
 async def _seed_personal(

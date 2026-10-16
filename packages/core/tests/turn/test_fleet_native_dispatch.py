@@ -906,10 +906,12 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
                     await asyncio.sleep(0.01)
         release.set()
         ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        assert ended.status == "failed" and ended.error_code == "dispatch_refused"
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd > 0 and not calls
         await _assert_completion_offered(request, wake_key)
+        live_run, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert live_run.status == "running"
         async with request.deps.sessionmaker.begin() as db:
             await access_policy.set_access_policy(
                 db, tenant_id=request.tenant_id, policy=original_policy
@@ -1058,3 +1060,138 @@ async def test_worker_failure_log_retains_closed_refusal_without_private_payload
         assert not calls  # Refusal logging never creates/sends a native request.
     finally:
         await ports.close()
+
+
+@pytest.mark.parametrize("error_kind", ["fleet", "unexpected", "already_terminal"])
+async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection(
+    worker_root, monkeypatch, error_kind
+):
+    from daimon.core import headless_runner
+    from daimon.core.fleet import FleetConflict
+    from structlog.testing import capture_logs
+
+    request, root, sibling, resolved, prices, calls, _, _, _ = worker_root
+    private = "PRIVATE_PROVIDER_BODY_KEY_SQL"
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def fail(prepared, *, worker, **kwargs):
+        entered.set()
+        await release.wait()
+        if error_kind == "already_terminal":
+            async with request.deps.sessionmaker.begin() as db:
+                await fleet.lock_budget(
+                    db,
+                    tenant_id=worker.tenant_id,
+                    actor_id=root.fleet.account_id,
+                    run_id=worker.run_id,
+                )
+                await fleet.finish(
+                    db,
+                    tenant_id=worker.tenant_id,
+                    worker_id=worker.id,
+                    expected_version=worker.version,
+                    status="failed",
+                    error_code="deadline_expired",
+                )
+        if error_kind == "unexpected":
+            raise ValueError(private)
+        error = FleetConflict(private, reason="journal_owner_mismatch")
+        error.__cause__ = RuntimeError(private)
+        raise error
+
+    async def preparation(parent):
+        return request
+
+    monkeypatch.setattr(headless_runner, "run_worker", fail)
+    pool = fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=pool,
+        deps=request.deps,
+    )
+    try:
+        with capture_logs() as logs:
+            reply = await FleetOrchestrator(ports).spawn(
+                root,
+                await _policy(request),
+                **_spawn_terms(request, root, resolved, "dispatch-failure"),
+            )
+            async with asyncio.timeout(5):
+                await entered.wait()
+            _, claimed_rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+            claimed = next(row for row in claimed_rows if str(row.id) == reply["worker_id"])
+            wake_key = await _arm_completion(request, root, claimed)
+            release.set()
+            ended = await _settled(ports, root, reply["worker_id"])
+            async with asyncio.timeout(5):
+                while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
+                    await asyncio.sleep(0.01)
+        assert ended.status == "failed"
+        assert ended.error_code == (
+            "deadline_expired" if error_kind == "already_terminal" else "dispatch_refused"
+        )
+        run, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert run.status == "running"
+        assert next(row for row in rows if row.id == sibling.id) == sibling
+        await _assert_completion_offered(request, wake_key)
+        assert ended.binding_id is None and ended.turns_used == 0 and not calls
+        # Terminalization never releases money on an unmeasured failure.
+        assert ended.reserved_usd > 0 and run.reserved_usd >= ended.reserved_usd
+        row = next(row for row in logs if row.get("event") == "fleet.worker_task_failed")
+        expected = (
+            [{"type": "ValueError"}]
+            if error_kind == "unexpected"
+            else [
+                {"type": "FleetConflict", "reason": "journal_owner_mismatch"},
+                {"type": "RuntimeError"},
+            ]
+        )
+        assert row["causes"] == expected and private not in json.dumps(row)
+        from daimon.core.observability import redact_log_event
+
+        scrubbed = redact_log_event(None, "warning", row)
+        assert scrubbed["causes"] == expected and private not in json.dumps(scrubbed)
+    finally:
+        release.set()
+        await ports.close()
+
+
+def test_fleet_conflict_unknown_reason_is_redacted():
+    from daimon.core.channel_backend import backend_refusal_causes
+    from daimon.core.fleet import FleetConflict
+
+    error = FleetConflict("PRIVATE_PROVIDER_BODY_KEY_SQL")
+    error.reason = "PRIVATE_PROVIDER_BODY_KEY_SQL"  # pyright: ignore[reportAttributeAccessIssue]
+    assert backend_refusal_causes(error) == [{"type": "FleetConflict", "reason": "redacted"}]
+
+
+async def test_dispatch_failure_cannot_terminalize_a_requeued_claim(worker_root):
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import commit_worker_transition
+
+    request, root, claimed, _, _, _, _, _, _ = worker_root
+    pending = await fleet.requeue(
+        request.deps.sessionmaker, tenant_id=claimed.tenant_id, worker=claimed, max_attempts=2
+    )
+    pool = fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2)
+    newer = await pool.claim(
+        request.deps.sessionmaker,
+        tenant_id=pending.tenant_id,
+        run_id=pending.run_id,
+        worker_id=pending.id,
+    )
+    assert newer is not None and newer.attempts == claimed.attempts + 1
+    try:
+        with pytest.raises(FleetConflict) as exc:
+            await commit_worker_transition(request, root, claimed, failure_code="dispatch_refused")
+        assert exc.value.reason == "claim_changed"
+        run, rows = await fleet.run_status(
+            request.deps.sessionmaker, tenant_id=claimed.tenant_id, run_id=claimed.run_id
+        )
+        assert run.status == "running"
+        assert next(row for row in rows if row.id == newer.id) == newer
+    finally:
+        pool.release()

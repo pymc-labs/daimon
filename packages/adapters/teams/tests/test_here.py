@@ -46,7 +46,7 @@ async def _cards_in_chat(
     fake: TeamsApiFake,
     activities: list[dict[str, object]],
 ) -> list[str]:
-    """Post each activity; the JSON of every card answered in the 1:1 chat, in order."""
+    """Post each activity; the JSON of every card answered to its sender, in order."""
     runtime = build_teams_runtime(db_factory, anthropic=await _anthropic())
     async with running_service(runtime, fake) as service:
         for n, activity in enumerate(activities, start=1):
@@ -61,11 +61,12 @@ def _chat(fake: TeamsApiFake) -> list[str]:
     return [
         json.dumps(r.body, ensure_ascii=False)
         for r in fake.activity_requests
-        if f"/conversations/{DIRECT_CHAT_ID}/" in r.url and "attachments" in r.body
+        if (f"/conversations/{DIRECT_CHAT_ID}/" in r.url or "isTargetedActivity=true" in r.url)
+        and "attachments" in r.body
     ]
 
 
-async def test_here_typed_in_a_channel_describes_that_channel_in_the_chat(
+async def test_here_typed_in_a_channel_describes_that_channel(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with db_session_factory.begin() as session:

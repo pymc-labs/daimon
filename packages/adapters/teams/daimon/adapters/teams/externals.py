@@ -132,6 +132,9 @@ class _TtlCache[K, V]:
         while len(self._entries) > MAX_ENTRIES:
             self._entries.popitem(last=False)
 
+    def pop(self, key: K) -> None:
+        self._entries.pop(key, None)
+
 
 class ExternalParticipants:
     """Classifies a Teams sender as one of ours or from another organisation."""

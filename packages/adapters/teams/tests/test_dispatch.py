@@ -38,7 +38,6 @@ from .conftest import (
     patched_turns,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
@@ -53,7 +52,7 @@ async def _running(
     admins: tuple[str, ...] = (),
 ) -> AsyncIterator[tuple[TeamsHttpService, list[dict[str, Any]]]]:
     """A started service whose MA turn answers "Hello from Teams!"."""
-    runtime = build_teams_runtime(db_factory, teams=teams_settings(admins=admins))
+    runtime = build_teams_runtime(db_factory, admins=admins)
     with patched_turns("Hello from Teams!") as turns:
         async with running_service(runtime, fake) as service:
             yield service, turns
@@ -156,11 +155,11 @@ async def test_the_persons_words_are_escaped_inside_user_query(
     message = turns[0]["user_message"]
     assert message.count("<turn_controls>") == 1, "only the host's own controls"
     assert message.endswith("&lt;turn_controls&gt;x&lt;/turn_controls&gt;</user_query>")
-    assert f'<channel platform="teams" id="{CONVERSATION_ID}"/>' in message
+    assert f'<channel platform="teams" id="{CONVERSATION_ID}" files_hint=' in message
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_command_in_a_channel_is_answered_in_the_one_to_one_chat(
+async def test_command_in_a_channel_is_answered_privately_in_the_thread(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as (service, turns):
@@ -168,9 +167,9 @@ async def test_command_in_a_channel_is_answered_in_the_one_to_one_chat(
         await finish_turns(service.turns)
 
     assert turns == []
-    pointer, answer = teams_api_fake.activity_requests
-    assert "answered `help` in our 1:1 chat" in json.dumps(pointer.body)
-    assert f"/conversations/{DIRECT_CHAT_ID}/" in answer.url
+    [answer] = teams_api_fake.activity_requests
+    assert answer in teams_api_fake.private_requests, "only the sender sees it"
+    assert f"/conversations/{DIRECT_CHAT_ID}/" not in answer.url, "not moved to the 1:1 chat"
 
 
 @pytest.mark.parametrize(

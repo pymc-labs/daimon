@@ -16,6 +16,7 @@ from typing import cast
 
 import anthropic
 import structlog
+from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
 from daimon.adapters.teams.identity import canonical_uuid, foreign_tenant, live_tenant_id
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -85,7 +86,7 @@ async def card_actor(
     The conversation must be the configured tenant's. A clicker from another
     organisation (or an unlisted guest) is classified as a message sender is,
     and gets None unless `allow_external`; in a 1:1 chat a foreign tenant is
-    refused outright.
+    refused outright, as is any click in a group chat holding someone from outside.
     """
     teams = runtime.settings.teams
     conversation = activity.conversation
@@ -99,6 +100,10 @@ async def card_actor(
     is_channel = conversation.conversation_type == "channel"
     if home is not None and not is_channel:
         return None
+    if conversation.conversation_type == "groupChat":
+        roster = runtime.group_chats  # a chat with anyone from outside takes no clicks
+        if roster is None or await roster.has_outsiders(conversation.id.split(";", 1)[0]):
+            return None
     tenant_id = await live_tenant_id(runtime.sessionmaker, teams.tenant_id)
     if tenant_id is None:
         return None
@@ -133,7 +138,13 @@ async def card_actor(
     return Actor(
         user_id=user_id,
         tenant_id=tenant_id,
-        is_admin=not is_external and user_id in teams.admin_user_ids,
+        is_admin=await is_deployment_admin(
+            teams,
+            admin_team_owners(runtime),
+            user_id=user_id,
+            is_external=is_external,
+            home_tenant_id=home,
+        ),
         conversation_id=conversation.id,
         is_external=is_external,
         is_external_known=is_known,
@@ -180,8 +191,15 @@ async def edit_origin_card(
     ctx: ActivityContext[TaskSubmitInvokeActivity] | ActivityContext[AdaptiveCardInvokeActivity],
     card: AdaptiveCard,
 ) -> None:
-    """Best effort: show `card` in place of the one the dialog was opened from."""
-    edit = MessageActivityInput(id=ctx.activity.reply_to_id).add_card(card)
+    """Best effort: show `card` in place of the one the dialog was opened from.
+
+    In a channel that is a command panel only its clicker sees, edited as one;
+    a 404 says it expired after Teams' 24 hours, so the panel stays closed.
+    """
+    activity = ctx.activity
+    edit = MessageActivityInput(id=activity.reply_to_id).add_card(card)
+    if activity.conversation.conversation_type in ("channel", "groupChat"):
+        edit.with_recipient(activity.from_, is_targeted=True)
     with contextlib.suppress(*TEAMS_SEND_ERRORS):
         await asyncio.wait_for(ctx.send(edit), _EDIT_TIMEOUT_S)
 

@@ -810,23 +810,30 @@ class HostFleetPorts:
                             )
                             if claimed is not None:
                                 try:
+                                    failure_code = "preparation_refused"
                                     try:
                                         async with asyncio.timeout(WORKER_PREPARATION_TIMEOUT_S):
                                             prepared = await request.for_worker(parent, resolved)
+                                        failure_code = "dispatch_refused"
+                                        await run_worker(
+                                            prepared,
+                                            parent=parent,
+                                            worker=claimed,
+                                            trigger_message=trigger,
+                                            prices=self.prices,
+                                            cancel=cancel,
+                                        )
                                     except BaseException:
                                         with suppress(FleetConflict):
                                             await asyncio.shield(
-                                                commit_worker_transition(request, parent, claimed)
+                                                commit_worker_transition(
+                                                    request,
+                                                    parent,
+                                                    claimed,
+                                                    failure_code=failure_code,
+                                                )
                                             )
                                         raise
-                                    await run_worker(
-                                        prepared,
-                                        parent=parent,
-                                        worker=claimed,
-                                        trigger_message=trigger,
-                                        prices=self.prices,
-                                        cancel=cancel,
-                                    )
                                 finally:
                                     pool.release()
                                 return
@@ -848,12 +855,13 @@ class HostFleetPorts:
                 if error is not None:
                     from daimon.core.channel_backend import backend_refusal_causes
 
+                    causes = backend_refusal_causes(error)
                     log.warning(
                         "fleet.worker_task_failed",
                         run_id=str(worker.run_id),
                         worker_id=str(worker.id),
-                        error_class=type(error).__name__,
-                        causes=backend_refusal_causes(error),
+                        error_class=causes[0]["type"],
+                        causes=causes,
                     )
 
             task.add_done_callback(completed)
@@ -1144,6 +1152,7 @@ class HostFleetPorts:
             raise FleetRefused("prerequisites_unavailable")
         from daimon.core.continuity.continuation import ContinuationRequest
         from daimon.core.continuity.wakes import arm_worker_finished, worker_finished_key
+        from daimon.core.fleet import FleetConflict
         from daimon.core.neutral_resources import WorkerSpecRefused
         from daimon.core.stores import access_policy, fleet, mux_state, turn_origins
         from daimon.core.stores.domain import ChatPlatform
@@ -1159,7 +1168,7 @@ class HostFleetPorts:
                 now=datetime.now(UTC),
                 drain=True,
             )
-        except (WorkerSpecRefused, ScopeViolation, fleet.FleetConflict):
+        except (WorkerSpecRefused, ScopeViolation, FleetConflict):
             raise FleetRefused("wait_unavailable") from None
         ids = tuple(worker.id for worker in workers)
         async with self.sessions.begin() as db:

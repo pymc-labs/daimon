@@ -1877,10 +1877,12 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
 
 
 @pytest.mark.parametrize("storage_backend", ["sqlite", "postgres"])
+@pytest.mark.parametrize("journal_owner", ["injected", "implicit"])
 @pytest.mark.parametrize("explicit_worker_request", [True], indirect=True)
 async def test_capped_worker_materialization_runs_through_headless_preparation_and_sdk(
     materialization_worker_request,
     storage_backend,
+    journal_owner,
     monkeypatch,
 ):
     from daimon.core.headless_runner import run_worker
@@ -1893,6 +1895,8 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
         values["storage_backend"] = "postgres"
         monkeypatch.setenv("K_SERVICE", "configured-mcp-host")
         owned.manifest_path.write_text(json.dumps([values]))
+    if journal_owner == "implicit":
+        selected = replace(selected, deps=replace(selected.deps, state_store=None))
     assert selected.worker.limits.max_input_tokens == 262144
     result = await run_worker(
         selected,
@@ -1930,7 +1934,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
 
 
 @pytest.mark.parametrize("explicit_worker_request", [False, True], indirect=True)
-async def test_worker_cancelled_before_binding_records_preparation_refusal_without_native_io(
+async def test_worker_cancelled_before_binding_ends_worker_without_native_io(
     materialization_worker_request,
     monkeypatch,
 ):
@@ -1956,7 +1960,7 @@ async def test_worker_cancelled_before_binding_records_preparation_refusal_witho
         selected.deps.sessionmaker, tenant_id=worker.tenant_id, run_id=worker.run_id
     )
     ended = next(row for row in rows if row.id == worker.id)
-    assert ended.status == "failed" and ended.error_code == "preparation_refused"
+    assert ended.status == "failed" and ended.error_code == "dispatch_refused"
     assert ended.binding_id is None and ended.turns_used == 0 and ended.attempts == 0
     assert (len(calls), len(owned.wire.requests)) == before
 
@@ -1998,3 +2002,41 @@ async def test_cloud_run_sqlite_refuses_before_key_discovery(
     monkeypatch.setattr(os.environ, "get", protected)
     with pytest.raises(AdmissionDenied):
         build_gemini_runtime(selected)
+
+
+@pytest.mark.parametrize("journal_owner", ["memory", "foreign_postgres"])
+@pytest.mark.parametrize("explicit_worker_request", [True], indirect=True)
+async def test_hosted_gemini_worker_refuses_a_foreign_journal_before_provider_io(
+    materialization_worker_request, journal_owner, monkeypatch
+):
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from mux.state.memory import MemoryStateStore
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    values = json.loads(owned.manifest_path.read_text())[0]
+    values.pop("records_path")
+    values.pop("holds_path")
+    values["storage_backend"] = "postgres"
+    monkeypatch.setenv("K_SERVICE", "configured-mcp-host")
+    owned.manifest_path.write_text(json.dumps([values]))
+    foreign = (
+        MemoryStateStore()
+        if journal_owner == "memory"
+        else PostgresStateStore(async_sessionmaker())
+    )
+    selected = replace(selected, deps=replace(selected.deps, state_store=foreign))
+    before = len(calls), len(owned.wire.requests)
+    with pytest.raises(FleetConflict) as exc:
+        await run_worker(
+            selected,
+            parent=root,
+            worker=worker,
+            prices=prices,
+            trigger_message="Complete the assigned task",
+            cancel=asyncio.Event(),
+        )
+    assert exc.value.reason == "journal_owner_mismatch"
+    assert (len(calls), len(owned.wire.requests)) == before

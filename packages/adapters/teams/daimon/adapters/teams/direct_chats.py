@@ -2,7 +2,8 @@
 
 A person's roster id (`29:…`) comes from a conversation they are in; Teams
 lets the bot open a 1:1 chat with anyone in a team it is installed in.
-Routine fallbacks and commands sent in a channel go through here.
+Routine fallbacks and commands sent in a channel go through here. Posts are
+Extended Markdown, with currency dollars escaped (`teams_markdown`).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Protocol
 import httpx
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TeamsSender
 from daimon.core.teams_bot_framework import SERVICE_URL
+from daimon.core.teams_markdown import escape_dollars
 from microsoft_teams.api import Account, MessageActivityInput
 from microsoft_teams.api.clients.conversation import CreateConversationParams
 from microsoft_teams.apps import App
@@ -31,7 +33,9 @@ class DirectChats(Protocol):
         """The bot's 1:1 chat with a roster member."""
         ...
 
-    async def post(self, conversation_id: str, text: str) -> None: ...
+    async def post(self, conversation_id: str, text: str) -> str:
+        """Post `text`; returns the new message's activity id."""
+        ...
 
 
 class SdkDirectChats:
@@ -63,6 +67,8 @@ class SdkDirectChats:
         conversations = self._app.api.from_service_url(SERVICE_URL).conversations
         return (await asyncio.wait_for(conversations.create(params), SEND_TIMEOUT_S)).id
 
-    async def post(self, conversation_id: str, text: str) -> None:
-        activity = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
-        await self._sender.send(conversation_id, activity, service_url=SERVICE_URL)
+    async def post(self, conversation_id: str, text: str) -> str:
+        activity = MessageActivityInput(
+            text=escape_dollars(text), text_format="extendedmarkdown"
+        ).add_ai_generated()
+        return (await self._sender.send(conversation_id, activity, service_url=SERVICE_URL)).id

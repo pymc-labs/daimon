@@ -311,6 +311,9 @@ privileged intent.
 GroupMembersFor = Callable[[str, str], GroupMembers | None]
 """A platform and workspace id to that workspace's group lookup, or None without one."""
 
+ServerAdminIds = Callable[[], Awaitable[Sequence[str]]]
+"""A platform's live server admins, where the stored admin role is not the source (Teams)."""
+
 
 class GroupMembersCache:
     """Group members by key, kept `ttl_s` seconds, so a busy channel costs one lookup a minute.
@@ -692,6 +695,7 @@ __all__ = [
     "GroupMembers",
     "GroupMembersCache",
     "GroupMembersFor",
+    "ServerAdminIds",
     "InvalidChannelAdminIds",
     "StoredAdmin",
     "administered_channel_ids",

@@ -12,6 +12,10 @@ instead, if the tenant's direct-message policy allows them, unless the
 destination lies in an isolated channel, whose results never leave it. The creator is
 cleared before any of this: an unreadable policy or a creator no longer allowed
 to invoke the agent gets nothing.
+
+A result posted in a channel also sends the creator an activity feed notice
+linking to it (`activity_feed`), one entry per routine that each run
+replaces; a 1:1 chat notifies on its own, so the fallback sends none.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from collections.abc import Awaitable, Callable, Mapping
 
 import httpx
 import structlog
+from daimon.adapters.teams.activity_feed import ActivityFeed, chain_id
 from daimon.adapters.teams.card import TEAMS_LIMIT
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
@@ -51,8 +56,12 @@ def make_teams_routine_poster(
     *,
     tenant_id: uuid.UUID,
     dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
+    feed: ActivityFeed | None = None,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
-    """The poster for `tenant_id`'s routines; another organisation's rows are skipped."""
+    """The poster for `tenant_id`'s routines; another organisation's rows are skipped.
+
+    `feed` sends the creator a notice for a result posted in a channel; None sends none.
+    """
 
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
@@ -111,13 +120,27 @@ def make_teams_routine_poster(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
+        text = render_fallback_post(row)
+        conversation = teams_thread_id(target)
         try:
-            for chunk in split_fenced(render_fallback_post(row), TEAMS_LIMIT, word_boundary=True):
-                await teams.post(teams_thread_id(target), chunk)
+            ids = [
+                await teams.post(conversation, chunk)
+                for chunk in split_fenced(text, TEAMS_LIMIT, word_boundary=True)
+            ]
         except httpx.HTTPStatusError as err:
             if err.response.status_code in (400, 403, 404):
                 return await fallback("destination_unavailable")
             raise
+        if feed is not None and creator is not None and ids:
+            headline, _, body = text.partition("\n\n")
+            feed.notify(
+                conversation,
+                ids[0],
+                recipient_id=creator,
+                text=headline.rstrip(":"),
+                preview=body or headline,
+                chain=chain_id(row.id),
+            )
         return DeliveryOutcome(status="delivered")
 
     return post

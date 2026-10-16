@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.confirmation import ApprovedConfirmation, prompt_for_tool_call
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
@@ -308,10 +309,17 @@ class Card:
     def __init__(self, chat: Chat, monkeypatch: pytest.MonkeyPatch, admission: Any) -> None:
         self.chat = chat
         self.admins = {REQUESTER[chat.platform]}
+
+        async def owners(_team_id: str) -> frozenset[str]:
+            return frozenset(self.admins)  # Teams: the admin team's owners, read live
+
         runtime = SimpleNamespace(
             settings=SimpleNamespace(
-                turn=chat.runtime.settings.turn, teams=SimpleNamespace(admin_user_ids=self.admins)
+                turn=chat.runtime.settings.turn,
+                teams=SimpleNamespace(admin_team_id="admin-team", tenant_id=""),
             ),
+            team_owners=owners,
+            group_members=GroupMembersCache(ttl_s=0),
             turn_deps=chat.turn_deps,
             sessionmaker=chat.runtime.session_factory,
             anthropic=chat.runtime.client,

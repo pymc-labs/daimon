@@ -18,6 +18,7 @@ from daimon.adapters.teams.http_service import (
     bot_client,
     create_teams_http_service,
 )
+from daimon.adapters.teams.reactions import EYES, ReactionTarget
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.testing.asgi import asgi_lifespan
 from microsoft_teams.api.auth.cloud_environment import PUBLIC
@@ -178,6 +179,34 @@ async def test_the_service_retries_a_throttled_send_through_the_sdk(
         sent = await service.teams_app.send("a:conversation-1", "hi")
     assert sent.id == "m-1"
     assert next(statuses, None) is None, "one 429, then the retry"
+
+
+async def test_a_throttled_reaction_is_retried_once_by_the_bot_client(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_bot_token: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reactions share the bot client, so its 429 retry covers them too."""
+    settings = teams_settings()
+    service = create_teams_http_service(
+        settings=settings, runtime=build_teams_runtime(db_session_factory, teams=settings)
+    )
+    statuses = iter([429, 200])
+    paths: list[str] = []
+
+    async def _send(self: httpx.AsyncClient, request: httpx.Request, **_: Any) -> httpx.Response:
+        paths.append(request.url.path)
+        headers = {"Retry-After": "0"}
+        return httpx.Response(next(statuses), headers=headers, request=request)
+
+    react = service.turns._reactions._react
+    assert react is not None, "the service reacts through Bot Framework"
+    target = ReactionTarget("a:conversation-1", "1700000000000", SERVICE_URL)
+    async with asgi_lifespan(service.app):
+        monkeypatch.setattr(httpx.AsyncClient, "send", _send)
+        await react(target, EYES, add=True)
+    assert next(statuses, None) is None, "one 429, then the retry"
+    assert all(path.endswith(f"/reactions/{EYES}") for path in paths), "both were the reaction"
 
 
 async def test_a_throttled_bot_framework_call_is_retried_once() -> None:

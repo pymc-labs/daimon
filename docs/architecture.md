@@ -118,7 +118,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
-| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text commands and panels, file consent delivery, channel files through SharePoint. |
+| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
@@ -219,7 +219,9 @@ config). The order is load-bearing and documented as such in the module:
    channel's B2B direct connect participant or a guest,
    `admit(external=ExternalFinding(…))`) raises
    `AdmissionDenied("external_participant")` anywhere but a channel with
-   `readers: own` or a thread in one, and in its setup thread too. Only a finding on
+   `readers: own` or a thread in one, and in its setup thread too. A Teams
+   group chat holding anyone from outside counts every sender there as
+   external, so it is never answered. Only a finding on
    positive evidence is stored on `accounts.is_external`; one without holds
    that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
    and keeps the stored role. An external account's stored role is always
@@ -1535,7 +1537,9 @@ possible follow-up.
 
 Who counts as an admin:
 
-- In admission (DMs), the live role the adapter passes for this turn.
+- In admission (DMs), the live role the adapter passes for this turn. Teams
+  reads it from the owners of `DAIMON_TEAMS__ADMIN_TEAM_ID`'s team (Graph,
+  cached for a minute, failing closed), its only admins.
 - For credential and configuration tools, a chat turn's credential, whose
   `is_admin` reads the account's stored role -- recorded from the platform by
   that turn's admission, and as current as the person's last platform turn
@@ -1716,8 +1720,8 @@ admission before any of this runs.
   writes nothing. Details keeps
   visibility and cache guidance off the main row.
 
-- **`/here`** in Discord and Slack, and `here` in Teams (answered in the 1:1
-  chat), reads routing and access policy, then shows a private card built from
+- **`/here`** in Discord and Slack, and `here` in Teams (answered privately in
+  the thread, or in the 1:1 chat), reads routing and access policy, then shows a private card built from
   `daimon.core.here_card`: who answers here,
   reading scope, and whether publishing needs approval. Discord uses an embed;
   Slack uses Block Kit with a state colour and notes that threads can differ;

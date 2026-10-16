@@ -487,6 +487,25 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     assert cards._controls.missing_message(token.group(1)) == EXPIRED_MESSAGE
 
 
+@pytest.mark.parametrize("still_ours", [True, False])
+async def test_a_closed_group_chat_gets_no_card_and_the_prompt_expires(still_ours: bool) -> None:
+    """A group chat's card waits on the turn's cached roster check: a closed chat sees nothing."""
+    checks: list[bool] = []
+
+    async def roster_open(fresh: bool) -> bool:
+        checks.append(fresh)
+        return still_ours
+
+    sender = FakeSender()
+    hook = TeamsConfirmationCards(sender).hook(
+        conversation_id=CONVERSATION_ID, service_url=None, roster_open=roster_open
+    )
+    answer = await hook(_prompt(expires_in=timedelta(milliseconds=10)))
+    assert answer == "expired", "unanswered either way"
+    assert checks == [False], "one cached check: a join evicts the roster"
+    assert bool(sender.sent) is still_ours, "only a chat still ours sees the card"
+
+
 async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
     sender = FakeSender()
     cards = TeamsConfirmationCards(sender)
@@ -705,20 +724,20 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
         await asyncio.gather(waiting, return_exceptions=True)
 
 
-async def test_runtime_hook_rechecks_current_configured_admins(
+async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from uuid import uuid4
-
+    """Clicking a card repeatedly must not cost a Graph owner read each time."""
     from daimon.core import confirmation
-    from daimon.core.config import TurnSettings
 
-    tenant, account = uuid4(), uuid4()
-    runtime = MagicMock()
+    team = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+    owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
+    runtime = MagicMock(team_owners=owners, group_members=GroupMembersCache())
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
-    runtime.settings.teams.admin_user_ids = (AAD_OBJECT_ID,)
+    runtime.settings.teams.admin_team_id = team
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    tenant, account = uuid.uuid4(), uuid.uuid4()
     TeamsConfirmationCards(FakeSender()).hook(
         conversation_id=CONVERSATION_ID,
         service_url=SERVICE_URL,
@@ -727,11 +746,15 @@ async def test_runtime_hook_rechecks_current_configured_admins(
         account_id=account,
     )
     kwargs = factory.call_args.kwargs
-    assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
+    assert (kwargs["tenant_id"], kwargs["account_id"]) == (tenant, account), "the turn's ids"
     check = kwargs["current_admin"]
-    assert await check(AAD_OBJECT_ID) is True
-    runtime.settings.teams.admin_user_ids = ()
-    assert await check(AAD_OBJECT_ID) is False
+    for _ in range(25):
+        assert await check(OTHER_AAD_OBJECT_ID) is False, "a non-owner is no admin"
+    assert owners.await_count == 1, "a cached no needs no further read"
+    assert await check(AAD_OBJECT_ID) is True, "an owner's yes is confirmed"
+    assert owners.await_count == 2, "only a yes is read again"
+    owners.return_value = frozenset()
+    assert await check(AAD_OBJECT_ID) is False, "a revoked owner counts at once, cache or not"
 
 
 @pytest.mark.parametrize("state", ["pending", "approved", "denied", "expired", "stopped"])
@@ -773,7 +796,7 @@ async def test_always_click_rechecks_revoked_team_owner_after_cache_fill(
         sessionmaker=db_session_factory, team_owners=owners, group_members=GroupMembersCache()
     )
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=False)
-    runtime.settings.teams.admin_user_ids = ()
+    runtime.settings.teams.admin_team_id = None
     members = team_owner_lookup(runtime)
     assert members is not None and OTHER_AAD_OBJECT_ID in await members(team_id)
     owners.return_value = frozenset()

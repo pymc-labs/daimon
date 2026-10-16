@@ -15,7 +15,8 @@ share, gets a URL, never one from a restricted library or folder elsewhere on
 the site. Uploads never
 overwrite (`conflictBehavior=rename`); one over `SIMPLE_UPLOAD_MAX` goes
 through an upload session, whose URL must be on SharePoint and gets no token.
-Any failure raises `GraphUnavailable`.
+An uploaded item's first-page thumbnail is a pre-authorised URL too, which
+its caller fetches without a token. Any failure raises `GraphUnavailable`.
 """
 
 from __future__ import annotations
@@ -91,6 +92,18 @@ class _UploadSession(_Model):
     upload_url: str
 
 
+class _Thumbnail(_Model):
+    url: str
+
+
+class _ThumbnailSet(_Model):
+    large: _Thumbnail | None = None
+
+
+class _ThumbnailSets(_Model):
+    value: list[_ThumbnailSet] = Field(default_factory=list[_ThumbnailSet])
+
+
 def _parse[T: BaseModel](model: type[T], data: object) -> T:
     try:
         return model.model_validate(data)
@@ -158,11 +171,28 @@ class SharePoint:
             data = await self._graph.send(
                 "PUT", f"{target}/content", params=params, content=content, timeout=UPLOAD_TIMEOUT_S
             )
-            return _parse(DriveItem, data)
-        session = await self._graph.send(
-            "POST", f"{target}/createUploadSession", body={"item": {_CONFLICT: "rename"}}
+            item = _parse(DriveItem, data)
+        else:
+            session = await self._graph.send(
+                "POST", f"{target}/createUploadSession", body={"item": {_CONFLICT: "rename"}}
+            )
+            item = await self._upload_chunks(_parse(_UploadSession, session).upload_url, content)
+        if item.parent_reference is None or item.parent_reference.drive_id is None:
+            # Later calls on the item address it by drive, which the reply may leave out.
+            parent = _Parent(drive_id=folder.drive_id)
+            item = item.model_copy(update={"parent_reference": parent})
+        return item
+
+    async def thumbnail_url(self, item: DriveItem) -> str | None:
+        """The pre-authorised URL of `item`'s large first-page thumbnail, if Graph has one."""
+        if item.parent_reference is None or item.parent_reference.drive_id is None:
+            raise GraphUnavailable("item without a drive")
+        drive = path_segment(item.parent_reference.drive_id)
+        data = await self._graph.send(
+            "GET", f"{GRAPH_ROOT}/drives/{drive}/items/{path_segment(item.id)}/thumbnails"
         )
-        return await self._upload_chunks(_parse(_UploadSession, session).upload_url, content)
+        sets = _parse(_ThumbnailSets, data).value
+        return sets[0].large.url if sets and sets[0].large is not None else None
 
     async def _upload_chunks(self, upload_url: str, content: bytes) -> DriveItem:
         url = _url(upload_url)

@@ -816,12 +816,22 @@ def test_teams_tenant_id_rejects_non_uuid() -> None:
         )
 
 
-def test_teams_admin_user_ids_canonicalize_and_reject_non_uuids() -> None:
-    base = {"client_id": "id", "client_secret": SecretStr("s"), "tenant_id": str(UUID(int=1))}
-    admin = str(UUID(int=7))
-    assert TeamsSettings(**base, admin_user_ids=(admin.upper(),)).admin_user_ids == (admin,)
-    with pytest.raises(ValidationError):
-        TeamsSettings(**base, admin_user_ids=("alice",))
+@pytest.mark.parametrize(
+    "leftover", ['["00000000-0000-0000-0000-000000000007"]', "alice, not json"]
+)
+def test_a_leftover_teams_admin_user_ids_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, leftover: str
+) -> None:
+    """The removed admin list may still be set; startup must not fail on it."""
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_TEAMS__CLIENT_ID", "id")
+    monkeypatch.setenv("DAIMON_TEAMS__CLIENT_SECRET", "s")
+    monkeypatch.setenv("DAIMON_TEAMS__TENANT_ID", str(UUID(int=1)))
+    monkeypatch.setenv("DAIMON_TEAMS__ADMIN_USER_IDS", leftover)
+    teams = load_settings(_env_file=None).teams
+    assert teams is not None and teams.tenant_id == str(UUID(int=1)), "Teams still loads"
+    assert "admin_user_ids" not in teams.model_dump(), "the old list is no longer read"
 
 
 def test_completion_policy_validates_and_normalizes_uuid_keys(monkeypatch):

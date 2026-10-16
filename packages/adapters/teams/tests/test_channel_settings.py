@@ -51,7 +51,6 @@ from .conftest import (
     patched_turns,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -118,9 +117,7 @@ async def _running(
                 mode="agent",
             )
     fake.channels.update({GROWTH: "Growth", LEGAL: "Legal"})
-    runtime = build_teams_runtime(
-        db_factory, anthropic=_anthropic(), teams=teams_settings(admins=(ADMIN,))
-    )
+    runtime = build_teams_runtime(db_factory, anthropic=_anthropic(), admins=(ADMIN,))
     with patched_turns():
         async with running_service(runtime, fake) as service:
             yield service

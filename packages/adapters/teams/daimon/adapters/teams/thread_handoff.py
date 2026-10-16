@@ -65,10 +65,10 @@ class TeamsThreadHandoff:
             return toast(DENIED)
         agent_id = str(submitted_fields(activity.value.action.data).get("agent") or "")
         conversation, notice = activity.conversation.id, activity.reply_to_id
-        personal = activity.conversation.conversation_type == "personal"
-        # The notice is a reply in the thread it is about; in a 1:1 chat, the chat.
+        # The notice is a reply in the thread it is about; in a 1:1 or group chat, the chat.
+        personal = activity.conversation.conversation_type in ("personal", "groupChat")
         if personal:
-            thread_id = conversation
+            conversation = thread_id = conversation.split(";", 1)[0]
         elif notice:
             thread_id = channel_thread_id(conversation, notice)
         else:

@@ -1042,6 +1042,10 @@ class PostgresStateStore:
             f"before_claim_{id(self)}", default=None
         )
 
+    def owns_sessions(self, session_factory: async_sessionmaker[AsyncSession]) -> bool:
+        """Whether journal claims use the host's actual transaction owner."""
+        return self._factory is session_factory
+
     @contextmanager
     def checking_claims(self, check: BeforeClaim, *, compose: bool = False) -> Iterator[None]:
         """Run `check` before this store's send claims, in this task only.

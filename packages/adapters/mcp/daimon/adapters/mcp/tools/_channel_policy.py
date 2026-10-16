@@ -608,6 +608,27 @@ async def _held_origin(
     return next(iter(held.values()), passed)
 
 
+async def list_running_origins(runtime: McpRuntime, auth: AuthIdentity) -> list[TurnOriginRow]:
+    """The active turn origins of the caller's account and executing agent, wherever they run."""
+    executing_agent = auth.agent_id or auth.chat_agent_id
+    if auth.platform is None or executing_agent is None:
+        return []
+    async with runtime.session_factory() as session:
+        running = await list_active_origins(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            now=datetime.now(UTC),
+        )
+    return [
+        origin
+        for origin in running
+        if executing_agent
+        == derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+    ]
+
+
 async def get_verified_origin(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> TurnOriginRow | None:

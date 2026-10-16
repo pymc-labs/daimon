@@ -300,7 +300,7 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
         channel; neither for the workspace. Channel and workspace scope need an
-        admin (Manage Server on Discord, a listed admin on Teams).
+        admin (Manage Server on Discord, an admin team owner on Teams).
 
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),

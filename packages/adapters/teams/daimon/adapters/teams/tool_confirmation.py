@@ -3,6 +3,8 @@
 Draws core's `posted_controls.confirmation` card as an Adaptive Card and routes
 the click to the waiting turn through `PendingConfirmations`. The registry is
 in-process, like the cancel registry: a restart ends the card and its turn together.
+A card posted in a channel thread also sends the requester, the one person who
+may answer it, an activity feed notice (`activity_feed`).
 """
 
 from __future__ import annotations
@@ -15,11 +17,13 @@ from datetime import UTC
 from typing import TYPE_CHECKING
 
 import structlog
+from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card_actions import (
     button,
     submitted_fields,
     toast,
 )
+from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.authz import Subject
@@ -89,8 +93,27 @@ _ANSWER_TOASTS: dict[ConfirmationAnswer, str] = {
     "expired": "Expired",
 }
 
+#: The activity feed line for a card waiting on its requester.
+APPROVAL_NOTICE = "Waiting for your approval"
+
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
+
+
+async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
+    """A live admin check at a click: a revoked team ownership counts at once.
+
+    The cached owners answer first and only a yes is read again, so a click
+    by anyone else costs no Graph read and can't spend the shared rate limit.
+    """
+    settings = runtime.settings.teams
+    if settings is None:
+        return False
+    for fresh in (False, True):
+        owners = admin_team_owners(runtime, fresh=fresh)
+        if not await is_deployment_admin(settings, owners, user_id=clicker, is_external=False):
+            return False
+    return True
 
 
 def _footer(
@@ -183,8 +206,9 @@ class _PostedCard:
 class TeamsConfirmationCards:
     """Posted confirmation cards awaiting a click, keyed by token."""
 
-    def __init__(self, sender: TeamsSender) -> None:
+    def __init__(self, sender: TeamsSender, *, feed: ActivityFeed | None = None) -> None:
         self._sender = sender
+        self._feed = feed
         self._controls = PostedConfirmations[_PostedCard]()
         self._always_tasks: set[asyncio.Task[None]] = set()
 
@@ -193,6 +217,7 @@ class TeamsConfirmationCards:
         *,
         conversation_id: str,
         service_url: str | None,
+        team_group_id: str | None = None,
         requester_display_name: str | None = None,
         runtime: TeamsRuntime | None = None,
         admission: Admission | None = None,
@@ -200,8 +225,14 @@ class TeamsConfirmationCards:
         account_id: uuid.UUID | None = None,
         prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
+        roster_open: Callable[[bool], Awaitable[bool]] | None = None,
     ) -> ConfirmationHook:
-        """A hook that posts each prompt's card into the turn's conversation."""
+        """A hook that posts each prompt's card into the turn's conversation.
+
+        `team_group_id` is the channel's team, from the inbound activity, for its notice.
+        `roster_open` is a group chat's `group_chats.turn_guard`: a closed chat gets no
+        card, and the prompt expires unanswered while the guard stops the turn.
+        """
 
         if runtime is not None:
             from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
@@ -213,8 +244,7 @@ class TeamsConfirmationCards:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
 
                 async def current_admin(clicker: str) -> bool:
-                    settings = runtime.settings.teams
-                    return settings is not None and clicker in settings.admin_user_ids
+                    return await _is_admin_now(runtime, clicker)
 
                 from functools import partial
 
@@ -247,11 +277,14 @@ class TeamsConfirmationCards:
 
             if runtime is None or tenant_id is None:
                 return Subject()
-            settings = runtime.settings.teams
-            admin = settings is not None and clicker in settings.admin_user_ids
+            admin = await _is_admin_now(runtime, clicker)
             caller = await channel_admin_caller(
-                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
+                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin
             )
+            if caller.role_ids:  # like the admin check: only owned teams are read again
+                caller = await channel_admin_caller(
+                    runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
+                )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
                     session, tenant_id=tenant_id, platform="teams", caller=caller
@@ -276,6 +309,15 @@ class TeamsConfirmationCards:
                 )
                 message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
                 sent = await self._sender.send(conversation_id, message, service_url=service_url)
+                if self._feed is not None:
+                    self._feed.notify(
+                        conversation_id,
+                        sent.id,
+                        recipient_id=prompt.requester_platform_user_id,
+                        text=APPROVAL_NOTICE,
+                        preview=card.headline,
+                        group_id=team_group_id,
+                    )
                 posted = _PostedCard(
                     prompt,
                     conversation_id,
@@ -292,6 +334,10 @@ class TeamsConfirmationCards:
                 posted.retired.set()
                 await self._edit(posted, state)
 
+            # Cached: a join evicts the roster, and the card would show the tool's input.
+            if roster_open is not None and not await roster_open(False):
+                log.info("teams.confirmation.withheld")
+                return "expired"
             result = await self._controls.confirm(
                 prompt, post=post, retire=retire, post_errors=TEAMS_SEND_ERRORS
             )

@@ -24,7 +24,10 @@ TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
 async def _provision(
-    db_factory: async_sessionmaker[AsyncSession], *, failed: bool, admins: tuple[str, ...] = ()
+    db_factory: async_sessionmaker[AsyncSession],
+    *,
+    failed: bool,
+    admins: tuple[str, ...] | None = (),
 ) -> Any:
     report = MagicMock()
     report.is_failure.return_value = failed
@@ -50,7 +53,7 @@ async def _provision(
             public_url=None,
             entra_tenant_id=ENTRA_TENANT_ID,
             signup_credit=Decimal("0"),
-            admin_user_ids=admins,
+            admin_ids=admins,
         )
     return await get_tenant_liveness(db_factory, TENANT)
 
@@ -116,8 +119,18 @@ async def test_boot_demotes_an_admin_removed_from_the_list(
             k: getattr(await get_account(session, a), "role", None) for k, a in accounts.items()
         }
     assert roles == {"kept": Role.ADMIN, "removed": Role.USER, "elsewhere": Role.ADMIN}, (
-        "only this organisation's unlisted Teams admins are demoted"
+        "only this organisation's Teams admins who are not owners are demoted"
     )
+
+
+async def test_boot_demotes_no_one_without_the_admins(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """None: the admin team's owners could not be read, so their stored roles stand."""
+    demote = AsyncMock(return_value=0)
+    with patch("daimon.adapters.teams.provisioning.demote_unlisted_admins", demote):
+        await _provision(db_session_factory, failed=False, admins=None)
+    demote.assert_not_awaited()
 
 
 async def test_a_failed_demotion_never_blocks_provisioning(

@@ -202,3 +202,70 @@ async def test_a_card_whose_post_lost_its_id_is_found_by_its_cancel_key() -> Non
         await _reader(httpx.MockTransport(handler)).find_card("a:chat", "k1", group_ids=[GROUP])
         is None
     ), "a 1:1 chat cannot be read back"
+
+
+CHAT = "19:group-chat-1@thread.v2"
+CHAT_MESSAGES = f"/v1.0/chats/{CHAT}/messages"
+
+
+def _chat(activity_id: str) -> TeamsInbound:
+    return dataclasses.replace(
+        make_inbound("q", conversation=CHAT, kind="group"), activity_id=activity_id
+    )
+
+
+async def test_a_group_chat_replays_its_newest_messages_with_their_images() -> None:
+    queries: list[tuple[str, dict[str, str]]] = []
+    image = f"https://graph.microsoft.com{CHAT_MESSAGES}/1700000000002/hostedContents/aA==/$value"
+    pasted = {"contentType": "html", "content": f'<p>see</p><img src="{image}">'}
+    foreign = f"https://graph.microsoft.com{CHAT_MESSAGES}/9/hostedContents/aA==/$value"
+    stolen = {"contentType": "html", "content": f'<img src="{foreign}">'}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append((request.url.path, dict(request.url.params)))
+        value = [
+            _message("1700000000003"),
+            {"id": "1700000000002", "body": pasted},
+            {"id": "1700000000001", "body": stolen},
+        ]
+        return httpx.Response(200, json={"value": value, "@odata.nextLink": "https://x"})
+
+    block = await _reader(httpx.MockTransport(handler)).read(
+        _chat("1700000000003"), watermark=None, skip_ids=frozenset({"1700000000003"})
+    )
+    assert queries == [(CHAT_MESSAGES, {"$top": "25", "$orderby": "createdDateTime desc"})]
+    assert block is not None and block.tag == "chat_history"
+    assert block.attrs == {"truncated": "true"}
+    assert len(block.lines) == 2, "the asking message is not history"
+    assert 'images_attached="1"' in block.lines[1] and "images_attached" not in block.lines[0]
+    assert block.image_urls == (image,), "only a message's own hosted content is fetched"
+    assert block.newest_id == "1700000000003"
+
+
+async def test_a_group_chat_continuation_reads_the_delta_and_its_media() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == CHAT_MESSAGES:
+            return httpx.Response(200, json={"value": [_message("1700000000009"), _message("5")]})
+        return httpx.Response(200, json=_message("1700000000010"))
+
+    reader = _reader(httpx.MockTransport(handler))
+    block = await reader.read(
+        _chat("1700000000010"), watermark="1700000000005", skip_ids=frozenset()
+    )
+    assert block is not None and block.tag == "thread_delta" and len(block.lines) == 1
+    media = await reader.read_media(_chat("1700000000010"))
+    assert media is not None and media.image_urls == () and media.files == ()
+    assert paths == [CHAT_MESSAGES, f"{CHAT_MESSAGES}/1700000000010"]
+
+
+async def test_a_group_chat_graph_refuses_leaves_the_turn_its_text() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": {"message": "no consent"}})
+
+    reader = _reader(httpx.MockTransport(handler))
+    block = await reader.read(_chat("1700000000010"), watermark=None, skip_ids=frozenset())
+    assert block is not None and block.unavailable == "http error" and block.lines == ()
+    assert await reader.read_media(_chat("1700000000010")) is None

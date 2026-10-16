@@ -951,6 +951,7 @@ async def admit_impl(
                 channel_id=budget_channel_id,
                 now=now,
                 group_members=deps.group_members,
+                server_admins=deps.server_admins,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 

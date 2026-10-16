@@ -42,6 +42,7 @@ from daimon.adapters.mcp.tools.teams._models import (
     TeamsThreadResult,
     TeamsThreadRow,
 )
+from daimon.adapters.mcp.tools.teams._send import GROUP_CHAT_REFUSED
 from daimon.core.teams_graph import (
     CARD_ATTACHMENT_TYPE,
     FILE_ATTACHMENT_TYPES,
@@ -52,6 +53,7 @@ from daimon.core.teams_graph import (
     message_text,
     skiptoken_of,
 )
+from daimon.core.teams_threads import is_group_chat
 from fastmcp.exceptions import ToolError
 
 _FILES = FILE_ATTACHMENT_TYPES
@@ -152,6 +154,8 @@ async def _located(
     client, caller = require_client(runtime, auth)
     if conversation_id.startswith("a:"):
         raise ToolError(_CHAT)
+    if is_group_chat(conversation_id):
+        raise ToolError(GROUP_CHAT_REFUSED)
     channel, root = split_thread(conversation_id)
     ref = await locate_channel(runtime, auth, client, channel)
     target = conversation_id if root is not None else None

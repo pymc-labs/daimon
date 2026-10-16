@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
-from daimon.core.channel_admins import GroupMembers, channel_admin_user_ids
+from daimon.core.channel_admins import GroupMembers, ServerAdminIds, channel_admin_user_ids
 from daimon.core.stores.accounts import list_platform_user_ids
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,12 +30,13 @@ async def support_recipient_tiers(
     channel_id: str,
     requester_id: str,
     members: GroupMembers | None = None,
+    server_admins: ServerAdminIds | None = None,
 ) -> tuple[tuple[str, ...], ...]:
     """The DM tiers to try in order (channel admins, then server admins); () for no grant.
 
     The requester is left out of both: asking for a human must reach someone else.
     `members` re-checks a channel admin matched by a stored group or Discord role,
-    with no DB session open.
+    with no DB session open. `server_admins`, if given, replaces the stored admins.
     """
     channel_admins = await channel_admin_user_ids(
         sessionmaker,
@@ -47,13 +48,15 @@ async def support_recipient_tiers(
     )
     if channel_admins is None:
         return ()
-    async with sessionmaker() as session:
-        server_admins = await list_platform_user_ids(
-            session, tenant_id=tenant_id, platform=platform, limit=MAX_RECIPIENTS, admins=True
-        )
+    if server_admins is not None:
+        admins = sorted(await server_admins())[:MAX_RECIPIENTS]
+    else:
+        async with sessionmaker() as session:
+            admins = await list_platform_user_ids(
+                session, tenant_id=tenant_id, platform=platform, limit=MAX_RECIPIENTS, admins=True
+            )
     return tuple(
-        tuple(uid for uid in tier if uid != requester_id)
-        for tier in (channel_admins, server_admins)
+        tuple(uid for uid in tier if uid != requester_id) for tier in (channel_admins, admins)
     )
 
 

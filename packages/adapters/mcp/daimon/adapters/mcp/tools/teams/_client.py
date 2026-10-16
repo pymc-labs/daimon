@@ -19,6 +19,7 @@ from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_file_offers import UploadOffer, sign_offer
 from daimon.core.teams_graph import GRAPH_SCOPE
+from daimon.core.teams_markdown import escape_dollars
 from pydantic import BaseModel, Field
 
 _CONVERSATIONS_URL = f"{SERVICE_URL}/v3/conversations"
@@ -90,7 +91,13 @@ def _id(value: str) -> str:
 
 
 def _message(text: str) -> dict[str, object]:
-    return {"type": "message", "text": text, "textFormat": "markdown", "entities": [_AI_LABEL]}
+    # Extended Markdown, as the adapter posts answers: math, tables, highlighted code.
+    return {
+        "type": "message",
+        "text": escape_dollars(text),
+        "textFormat": "extendedmarkdown",
+        "entities": [_AI_LABEL],
+    }
 
 
 def _card_message(card: Mapping[str, object]) -> dict[str, object]:

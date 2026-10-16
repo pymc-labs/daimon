@@ -30,7 +30,6 @@ from .conftest import (
     make_message_activity,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -48,9 +47,7 @@ def _running(
     db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake, admins: tuple[str, ...] = ()
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     anthropic = build_fake_anthropic(_agents)
-    runtime = build_teams_runtime(
-        db_factory, anthropic=anthropic, teams=teams_settings(admins=admins)
-    )
+    runtime = build_teams_runtime(db_factory, anthropic=anthropic, admins=admins)
     return running_service(runtime, fake)
 
 

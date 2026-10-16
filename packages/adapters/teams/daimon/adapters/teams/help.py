@@ -21,6 +21,9 @@ COMMAND_HELP = {
     "support": "Ask a person",
     "help": "This list",
 }
+_WHERE = (
+    "Send these in our 1:1 chat, or type / in a channel or group chat: only you see the answer."
+)
 
 
 def help_card(names: Collection[str], *, bot: str) -> AdaptiveCard:
@@ -32,7 +35,7 @@ def help_card(names: Collection[str], *, bot: str) -> AdaptiveCard:
     ]
     body: list[CardElement] = [
         heading("📖 Commands"),
-        TextBlock(text="Send these in our 1:1 chat.", is_subtle=True, wrap=True),
+        TextBlock(text=_WHERE, is_subtle=True, wrap=True),
         FactSet(facts=facts),
         heading("💬 Or just ask"),
         TextBlock(text=f"In a channel, @mention {bot} each time.", spacing="Medium", wrap=True),

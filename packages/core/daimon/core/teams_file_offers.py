@@ -65,6 +65,11 @@ def verify_offer(token: str, *, secret: str, now: float) -> UploadOffer | None:
         return None
 
 
+def consent_description(name: str) -> str:
+    """The consent card's question, the same from the adapter's sweep and `send_file`."""
+    return f"Save {name} to your OneDrive?"
+
+
 def consent_attachment(name: str, size_bytes: int, token: str) -> dict[str, object]:
     """The FileConsentCard attachment, as Bot Framework JSON."""
     context = {UPLOAD_KEY: token}
@@ -72,7 +77,7 @@ def consent_attachment(name: str, size_bytes: int, token: str) -> dict[str, obje
         "contentType": FILE_CONSENT_CONTENT_TYPE,
         "name": name,
         "content": {
-            "description": name,
+            "description": consent_description(name),
             "sizeInBytes": size_bytes,
             "acceptContext": context,
             "declineContext": context,

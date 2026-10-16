@@ -92,6 +92,22 @@ async def test_get_message_addresses_a_reply_under_its_root() -> None:
     assert message.sender.user.display_name == "Ada"
 
 
+async def test_a_group_chat_reads_its_newest_messages_and_one_by_id() -> None:
+    seen: list[httpx.Request] = []
+    client = _client(lambda _: httpx.Response(200, json={"value": [_message("2")]}), seen)
+    page = await client.list_chat_messages("19:abc@thread.v2", top=10)
+    assert (
+        seen[0].url.raw_path.decode().split("?")[0] == "/v1.0/chats/19%3Aabc%40thread.v2/messages"
+    )
+    assert seen[0].url.params["$orderby"] == "createdDateTime desc"
+    assert seen[0].url.params["$top"] == "10"
+    assert [m.id for m in page.value] == ["2"]
+
+    client = _client(lambda _: httpx.Response(200, json=_message("7")), seen)
+    assert (await client.get_chat_message("19:abc@thread.v2", "7")).id == "7"
+    assert seen[1].url.path == "/v1.0/chats/19:abc@thread.v2/messages/7"
+
+
 @pytest.mark.parametrize("status", [403, 404, 429, 500])
 async def test_a_failed_read_raises_with_the_status_and_no_content(status: int) -> None:
     secret = "private thread text"
@@ -206,6 +222,7 @@ async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
                 "value": [
                     {"userId": owner, "roles": ["owner"]},
                     {"userId": "c3", "roles": []},
+                    {"userId": "g4", "roles": ["owner", "guest"]},
                     {"roles": ["owner"]},
                 ],
                 "@odata.nextLink": next_link,
@@ -214,7 +231,7 @@ async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
 
     owners = await _client(handler, seen).list_team_owner_ids(GROUP)
 
-    assert owners == frozenset({owner.lower(), "b2"}), "owners only, Entra ids lower-cased"
+    assert owners == frozenset({owner.lower(), "b2"}), "owners only, no guests, ids lower-cased"
     assert seen[0].url.params["$filter"] == "roles/any(r:r eq 'owner')", "Graph filters owners"
     assert seen[0].url.path == f"/v1.0/teams/{GROUP}/members"
     assert "$filter" not in seen[1].url.params, "a next link carries its own query"

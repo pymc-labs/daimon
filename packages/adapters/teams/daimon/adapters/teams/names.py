@@ -27,7 +27,7 @@ def remember_inbound(
         user_id=inbound.user_id,
         display_name=inbound.user_name,
     )
-    if inbound.kind == "channel" and inbound.channel_name:
+    if inbound.kind != "dm" and inbound.channel_name:
         remember_channel_names(
             sessionmaker,
             tenant_id=tenant_id,

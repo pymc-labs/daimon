@@ -1,8 +1,9 @@
-"""Reads a channel thread's history and the mentioned message from Graph.
+"""Reads a channel thread's or group chat's history and the mentioned message from Graph.
 
 The shell around `graph` and `context`: it finds the team's Entra group id
 (`graph.TeamGroups`), picks the window (thread, delta since the watermark, or
-the channel's posts with their replies), attaches the newest replayed images
+the channel's posts with their replies; in a group chat its newest messages or
+the delta), attaches the newest replayed images
 and files, and turns any Graph failure into an unavailable block plus one
 content-free warning, so a turn never fails for want of history.
 """
@@ -23,6 +24,9 @@ from daimon.adapters.teams.context import (
     channel_block,
     channel_media,
     channel_messages,
+    chat_block,
+    chat_media,
+    chat_messages,
     classifier_window,
     delta_block,
     delta_messages,
@@ -89,6 +93,8 @@ class ThreadReader:
         after it. `images` names the images already inlined (a reseed); without
         it the newest replayed images are picked.
         """
+        if inbound.kind == "group":
+            return await self._read_chat(inbound, watermark, skip_ids, images)
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
             return None
@@ -123,6 +129,31 @@ class ThreadReader:
             return unavailable_block(err.reason or f"graph {err.status}")
         return await self._attach(inbound, group, messages, images, build)
 
+    async def _read_chat(
+        self,
+        inbound: TeamsInbound,
+        watermark: str | None,
+        skip_ids: frozenset[str],
+        images: Mapping[str, int] | None,
+    ) -> HistoryBlock:
+        """A group chat's newest messages, or with a numeric `watermark` those after it."""
+        chat, bot = inbound.channel_id, self._bot_app_id
+        try:
+            if watermark is not None and watermark.isdigit():
+                page, after = await self._graph.list_chat_messages(chat), int(watermark)
+                messages = delta_messages(page, after=after, skip_ids=skip_ids)
+                build = functools.partial(
+                    delta_block, page, after=after, skip_ids=skip_ids, bot_app_id=bot
+                )
+            else:
+                page = await self._graph.list_chat_messages(chat, top=CHANNEL_BACKFILL_LIMIT)
+                messages = chat_messages(page, skip_ids=skip_ids)
+                build = functools.partial(chat_block, page, skip_ids=skip_ids, bot_app_id=bot)
+        except GraphUnavailable as err:
+            log.warning("teams.history.unavailable", status=err.status, reason=err.reason)
+            return unavailable_block(err.reason or f"graph {err.status}")
+        return await self._attach(inbound, "", messages, images, build)
+
     async def _attach(
         self,
         inbound: TeamsInbound,
@@ -131,9 +162,17 @@ class ThreadReader:
         images: Mapping[str, int] | None,
         build: Callable[..., HistoryBlock],
     ) -> HistoryBlock:
-        found, files = history_media(messages, group_id=group, channel_id=inbound.channel_id)
+        chat = inbound.channel_id if inbound.kind == "group" else None
+        found, files = history_media(
+            messages, group_id=group, channel_id=inbound.channel_id, chat_id=chat
+        )
         downloads: dict[str, str] = {}
-        if files and self._files is not None and await self._files.is_available(inbound):
+        if (
+            files
+            and chat is None
+            and self._files is not None
+            and await self._files.is_available(inbound)
+        ):
             resolved = await self._files.resolve(
                 ChannelMedia(files=tuple(files)), group_id=group, channel_id=inbound.channel_id
             )
@@ -173,6 +212,8 @@ class ThreadReader:
 
         Shared files get a download URL when the channel's site is granted.
         """
+        if inbound.kind == "group":
+            return await self._chat_media(inbound)
         root = root_id(inbound.conversation_id)
         if inbound.kind != "channel" or root is None:
             return None
@@ -196,6 +237,21 @@ class ThreadReader:
         if self._files is None or not media.files:
             return media
         return await self._files.resolve(media, group_id=group, channel_id=inbound.channel_id)
+
+    async def _chat_media(self, inbound: TeamsInbound) -> ChannelMedia | None:
+        """`read_media` in a group chat: hosted images; files stay unreadable there."""
+        images: list[str] = []
+        files: list[SharedFile] = []
+        try:
+            for message_id in inbound.message_ids:
+                message = await self._graph.get_chat_message(inbound.channel_id, message_id)
+                media = chat_media(message, chat_id=inbound.channel_id)
+                images += media.image_urls
+                files += media.files
+        except GraphUnavailable as err:
+            log.warning("teams.media.unavailable", status=err.status, reason=err.reason)
+            return None
+        return ChannelMedia(image_urls=tuple(images), files=tuple(files))
 
     async def find_card(
         self, conversation_id: str, marker: str, *, group_ids: Sequence[str]

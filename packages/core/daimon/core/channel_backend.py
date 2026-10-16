@@ -223,9 +223,11 @@ type BackendRefusalStage = Literal[
 def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
     """One closed-label sanitizer for turn and background worker refusals."""
     # Delay this import: the turn package itself imports channel_backend.
+    from daimon.core.fleet import FleetConflict, FleetConflictReason
     from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 
     safe_types: dict[type[BaseException], str] = {
+        FleetConflict: "FleetConflict",
         AgentBackendRefused: "AgentBackendRefused",
         AdmissionDenied: "AdmissionDenied",
         BackendUnsupported: "BackendUnsupported",
@@ -284,6 +286,12 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         cause: dict[str, object] = {"type": safe_types.get(type(error), "redacted")}
         if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
+        if isinstance(error, FleetConflict):
+            cause["reason"] = (
+                error.reason
+                if error.reason in get_args(FleetConflictReason.__value__)
+                else "redacted"
+            )
         if isinstance(error, UnsupportedCapability):
             cause["missing"] = sorted(
                 {item if item in safe_missing else "redacted" for item in error.missing}

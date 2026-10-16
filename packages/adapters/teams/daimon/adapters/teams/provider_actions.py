@@ -1,15 +1,20 @@
-"""Turn-local typed provider cards and requester-only Teams action routing."""
+"""Turn-local typed provider cards and requester-only Teams action routing.
+
+A card posted in a channel thread also sends the requester an activity feed
+notice (`activity_feed`).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TypedDict
 
 import structlog
+from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card_actions import button, submitted_fields, toast
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
@@ -84,19 +89,35 @@ class PendingAction:
 
 
 class TeamsProviderActions:
-    def __init__(self, sender: TeamsSender) -> None:
+    def __init__(self, sender: TeamsSender, *, feed: ActivityFeed | None = None) -> None:
         self.sender = sender
+        self.feed = feed
         self.pending: dict[str, PendingAction] = {}
 
     def hook(
-        self, *, conversation_id: str, service_url: str | None, thread_id: str
+        self,
+        *,
+        conversation_id: str,
+        service_url: str | None,
+        thread_id: str,
+        team_group_id: str | None = None,
+        roster_open: Callable[[bool], Awaitable[bool]] | None = None,
     ) -> ProviderActionHook:
+        """Posts each prompt's card; `team_group_id` is the channel's team, for its notice.
+
+        `roster_open` is a group chat's `group_chats.turn_guard`: a closed chat gets no
+        card, and the prompt goes unanswered while the guard stops the turn.
+        """
+
         async def request(prompt: ProviderActionPrompt) -> NativeActionResponse | None:
             if (
                 prompt.context.requester.platform != "teams"
                 or prompt.context.requester.thread_id != thread_id
                 or datetime.now(UTC) >= prompt.context.expires_at
             ):
+                return None
+            if roster_open is not None and not await roster_open(False):
+                log.info("teams.provider_action.withheld")
                 return None
             answer: asyncio.Future[NativeActionResponse | None] = (
                 asyncio.get_running_loop().create_future()
@@ -111,6 +132,15 @@ class TeamsProviderActions:
                 )
                 sent = await self.sender.send(conversation_id, activity, service_url=service_url)
                 posted.message_id = sent.id
+                if self.feed is not None:
+                    self.feed.notify(
+                        conversation_id,
+                        sent.id,
+                        recipient_id=prompt.context.requester.platform_user_id,
+                        text="Waiting for your answer",
+                        preview=_words(prompt)[0],
+                        group_id=team_group_id,
+                    )
                 remaining = max(
                     0.0, (prompt.context.expires_at - datetime.now(UTC)).total_seconds()
                 )

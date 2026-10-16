@@ -39,7 +39,6 @@ from .conftest import (
     make_invoke,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -123,7 +122,7 @@ async def _running(
     runtime = build_teams_runtime(
         db_factory,
         anthropic=ma,
-        teams=teams_settings(admins=(AAD_OBJECT_ID,) if admin else ()),
+        admins=(AAD_OBJECT_ID,) if admin else (),
         deployment_default=DeploymentDefault(agent_name="helper" if local_helper else "daimon"),
     )
     async with running_service(runtime, fake) as service:

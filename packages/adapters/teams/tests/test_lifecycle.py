@@ -25,6 +25,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.teams import card
 from daimon.adapters.teams import lifecycle as lifecycle_module
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
 from daimon.core.errors import TurnError
 from daimon.core.message_split import split_fenced
@@ -34,7 +35,13 @@ from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
-from microsoft_teams.api import Account, MentionEntity, MessageActivityInput, SentActivity
+from microsoft_teams.api import (
+    Account,
+    Attachment,
+    MentionEntity,
+    MessageActivityInput,
+    SentActivity,
+)
 from sqlalchemy.exc import OperationalError
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
@@ -67,6 +74,9 @@ async def _posted(
     )
     await lifecycle.post_initial()
     return lifecycle
+
+
+_TOOL = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
 
 
 def _answer(text: str) -> TurnState:
@@ -438,6 +448,47 @@ async def test_a_ping_whose_answer_fails_collapses_the_card_to_the_failure() -> 
     assert lifecycle.final_message_id is None, "no watermark past an answer nobody saw"
 
 
+@pytest.mark.parametrize(
+    ("ping", "state", "expected"),
+    [
+        (True, _answer("Done."), ["accepted", "done"]),
+        (True, TurnState(content=[_TOOL]), ["accepted", "done"]),
+        (True, TurnState(), ["accepted"]),
+        (False, _answer("Done."), []),
+    ],
+    ids=["answered", "tool-only", "cancelled", "no-ping"],
+)
+async def test_a_ping_reacts_on_the_askers_message_as_on_discord(
+    ping: bool, state: TurnState, expected: list[str]
+) -> None:
+    phases: list[str] = []
+    lifecycle = await _posted(FakeSender(), completion_ping=ping, acknowledge=phases.append)
+    await lifecycle.on_acknowledgment("accepted")
+    await lifecycle.on_terminal_success(state)
+    await lifecycle.on_acknowledgment("done")
+    assert phases == expected, "👀 on acceptance with a ping, ✅ only once something was answered"
+
+
+async def test_a_failed_answer_or_an_unprompted_turn_earns_no_check() -> None:
+    phases: list[str] = []
+    lifecycle = await _posted(
+        FakeSender(fail_on={1}), completion_ping=True, acknowledge=phases.append
+    )
+    await lifecycle.on_terminal_success(_answer("Done."))
+    await lifecycle.on_acknowledgment("done")
+    unprompted = TeamsTurnLifecycle(
+        sender=FakeSender(),
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        unprompted=True,
+        completion_ping=True,
+        acknowledge=phases.append,
+    )
+    await unprompted.on_acknowledgment("accepted")
+    assert phases == [], "no ✅ for an answer nobody saw, no reaction in a thread nobody asked in"
+
+
 async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -497,6 +548,71 @@ async def test_file_links_that_would_overflow_the_last_message_are_refused() -> 
 
     assert not await lifecycle.append_to_answer("Saved to this channel's files:")
     assert len(sender.sent) == 3, "no edit was tried"
+
+
+def _image(name: str) -> Attachment:
+    return Attachment(content_type="image/png", content_url="data:image/png;base64,AA==", name=name)
+
+
+def _names(activity: MessageActivityInput) -> list[str | None]:
+    return [a.name for a in activity.attachments or []]
+
+
+async def test_previews_ride_the_links_edit_and_later_edits_keep_them() -> None:
+    """One edit adds links and images; another adds more; a notice above sends them again."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert await lifecycle.append_to_answer("Saved to this channel's files:", [_image("a.png")])
+    assert await lifecycle.append_to_answer(attachments=[_image("deck.pptx")])
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    links, thumbnails, notice = sender.activities[-3:]
+    assert {links.id, thumbnails.id, notice.id} == {"m-1"}, "each one an edit of the answer"
+    assert links.text == "The posterior mean is 3.\n\nSaved to this channel's files:"
+    assert _names(links) == ["a.png"], "the image rides the links' edit"
+    assert thumbnails.text == links.text, "no text added"
+    assert _names(thumbnails) == ["a.png", "deck.pptx"], "added after the one already there"
+    assert notice.text and notice.text.startswith("I lost the workspace.")
+    assert _names(notice) == ["a.png", "deck.pptx"], "an edit never drops a shown preview"
+
+
+async def test_previews_the_answer_cannot_take_are_refused() -> None:
+    """A notice card, an overflow or a refused edit: the caller sends the previews instead."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState(content=[_TOOL]))
+    posted = len(sender.sent)
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a notice card"
+    assert len(sender.sent) == posted, "no edit was tried"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links still fit"
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT - 5)))
+    assert not await lifecycle.append_to_answer("Saved:", [_image("a.png")]), "too long"
+
+    sender = FakeSender(refuse_on={3})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a 413"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert not sender.activities[-1].attachments, "a refused preview is not sent again"
+
+
+async def test_an_answer_holds_no_more_previews_than_one_preview_message() -> None:
+    """Thumbnails that would take the answer past MAX_PREVIEWS images are refused whole."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    charts = [_image(f"c{n}.png") for n in range(MAX_PREVIEWS - 1)]
+    assert await lifecycle.append_to_answer(attachments=charts)
+    edits = len(sender.sent)
+
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.pdf"), _image("b.pdf")])
+    assert len(sender.sent) == edits, "no edit was tried"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert _names(sender.activities[-1]) == [a.name for a in charts], "the charts stay, alone"
 
 
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
@@ -748,3 +864,47 @@ async def test_unchanged_running_state_rerendered_moves_the_elapsed_time() -> No
     assert len(sender.activities) == 3
     assert all(activity.id == "m-1" for activity in sender.activities[1:])
     assert [_card_body(sender, i)[-2]["text"] for i in (1, 2)] == ["12s", "24s"]
+
+
+async def test_a_group_chat_that_closes_mid_turn_shows_none_of_the_turn() -> None:
+    """A status edit with a draft checks the roster; once closed, the answer never posts."""
+    sender, clock = FakeSender(), Clock()
+    checks: list[bool] = []
+
+    async def roster_open(fresh: bool) -> bool:
+        checks.append(fresh)
+        return False
+
+    lifecycle = await _posted(sender, clock, roster_open=roster_open)
+    message: Any = BetaManagedAgentsAgentMessageEvent(
+        id="evt_1",
+        type="agent.message",
+        processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content=[BetaManagedAgentsTextBlock(type="text", text="The secret plan is…")],
+    )
+    await lifecycle.on_sse_event(message)
+    clock.now += 6
+    await lifecycle.on_render(TurnState())
+    await lifecycle.on_terminal_success(_answer("The secret plan is X."))
+
+    assert checks == [False], "a status edit uses the cached roster, once"
+    assert len(sender.activities) == 2, "the card edit is the only post after the card"
+    notice = sender.activities[1]
+    assert notice.id == "m-1", "the card itself is replaced"
+    assert _card_text(sender, 1) == card.OUTSIDER_JOINED_NOTICE
+    assert "secret" not in _card_json(sender, 1), "no word of the turn's work"
+
+
+async def test_a_group_chat_answer_reads_the_roster_afresh_before_it_posts() -> None:
+    """The answer waits on an uncached roster read; an open chat gets it as usual."""
+    sender = FakeSender()
+    checks: list[bool] = []
+
+    async def roster_open(fresh: bool) -> bool:
+        checks.append(fresh)
+        return True
+
+    lifecycle = await _posted(sender, roster_open=roster_open)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    assert checks == [True], "one fresh read before the answer"
+    assert sender.activities[1].text == "The posterior mean is 3."

@@ -6,12 +6,14 @@ boot instead. Same status rules as the Slack boot sweep: success (clean
 reconcile and the default agent on the roster) flips to `ready`; a failure
 keeps an already-ready tenant ready and records the reason; otherwise the
 tenant flips to `failed`. An archived tenant is left alone. Anyone no
-longer in `DAIMON_TEAMS__ADMIN_USER_IDS` loses the stored admin role here.
+longer an owner of `DAIMON_TEAMS__ADMIN_TEAM_ID`'s team loses the stored admin
+role here; a failed owner read demotes no one.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,6 +34,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger()
 
 
+async def demote_former_admins(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    admin_ids: Collection[str],
+) -> None:
+    """Demote stored Teams admins not in `admin_ids`; a database failure is logged, not raised."""
+    try:
+        async with sessionmaker.begin() as session:
+            demoted = await demote_unlisted_admins(
+                session, tenant_id=tenant_id, platform="teams", admin_ids=admin_ids
+            )
+    except SQLAlchemyError:
+        log.exception("teams.admin_demotion_failed", tenant_id=str(tenant_id))
+    else:
+        if demoted:
+            log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
+
+
 async def provision_configured_tenant(
     *,
     anthropic: AsyncAnthropic,
@@ -41,25 +62,20 @@ async def provision_configured_tenant(
     public_url: str | None,
     entra_tenant_id: str,
     signup_credit: Decimal,
-    admin_user_ids: tuple[str, ...],
+    admin_ids: Collection[str] | None,
 ) -> uuid.UUID | None:
-    """Provision and reconcile the configured tenant. Returns its id unless archived."""
+    """Provision and reconcile the configured tenant. Returns its id unless archived.
+
+    `admin_ids` None (the admin team's owners could not be read) demotes no one.
+    """
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=entra_tenant_id)
     existing = await get_tenant_liveness(sessionmaker, tenant_id)
     if existing is not None and existing.archived_at is not None:
         log.warning("teams.tenant_archived", tenant_id=str(tenant_id))
         return None
     # First, so the reconcile below neither delays nor skips it; a failure never blocks it.
-    try:
-        async with sessionmaker.begin() as session:
-            demoted = await demote_unlisted_admins(
-                session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
-            )
-    except SQLAlchemyError:
-        log.exception("teams.admin_demotion_failed", tenant_id=str(tenant_id))
-    else:
-        if demoted:
-            log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
+    if admin_ids is not None:
+        await demote_former_admins(sessionmaker, tenant_id=tenant_id, admin_ids=admin_ids)
     await provision_tenant(
         sessionmaker, platform="teams", workspace_id=entra_tenant_id, signup_credit=signup_credit
     )

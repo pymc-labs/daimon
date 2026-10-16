@@ -51,7 +51,6 @@ from .conftest import (
     patched_turns,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -79,7 +78,7 @@ async def _running(
     state: FakeMAState | None = None,
 ) -> AsyncIterator[tuple[TeamsHttpService, list[dict[str, Any]]]]:
     ma = build_fake_anthropic(make_fake_ma_handler(state or _ma_state()))
-    runtime = build_teams_runtime(db_factory, anthropic=ma, teams=teams_settings(admins=admins))
+    runtime = build_teams_runtime(db_factory, anthropic=ma, admins=admins)
     runtime.settings.mcp.public_url = HttpUrl("https://mcp.example.test/mcp")
     runtime.settings.mcp.jwt_secret = SecretStr("s" * 48)
     with patched_turns() as turns:

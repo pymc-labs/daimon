@@ -15,9 +15,19 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
-Image outputs also travel as inline previews (`image_preview`): in a channel,
-up to MAX_PREVIEWS in delivery order in one message after the links; in a 1:1
-chat, each just before its first consent card. A failed preview is only logged.
+Image outputs also travel as inline previews (`image_preview`), up to
+MAX_PREVIEWS in delivery order, edited into the answer's last message: in a
+channel in the same edit as the links, in a 1:1 chat above the consent
+cards. Where files cannot be saved, a group chat included, none is shown.
+Up to MAX_PREVIEWS uploaded Office files and PDFs then show their first
+page, Graph's thumbnail of each, in a second edit. Previews the answer
+cannot take (a notice card, a refused edit) go in a message of their own,
+as with no answer to edit. A failed preview is only logged.
+An output named `<file>.preview.png` (`is_preview_output`) is the agent's own
+picture of `<file>`, such as a document's first page in a 1:1 chat, where
+Graph makes no thumbnail: it is only shown as a preview, never offered or
+uploaded, then deleted. In a 1:1 chat it shows with the other previews, in
+its document's place; in a channel it stands in for Graph's thumbnail.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -33,7 +43,7 @@ import functools
 import hashlib
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
@@ -41,7 +51,7 @@ from typing import Any, Protocol
 import anthropic
 import httpx
 import structlog
-from daimon.adapters.teams.attachments import FetchRefused
+from daimon.adapters.teams.attachments import FetchRefused, fetch_bytes
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
@@ -49,6 +59,7 @@ from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
+from daimon.core.media.vision import sniff_image_media_type
 from daimon.core.output_delivery import (
     MAX_BYTES_PER_FILE,
     DeliverableFile,
@@ -59,9 +70,14 @@ from daimon.core.output_delivery import (
     sweep_session_outputs,
 )
 from daimon.core.stores.file_uploads import get_upload
-from daimon.core.teams_file_offers import FILE_CONSENT_CONTENT_TYPE, UPLOAD_KEY, verify_offer
+from daimon.core.teams_file_offers import (
+    FILE_CONSENT_CONTENT_TYPE,
+    UPLOAD_KEY,
+    consent_description,
+    verify_offer,
+)
 from daimon.core.teams_graph import GraphUnavailable, is_sharepoint_host
-from daimon.core.teams_sharepoint import file_link
+from daimon.core.teams_sharepoint import DriveItem, file_link
 from microsoft_teams.api import (
     Attachment,
     FileConsentCard,
@@ -79,9 +95,64 @@ OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _SAVED = "Saved to this channel's files:"
+PREVIEW_SUFFIX = ".preview.png"
 
-# Edits a line in below the answer on screen; False if it cannot go there.
-AppendToAnswer = Callable[[str], Awaitable[bool]]
+# Edits text, attachments or both in below the answer on screen; False if they cannot go there.
+AppendToAnswer = Callable[[str | None, Sequence[Attachment]], Awaitable[bool]]
+
+# Graph renders a first-page thumbnail of these, often seconds after the upload.
+THUMBNAIL_SUFFIXES = (".docx", ".pptx", ".xlsx", ".pdf", ".doc", ".ppt", ".xls")
+THUMBNAIL_ATTEMPTS = 3
+THUMBNAIL_RETRY_S = 3.0
+# All thumbnails together: the message they share waits at most this long.
+THUMBNAIL_BUDGET_S = 10.0
+THUMBNAIL_MAX_BYTES = 4 * 1024 * 1024
+# Graph serves SharePoint thumbnails from SharePoint or from Microsoft's media
+# service on `svc.ms`. The URL is pre-authorised and short-lived, so it gets no
+# token; the host check keeps a URL in a Graph reply from sending us anywhere else.
+_THUMBNAIL_HOST_SUFFIX = ".svc.ms"
+
+
+def _is_thumbnail_host(url: httpx.URL) -> bool:
+    return is_sharepoint_host(url) or (
+        url.scheme == "https" and url.host.endswith(_THUMBNAIL_HOST_SUFFIX)
+    )
+
+
+def is_preview_output(filename: str) -> bool:
+    """An output the agent made only to be seen inline: `<file>.preview.png`."""
+    return filename.lower().endswith(PREVIEW_SUFFIX)
+
+
+def preview_label(filename: str) -> str:
+    """The name a preview output shows: the file it pictures."""
+    return filename[: -len(PREVIEW_SUFFIX)] or filename
+
+
+def picture_key(filename: str) -> str:
+    """Matches a preview output's label to its document, as saved (`sanitize_title`)."""
+    return sanitize_title(filename).lower()
+
+
+def previews_first(filenames: Sequence[str]) -> list[int]:
+    """A 1:1 sweep's order: each preview output just before its document, else in place.
+
+    The agent renders a document before picturing it, so the listing may name
+    the picture second; the previews then keep the order of the cards below.
+    """
+    documents = {picture_key(name) for name in filenames if not is_preview_output(name)}
+    held: dict[str, list[int]] = {}
+    for index, name in enumerate(filenames):
+        if is_preview_output(name) and (key := picture_key(preview_label(name))) in documents:
+            held.setdefault(key, []).append(index)
+    order: list[int] = []
+    for index, name in enumerate(filenames):
+        if not is_preview_output(name):
+            order.extend(held.pop(picture_key(name), []))
+            order.append(index)
+        elif picture_key(preview_label(name)) not in documents:
+            order.append(index)
+    return order
 
 
 async def _log_channel_skip(file: SkippedFile) -> None:
@@ -116,7 +187,10 @@ class _Offer:
 def consent_card(name: str, size_bytes: int, token: str) -> MessageActivityInput:
     context = {"offer": token}
     card = FileConsentCard(
-        description=name, size_in_bytes=size_bytes, accept_context=context, decline_context=context
+        description=consent_description(name),
+        size_in_bytes=size_bytes,
+        accept_context=context,
+        decline_context=context,
     )
     attachment = Attachment(content_type=FILE_CONSENT_CONTENT_TYPE, name=name, content=card)
     return MessageActivityInput().add_attachments(attachment)
@@ -173,11 +247,11 @@ class TeamsOutputDelivery:
         """Drop queued decodes; one already running finishes on its thread."""
         self._decoder.shutdown(wait=False, cancel_futures=True)
 
-    async def _preview(self, name: str, file: DeliverableFile) -> Attachment | None:
+    async def _preview(self, name: str, content: bytes, mime_type: str) -> Attachment | None:
         # Off the event loop: decoding and re-encoding a large image would stall other turns.
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            self._decoder, preview_attachment, name, file.content, file.mime_type
+            self._decoder, preview_attachment, name, content, mime_type
         )
 
     async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
@@ -217,7 +291,7 @@ class TeamsOutputDelivery:
     ) -> None:
         """Deliver the session's outputs. Chained per session: two sweeps never overlap.
 
-        `append` puts a channel's file links below the turn's answer.
+        `append` puts file links and previews below the turn's answer.
         """
         previous = self._sweeps.get(session_id)
         current = asyncio.current_task()
@@ -227,49 +301,78 @@ class TeamsOutputDelivery:
             if previous is not None:
                 with contextlib.suppress(Exception):
                     await previous
-            if inbound.kind == "channel":
+            if inbound.kind != "dm":  # a group chat has no files: each is skipped
                 await self._sweep_channel(inbound, session_id, append)
                 return
+            previews: list[Attachment] = []
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
-                post=functools.partial(self._offer, inbound, session_id),
+                post=functools.partial(self._post_direct, inbound, session_id, previews),
                 on_skip=_log_skip,
                 sleep=self._sleep,
+                order=previews_first,
             )
+            # In the answer, above the consent cards; else one message each.
+            inline = previews[:MAX_PREVIEWS]
+            if inline and append is not None and await append(None, inline):
+                previews = previews[MAX_PREVIEWS:]
+            for preview in previews:
+                await self._send_previews(inbound, [preview])
         finally:
             if self._sweeps.get(session_id) is current:
                 self._sweeps.pop(session_id, None)
+
+    async def _post_direct(
+        self,
+        inbound: TeamsInbound,
+        session_id: str,
+        previews: list[Attachment],
+        file: DeliverableFile,
+    ) -> None:
+        """A 1:1 chat's output: offered, or a preview output only shown and then deleted.
+
+        Either one's preview goes into `previews`, shown once the sweep ends.
+        """
+        if not is_preview_output(file.filename):
+            await self._offer(inbound, session_id, file, previews=previews)
+            return
+        if (preview := await self._preview_output(file)) is not None:
+            previews.append(preview)
+
+    async def _preview_output(self, file: DeliverableFile) -> Attachment | None:
+        mime_type = sniff_image_media_type(file.content) or file.mime_type
+        return await self._preview(preview_label(file.filename), file.content, mime_type)
 
     async def _sweep_channel(
         self, inbound: TeamsInbound, session_id: str, append: AppendToAnswer | None
     ) -> None:
         files = self._files
         if files is None or not await files.is_available(inbound):
-            # Zero sends every file down the skip path: a log line, then a
-            # delete for a file that fits the cap. A file over it is kept,
-            # as on every other path: no channel could take it either.
-            # No preview here: the skip path never downloads the bytes, and
-            # the agent's reply already says the files could not be saved.
-            await sweep_session_outputs(
-                self._runtime.anthropic,
-                session_id=session_id,
-                post=functools.partial(self._offer, inbound, session_id),
-                on_skip=_log_channel_skip,
-                sleep=self._sleep,
-                max_bytes=0,
-                discard_skipped_up_to=MAX_BYTES_PER_FILE,
-            )
+            await self._sweep_unsaved(inbound, session_id)
             return
         links: list[str] = []
         previews: list[Attachment] = []
+        # Uploaded documents, by the name asked for, whose first page is looked up once
+        # every file is in; one the agent made a preview output of needs none.
+        documents: list[tuple[set[str], DriveItem]] = []
+        pictured: set[str] = set()
 
         async def upload(file: DeliverableFile) -> None:
+            if is_preview_output(file.filename):
+                pictured.add(picture_key(preview_label(file.filename)))
+                if (
+                    not inbound.unprompted
+                    and len(previews) < MAX_PREVIEWS
+                    and (preview := await self._preview_output(file)) is not None
+                ):
+                    previews.append(preview)
+                return  # Never uploaded: the sweep deletes it.
             name = display_filename_for(file.filename, file.mime_type)
             preview = None
             if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
                 # Before the upload: a preview error must never re-upload a saved file.
-                preview = await self._preview(name, file)
+                preview = await self._preview(name, file.content, file.mime_type)
             try:
                 item = await files.upload(inbound, name, file.content)
             except GraphUnavailable as err:
@@ -289,6 +392,13 @@ class TeamsOutputDelivery:
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
             if preview is not None:
                 previews.append(preview)
+            elif (
+                not inbound.unprompted
+                and len(documents) < MAX_PREVIEWS
+                and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES)
+            ):
+                # The name asked for, or as saved: a mime type may have added an extension.
+                documents.append(({picture_key(file.filename), picture_key(name)}, item))
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -297,15 +407,101 @@ class TeamsOutputDelivery:
             on_skip=_log_skip,
             sleep=self._sleep,
         )
-        if links:
-            await self._post_links(inbound, links, append)
+        # Links and images in one edit of the answer; refused, each goes as on its own.
+        text = "\n".join([_SAVED, *links])
+        if not links:
+            await self._show_previews(inbound, previews, append)
+        elif not (previews and append is not None and await append(text, previews)):
+            await self._post_links(inbound, text, append)
+            await self._send_previews(inbound, previews)
+        # Images first, as they are ready: a thumbnail may take seconds or never come,
+        # so documents get an edit of their own rather than images' places.
+        unpictured = [item for keys, item in documents if not keys & pictured]
+        await self._show_previews(inbound, await self._thumbnails(files, unpictured), append)
+
+    async def _show_previews(
+        self, inbound: TeamsInbound, previews: list[Attachment], append: AppendToAnswer | None
+    ) -> None:
+        """`previews` below the answer, else in a message of their own."""
+        if previews and append is not None and await append(None, previews):
+            return
         await self._send_previews(inbound, previews)
 
+    async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
+        """A channel or group chat whose files cannot be saved: every file takes the skip path.
+
+        A skipped file is logged, then deleted if it fits the cap; one over it
+        is kept, as on every other path: no channel could take it either.
+        """
+        await sweep_session_outputs(
+            self._runtime.anthropic,
+            session_id=session_id,
+            post=functools.partial(self._offer, inbound, session_id),
+            on_skip=_log_channel_skip,
+            sleep=self._sleep,
+            max_bytes=0,
+            discard_skipped_up_to=MAX_BYTES_PER_FILE,
+        )
+
+    async def _thumbnails(
+        self, files: ChannelFiles, documents: list[DriveItem]
+    ) -> list[Attachment]:
+        """The first-page thumbnails of `documents` that came within the budget, in order."""
+        thumbnails: dict[int, Attachment] = {}
+
+        async def fetch(index: int, item: DriveItem) -> None:
+            if (thumbnail := await self._thumbnail(files, item)) is not None:
+                thumbnails[index] = thumbnail
+
+        if documents:
+            try:
+                async with asyncio.timeout(THUMBNAIL_BUDGET_S):
+                    await asyncio.gather(*(fetch(n, item) for n, item in enumerate(documents)))
+            except TimeoutError:
+                log.info("teams.output_thumbnail.skipped", reason="timed_out")
+        return [thumbnails[index] for index in sorted(thumbnails)]
+
+    async def _thumbnail(self, files: ChannelFiles, item: DriveItem) -> Attachment | None:
+        """Graph's first-page thumbnail of an uploaded document, re-encoded as a preview.
+
+        Graph may not have rendered one yet, so a missing thumbnail is asked
+        for again a few times; any other failure is logged once and skipped.
+        """
+        for attempt in range(THUMBNAIL_ATTEMPTS):
+            if attempt:
+                await self._sleep(THUMBNAIL_RETRY_S)
+            try:
+                url = await files.thumbnail_url(item)
+            except GraphUnavailable as err:
+                if err.status == 404:  # The item's thumbnails are not there yet.
+                    continue
+                log.info("teams.output_thumbnail.skipped", reason=err.reason, status=err.status)
+                return None
+            if url is None:
+                continue
+            try:
+                content = await fetch_bytes(
+                    self._runtime.http_client,
+                    url,
+                    is_allowed=_is_thumbnail_host,
+                    token=None,
+                    max_bytes=THUMBNAIL_MAX_BYTES,
+                )
+            except (FetchRefused, httpx.HTTPError, httpx.InvalidURL) as err:
+                log.info("teams.output_thumbnail.skipped", reason=type(err).__name__)
+                return None
+            mime_type = sniff_image_media_type(content) or "application/octet-stream"
+            preview = await self._preview(item.name or "preview", content, mime_type)
+            if preview is None:
+                log.info("teams.output_thumbnail.skipped", reason="not_an_image")
+            return preview
+        log.info("teams.output_thumbnail.skipped", reason="not_ready")
+        return None
+
     async def _post_links(
-        self, inbound: TeamsInbound, links: list[str], append: AppendToAnswer | None
+        self, inbound: TeamsInbound, text: str, append: AppendToAnswer | None
     ) -> None:
-        text = "\n".join([_SAVED, *links])
-        if append is not None and await append(text):
+        if append is not None and await append(text, ()):
             return
         if inbound.unprompted:
             # Nobody asked: an unprompted turn posts its answer and nothing else.
@@ -339,7 +535,7 @@ class TeamsOutputDelivery:
             or file.size_bytes > MAX_BYTES_PER_FILE
         ):
             return False
-        if inbound.kind != "channel":
+        if inbound.kind == "dm":
             # A consent ledger key binds the bytes and their actual destination.
             # It is local identity, never a provider resource ID or byte-read authority.
             identity = hashlib.sha256()
@@ -376,7 +572,7 @@ class TeamsOutputDelivery:
         name = display_filename_for(file.filename, file.mime_type)
         item = await files.upload(inbound, name, file.content)
         text = f"{_SAVED}\n{file_link(sanitize_title(item.name or name), item.web_url)}"
-        if append is not None and await append(text):
+        if append is not None and await append(text, ()):
             return True
         if inbound.unprompted:
             return False
@@ -394,8 +590,12 @@ class TeamsOutputDelivery:
         file: DeliverableFile,
         *,
         content: bytes | None = None,
+        previews: list[Attachment] | None = None,
     ) -> None:
-        """Send a consent card, then defer: the click decides the file's fate."""
+        """Send a consent card, then defer: the click decides the file's fate.
+
+        The file's preview goes into `previews` when given, else just before the card.
+        """
         now = self._clock()
         self._offers = {k: v for k, v in self._offers.items() if v.expires_at > now}
         pending = {offer.file_id for offer in self._offers.values()} | self._claimed
@@ -404,7 +604,10 @@ class TeamsOutputDelivery:
         name = display_filename_for(file.filename, file.mime_type)
         if file.file_id not in self._previewed:
             self._previewed.add(file.file_id)
-            if (preview := await self._preview(name, file)) is not None:
+            preview = await self._preview(name, file.content, file.mime_type)
+            if preview is not None and previews is not None:
+                previews.append(preview)
+            elif preview is not None:
                 await self._send_previews(inbound, [preview])
         token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(

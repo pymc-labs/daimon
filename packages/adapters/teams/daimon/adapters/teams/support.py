@@ -69,6 +69,7 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.adapters.teams.channel_admin_groups import team_owner_lookup
 from daimon.adapters.teams.commands import CommandContext
+from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
@@ -496,7 +497,7 @@ class SupportCommand:
         )
 
     async def _chat_admins(self, tenant_id: uuid.UUID, asked: _Asked, body: str) -> bool:
-        """Message the channel's admins, else the tenant's admins. True once a tier got it.
+        """Message the channel's admins, else the deployment's. True once a tier got it.
 
         False at once for the 1:1 chat or a channel with no admins of its own,
         so it keeps the escalation channel. Each recipient is held to the
@@ -513,6 +514,7 @@ class SupportCommand:
             channel_id=channel_id,
             requester_id=asked.user_id,
             members=team_owner_lookup(self._runtime),
+            server_admins=live_admin_ids(self._runtime),
         )
         policies = self._runtime.settings.direct_message_policies
         policy = policies.get(tenant_id, DirectMessagePolicy())

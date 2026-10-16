@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_admins import GroupMembersFor
+from daimon.core.channel_admins import GroupMembersFor, ServerAdminIds
 from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.config import (
     GithubAppSettings,
@@ -82,6 +82,8 @@ class TurnDeps:
     budget_notifier: BudgetNotifier | None = None
     # Re-checks a notice recipient's stored Slack group or Teams team; set with the notifier.
     group_members: GroupMembersFor | None = None
+    # The notice's server admins, where the stored role is not the source (Teams).
+    server_admins: ServerAdminIds | None = None
     budget_notices_off: frozenset[uuid.UUID] = frozenset()
     # Native MA client remains during the rollout; ancillary Messages calls
     # have a separate injection point and never go through Events/Sessions.

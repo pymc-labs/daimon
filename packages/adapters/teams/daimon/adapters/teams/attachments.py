@@ -326,14 +326,14 @@ async def prepare_attachments(
     if channel and channel_media is None and not unnamed:
         # The activity names no media, so whether any were missed is unknown.
         lines.append(
-            "[attachment] This channel message's images and files could not be read; "
+            "[attachment] This message's images and files could not be read; "
             "say so if the person refers to one."
         )
     for file in unnamed:
         what = "an image" if file.kind == "embedded_image" else "a file"
         lines.append(
             f"[attachment] {what} was shared but can't be opened: "
-            "daimon could not read this channel message."
+            "daimon could not read this message."
         )
     for file in files:
         if file.kind == "refused":
@@ -345,7 +345,7 @@ async def prepare_attachments(
         if file.kind == "unreachable":
             lines.append(
                 f"[attachment] `{file.name}` was shared but can't be opened: "
-                "daimon could not fetch it from this channel."
+                "daimon could not fetch it from this conversation."
             )
             continue
         pasted = file.kind in ("pasted_image", "graph_image")
