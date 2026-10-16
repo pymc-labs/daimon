@@ -292,6 +292,75 @@ async def test_open_records_do_not_block_account_update_fence(postgres_state):
         ) == UUID(scope.account_id)
 
 
+async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
+    postgres_state, db_preflight, db_schema, monkeypatch
+):
+    from daimon.core import session_fence_retry
+    from daimon.testing.db import build_test_engine
+
+    _, scope, _, _ = postgres_state
+    engine = build_test_engine(
+        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=0.5
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="polling")
+    original_sleep = asyncio.sleep
+    polling = asyncio.Event()
+    sleeps = []
+    waiter = None
+
+    async def observed_sleep(delay):
+        if asyncio.current_task() is waiter:
+            sleeps.append(delay)
+            if len(sleeps) == 8:
+                polling.set()
+        await original_sleep(delay)
+
+    async def resolve():
+        async with storage.transaction(after_dispatch=True) as records:
+            records.creations[("t", "a", "resolved")] = ("p", "d", "agent")
+
+    monkeypatch.setattr(session_fence_retry.random, "uniform", lambda low, high: high)
+    monkeypatch.setattr(session_fence_retry.asyncio, "sleep", observed_sleep)
+    try:
+        async with storage.transaction():
+            waiter = asyncio.create_task(resolve())
+            await asyncio.wait_for(polling.wait(), 7)
+            # The eighth retry must still release the second pool connection;
+            # nested durable holds retain capacity while Records is locked.
+            assert engine.pool.checkedout() == 1
+            await asyncio.wait_for(
+                holds(sessions, scope, project="polling").before_attempt(
+                    model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
+                ),
+                0.5,
+            )
+        # An old waiter must not sleep for a second while new contenders start
+        # at the short cadence. Use the longest jitter for a stable regression.
+        await asyncio.wait_for(waiter, 0.5)
+        assert len(sleeps) >= 8 and max(sleeps) <= 0.075
+        async with storage.transaction() as records:
+            assert ("t", "a", "resolved") in records.creations
+        assert engine.pool.checkedout() == 0
+    finally:
+        if waiter is not None:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        await engine.dispose()
+
+
+async def test_post_dispatch_acquisition_respects_an_earlier_outer_send_timeout(postgres_state):
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="outer-timeout")
+    async with storage.transaction():
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.1), storage.transaction(after_dispatch=True):
+                pytest.fail("post-dispatch writer passed an active holder")
+    # Cancellation of the long acquisition must not leak a connection or lock.
+    async with asyncio.timeout(1), storage.transaction(after_dispatch=True):
+        pass
+
+
 @pytest.mark.parametrize("kind", ["records", "holds"])
 @pytest.mark.parametrize("cancellations", [1, 2])
 async def test_pg_commit_finishes_before_cancellation_propagates(

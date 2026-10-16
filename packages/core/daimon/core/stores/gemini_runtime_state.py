@@ -78,7 +78,9 @@ class PostgresPayloadDatabase:
             raise ValueError("Gemini state account is unavailable")
 
     @asynccontextmanager
-    async def _locked(self, deadline: float, *, initialize: bool) -> AsyncIterator[Payload]:
+    async def _locked(
+        self, deadline: float, *, initialize: bool, after_dispatch: bool
+    ) -> AsyncIterator[Payload]:
         key = "gemini_state:" + json.dumps([str(value) for value in self._key.values()])
 
         async def acquire():
@@ -127,7 +129,9 @@ class PostgresPayloadDatabase:
                     raise FenceUnavailable(deadline) from None
                 raise
 
-        stack, session, transaction, predicates, body = await retry_fences(acquire)
+        stack, session, transaction, predicates, body = await retry_fences(
+            acquire, backoff=not after_dispatch
+        )
         try:
 
             async def save(value: str) -> None:
@@ -150,13 +154,16 @@ class PostgresPayloadDatabase:
     async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Payload]:
         from daimon.core.turn.ceiling import TURN_CEILING_S
 
-        # Before dispatch, busy is safely retryable. After dispatch, retain the
-        # turn budget to durably resolve the already-sent operation instead.
+        # Before dispatch, busy is safely retryable. After dispatch, keep a long
+        # acquisition fallback; the host's enclosing send timeout (120s default,
+        # including pre-dispatch work/POST time) or earlier request cancellation binds.
         deadline = asyncio.get_running_loop().time() + (TURN_CEILING_S if after_dispatch else 5)
         # Initialization commits its FK/account locks before any provider I/O.
-        async with self._locked(deadline, initialize=True):
+        async with self._locked(deadline, initialize=True, after_dispatch=after_dispatch):
             pass
-        async with self._locked(deadline, initialize=False) as payload:
+        async with self._locked(
+            deadline, initialize=False, after_dispatch=after_dispatch
+        ) as payload:
             yield payload
 
 

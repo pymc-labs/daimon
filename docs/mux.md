@@ -1679,12 +1679,16 @@ runtimes refuse SQLite when Cloud Run's `K_SERVICE` or `CLOUD_RUN_JOB` marker is
 present, before credential discovery. A PostgreSQL plan with SQLite paths refuses
 rather than silently abandoning the original state.
 
-PostgreSQL writers use the existing nonblocking fence retries, release pooled
+PostgreSQL writers use the existing nonblocking fence retries and release pooled
 connections between acquisition attempts. Pre-dispatch acquisition returns
-retryable session busy after five seconds; recording accepted results or definite
-refusals after dispatch uses the existing turn ceiling instead. Only the active
-record writer keeps a connection during provider
-I/O; its account lineage locks are released beforehand. Records and holds commit
+retryable session busy after five seconds. Recording accepted results or definite
+refusals after dispatch polls every 25–75ms without increasing backoff, so older
+outcome writers retain the same polling cadence as fresh contenders. This is not
+a FIFO guarantee. The enclosing host send timeout is 120 seconds by default,
+including pre-dispatch work and POST time already spent; an earlier request
+deadline also cancels acquisition. The storage's longer internal fallback does
+not extend either host bound. Only the active record writer keeps a connection
+during provider I/O; its account lineage locks are released beforehand. Records and holds commit
 independently, and commits finish before cancellation propagates. Unchanged record
 payloads are not rewritten. Account privacy purge previews and removes conversation
 records; conservative financial holds are deliberately retained as financial

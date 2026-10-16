@@ -68,7 +68,10 @@ async def try_fence(
 
 
 async def retry_fences[T](
-    operation: Callable[[], Awaitable[T]], *, busy_error: Callable[[], Exception] | None = None
+    operation: Callable[[], Awaitable[T]],
+    *,
+    busy_error: Callable[[], Exception] | None = None,
+    backoff: bool = True,
 ) -> T:
     """Retry acquisition-only failures after their contexts release resources.
 
@@ -77,6 +80,8 @@ async def retry_fences[T](
     Gates queue without a timer. busy_error overrides the default session error.
     Callers must raise FenceUnavailable only before protected side effects.
     Failed attempts roll back and re-read/re-authorize on the next attempt.
+    Set backoff=False for flat short polling when resolving a dispatched write;
+    this avoids disadvantaging that waiter against newly arriving acquisitions.
     """
     token = _acquisitions.set({})
     delay = RETRY_MAX_S
@@ -96,6 +101,7 @@ async def retry_fences[T](
                         retry_after=datetime.now(UTC) + timedelta(seconds=1),
                     ) from None
                 await asyncio.sleep(min(remaining, random.uniform(delay / 3, delay)))
-                delay = min(RETRY_CEILING_S, delay * 2)
+                if backoff:
+                    delay = min(RETRY_CEILING_S, delay * 2)
     finally:
         _acquisitions.reset(token)

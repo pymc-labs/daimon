@@ -90,7 +90,11 @@ class Records:
 
 class Storage(Protocol):
     def transaction(self, *, after_dispatch: bool = False) -> AbstractAsyncContextManager[Records]:
-        """Serialize atomic writes; post-dispatch outcomes need the long wait budget."""
+        """Serialize atomic writes; allow post-dispatch outcome acquisition to wait.
+
+        The host's enclosing send timeout (120s by default, including pre-dispatch
+        work and POST time) or earlier request cancellation still bounds that wait.
+        """
         ...
 
 
