@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `daimon github cleanup-legacy-vault` also deletes retired repo credentials recorded as `https://github.com/`, with a trailing slash, instead of stopping on them.
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
 
 - Allow fresh Gemini preparation for a new mention thread while preserving an existing session when replacement is unsupported.

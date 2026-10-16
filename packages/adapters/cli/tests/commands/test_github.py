@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.cli.commands import github as github_command
-from daimon.adapters.cli.commands.github import _grant_session_action, github_app
+from daimon.adapters.cli.commands.github import (
+    _grant_session_action,
+    _is_legacy_repo_credential_url,
+    github_app,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_snapshot import SessionSnapshot
 from typer.testing import CliRunner
@@ -80,3 +84,98 @@ def test_grant_edit_rotates_only_when_app_repo_set_is_unchanged() -> None:
     assert _grant_session_action("add", snapshot, ()) == "close"
     assert _grant_session_action("remove", snapshot, ()) == "close"
     assert _grant_session_action("activate", snapshot, snapshot.repo_urls) == "close"
+
+
+def test_legacy_vault_cleanup_accepts_github_with_or_without_trailing_slash() -> None:
+    assert _is_legacy_repo_credential_url("https://github.com")
+    assert _is_legacy_repo_credential_url("https://github.com/")
+    assert not _is_legacy_repo_credential_url("https://api.githubcopilot.com/mcp")
+    for other in (
+        "https://github.com//",
+        "https://github.com/owner/repo",
+        "https://GitHub.com",
+        "http://github.com",
+        "https://github.com:443",
+        "https://github.com.example",
+        None,
+    ):
+        assert not _is_legacy_repo_credential_url(other)
+
+
+@pytest.mark.parametrize(
+    ("url", "deleted"),
+    [("https://github.com/", True), ("https://api.githubcopilot.com/mcp", False)],
+)
+def test_legacy_vault_cleanup_deletes_only_recorded_repo_credentials(
+    monkeypatch: pytest.MonkeyPatch, url: str, deleted: bool
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    updates: list[dict[str, object]] = []
+
+    class _Session:
+        async def execute(self, _statement: object, params: dict[str, object] | None = None):
+            if params is not None:
+                updates.append(params)
+            return SimpleNamespace(all=lambda: [(tenant_id, agent_id, "cred_legacy")])
+
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class _Factory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+        def begin(self) -> _Session:
+            return _Session()
+
+    class _Anthropic:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "_Anthropic":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    async def vaults(*_: object, **__: object):
+        yield SimpleNamespace(id="vault_1", display_name=f"daimon-mcp:account:{agent_id}")
+
+    async def credentials(*_: object, **__: object):
+        yield SimpleNamespace(id="cred_legacy", auth=SimpleNamespace(mcp_server_url=url))
+
+    delete = AsyncMock()
+    settings = SimpleNamespace(
+        database=SimpleNamespace(url="postgresql+asyncpg://unused/db"),
+        anthropic=SimpleNamespace(
+            api_key=SimpleNamespace(get_secret_value=lambda: "unused"), base_url="https://unused"
+        ),
+    )
+    monkeypatch.setattr(github_command, "load_settings", lambda: settings)
+
+    def engine(_url: str) -> SimpleNamespace:
+        return SimpleNamespace(dispose=AsyncMock())
+
+    def factory(_engine: object) -> _Factory:
+        return _Factory()
+
+    monkeypatch.setattr(github_command, "build_engine", engine)
+    monkeypatch.setattr(github_command, "build_session_factory", factory)
+    monkeypatch.setattr(github_command, "AsyncAnthropic", _Anthropic)
+    monkeypatch.setattr(github_command, "list_vaults", vaults)
+    monkeypatch.setattr(github_command, "list_credentials", credentials)
+    monkeypatch.setattr(github_command, "delete_credential", delete)
+
+    result = CliRunner().invoke(github_app, ["cleanup-legacy-vault", "--apply"])
+
+    if deleted:
+        assert result.exit_code == 0, result.output
+        delete.assert_awaited_once()
+        assert updates == [{"tenant": tenant_id, "agent": agent_id, "credential": "cred_legacy"}]
+    else:
+        assert result.exit_code != 0
+        delete.assert_not_awaited()
+        assert updates == []

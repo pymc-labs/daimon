@@ -67,6 +67,14 @@ grants_app = typer.Typer(help="Manage live agent GitHub grants.")
 github_app.add_typer(grants_app, name="grants")
 
 
+_LEGACY_REPO_CREDENTIAL_URLS = frozenset({"https://github.com", "https://github.com/"})
+
+
+def _is_legacy_repo_credential_url(url: str | None) -> bool:
+    """A saved repo key's vault entry targets github.com; older entries end in a slash."""
+    return url in _LEGACY_REPO_CREDENTIAL_URLS
+
+
 def _repo_name(url: str) -> str:
     return normalize_owner_repo(url).casefold()
 
@@ -270,7 +278,7 @@ def cleanup_legacy_vault(
                             if credential.id != credential_id:
                                 continue
                             url = getattr(credential.auth, "mcp_server_url", None)
-                            if url != "https://github.com":
+                            if not _is_legacy_repo_credential_url(url):
                                 raise ValueError(
                                     f"{credential_id} is not a legacy repo credential; "
                                     "cleanup stopped"
