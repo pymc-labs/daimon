@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Each session use of a shared MCP vault removes any `static_bearer` credential at `https://api.githubcopilot.com/mcp`, including external MCP keys added later. GitHub access uses the GitHub App only; OAuth grants and credentials for other URLs remain.
+
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
 
 - Allow fresh Gemini preparation for a new mention thread while preserving an existing session when replacement is unsupported.

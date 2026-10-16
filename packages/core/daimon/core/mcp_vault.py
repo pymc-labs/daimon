@@ -300,6 +300,11 @@ async def ensure_agent_mcp_vault(
     The one-time legacy upgrade is an exception: an active session may observe
     the new chat identity during the upgrade. Subsequent warm calls stay stable.
 
+    Every use removes any ``static_bearer`` credential at
+    ``https://api.githubcopilot.com/mcp`` from the shared vault, including an
+    external MCP key added later. GitHub access uses the GitHub App only;
+    OAuth grants and credentials for other URLs remain.
+
     We do NOT delete credentials on URL drift. The vault is shared with user-added
     external MCP credentials (``add_external_mcp_credential``) whose URLs we cannot
     authenticate as "ours". Deleting any cred that doesn't match the current
@@ -320,7 +325,7 @@ async def ensure_agent_mcp_vault(
     )
     async with session_factory() as session, session.begin():
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
-        return await _ensure_agent_mcp_vault_locked(
+        vault_id = await _ensure_agent_mcp_vault_locked(
             client,
             account_id=account_id,
             agent_id=agent_id,
@@ -330,6 +335,17 @@ async def ensure_agent_mcp_vault(
             slack_turn_context_id=slack_turn_context_id,
             scope=scope,
         )
+        # Collect before deleting so pagination cannot skip credentials.
+        retired = [
+            cred.id
+            async for cred in list_credentials(client, vault_id, scope=scope)
+            if not isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
+            and cred.auth.type == "static_bearer"
+            and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
+        ]
+        for credential_id in retired:
+            await delete_credential(client, vault_id, credential_id, scope=scope)
+        return vault_id
 
 
 async def add_github_copilot_credential(

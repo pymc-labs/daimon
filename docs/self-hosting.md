@@ -255,6 +255,9 @@ upgrading, run
 Managed Agents vault credentials. Run it with `--apply` to delete them. Repeated
 runs skip credentials already deleted. This command leaves GitHub Copilot MCP
 credentials configured for `https://api.githubcopilot.com/mcp` alone.
+Each session use of a shared MCP vault removes any `static_bearer` credential at
+`https://api.githubcopilot.com/mcp`, including external MCP keys added later.
+GitHub access uses the GitHub App only; OAuth grants and other URLs remain.
 The migration asks live sessions of agents with retired GitHub credentials to
 start fresh on their next turn; other sessions keep their workspace. Run
 `cleanup-legacy-vault --apply` even after those sessions restart: the migration

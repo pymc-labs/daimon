@@ -19,7 +19,11 @@ import httpx
 import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core.mcp_vault import add_external_mcp_credential, ensure_agent_mcp_vault
+from daimon.core.mcp_vault import (
+    GITHUB_COPILOT_MCP_URL,
+    add_external_mcp_credential,
+    ensure_agent_mcp_vault,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -43,6 +47,297 @@ def _vault_obj(vault_id: str, display_name: str, created_at: str) -> dict[str, A
         "archived_at": None,
         "created_at": created_at,
     }
+
+
+@pytest.mark.parametrize("warm", [False, True])
+async def test_ensure_agent_mcp_vault_removes_only_retired_copilot_bearers(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    warm: bool,
+) -> None:
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    vault = _vault_obj("vlt_mine", display, "2026-04-01T00:00:00Z")
+    deleted: list[str] = []
+    created = False
+
+    def credential(credential_id: str, auth_type: str, url: str) -> dict[str, Any]:
+        return {
+            "id": credential_id,
+            "type": "credential",
+            "vault_id": "vlt_mine",
+            "metadata": {"daimon_chat_identity": str(agent_id)},
+            "auth": {"type": auth_type, "mcp_server_url": url},
+        }
+
+    credentials = [
+        credential("vcrd_jwt", "static_bearer", "https://mcp.example.com/mcp"),
+        credential("vcrd_old", "static_bearer", GITHUB_COPILOT_MCP_URL),
+        credential("vcrd_duplicate", "static_bearer", GITHUB_COPILOT_MCP_URL),
+        credential("vcrd_oauth", "mcp_oauth", GITHUB_COPILOT_MCP_URL),
+        credential("vcrd_other", "static_bearer", "https://other.example.com/mcp"),
+        credential("vcrd_slash", "static_bearer", f"{GITHUB_COPILOT_MCP_URL}/"),
+        credential("vcrd_http", "static_bearer", "http://api.githubcopilot.com/mcp"),
+        credential("vcrd_path", "static_bearer", "https://api.githubcopilot.com/other"),
+        credential("vcrd_host", "static_bearer", "https://api.githubcopilot.example.com/mcp"),
+        {
+            "id": "vcrd_env",
+            "type": "credential",
+            "vault_id": "vlt_mine",
+            "auth": {"type": "environment_variable", "secret_name": "GH_TOKEN"},
+        },
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal created
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [vault] if warm else [], "has_more": False})
+        if req.method == "POST" and req.url.path == "/v1/vaults":
+            assert not warm
+            created = True
+            return httpx.Response(200, json=vault)
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            assert warm or created
+            return httpx.Response(200, json={"data": credentials, "has_more": False})
+        if req.method == "POST" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            assert not warm
+            return httpx.Response(
+                200,
+                json=credential("vcrd_jwt", "static_bearer", "https://mcp.example.com/mcp"),
+            )
+        if req.method == "DELETE" and req.url.path.startswith("/v1/vaults/vlt_mine/credentials/"):
+            deleted.append(req.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    vault_id = await ensure_agent_mcp_vault(
+        _make_client(httpx.MockTransport(handler)),
+        account_id=account_id,
+        agent_id=agent_id,
+        jwt_secret=b"a" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+        session_factory=db_session_factory,
+    )
+
+    assert vault_id == "vlt_mine"
+    assert deleted == ["vcrd_old", "vcrd_duplicate"]
+
+
+async def test_ensure_agent_mcp_vault_deletes_after_all_credential_pages_and_is_idempotent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    calls: list[str] = []
+    remaining = {"vcrd_first", "vcrd_second", "vcrd_third"}
+
+    def credential(credential_id: str, url: str) -> dict[str, Any]:
+        return {
+            "id": credential_id,
+            "type": "credential",
+            "vault_id": "vlt_mine",
+            "metadata": {"daimon_chat_identity": str(agent_id)},
+            "auth": {"type": "static_bearer", "mcp_server_url": url},
+        }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [_vault_obj("vlt_mine", display, "2026-04-01T00:00:00Z")],
+                    "has_more": False,
+                },
+            )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            page = req.url.params.get("page")
+            calls.append(f"list:{page or 'first'}")
+            if page == "p2":
+                data = [credential("vcrd_other", "https://other.example.com/mcp")]
+                if "vcrd_second" in remaining:
+                    data.append(credential("vcrd_second", GITHUB_COPILOT_MCP_URL))
+                return httpx.Response(200, json={"data": data, "next_page": "p3"})
+            if page == "p3":
+                data = (
+                    [credential("vcrd_third", GITHUB_COPILOT_MCP_URL)]
+                    if "vcrd_third" in remaining
+                    else []
+                )
+                return httpx.Response(200, json={"data": data, "next_page": None})
+            data = [credential("vcrd_jwt", "https://mcp.example.com/mcp")]
+            if "vcrd_first" in remaining:
+                data.append(credential("vcrd_first", GITHUB_COPILOT_MCP_URL))
+            return httpx.Response(200, json={"data": data, "next_page": "p2"})
+        if req.method == "DELETE" and req.url.path.startswith("/v1/vaults/vlt_mine/credentials/"):
+            credential_id = req.url.path.rsplit("/", 1)[-1]
+            calls.append(f"delete:{credential_id}")
+            remaining.remove(credential_id)
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    client = _make_client(httpx.MockTransport(handler))
+    for _ in range(2):
+        assert (
+            await ensure_agent_mcp_vault(
+                client,
+                account_id=account_id,
+                agent_id=agent_id,
+                jwt_secret=b"a" * 32,
+                public_url="https://mcp.example.com/mcp",
+                now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+                session_factory=db_session_factory,
+            )
+            == "vlt_mine"
+        )
+
+    assert calls == [
+        "list:first",
+        "list:first",
+        "list:p2",
+        "list:p3",
+        "delete:vcrd_first",
+        "delete:vcrd_second",
+        "delete:vcrd_third",
+        "list:first",
+        "list:first",
+        "list:p2",
+        "list:p3",
+    ]
+
+
+async def test_ensure_agent_mcp_vault_later_credential_page_failure_does_not_delete(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    calls: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [_vault_obj("vlt_mine", display, "2026-04-01T00:00:00Z")],
+                    "has_more": False,
+                },
+            )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            page = req.url.params.get("page")
+            calls.append(f"list:{page or 'first'}")
+            if page == "p2":
+                return httpx.Response(
+                    400,
+                    json={"error": {"type": "invalid_request_error", "message": "page two failed"}},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "vcrd_jwt",
+                            "type": "credential",
+                            "vault_id": "vlt_mine",
+                            "metadata": {"daimon_chat_identity": str(agent_id)},
+                            "auth": {
+                                "type": "static_bearer",
+                                "mcp_server_url": "https://mcp.example.com/mcp",
+                            },
+                        },
+                        {
+                            "id": "vcrd_old",
+                            "type": "credential",
+                            "vault_id": "vlt_mine",
+                            "auth": {
+                                "type": "static_bearer",
+                                "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                            },
+                        },
+                    ],
+                    "next_page": "p2",
+                },
+            )
+        if req.method == "DELETE":
+            calls.append("delete")
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    with pytest.raises(Exception, match="page two failed"):
+        await ensure_agent_mcp_vault(
+            _make_client(httpx.MockTransport(handler)),
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=b"a" * 32,
+            public_url="https://mcp.example.com/mcp",
+            now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+            session_factory=db_session_factory,
+        )
+
+    assert calls == ["list:first", "list:first", "list:p2"]
+
+
+async def test_ensure_agent_mcp_vault_propagates_credential_delete_failure(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [_vault_obj("vlt_mine", display, "2026-04-01T00:00:00Z")],
+                    "has_more": False,
+                },
+            )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "vcrd_jwt",
+                            "type": "credential",
+                            "vault_id": "vlt_mine",
+                            "metadata": {"daimon_chat_identity": str(agent_id)},
+                            "auth": {
+                                "type": "static_bearer",
+                                "mcp_server_url": "https://mcp.example.com/mcp",
+                            },
+                        },
+                        {
+                            "id": "vcrd_old",
+                            "type": "credential",
+                            "vault_id": "vlt_mine",
+                            "auth": {
+                                "type": "static_bearer",
+                                "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                            },
+                        },
+                    ],
+                    "has_more": False,
+                },
+            )
+        if req.method == "DELETE" and req.url.path == "/v1/vaults/vlt_mine/credentials/vcrd_old":
+            return httpx.Response(
+                400, json={"error": {"type": "invalid_request_error", "message": "delete failed"}}
+            )
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    with pytest.raises(Exception, match="delete failed"):
+        await ensure_agent_mcp_vault(
+            _make_client(httpx.MockTransport(handler)),
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=b"a" * 32,
+            public_url="https://mcp.example.com/mcp",
+            now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+            session_factory=db_session_factory,
+        )
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -127,6 +422,7 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     expected = ["GET /v1/vaults", "GET /v1/vaults/vlt_old/credentials"]
     if legacy:
         expected.append("POST /v1/vaults/vlt_old/credentials/vcrd_existing")
+    expected.append("GET /v1/vaults/vlt_old/credentials")
     assert calls == expected, (
         "must list creds to verify URL match, but not create/delete when matching"
     )
@@ -213,6 +509,8 @@ async def test_ensure_agent_mcp_vault_cold_path_creates_vault_and_credential(
                     },
                 },
             )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_new/credentials":
+            return httpx.Response(200, json={"data": [], "has_more": False})
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     client = _make_client(httpx.MockTransport(handler))
@@ -238,6 +536,8 @@ def _cold_path_handler(
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_new/credentials":
             return httpx.Response(200, json={"data": [], "has_more": False})
         if req.method == "POST" and req.url.path == "/v1/vaults":
             return httpx.Response(
@@ -467,19 +767,16 @@ async def test_ensure_agent_mcp_vault_warm_path_with_matching_url_skips_rebind(
 async def test_ensure_agent_mcp_vault_rebind_preserves_external_mcp_credentials(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """URL-drift: no credential is deleted when public_url changes across deploys.
+    """URL drift keeps unrelated credentials and removes retired Copilot keys.
 
     The per-agent vault holds the daimon-mcp credential AND any external
-    MCP credentials added separately (GitHub Copilot via
-    add_github_copilot_credential, plus user-added MCPs via
-    add_external_mcp_credential). When daimon's public_url changes across
-    deploys, NO credentials are deleted — we just create a fresh credential
-    at the new URL. The prior daimon-mcp credential is left as an inert orphan;
-    user-added external creds are left strictly alone.
+    MCP credentials added separately. When daimon's public_url changes across
+    deploys, the prior daimon-mcp credential is left as an inert orphan,
+    and unrelated user-added external credentials remain in place.
 
     Latent footgun this guards against: first URL drift after a user adds
     any external MCP would silently nuke their creds. The fix is to not
-    sweep at all on URL drift (we cannot authenticate "ours" vs theirs).
+    sweep unrelated URLs on drift (we cannot authenticate "ours" vs theirs).
     """
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -556,11 +853,7 @@ async def test_ensure_agent_mcp_vault_rebind_preserves_external_mcp_credentials(
         session_factory=db_session_factory,
     )
 
-    assert deleted_cred_ids == [], (
-        f"URL drift must NOT delete any credential (user-MCP data-loss guard); "
-        f"the stale daimon-mcp cred is left as an inert orphan and external "
-        f"MCP creds are untouched. got deletions: {deleted_cred_ids}"
-    )
+    assert deleted_cred_ids == ["vcrd_github_copilot"]
     assert len(created_bodies) == 1, "exactly one credential POST at the new URL"
     assert created_bodies[0]["auth"]["mcp_server_url"] == public_url, (
         "fresh credential targets the current public_url"
@@ -857,6 +1150,8 @@ async def test_ensure_agent_mcp_vault_cold_path_creates_per_agent_vault(
                     },
                 },
             )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_1/credentials":
+            return httpx.Response(200, json={"data": [], "has_more": False})
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     client = _make_client(httpx.MockTransport(handler))
@@ -1269,6 +1564,99 @@ async def test_ensure_agent_mcp_vault_concurrent_calls_create_exactly_one_vault(
     assert vault_id_a == vault_id_b == "vlt_race", (
         "both concurrent callers must resolve to the same (single) created vault"
     )
+
+
+async def test_ensure_agent_mcp_vault_concurrent_calls_clean_retired_credential_once() -> None:
+    dsn = _test_dsn()
+    engine_a = create_async_engine(dsn)
+    engine_b = create_async_engine(dsn)
+    session_factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    session_factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
+
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    remaining = {"vcrd_old"}
+    calls: list[str] = []
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            calls.append("list:vaults")
+            return httpx.Response(
+                200,
+                json={
+                    "data": [_vault_obj("vlt_mine", display, "2026-04-01T00:00:00Z")],
+                    "has_more": False,
+                },
+            )
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            calls.append("list:credentials")
+            if remaining:
+                # Give a second caller time to enter the read/delete window.
+                await asyncio.sleep(0.2)
+            data = [
+                {
+                    "id": "vcrd_jwt",
+                    "type": "credential",
+                    "vault_id": "vlt_mine",
+                    "metadata": {"daimon_chat_identity": str(agent_id)},
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": "https://mcp.example.com/mcp",
+                    },
+                }
+            ]
+            if "vcrd_old" in remaining:
+                data.append(
+                    {
+                        "id": "vcrd_old",
+                        "type": "credential",
+                        "vault_id": "vlt_mine",
+                        "auth": {
+                            "type": "static_bearer",
+                            "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                        },
+                    }
+                )
+            return httpx.Response(200, json={"data": data, "has_more": False})
+        if req.method == "DELETE" and req.url.path == "/v1/vaults/vlt_mine/credentials/vcrd_old":
+            calls.append("delete:vcrd_old")
+            if "vcrd_old" not in remaining:
+                return httpx.Response(404, json={"error": {"message": "not found"}})
+            remaining.remove("vcrd_old")
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    client = _make_client(httpx.MockTransport(handler))
+    try:
+        vault_id_a, vault_id_b = await asyncio.gather(
+            ensure_agent_mcp_vault(
+                client,
+                account_id=account_id,
+                agent_id=agent_id,
+                jwt_secret=b"a" * 32,
+                public_url="https://mcp.example.com/mcp",
+                now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+                session_factory=session_factory_a,
+            ),
+            ensure_agent_mcp_vault(
+                client,
+                account_id=account_id,
+                agent_id=agent_id,
+                jwt_secret=b"a" * 32,
+                public_url="https://mcp.example.com/mcp",
+                now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+                session_factory=session_factory_b,
+            ),
+        )
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+    assert vault_id_a == vault_id_b == "vlt_mine"
+    assert calls.count("delete:vcrd_old") == 1
+    assert calls.index("delete:vcrd_old") < calls.index("list:vaults", 1)
+    assert remaining == set()
 
 
 async def test_add_external_mcp_credential_replaces_the_callers_oauth_grant_at_that_url(
