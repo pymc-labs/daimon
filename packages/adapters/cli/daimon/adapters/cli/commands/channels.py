@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, cast
 import httpx
 import typer
 from cryptography.fernet import InvalidToken
+from daimon.adapters.cli.commands.channels_answerable import channels_answerable_command
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
@@ -72,7 +73,7 @@ from rich.markup import escape
 from sqlalchemy.ext.asyncio import AsyncSession
 
 channels_app = typer.Typer(
-    help="Channels: a summary, spend budgets, channel admins, skills and rules."
+    help="Channels: a summary, budgets, admins, skills, rules and where Daimon answers."
 )
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
@@ -88,6 +89,7 @@ skills_app = typer.Typer(
 channels_app.add_typer(skills_app, name="skills")
 rule_app = typer.Typer(help="A channel's rule: who can read it and who can post there.")
 channels_app.add_typer(rule_app, name="rule")
+channels_app.command("answerable")(channels_answerable_command)
 agent_rule_app = typer.Typer(help="An agent's rule: which channels it runs in.")
 
 _PLATFORMS = ("discord", "slack", "teams")

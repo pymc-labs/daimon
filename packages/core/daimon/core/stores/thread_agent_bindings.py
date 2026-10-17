@@ -224,6 +224,27 @@ async def list_bound_parent_channel_ids(
     return list(ids.scalars())
 
 
+async def list_answering_bindings(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str
+) -> list[ThreadAgentBindingRow]:
+    """Every thread binding that still answers in one tenant's server, by parent then thread.
+
+    Setup and handoff alike; archived and locked threads count, as in
+    `list_bound_parent_channel_ids`. Deleted bindings and DM scopes are left out.
+    """
+    bindings = await session.execute(
+        select(ThreadAgentBinding)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.platform == platform,
+            ThreadAgentBinding.deleted.is_(False),
+            ThreadAgentBinding.thread_id.not_like(f"{DM_SCOPE_PREFIX}%"),
+        )
+        .order_by(ThreadAgentBinding.parent_channel_id, ThreadAgentBinding.thread_id)
+    )
+    return [ThreadAgentBindingRow.model_validate(binding) for binding in bindings.scalars()]
+
+
 async def list_dm_bindings(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[tuple[str, str, str, str]]:
