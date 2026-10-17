@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -168,6 +169,40 @@ async def get_user_for_update(session: AsyncSession, *, github_user_id: int) -> 
     return GitHubUser.model_validate(row) if row is not None else None
 
 
+# The most ids one query leaves out, so its text stays small.
+MAX_EXCLUDED_USER_IDS = 1000
+
+
+async def list_users_with_expiring_refresh(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    before: datetime,
+    limit: int,
+    exclude_user_ids: Collection[int] = (),
+) -> list[int]:
+    """Active users whose live refresh token expires by ``before``, soonest first.
+
+    ``exclude_user_ids`` leaves out users a caller is backing off from, so rows
+    that keep failing cannot fill every slot. At most `MAX_EXCLUDED_USER_IDS`
+    are honoured.
+    """
+    stmt = select(GitHubUserLink.github_user_id).where(
+        GitHubUserLink.status == "active",
+        GitHubUserLink.encrypted_refresh_token.is_not(None),
+        GitHubUserLink.refresh_expires_at.is_not(None),
+        GitHubUserLink.refresh_expires_at > now,
+        GitHubUserLink.refresh_expires_at <= before,
+    )
+    excluded = sorted(exclude_user_ids)[:MAX_EXCLUDED_USER_IDS]
+    if excluded:
+        stmt = stmt.where(GitHubUserLink.github_user_id.not_in(excluded))
+    rows = await session.scalars(
+        stmt.order_by(GitHubUserLink.refresh_expires_at, GitHubUserLink.github_user_id).limit(limit)
+    )
+    return list(rows)
+
+
 async def rotate_user_tokens(
     session: AsyncSession,
     *,
@@ -226,6 +261,13 @@ async def bump_link_generation(
 
 async def get_account_link(session: AsyncSession, *, account_id: uuid.UUID) -> AccountLink | None:
     row = await session.get(AccountGitHubLink, account_id)
+    return AccountLink.model_validate(row) if row is not None else None
+
+
+async def get_account_link_for_update(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> AccountLink | None:
+    row = await session.get(AccountGitHubLink, account_id, with_for_update=True)
     return AccountLink.model_validate(row) if row is not None else None
 
 

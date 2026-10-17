@@ -64,6 +64,7 @@ from daimon.core.github_app_session import (
     create_session_vault,
     declared_app_repositories,
     finish_app_delivery,
+    has_declared_app_access,
     prepare_app_access,
     resolve_bot_identity,
     revoke_app_access,
@@ -363,7 +364,12 @@ async def project_session_resources(
                 session_factory, tenant_id=tenant_id, agent_id=agent_uuid
             )
         )
-    if app_mode and repos:
+    has_app_access = (
+        app_mode
+        and not is_external
+        and await has_declared_app_access(session_factory, tenant_id=tenant_id, agent_id=agent_uuid)
+    )
+    if has_app_access:
         # Without a repository grant, the App vault carries no GitHub source
         # obligation. Caller MCP credentials are captured separately above.
         requirements.append(
@@ -376,7 +382,7 @@ async def project_session_resources(
         or app_session_unmapped
         or (requester_is_headless and app_mode)
         or origin_seal_ids
-        or (app_mode and agent_github_app is not None and repos)
+        or (has_app_access and agent_github_app is not None)
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id="caller-resources", kind="native"))
@@ -721,7 +727,7 @@ async def create_session(
     try:
         if app_mode:
             assert tenant_id is not None and agent_uuid is not None and session_factory is not None
-            if not is_external and await declared_app_repositories(
+            if not is_external and await has_declared_app_access(
                 session_factory, tenant_id=tenant_id, agent_id=agent_uuid
             ):
                 vault_id = await create_session_vault(

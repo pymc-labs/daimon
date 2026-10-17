@@ -71,8 +71,25 @@ async def get_account_with_tenant(
     )
 
 
-async def get_account(session: AsyncSession, account_id: uuid.UUID) -> AccountRow | None:
-    orm = await session.get(Account, account_id)
+async def get_account(
+    session: AsyncSession, account_id: uuid.UUID, *, for_share: bool = False
+) -> AccountRow | None:
+    """Read one account. `for_share` locks the row (`SELECT ... FOR SHARE`) first.
+
+    For a commit-time authority recheck inside a REPEATABLE READ or SERIALIZABLE
+    transaction: a role or external flag changed by a transaction that committed
+    after this one's snapshot raises 40001 here instead of reading the old value,
+    and a change after the lock waits for this transaction to finish.
+    """
+    if for_share:
+        orm = await session.scalar(
+            select(Account)
+            .where(Account.id == account_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+    else:
+        orm = await session.get(Account, account_id)
     if orm is None:
         return None
     return AccountRow.model_validate(orm)

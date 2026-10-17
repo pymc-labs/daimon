@@ -1446,6 +1446,46 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         assert after == before + 1
         assert grants == []
 
+        # The agent already uses another org: the confirmation shows the approved
+        # copy, with what to remove, not the store's raw wording.
+        async with sessionmaker.begin() as session:
+            await github_app_installations.upsert(
+                session, installation_id=88, account_login="other", repo_full_names=["other/repo"]
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO tenant_github_repos "
+                    "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                    "repo_full_name, max_access, authorized_by_github_user_id, "
+                    "authorized_by_account_id) "
+                    "VALUES (:tenant, 900, :agent, 66, 88, 'other/repo', 'write', 17, :account)"
+                ),
+                {"tenant": tenant_id, "agent": agent_id, "account": account_id},
+            )
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=900,
+                baseline_access="read",
+                ceiling_access="read",
+                granted_by_account_id=account_id,
+            )
+        _state, hidden, _rendered = await page()
+        refused = await save(hidden, repo="101", access_101="read")
+        assert refused.status_code == 400
+        assert "Editor already has repos from other." in html.unescape(refused.text)
+        assert (
+            "An agent uses one GitHub account or org at a time. "
+            "To switch, remove the other repos first."
+        ) in html.unescape(refused.text)
+        async with sessionmaker.begin() as session:
+            for table in ("agent_github_grants", "tenant_github_repos"):
+                await session.execute(
+                    text(f"DELETE FROM {table} WHERE tenant_id = :tenant AND repo_id = 900"),
+                    {"tenant": tenant_id},
+                )
+
         # CLI operator links omit agent_ma_id; they remain restricted to a
         # current tenant admin and still open this editor.
         _state, hidden, rendered = await page(operator=True)

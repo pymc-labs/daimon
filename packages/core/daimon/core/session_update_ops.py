@@ -47,7 +47,7 @@ from daimon.core.agent_mcp_credentials import (
     sync_agent_mcp_credentials,
 )
 from daimon.core.config import GithubAppSettings, McpSettings
-from daimon.core.credential_env import assemble_env_bytes, upload_env_file
+from daimon.core.credential_env import assemble_env_bytes, session_env_key, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_session import rotate_live_app_tokens
 from daimon.core.mcp_vault import refresh_mounted_mcp_vaults
@@ -180,7 +180,7 @@ async def _replace_env_file(
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     if snapshot.github_mode == "app":
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+        rows = [row for row in rows if session_env_key(row.key, exclude_github=True)]
 
     file_id = (
         await upload_env_file(anthropic, sessionmaker, rows=rows, scope=scope) if rows else None

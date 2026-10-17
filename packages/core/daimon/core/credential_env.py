@@ -22,7 +22,11 @@ from anthropic.types.beta import FileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
-from daimon.core.env_file import env_row_skip_reason, serialize_env_file
+from daimon.core.env_file import (
+    env_row_skip_reason,
+    is_reserved_github_token_name,
+    serialize_env_file,
+)
 from daimon.core.github_app_auth import BotIdentity
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import upload_credential_file
@@ -41,7 +45,7 @@ GIT_IDENTITY_MOUNT_PATH = "git-identity.sh"
 
 def session_env_key(key: str, *, exclude_github: bool) -> bool:
     """The session owner's app-mode exclusion, before value decoding/upload."""
-    return not exclude_github or key not in ("GH_TOKEN", "GITHUB_TOKEN")
+    return not exclude_github or not is_reserved_github_token_name(key)
 
 
 def assemble_env_bytes(rows: list[AgentFileRow]) -> bytes:

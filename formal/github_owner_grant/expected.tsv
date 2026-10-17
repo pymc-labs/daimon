@@ -1,0 +1,5 @@
+config	verdict	distinct_states
+clean	clean	66096
+no_exclusion	violates:ExcludedNeverMinted	114
+mint_from_cache	violates:MintedSubsetCovered	133
+future_repo_witness	violates:FutureRepoNeverMinted	139

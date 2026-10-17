@@ -22,7 +22,18 @@ from daimon.adapters.mcp.oauth_github import (
     _pending_page,
     _Repo,
 )
-from daimon.adapters.mcp.oauth_github_personal import _page as personal_page
+from daimon.adapters.mcp.oauth_github_personal import (
+    _back as personal_back,
+)
+from daimon.adapters.mcp.oauth_github_personal import (
+    _expired as personal_expired,
+)
+from daimon.adapters.mcp.oauth_github_personal import (
+    _page as personal_page,
+)
+from daimon.adapters.mcp.oauth_github_personal import (
+    _unreachable as personal_unreachable,
+)
 from daimon.adapters.mcp.oauth_mcp import _success_page as mcp_success_page
 from daimon.adapters.mcp.oauth_slack import (
     _install_landing_html as slack_install_page,
@@ -65,7 +76,11 @@ NAMES = (
 )
 REPOS = tuple(
     _Repo(
-        id=index + 101, owner_id=55, installation_id=77, full_name=f"example-org/{name}", admin=True
+        id=index + 101,
+        owner_id=55,
+        installation_id=77,
+        full_name=f"example-org/{name}",
+        permission="admin",
     )
     for index, name in enumerate(NAMES)
 )
@@ -98,6 +113,70 @@ def confirmation(
         already_added=already_added,
         needed=needed,
     )
+
+
+def personal_pages() -> dict[str, Response]:
+    """The personal GitHub link outcomes, with synthetic names."""
+    return {
+        "personal_linked": personal_page(
+            "GitHub linked",
+            "Linked as @sam-rivera. Check Discord for the result.",
+            names=("@sam-rivera",),
+            status=200,
+            mark="circle-check",
+            back=personal_back("discord", "123", primary=True),
+        ),
+        "personal_linked_slack": personal_page(
+            "GitHub linked",
+            "Linked as @sam-rivera. Check Slack for the result.",
+            names=("@sam-rivera",),
+            status=200,
+            mark="circle-check",
+            back=personal_back("slack", "T123", primary=True),
+        ),
+        "personal_linked_idle": personal_page(
+            "GitHub linked",
+            "Linked as @sam-rivera.",
+            names=("@sam-rivera",),
+            status=200,
+            mark="circle-check",
+            back=personal_back("discord", "123", primary=True),
+        ),
+        "personal_wrong_account": personal_page(
+            "Wrong GitHub account",
+            "@sam-rivera can't open northwind-labs/analysis.",
+            names=("@sam-rivera", "northwind-labs/analysis"),
+            status=200,
+            tone="error",
+            back=personal_back("discord", "123"),
+            action=("Use another GitHub account", "#another"),
+        ),
+        "personal_not_your_link": personal_page(
+            "Not your link",
+            "This link was made for another person. Ask in Discord for your own link.",
+            status=403,
+            tone="error",
+            back=personal_back("discord", primary=True),
+        ),
+        "personal_ask_again": personal_page(
+            "Ask again in chat",
+            "Agent access changed while you were linking.",
+            status=200,
+            mark="info",
+            back=personal_back("discord", "123", primary=True),
+        ),
+        "personal_not_linked": personal_page(
+            "GitHub wasn't linked",
+            status=200,
+            tone="error",
+            back=personal_back("discord", "123"),
+            action=("Try again", "#retry"),
+        ),
+        "personal_expired": personal_expired("discord"),
+        "personal_connection_problem": personal_unreachable(
+            status=502, action=("Try again", "#retry")
+        ),
+    }
 
 
 def pages() -> dict[str, Response]:
@@ -216,11 +295,7 @@ def pages() -> dict[str, Response]:
             signup_credit=Decimal("5"),
         ),
         "slack_done": slack_success_page(workspace="Example Lab", signup_credit=Decimal("5")),
-        "personal_link": personal_page(
-            "Linked as @reviewer",
-            status=200,
-            back='<a href="#back">Back to Discord</a>',
-        ),
+        **personal_pages(),
         "mcp_done": mcp_success_page(server_name="Analytics MCP", agent_name="ResearchBot"),
         "billing_done": asyncio.run(billing_success(None)),  # type: ignore[arg-type]
         "billing_cancel": asyncio.run(billing_cancel(None)),  # type: ignore[arg-type]
@@ -253,7 +328,9 @@ def collect_form(posted: list[dict[str, list[str]]]):
 
 
 def main() -> None:
-    states = pages()
+    # GITHUB_CAPTURE_ONLY=personal renders just the personal link pages.
+    personal_only = os.environ.get("GITHUB_CAPTURE_ONLY") == "personal"
+    states = personal_pages() if personal_only else pages()
     (ROOT / "screenshots").mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -327,6 +404,27 @@ def main() -> None:
                         "Already added",
                     ]
                     assert page.locator("#connect-repos").inner_text() == "Add 1 repo"
+                if state.startswith("personal_"):
+                    buttons = page.locator(".gh-actions a")
+                    boxes = [buttons.nth(i).bounding_box() for i in range(buttons.count())]
+                    assert all(box and box["height"] >= 44 for box in boxes)
+                    if width == 390:
+                        # On a phone every button starts at the same left edge.
+                        assert len({round(box["x"]) for box in boxes if box}) <= 1
+                        print(state, "left x", [round(box["x"]) for box in boxes if box])
+                    assert "close this tab" not in page.locator("main").inner_text().lower()
+                    assert page.locator("h1").inner_text() == (
+                        "GitHub linked"
+                        if state.startswith("personal_linked")
+                        else {
+                            "personal_wrong_account": "Wrong GitHub account",
+                            "personal_not_your_link": "Not your link",
+                            "personal_ask_again": "Ask again in chat",
+                            "personal_not_linked": "GitHub wasn't linked",
+                            "personal_expired": "Link expired",
+                            "personal_connection_problem": "Connection problem",
+                        }[state]
+                    )
                 if state == "picker_already_added":
                     assert page.locator("h1").inner_text() == "Add repos to ResearchBot"
                     assert page.locator("input[name=repo]:disabled:checked").count() == 2
@@ -393,7 +491,7 @@ def main() -> None:
                 if state not in {"picker_empty", "picker_selected"}:
                     page.screenshot(path=ROOT / "screenshots" / f"{state}-{width}.png")
                 page.close()
-            if width == 390:
+            if width == 390 and not personal_only:
                 no_js = browser.new_context(
                     viewport={"width": width, "height": height}, java_script_enabled=False
                 )

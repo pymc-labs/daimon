@@ -892,6 +892,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # account; its encrypted flow rows cascade from the invitation.
             "github_connect_invitations",
             "agent_github_grants",
+            # Same shape for an owner-wide grant: tenant-owned, and the only
+            # accounts.id FK is the nullable granted_by_account_id with ON DELETE
+            # SET NULL. Erasure severs who granted it without removing the
+            # agent's access.
+            "agent_github_owner_grants",
             # Drafts belong to the tenant; deleting an account clears the
             # nullable actor reference and leaves the pending repo choice.
             "agent_github_grant_drafts",
@@ -919,6 +924,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",
+            # A chat grant waiting on a personal link lives ten minutes, holds
+            # only agent and repo names and chat ids, and account_id is ON DELETE
+            # CASCADE, so erasing the account removes it.
+            "github_linked_connect_pending",
         }
     )
 

@@ -1176,7 +1176,10 @@ created without replacing or deleting existing tags.
 
 For worker compose files, set `stop_grace_period: 90s` on Discord, Slack,
 Teams and scheduler. This leaves time for the adapters' 60-second in-flight
-drain and cleanup before Docker sends SIGKILL. When recreating containers, use
+drain and cleanup before Docker sends SIGKILL. The scheduler waits at most 50
+seconds of it for GitHub token refreshes already under way to store their
+answer; a refresh still running after that may be lost, and that person links
+GitHub again. When recreating containers, use
 `docker compose up -d --remove-orphans --timeout 95` so the CLI timeout exceeds
 the compose grace. The managed deploy fetches its worker compose asset from
 GCS; its source lives in `pymc-labs/daimon-infra` and an operator uploads changes

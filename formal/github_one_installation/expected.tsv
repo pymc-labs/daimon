@@ -1,0 +1,15 @@
+config	verdict	distinct_states
+safe	clean	36732
+advisory_lock	violates:AtMostOneInstallation	18044
+advisory_fast_owner	violates:AtMostOneInstallation	4060
+advisory_two_serializable	clean	24008
+advisory_serializable_no_ssi	violates:AtMostOneInstallation	12180
+fence_no_abort	violates:AtMostOneInstallation	18394
+inverted_order	clean	35784
+inverted_order_witness	violates:NoDeadlock	6788
+inverted_order_unmapped	violates:NoUnhandledOutcome	6788
+serialization_unmapped	violates:NoUnhandledOutcome	9851
+serialization_abort_witness	violates:NoSerializationFailure	9851
+refusal_witness	violates:NeverRefused	6696
+owner_commit_witness	violates:NoOwnerCommit	6835
+two_commits_witness	violates:NoTwoCommits	9809

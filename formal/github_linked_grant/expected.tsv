@@ -1,0 +1,14 @@
+config	verdict	distinct_states
+clean	clean	32294
+no_platform_identity	violates:NoForeignLink	233
+no_commit_recheck	violates:GrantRestsOnCurrentAuthority	15736
+permission_gap	violates:NoStalePermission	19184
+late_snapshot_sets_only	violates:NoGrantAfterCoverageRemoval	25653
+lock_check_only	clean	38310
+late_check_only	clean	32294
+role_read_unlocked	violates:NoStaleAuthority	13643
+role_lock_no_abort	violates:NoStaleAuthority	13642
+rule_read_unlocked	violates:NoStaleAuthority	21587
+rule_lock_no_abort	violates:NoStaleAuthority	21586
+role_abort_witness	violates:RoleAbortNeverHappens	13642
+rule_abort_witness	violates:RuleAbortNeverHappens	21586

@@ -79,8 +79,15 @@ async def requester_manages_agent(
     default: DeploymentDefault,
     is_daimon_managed: bool | None,
     other_names: tuple[str | None, ...] = (),
+    lock_authority: bool = False,
 ) -> bool:
-    """Use the stored native admin role for an out-of-turn GitHub save."""
+    """Use the stored native admin role for an out-of-turn GitHub save.
+
+    `lock_authority` is for a commit-time recheck inside a SERIALIZABLE
+    transaction. It takes a `FOR SHARE` lock on the requester's account row, so
+    a demotion that committed after the transaction's snapshot fails the
+    transaction (40001) instead of being read as it was.
+    """
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
     stored = await read_stored_admin(
@@ -89,6 +96,7 @@ async def requester_manages_agent(
         platform=platform,
         account_id=account_id,
         platform_user_id=platform_user_id,
+        lock=lock_authority,
     )
     return stored.is_admin
 

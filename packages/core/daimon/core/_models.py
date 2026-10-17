@@ -3039,6 +3039,78 @@ class GitHubPersonalLinkIntent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class GitHubLinkedConnectPending(Base):
+    """A single chat grant to resume after a verified personal link."""
+
+    __tablename__ = "github_linked_connect_pending"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_name: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_access: Mapped[str] = mapped_column(Text, nullable=False, server_default="read")
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Set while a resume holds the request; cleared by deleting the row once resolved.
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Identifies the claim that holds the request: only it may renew or resolve the row.
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class AgentGitHubOwnerGrant(Base):
+    __tablename__ = "agent_github_owner_grants"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "installation_id"),
+        CheckConstraint("access IN ('read', 'write')", name="ck_agent_github_owner_grants_access"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    installation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_app_installations.installation_id", ondelete="CASCADE")
+    )
+    owner_login: Mapped[str] = mapped_column(Text)
+    access: Mapped[str] = mapped_column(Text)
+    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentGitHubGrantFence(Base):
+    """One row per agent that every grant writer bumps (see `lock_agent_grants`)."""
+
+    __tablename__ = "agent_github_grant_fences"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(BigInteger, server_default="1")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentGitHubOwnerExclusion(Base):
+    __tablename__ = "agent_github_owner_exclusions"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "repo_full_name"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    repo_full_name: Mapped[str] = mapped_column(Text)
+
+
 class GitHubIssuedToken(Base):
     __tablename__ = "github_issued_tokens"
     __table_args__ = (
@@ -3061,6 +3133,7 @@ class GitHubIssuedToken(Base):
     session_id: Mapped[str] = mapped_column(Text)
     installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
+    repo_names: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     permissions: Mapped[dict[str, str]] = mapped_column(JSONB)
     grant_versions: Mapped[dict[str, int]] = mapped_column(JSONB)
     requester_account_id: Mapped[uuid.UUID | None] = mapped_column(

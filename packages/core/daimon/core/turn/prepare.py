@@ -42,7 +42,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import backend_switch_tools_for_turn
-from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.credential_env import assemble_env_bytes, session_env_key
 from daimon.core.github_app_session import AppSessionAccess
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
@@ -415,7 +415,7 @@ async def _env_bytes_sha256(
     """
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-    rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+    rows = [row for row in rows if session_env_key(row.key, exclude_github=True)]
     if not rows:
         return None
     return hash_env_bytes(assemble_env_bytes(rows))

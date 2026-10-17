@@ -318,9 +318,7 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
 
     revoke = AsyncMock(wraps=session_module.revoke_app_access)
     monkeypatch.setattr(session_module, "revoke_app_access", revoke)
-    monkeypatch.setattr(
-        session_module, "declared_app_repositories", AsyncMock(return_value=("declared",))
-    )
+    monkeypatch.setattr(session_module, "has_declared_app_access", AsyncMock(return_value=True))
     async with build_fake_anthropic_http(
         combine_handlers(make_fake_memory_store_handler(), handle)
     ) as client:
@@ -1526,8 +1524,8 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     token = AppToken(uuid.uuid4(), "ghs_x", 1, (1,), "write", "GH_TOKEN_ACME_WRITE")
     monkeypatch.setattr("daimon.core.sessions.create_session_vault", AsyncMock(return_value="v"))
     monkeypatch.setattr(
-        "daimon.core.sessions.declared_app_repositories",
-        AsyncMock(return_value=("declared",)),
+        "daimon.core.sessions.has_declared_app_access",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         "daimon.core.sessions.prepare_app_access",
@@ -1598,8 +1596,8 @@ async def test_app_session_attaches_caller_and_session_vaults(
         "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_session")
     )
     monkeypatch.setattr(
-        "daimon.core.sessions.declared_app_repositories",
-        AsyncMock(return_value=("declared",)),
+        "daimon.core.sessions.has_declared_app_access",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")

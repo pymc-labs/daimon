@@ -134,14 +134,23 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one()
 
 
-async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
+async def load_access_policy(
+    session: AsyncSession, *, tenant_id: uuid.UUID, for_share: bool = False
+) -> TenantAccessPolicy:
+    """The tenant's policy. `for_share` locks the row (`SELECT ... FOR SHARE`).
+
+    For a commit-time authority recheck inside a REPEATABLE READ or SERIALIZABLE
+    transaction (see `get_account`): a policy edited or cleared by a transaction
+    that committed after this one's snapshot raises 40001 instead of reading
+    the old rules. A tenant with no row has no row to lock; a row inserted
+    later can only add rules, which the recheck's callers do not rely on.
+    """
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
-    record = (
-        await session.execute(
-            select(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
-        )
-    ).scalar_one_or_none()
+    stmt = select(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
+    if for_share:
+        stmt = stmt.with_for_update(read=True).execution_options(populate_existing=True)
+    record = (await session.execute(stmt)).scalar_one_or_none()
     if record is None:
         return OPEN_ACCESS_POLICY
     payload = cast(object, record.policy)

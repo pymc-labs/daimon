@@ -4,6 +4,7 @@ The user-visible risk is a cached installation with the wrong repositories,
 suspension flag, or existence after webhook traffic stops. This model checks
 whether duplicate and reordered deliveries, changes during a refresh, and a
 lease takeover can strand stale cache data or allow an old worker to finish.
+It maps to the installation reconciliation implementation on main.
 It also checks the deploy ordering: migration 0108 queues the first refresh
 while the previous image's scheduler is still running, and that scheduler can
 finish the job without writing the snapshot. Every installation must still end
@@ -12,7 +13,8 @@ up with a GitHub snapshot.
 Run `python3 formal/github_installation_reconcile/run_models.py` from the repo
 root. The runner uses one TLC worker, a 180-second limit and 256 MiB metadir cap
 per case (the largest case peaks near 177 MiB), removes each metadir, and pins
-distinct-state counts in `expected.tsv`. Liveness is checked once after the
+distinct-state counts in `expected.tsv`; the central `formal/expected.tsv`
+runs the same configurations. Liveness is checked once after the
 full search (`-lncheck final`); the default checks at timed intervals and makes
 the counts of liveness counterexamples vary between runs. Terminal states are allowed because TLA's stuttering step
 represents a system at rest.

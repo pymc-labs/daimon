@@ -405,6 +405,16 @@ _HARD_DENY_EXACT: Final[frozenset[str]] = frozenset(
         "EXINIT",
     }
 )
+_GITHUB_APP_TOKEN_NAME: Final[re.Pattern[str]] = re.compile(
+    r"(?:GH_TOKEN|GITHUB_TOKEN)(?:_[0-9]+)?"
+)
+
+
+def is_reserved_github_token_name(name: str) -> bool:
+    """Names owned by per-session GitHub App credentials, including numbered slots."""
+    return _GITHUB_APP_TOKEN_NAME.fullmatch(name.upper()) is not None
+
+
 #: HARD DENY prefixes.
 _HARD_DENY_PREFIXES: Final[tuple[str, ...]] = (
     "LD_",
@@ -554,7 +564,7 @@ def env_name_hard_denied(name: str) -> bool:
     upper = name.upper()
     if upper in _HARD_DENY_EXCEPTIONS or upper in _GIT_IDENTITY_NAMES:
         return False
-    if upper in _HARD_DENY_EXACT:
+    if upper in _HARD_DENY_EXACT or is_reserved_github_token_name(upper):
         return True
     if _HARD_DENY_PATTERN.fullmatch(upper) is not None:
         return True

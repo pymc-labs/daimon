@@ -67,6 +67,28 @@ on:
       - "apps/report-host/tests/test_uploads.py"
       - "apps/report-host/tests/test_reports_store.py"
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_linked_grant.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_linked_pending.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_connect.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_remove_repo.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_github_personal.py"
+      - "packages/core/daimon/core/stores/github_owner_grants.py"
+      - "packages/core/daimon/core/stores/github_access.py"
+      - "packages/core/daimon/core/stores/github_linked_pending.py"
+      - "packages/core/alembic/versions/0111_github_owner_grants.py"
+      - "packages/core/alembic/versions/0110_github_link_pending.py"
+      - "packages/core/daimon/core/native_admins.py"
+      - "packages/core/daimon/core/github_requester_access.py"
+      - "packages/core/daimon/core/github_link_refresh.py"
+      - "packages/core/daimon/core/github_panel.py"
+      - "packages/core/daimon/core/agent_reach.py"
+      - "packages/core/daimon/core/stores/access_policy.py"
+      - "packages/core/daimon/core/stores/accounts.py"
+      - "packages/core/daimon/core/stores/github_links.py"
+      - "packages/core/daimon/core/stores/github_personal_links.py"
+      - "packages/core/daimon/core/stores/github_issued_tokens.py"
+      - "packages/core/daimon/core/stores/github_installation_coverage.py"
+      - "packages/core/daimon/core/github_app_session.py"
       - "packages/core/daimon/core/stores/github_app_installations.py"
       - "packages/core/daimon/core/stores/github_installation_reconciliation.py"
       - "packages/core/daimon/core/github_installation_reconcile.py"
@@ -193,6 +215,29 @@ on:
       - "docker-compose.yml"
       # billing/
       - "packages/adapters/mcp/daimon/adapters/mcp/webhooks.py"
+      # github_chat_grant/
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_linked_grant.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_linked_pending.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_connect.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/tools/github_remove_repo.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/oauth_github_personal.py"
+      - "packages/core/daimon/core/stores/github_owner_grants.py"
+      - "packages/core/daimon/core/stores/github_access.py"
+      - "packages/core/daimon/core/stores/github_linked_pending.py"
+      - "packages/core/alembic/versions/0111_github_owner_grants.py"
+      - "packages/core/alembic/versions/0110_github_link_pending.py"
+      - "packages/core/daimon/core/native_admins.py"
+      - "packages/core/daimon/core/github_requester_access.py"
+      - "packages/core/daimon/core/github_link_refresh.py"
+      - "packages/core/daimon/core/github_panel.py"
+      - "packages/core/daimon/core/agent_reach.py"
+      - "packages/core/daimon/core/stores/access_policy.py"
+      - "packages/core/daimon/core/stores/accounts.py"
+      - "packages/core/daimon/core/stores/github_links.py"
+      - "packages/core/daimon/core/stores/github_personal_links.py"
+      - "packages/core/daimon/core/stores/github_issued_tokens.py"
+      - "packages/core/daimon/core/stores/github_installation_coverage.py"
+      - "packages/core/daimon/core/github_app_session.py"
       - "packages/core/daimon/core/_models.py"
       - "packages/core/daimon/core/stores/github_connect.py"
       - "packages/adapters/mcp/daimon/adapters/mcp/oauth_github.py"
@@ -285,7 +330,9 @@ concurrency:
 jobs:
   tlc:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The GitHub linked-grant, pending and one-installation models add about
+    # eight minutes; a full run took 16 to 21 minutes on hosted runners.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

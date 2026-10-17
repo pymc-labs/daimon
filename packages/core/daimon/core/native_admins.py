@@ -327,9 +327,14 @@ async def read_stored_admin(
     platform: str | None,
     account_id: uuid.UUID,
     platform_user_id: str | None,
+    lock: bool = False,
 ) -> StoredAdmin:
-    """Read only the account's stored native admin role."""
-    account = await get_account(session, account_id)
+    """Read only the account's stored native admin role.
+
+    `lock` takes a `FOR SHARE` lock on the account row it reads, for a
+    commit-time recheck in a SERIALIZABLE transaction (`get_account`).
+    """
+    account = await get_account(session, account_id, for_share=lock)
     return StoredAdmin(
         is_admin=account is not None and account.role is Role.ADMIN and not account.is_external,
         platform_user_id=platform_user_id,

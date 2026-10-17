@@ -607,6 +607,8 @@ def test_opaque_secret_exceptions_escape_their_prefix_and_nothing_else(name: str
 # --- follow-up: more exec-on-env names, path-valued keys, alias groups -------
 
 _FOLLOWUP_HARD_DENY: list[str] = [
+    "GH_TOKEN_2",
+    "GITHUB_TOKEN_3",
     "RSYNC_RSH",
     "CVS_RSH",
     "GIT_PASSCOMMAND",

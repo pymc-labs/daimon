@@ -21,6 +21,11 @@ from daimon.core.stores.github_access import (
     remove_agent_repo,
     repo_id_for_agent_removal,
 )
+from daimon.core.stores.github_owner_grants import (
+    exclude_repo,
+    has_owner_grant,
+    remove_owner_grants,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -68,7 +73,7 @@ async def remove_repo_impl(
     )
     requested = repo_name.strip()
     if requested.count("/") != 1 or any(c.isspace() for c in requested):
-        raise ToolError("Name one repo as owner/repo.")
+        raise ToolError("Name one repo as owner/repo or owner/*.")
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory.begin() as session:
         account = await get_account(session, auth.account_id)
@@ -89,21 +94,52 @@ async def remove_repo_impl(
         )
         if not manages:
             raise ToolError("Ask a server admin.")
-        repo_id = await repo_id_for_agent_removal(
-            session, tenant_id=auth.tenant_id, agent_id=agent_id, repo_name=requested
-        )
-        if repo_id is None:
-            raise ToolError("That repo is not on this agent's list.")
-        # A clear ask is enough (Derick, 2026-10-10): no separate "say yes" turn.
-        removed = await remove_agent_repo(
+        if requested.endswith("/*"):
+            if not await remove_owner_grants(
+                session, tenant_id=auth.tenant_id, agent_id=agent_id, owner_login=requested[:-2]
+            ):
+                raise ToolError("That owner grant is not on this agent's list.")
+            return RemoveRepoResult(
+                status="removed", message=f"Removed {requested} from {agent.name}."
+            )
+        owner_active = await has_owner_grant(
             session,
             tenant_id=auth.tenant_id,
             agent_id=agent_id,
-            repo_id=repo_id,
-            account_id=auth.account_id,
+            owner_login=requested.split("/", 1)[0],
         )
-        if not removed:
+        repo_id = await repo_id_for_agent_removal(
+            session, tenant_id=auth.tenant_id, agent_id=agent_id, repo_name=requested
+        )
+        if repo_id is None and not owner_active:
+            raise ToolError("That repo is not on this agent's list.")
+        # A clear ask is enough (Derick, 2026-10-10): no separate "say yes" turn.
+        removed = (
+            await remove_agent_repo(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent_id,
+                repo_id=repo_id,
+                account_id=auth.account_id,
+            )
+            if repo_id is not None
+            else False
+        )
+        if owner_active:
+            await exclude_repo(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent_id,
+                repo_full_name=requested.casefold(),
+            )
+        if not removed and not owner_active:
             raise ToolError("That repo is no longer on this agent's list.")
+    if owner_active:
+        owner = requested.split("/", 1)[0]
+        return RemoveRepoResult(
+            status="removed",
+            message=f"{agent.name} can no longer use {requested}.\nThe other {owner} repos stay.",
+        )
     return RemoveRepoResult(
         status="removed",
         message=(
@@ -123,12 +159,15 @@ def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         expected_ma_agent_id: str | None = None,
         confirmed: bool = False,
     ) -> RemoveRepoResult:
-        """Remove owner/repo from this agent only.
+        """Remove owner/repo or owner/* from this agent only.
 
         A clear ask is enough: call it right away and reply with the returned
-        line. Ask only if the repo or agent is unclear. confirmed is ignored.
+        lines as they are. Ask only if the repo or agent is unclear. confirmed is ignored.
         The Connect GitHub page also adds and removes repos. If it was the working
         repo, the working repo is cleared. Other agents keep their access.
+        Removing owner/repo under an owner/* grant keeps that repo excluded;
+        removing owner/* leaves exclusions for later regrants.
+        Asked to remove "all owner repos" or "every owner repo", pass owner/*.
         Pass the current turn origin and selected agent identity.
         """
         return await remove_repo_impl(

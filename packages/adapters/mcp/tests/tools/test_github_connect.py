@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,6 +16,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import github_connect as connect_tool
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -25,14 +26,205 @@ from daimon.core.config import (
 )
 from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import github_access, github_app_installations
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import digest, get_invitation
 from daimon.testing.factories import make_account, make_tenant
+from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.fixture(autouse=True)
+def live_admin(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Admit the live platform admin read a linked grant makes; test_github_linked_grant covers it."""
+    admit = AsyncMock(return_value=None)
+    monkeypatch.setattr(connect_tool, "live_admin_refusal", admit)
+    return admit
+
+
+@pytest.mark.asyncio
+async def test_connected_repo_is_granted_immediately_in_chat(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, workspace_id=f"grant-{uuid.uuid4().hex[:8]}")
+        account = await make_account(session, tenant=tenant)
+        await set_role(session, account.id, Role.ADMIN)
+        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ma_agent")
+        await github_app_installations.upsert(
+            session,
+            installation_id=98765,
+            account_login="owner",
+            repo_full_names=["owner/repo"],
+        )
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                "repo_full_name, max_access, authorized_by_github_user_id, "
+                "authorized_by_account_id) "
+                "VALUES (:tenant, 12345, NULL, 12, 98765, 'owner/repo', "
+                "'write', 17, :account)"
+            ),
+            {"tenant": tenant.id, "account": account.id},
+        )
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=AsyncMock(),  # type: ignore[arg-type]
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+    origin = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_at=datetime.now(UTC) - timedelta(seconds=1),
+        configuration_target_name="Agent",
+        configuration_target_ma_agent_id="ma_agent",
+        responder_name="Daimon",
+        responder_ma_agent_id="ma_daimon",
+        parent_channel_id="channel",
+        thread_id="thread",
+    )
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
+    delivery = AsyncMock()
+    monkeypatch.setattr(connect_tool, "_post_discord_connect_card", delivery)
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        external_id="workspace",
+        platform_user_id="admin",
+        is_admin=True,
+    )
+    result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo"
+    )
+    assert result.status == "granted"
+    assert result.message == (
+        "Agent can now read and change owner/repo.\n"
+        "Everyone who talks to Agent can use this repo through Agent."
+    )
+    delivery.assert_not_awaited()
+    async with committing_sessionmaker() as session:
+        [grant] = await github_access.list_agent_grants(
+            session, tenant_id=tenant.id, agent_id=agent_id
+        )
+        assert (grant.baseline_access, grant.ceiling_access) == (
+            "write",
+            "write",
+        )
+    write = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        auth,
+        origin_context_id=str(uuid.uuid4()),
+        repo_name="owner/repo",
+        required_ability="write",
+        confirmed=True,
+    )
+    assert write.status == "granted"
+    assert write.message == result.message
+    async with committing_sessionmaker() as session:
+        [grant] = await github_access.list_agent_grants(
+            session, tenant_id=tenant.id, agent_id=agent_id
+        )
+        assert grant.ceiling_access == "write"
+    async with committing_sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE tenant_github_repos SET max_access = 'read' WHERE repo_id = 12345")
+        )
+    read = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo", access="write"
+    )
+    assert read.status == "granted_read_only"
+    assert read.message == (
+        "Agent can now read owner/repo.\n"
+        "Everyone who talks to Agent can use this repo through Agent."
+    )
+    assert "http" not in read.message
+    async with committing_sessionmaker() as session:
+        [grant] = await github_access.list_agent_grants(
+            session, tenant_id=tenant.id, agent_id=agent_id
+        )
+        assert (grant.baseline_access, grant.ceiling_access) == ("read", "read")
+    # A server-wide repo of another org is refused with the approved copy, as a
+    # result and not as a raw error.
+    async with committing_sessionmaker.begin() as session:
+        await github_app_installations.upsert(
+            session,
+            installation_id=98766,
+            account_login="second",
+            repo_full_names=["second/repo"],
+        )
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                "repo_full_name, max_access, authorized_by_github_user_id, "
+                "authorized_by_account_id) "
+                "VALUES (:tenant, 12347, NULL, 13, 98766, 'second/repo', "
+                "'write', 17, :account)"
+            ),
+            {"tenant": tenant.id, "account": account.id},
+        )
+    other = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="second/repo"
+    )
+    assert other.status == "other_installation"
+    assert other.message == (
+        "Agent already has repos from owner.\n"
+        "An agent uses one GitHub account or org at a time. To switch, remove the owner repos first."
+    )
+    async with committing_sessionmaker() as session:
+        assert [
+            grant.repo_id
+            for grant in await github_access.list_agent_grants(
+                session, tenant_id=tenant.id, agent_id=agent_id
+            )
+        ] == [12345]
+    missing = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        auth,
+        origin_context_id=str(uuid.uuid4()),
+        repo_name="owner/missing",
+    )
+    assert missing.status == "sent"
+    assert "nothing is connected yet" in missing.message
+    assert "at most this line" in missing.message
+    assert "I can't see owner/missing yet." in missing.message
+    assert "Add repos" not in missing.message
+    delivery.assert_awaited_once()
+    async with committing_sessionmaker.begin() as session:
+        await session.execute(
+            text("""
+            UPDATE github_app_installations SET github_repo_full_names = ARRAY[]::text[]
+            WHERE installation_id = 98765
+        """)
+        )
+    removed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo"
+    )
+    assert removed.status == "sent", "GitHub removal must block a newly requested grant"
 
 
 @pytest.mark.asyncio
@@ -115,6 +307,151 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
         "text": "🔗 Connect GitHub",
         "emoji": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, workspace_id="workspace")
+        account = await make_account(session, tenant=tenant)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=AsyncMock(),  # type: ignore[arg-type]
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=fernet,
+    )
+    origin = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_at=datetime.now(UTC),
+        configuration_target_name="ConnectedBot",
+        configuration_target_ma_agent_id="agent_connected",
+        responder_name="ResearchBot",
+        responder_ma_agent_id="agent_research",
+        parent_channel_id="channel",
+        thread_id="thread",
+    )
+    agent = SimpleNamespace(id="agent_connected", name="ConnectedBot", metadata={})
+    delivery = AsyncMock()
+    monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr(connect_tool, "_post_discord_connect_card", delivery)
+    member = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        external_id="workspace",
+        platform_user_id="123",
+        is_admin=False,
+    )
+    result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, member, origin_context_id=str(uuid.uuid4())
+    )
+    assert result.status == "ask_admin" and result.message == (
+        "Only a server admin can give ConnectedBot repos.\n"
+        "Ask a server admin to say here: connect GitHub to ConnectedBot."
+    )
+    delivery.assert_not_awaited()
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    async with committing_sessionmaker() as session:
+        request = (
+            await session.execute(
+                text(
+                    "SELECT requester_account_id FROM github_connect_requests "
+                    "WHERE agent_id = :agent_id"
+                ),
+                {"agent_id": agent_id},
+            )
+        ).one_or_none()
+        assert request is not None and request[0] == account.id
+    async with committing_sessionmaker.begin() as session:
+        await set_role(session, account.id, Role.ADMIN)
+    admin = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        external_id="workspace",
+        platform_user_id="123",
+        is_admin=True,
+    )
+    result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        admin,
+        origin_context_id=str(uuid.uuid4()),
+        requested_work="Review the issue after GitHub is connected",
+    )
+    assert result.status == "sent" and "http" not in result.message
+    delivery.assert_awaited_once()
+    assert delivery.await_args is not None
+    assert delivery.await_args.kwargs["agent_name"] == "ConnectedBot"
+    assert delivery.await_args.kwargs["requester_id"] == "123"
+    assert delivery.await_args.kwargs["thread_id"] == "thread"
+    assert "url" not in delivery.await_args.kwargs
+    intent_id = delivery.await_args.kwargs["intent_id"]
+    assert str(intent_id) not in result.model_dump_json()
+    async with committing_sessionmaker() as session:
+        intent = (
+            await session.execute(
+                text(
+                    "SELECT encrypted_token, requested_work, origin_thread_id, "
+                    "origin_ma_agent_id FROM github_connect_click_intents WHERE id = :id"
+                ),
+                {"id": intent_id},
+            )
+        ).one_or_none()
+        assert intent is not None and intent.encrypted_token is None
+        assert intent.requested_work == "Review the issue after GitHub is connected"
+        assert intent.origin_thread_id == "thread"
+        assert intent.origin_ma_agent_id == "agent_research"
+    delivery.side_effect = ToolError("thread unavailable")
+    blocked = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, admin, origin_context_id=str(uuid.uuid4())
+    )
+    assert blocked.status == "delivery_failed"
+    assert blocked.message == "I couldn't show the GitHub connection button. Try again."
+    assert delivery.await_args is not None
+    blocked_id = delivery.await_args.kwargs["intent_id"]
+    async with committing_sessionmaker() as session:
+        assert (
+            await session.scalar(
+                text("SELECT id FROM github_connect_click_intents WHERE id = :id"),
+                {"id": blocked_id},
+            )
+            is None
+        )
+    async with committing_sessionmaker.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy.model_validate(
+                {"agent_rules": {"ConnectedBot": {"runs_in": ["client-channel"]}}}
+            ),
+        )
+    delivery.reset_mock()
+    delivery.side_effect = None
+    # A pinned agent with no server-wide repos may get repos of its own.
+    pinned = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, admin, origin_context_id=str(uuid.uuid4())
+    )
+    assert pinned.status == "sent"
+    delivery.assert_awaited_once()
 
 
 class _FakeTeams:

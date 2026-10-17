@@ -25,6 +25,7 @@ class IssuedToken(BaseModel):
     session_id: str
     installation_id: int
     repo_ids: list[int]
+    repo_names: list[str] = []
     permissions: dict[str, str]
     grant_versions: dict[str, int]
     requester_account_id: uuid.UUID | None
@@ -94,6 +95,7 @@ async def create_pending(
     session_id: str,
     installation_id: int,
     repo_ids: list[int],
+    repo_names: list[str] | None = None,
     permissions: dict[str, str],
     grant_versions: dict[str, int],
     expires_at: datetime,
@@ -105,8 +107,15 @@ async def create_pending(
         link_generation is None
     ):
         raise ValueError("requester link identity and generation must be recorded together")
-    if not repo_ids or len(repo_ids) > 500 or len(set(repo_ids)) != len(repo_ids):
-        raise ValueError("token inventory requires 1..500 repository IDs")
+    names = repo_names or []
+    if (
+        bool(repo_ids) == bool(names)
+        or len(repo_ids) > 500
+        or len(names) > 500
+        or len(set(repo_ids)) != len(repo_ids)
+        or len(set(names)) != len(names)
+    ):
+        raise ValueError("token inventory requires 1..500 repository IDs or names")
     if any(
         repo_id <= 0
         or grant_versions.get(f"grant:{repo_id}", 0) <= 0
@@ -122,6 +131,7 @@ async def create_pending(
         session_id=session_id,
         installation_id=installation_id,
         repo_ids=repo_ids,
+        repo_names=names,
         permissions=permissions,
         grant_versions=grant_versions,
         requester_account_id=requester_account_id,
@@ -263,6 +273,24 @@ async def select_stale_tokens(
                        token.permissions ->> 'contents' = 'write'
                        AND grant_row.ceiling_access <> 'write'
                      )
+                )
+                OR EXISTS (
+                  SELECT 1 FROM unnest(token.repo_names) AS repo(repo_name)
+                  LEFT JOIN agent_github_owner_grants AS owner_grant
+                    ON owner_grant.tenant_id = token.tenant_id
+                   AND owner_grant.agent_id = token.agent_id
+                   AND owner_grant.installation_id = token.installation_id
+                   AND lower(owner_grant.owner_login) = lower(split_part(repo.repo_name, '/', 1))
+                  LEFT JOIN agent_github_owner_exclusions AS exclusion
+                    ON exclusion.tenant_id = token.tenant_id
+                   AND exclusion.agent_id = token.agent_id
+                   AND lower(exclusion.repo_full_name) = lower(repo.repo_name)
+                  WHERE owner_grant.installation_id IS NULL
+                     OR exclusion.repo_full_name IS NOT NULL
+                     OR repo.repo_name <> ALL(COALESCE(
+                          installation.github_repo_full_names, installation.repo_full_names))
+                     OR (token.permissions ->> 'contents' = 'write'
+                         AND owner_grant.access <> 'write')
                 )
               )
             """

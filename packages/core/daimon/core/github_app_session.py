@@ -71,6 +71,7 @@ from daimon.core.stores.github_issued_tokens import (
     set_session_id,
     store_token,
 )
+from daimon.core.stores.github_owner_grants import OwnerRepository, resolve_owner_repositories
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.thread_sessions import record_app_token_refresh
 from daimon.core.turn_origin import current_origin_id
@@ -89,6 +90,7 @@ class AppToken:
     repo_ids: tuple[int, ...]
     profile: PermissionProfile
     credential_name: str
+    repo_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -207,7 +209,9 @@ async def effective_repo_state(
     if is_external:
         return (), {}
     async with sessionmaker() as session:
-        if not await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
+        if not await list_live_grant_repositories(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        ) and not await resolve_owner_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
             return (), {}
     if fernet is None:
         raise ValueError("GitHub App mode requires encryption")
@@ -226,12 +230,20 @@ async def effective_repo_state(
         [repo.repo_id for _, repo, _ in rows],
         working_ids={grant.repo_id for grant, _, _ in rows if grant.is_working_repo},
     )
+    owner_rows = await _owner_rows(sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
     return (
         tuple(
             sorted(
-                f"https://github.com/{repo.repo_full_name}"
-                for _, repo, _ in rows
-                if not mounted_only or repo.repo_id in mounted
+                {
+                    f"https://github.com/{repo.repo_full_name}"
+                    for _, repo, _ in rows
+                    if not mounted_only or repo.repo_id in mounted
+                }
+                | (
+                    {f"https://github.com/{repo.full_name}" for repo in owner_rows}
+                    if not mounted_only
+                    else set()
+                )
             )
         ),
         {repo.repo_id: dict(PERMISSION_PROFILES[profile]) for _, repo, profile in rows},
@@ -309,6 +321,13 @@ async def _effective_rows(
     return rows, None, None
 
 
+async def _owner_rows(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[OwnerRepository]:
+    async with sessionmaker() as session:
+        return await resolve_owner_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+
+
 async def revoke_token(client: httpx.AsyncClient, token: str) -> None:
     response = await client.delete(
         "https://api.github.com/installation/token",
@@ -361,6 +380,17 @@ async def declared_app_repositories(
     )
 
 
+async def has_declared_app_access(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    """Whether a single or owner grant requires an App vault."""
+    async with sessionmaker() as session:
+        return bool(
+            await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+            or await resolve_owner_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+        )
+
+
 async def prepare_app_access(
     sessionmaker: async_sessionmaker[AsyncSession],
     client: httpx.AsyncClient,
@@ -378,7 +408,9 @@ async def prepare_app_access(
     """Mint only this session's effective repository groups, recording every token."""
     if is_external:
         return AppSessionAccess((), (), None)
-    if not await _declared_repositories(sessionmaker, tenant_id=tenant_id, agent_id=agent_id):
+    if not await _declared_repositories(
+        sessionmaker, tenant_id=tenant_id, agent_id=agent_id
+    ) and not await _owner_rows(sessionmaker, tenant_id=tenant_id, agent_id=agent_id):
         return AppSessionAccess((), (), None)
     if fernet is None or config.app_id is None or config.private_key is None:
         raise ValueError("GitHub App mode requires App credentials and encryption")
@@ -392,8 +424,19 @@ async def prepare_app_access(
         fernet=fernet,
         cache=cache,
     )
-    if not rows:
+    owner_rows = await _owner_rows(sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
+    if not rows and not owner_rows:
         return AppSessionAccess((), (), None)
+    # A single explicit grant and an owner grant may cover the same name.
+    # Mint only one effective scope for it, at the higher access.
+    single_names = {repo.repo_full_name: profile for _, repo, profile in rows}
+    owner_effective: dict[tuple[int, str], PermissionProfile] = {}
+    for owner_repo in owner_rows:
+        name = owner_repo.full_name
+        single = single_names.get(name)
+        if single == "write" or (single == "read" and owner_repo.access == "read"):
+            continue
+        owner_effective[(owner_repo.installation_id, name)] = owner_repo.access
     repo_urls = {repo.repo_id: f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows}
     skipped_repo_ids = {
         repo.repo_id for _, repo, _ in rows if repo_urls[repo.repo_id] in excluded_repo_urls
@@ -403,10 +446,33 @@ async def prepare_app_access(
             (repo.installation_id, repo.repo_id, access)
             for _, repo, access in rows
             if repo.repo_id not in skipped_repo_ids
+            and (repo.installation_id, repo.repo_full_name) not in owner_effective
         ]
     )
     active_groups.sort(key=lambda group: (group[0], group[1], group[2]))
-    if len(active_groups) + 1 > 15:
+    name_groups: list[tuple[int, PermissionProfile, tuple[str, ...]]] = []
+    name_keys: set[tuple[int, PermissionProfile]] = {
+        (key[0], value) for key, value in owner_effective.items()
+    }
+    for installation_id, profile in sorted(name_keys):
+        names = sorted(
+            name
+            for (inst, name), value in owner_effective.items()
+            if inst == installation_id
+            and value == profile
+            and f"https://github.com/{name}" not in excluded_repo_urls
+        )
+        name_groups.extend(
+            (installation_id, profile, tuple(names[start : start + 500]))
+            for start in range(0, len(names), 500)
+        )
+    groups: list[tuple[int, PermissionProfile, tuple[int, ...], tuple[str, ...]]] = [
+        (installation_id, profile, ids, ()) for installation_id, profile, ids in active_groups
+    ]
+    groups.extend(
+        (installation_id, profile, (), names) for installation_id, profile, names in name_groups
+    )
+    if len(groups) + 1 > 15:
         raise ValueError("GitHub App access exceeds the session vault credential limit")
     jwt = build_app_jwt(
         config.private_key.get_secret_value(), config.app_id, now=int(datetime.now(UTC).timestamp())
@@ -415,7 +481,7 @@ async def prepare_app_access(
     excluded_repo_ids: set[int] = set(skipped_repo_ids)
     pending_token_id: uuid.UUID | None = None
     try:
-        for installation_id, profile, repo_ids in active_groups:
+        for installation_id, profile, repo_ids, repo_names in groups:
             versions = {
                 key: version
                 for grant, repo, _ in rows
@@ -434,6 +500,7 @@ async def prepare_app_access(
                     session_id=provisional_session_id,
                     installation_id=installation_id,
                     repo_ids=list(repo_ids),
+                    repo_names=list(repo_names),
                     permissions=dict(PERMISSION_PROFILES[profile]),
                     grant_versions=versions,
                     expires_at=expires_at,
@@ -447,7 +514,10 @@ async def prepare_app_access(
                     client,
                     jwt=jwt,
                     installation_id=installation_id,
-                    repository_ids=list(repo_ids),
+                    repository_ids=list(repo_ids) if repo_ids else None,
+                    repositories=[name.split("/", 1)[1] for name in repo_names]
+                    if repo_names
+                    else None,
                     profile=profile,
                 )
             except httpx.HTTPStatusError as exc:
@@ -462,6 +532,10 @@ async def prepare_app_access(
                     )
                 pending_token_id = None
                 excluded_repo_ids.update(repo_ids)
+                excluded_repo_urls = (
+                    *excluded_repo_urls,
+                    *(f"https://github.com/{name}" for name in repo_names),
+                )
                 _log.warning(
                     "GitHub App token mint could not cover installation %s (HTTP %s)",
                     installation_id,
@@ -510,6 +584,7 @@ async def prepare_app_access(
                     repo_ids,
                     profile,
                     credential_name,
+                    repo_names,
                 )
             )
             async with sessionmaker() as session:
@@ -532,6 +607,14 @@ async def prepare_app_access(
                 _log.exception("Failed to revoke partially minted GitHub token %s", issued.token_id)
         raise
     by_repo = {repo_id: item.token for item in tokens for repo_id in item.repo_ids}
+    by_name = {name: item.token for item in tokens for name in item.repo_names}
+    by_repo.update(
+        {
+            repo.repo_id: by_name[repo.repo_full_name]
+            for _, repo, _ in rows
+            if repo.repo_full_name in by_name
+        }
+    )
     resources: list[Resource] = []
     available_rows = [
         (grant, repo, profile) for grant, repo, profile in rows if repo.repo_id in by_repo
@@ -563,13 +646,16 @@ async def prepare_app_access(
         )
     )
     token_repo_urls = tuple(
-        sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in available_rows)
+        sorted(
+            [f"https://github.com/{repo.repo_full_name}" for _, repo, _ in available_rows]
+            + [f"https://github.com/{name}" for token in tokens for name in token.repo_names]
+        )
     )
     return AppSessionAccess(
         tuple(resources),
         tuple(tokens),
         working or (tokens[0].token if tokens else None),
-        excluded,
+        tuple(sorted(set(excluded) | set(excluded_repo_urls))),
         token_repo_urls,
     )
 
@@ -630,6 +716,8 @@ async def add_app_credentials(
     )
     token = access.working_token or (access.tokens[0].token if access.tokens else None)
     desired = {"GH_TOKEN": token} if token is not None else {}
+    additional = [issued.token for issued in access.tokens if issued.token != token]
+    desired.update({f"GH_TOKEN_{index}": value for index, value in enumerate(additional, 2)})
     existing = {
         cred.auth.secret_name: cred.id
         async for cred in list_credentials(anthropic, vault_id, scope=scope)
@@ -867,7 +955,7 @@ async def _current_app_access(
         token = decrypt_issued_token(row, fernet=fernet)
         if (
             token is None
-            or not row.repo_ids
+            or (not row.repo_ids and not row.repo_names)
             or any(repo_id not in repos for repo_id in row.repo_ids)
         ):
             raise ValueError("current App token cannot be restored")
@@ -883,9 +971,13 @@ async def _current_app_access(
                 tuple(row.repo_ids),
                 profile,
                 credential_name,
+                tuple(row.repo_names),
             )
         )
-        for repo_id in row.repo_ids:
+        named_ids = [
+            repo_id for repo_id, repo in repos.items() if repo.repo_full_name in row.repo_names
+        ]
+        for repo_id in (*row.repo_ids, *named_ids):
             if repo_id not in mounted:
                 continue
             repo = repos[repo_id]
@@ -899,7 +991,9 @@ async def _current_app_access(
                     or f"/workspace/{owner}/{name}",
                 }
             )
-        if working_token is None and any(repo_id in working_ids for repo_id in row.repo_ids):
+        if working_token is None and any(
+            repo_id in working_ids for repo_id in (*row.repo_ids, *named_ids)
+        ):
             working_token = token
     return AppSessionAccess(
         tuple(resources), tuple(tokens), working_token or (tokens[0].token if tokens else None)

@@ -32,7 +32,7 @@ from anthropic.types.beta.session_create_params import Resource
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import GithubAppSettings
-from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.credential_env import assemble_env_bytes, session_env_key
 from daimon.core.github_app_session import effective_repo_url_sets
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_fence_retry import try_fence
@@ -317,7 +317,7 @@ async def desired_snapshot_for(
     """
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
+        rows = [row for row in rows if session_env_key(row.key, exclude_github=True)]
         memory_store_id = await get_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid
         )

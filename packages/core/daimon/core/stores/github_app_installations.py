@@ -108,6 +108,13 @@ async def get(
     return GitHubAppInstallationRow.model_validate(orm)
 
 
+async def get_for_update(
+    session: AsyncSession, *, installation_id: int
+) -> GitHubAppInstallationRow | None:
+    orm = await session.get(GitHubAppInstallation, installation_id, with_for_update=True)
+    return GitHubAppInstallationRow.model_validate(orm) if orm is not None else None
+
+
 async def get_for_repo(
     session: AsyncSession,
     *,

@@ -900,6 +900,17 @@ replaced is decided in `packages/core/daimon/core/session_preparation.py`
 against the fingerprints stored on the mapping row; the outcome rides back on
 `PreparedTurn.continuity` so the adapter can say what happened.
 
+A server admin who has linked their GitHub login can grant an agent a repo or
+`owner/*` straight from chat (`github_connect`). The grant is written only
+after the live App installation shows the repo, or every repo under the owner,
+is covered and the linked user can reach it; a request that cannot finish
+because the link is missing or expired is kept as a pending request and resumed
+once the person links, under a per-request deadline. An agent uses one GitHub
+installation at a time: a grant from a second account or org is refused until
+the first one's repos are removed (`remove_repo`).
+Linked-user tokens are refreshed by the scheduler sweep; a refresh that GitHub
+has answered is finished before shutdown.
+
 GitHub App mode uses the agent's live grants when assembling a turn. External
 askers get no App token. Each session gets one write token scoped to the agent's
 live repositories in one installation. The token is recorded before minting

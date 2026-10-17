@@ -25,8 +25,9 @@ import contextlib
 import functools
 import signal
 import sys
+import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -64,6 +65,11 @@ from daimon.core.github_app_session import (
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_installation_reconcile import (
     drain_github_installation_reconciliations,
+)
+from daimon.core.github_link_refresh import refresh_expiring_links
+from daimon.core.github_requester_access import (
+    drain_detached_refreshes,
+    settle_detached_refreshes,
 )
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
@@ -734,6 +740,39 @@ _last_app_access_checks: dict[str, datetime] = {}
 # Session id -> (consecutive failures, earliest next attempt). A failing refresh
 # mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
+_GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
+# What the hourly sweep may spend before it stops starting new people. It never
+# cancels a refresh under way: one person's refresh ends within its lock timeout,
+# the HTTP client's timeout and database time.
+_GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
+# One budget for everything GitHub-link-refresh related at shutdown, taken once
+# at the start of `run`'s `finally`. The worker's stop_grace_period is 90 s
+# (docker-compose.yml; `up --timeout 95`). The refresh part waits at most 45 s
+# plus `_SHUTDOWN_CANCEL_SLACK_S` (50 s); what is left of the 90 s goes to the
+# tick already running and the rest of shutdown (dispatcher, health server,
+# advisory unlock, client close, outcome drain, engine dispose), which is not
+# guaranteed to fit. Three waits come out of the budget, never in addition to it:
+#   1. the sweep gets up to `_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S` to finish
+#      its current person (the grace is also capped by what remains);
+#   2. past the grace the sweep is cancelled, and its HTTP-client context holds
+#      the client open while a refresh detached from it stores GitHub's answer,
+#      for at most what remains of the budget (`_SingleFlight.settle_s`);
+#   3. the final drain gets whatever remains, zero if nothing does.
+# A refresh still running when the budget is gone may lose GitHub's answer when
+# its client closes (GitHub retires the old token pair as it answers); that
+# person's link is then broken and they relink on next use. It is logged as
+# `scheduler.github_link_refresh.drain_timed_out`. This caps the refresh part
+# of shutdown (45 s plus `_SHUTDOWN_CANCEL_SLACK_S`), not shutdown as a whole:
+# a tick already running finishes first and the steps after it have their own
+# waits. Docker's SIGKILL at 90 s is the hard stop.
+_GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S = 45.0
+_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 20.0
+# Past the budget, how long shutdown still waits for the cancelled sweep's
+# database cancel and client close, which the budget cannot cap.
+_SHUTDOWN_CANCEL_SLACK_S = 5.0
+# How long a sweep cancelled outside shutdown (no shared deadline, as in
+# `--once`) holds its client open for a detached refresh.
+_GITHUB_LINK_REFRESH_DRAIN_S = 30.0
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -1244,6 +1283,9 @@ async def run(
     )
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     push_resync_fernet = build_multifernet(crypto_keys) if crypto_keys else None
+    link_refresh_throttle = _IntervalThrottle(_GITHUB_LINK_REFRESH_INTERVAL_S)
+    link_refresh_flight = _SingleFlight()
+    link_refresh_backoff: dict[int, datetime] = {}
 
     lock_conn = await _acquire_advisory_lock(engine, scheduler_settings.advisory_lock_key)
     if lock_conn is None:
@@ -1321,6 +1363,13 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _refresh_expiring_github_links(
+                sm=sm,
+                settings=settings,
+                fernet=push_resync_fernet,
+                throttle=link_refresh_throttle,
+                backoff=link_refresh_backoff,
+            )
             return 0
 
         async def tick() -> None:
@@ -1355,6 +1404,14 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _refresh_expiring_github_links(
+                sm=sm,
+                settings=settings,
+                fernet=push_resync_fernet,
+                throttle=link_refresh_throttle,
+                flight=link_refresh_flight,
+                backoff=link_refresh_backoff,
+            )
 
         async def usage_sweep() -> None:
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -1377,6 +1434,7 @@ async def run(
 
         return 0
     finally:
+        await _shutdown_github_link_refresh(link_refresh_flight)
         await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()
@@ -1392,6 +1450,21 @@ async def run(
         await drain_outcomes()
         if _engine_override is None:
             await engine.dispose()
+
+
+async def _shutdown_github_link_refresh(flight: _SingleFlight) -> None:
+    """Stop the sweep and settle detached refreshes inside one shared budget.
+
+    The deadline is taken once, here. The sweep's grace, the cancelled sweep's
+    settle and the final drain all come out of it (see the budget comment at
+    `_GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S`). A refresh detached from the
+    cancelled sweep must store its rotated tokens before the clients close and
+    the engine is disposed.
+    """
+    deadline = time.monotonic() + _GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S
+    await flight.aclose(deadline=deadline)
+    if await drain_detached_refreshes(max(0.0, deadline - time.monotonic())):
+        log.warning("scheduler.github_link_refresh.drain_timed_out")
 
 
 async def _drain_github_push_resync(
@@ -1429,6 +1502,181 @@ async def _drain_github_installation_reconciliations(
             )
     except Exception:
         log.exception("scheduler.github_installation_reconciliation.failed")
+
+
+class _IntervalThrottle:
+    """Let a job run at most once per interval within this process."""
+
+    def __init__(self, interval_s: float) -> None:
+        self._interval_s = interval_s
+        self._next_at = 0.0
+
+    def due(self) -> bool:
+        now = time.monotonic()
+        if now < self._next_at:
+            return False
+        self._next_at = now + self._interval_s
+        return True
+
+
+class _SingleFlight:
+    """Run one background job at a time, so a slow sweep never delays a tick.
+
+    `start` skips while the previous job is still running. `aclose` asks the job
+    to stop through `stopping` and waits for it, so a job in the middle of
+    something that must finish gets to; only past `grace_s` does it cancel.
+    Given a `deadline` (a `time.monotonic` value), the grace is cut to what
+    remains of it and the cancelled job's own cleanup reads the rest through
+    `settle_s`.
+    """
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task[None] | None = None
+        self._deadline: float | None = None
+        self.stop_requested = asyncio.Event()
+
+    def settle_s(self, default: float) -> float:
+        """How long a cancelled job may keep clients open: the shutdown remainder, or `default`."""
+        if self._deadline is None:
+            return default
+        return max(0.0, self._deadline - time.monotonic())
+
+    def stopping(self) -> bool:
+        return self.stop_requested.is_set()
+
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self, job: Callable[[], Coroutine[object, object, None]]) -> bool:
+        if self.running():
+            return False
+        self._task = asyncio.create_task(job())
+        return True
+
+    async def aclose(
+        self,
+        *,
+        grace_s: float | None = None,
+        deadline: float | None = None,
+    ) -> None:
+        if grace_s is None:
+            grace_s = _GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S
+        self.stop_requested.set()
+        self._deadline = deadline
+        task, self._task = self._task, None
+        if task is None or task.done():
+            return
+        if deadline is not None:
+            grace_s = min(grace_s, max(0.0, deadline - time.monotonic()))
+        done, _ = await asyncio.wait({task}, timeout=grace_s)
+        if done:
+            return
+        task.cancel()
+        if deadline is None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return
+        # The cancelled job's settle reads what remains of the deadline, but
+        # its database cancel and client close are not capped by it; give them
+        # a few seconds past the deadline, then leave the task to the loop's
+        # own shutdown rather than hold the worker's stop.
+        done, _ = await asyncio.wait(
+            {task}, timeout=max(0.0, deadline - time.monotonic()) + _SHUTDOWN_CANCEL_SLACK_S
+        )
+        if not done:
+            log.warning("scheduler.github_link_refresh.cancel_outlived_budget")
+
+
+async def _run_github_link_refresh(
+    *,
+    sm: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    client_id: str,
+    client_secret: str,
+    backoff: dict[int, datetime],
+    should_stop: Callable[[], bool] | None = None,
+    settle_s: Callable[[], float] | None = None,
+) -> None:
+    """One sweep: it stops starting new people at its budget or on `should_stop`.
+
+    `settle_s` says, when the sweep is cancelled, how long its HTTP client stays
+    open for a refresh detached from it; the default is
+    `_GITHUB_LINK_REFRESH_DRAIN_S`. Shutdown passes what remains of its budget.
+    """
+    try:
+        async with (
+            httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client,
+            # A cancel mid-refresh leaves the refresh running detached; it needs
+            # this client until it stores GitHub's answer.
+            settle_detached_refreshes(settle_s or _GITHUB_LINK_REFRESH_DRAIN_S),
+        ):
+            counts = await refresh_expiring_links(
+                sm,
+                http_client,
+                fernet=fernet,
+                client_id=client_id,
+                client_secret=client_secret,
+                now=datetime.now(UTC),
+                backoff=backoff,
+                budget_s=_GITHUB_LINK_REFRESH_DEADLINE_S,
+                should_stop=should_stop,
+            )
+        if counts.refreshed or counts.broken or counts.failed or counts.not_attempted:
+            log.info(
+                "scheduler.github_link_refresh",
+                refreshed=counts.refreshed,
+                broken=counts.broken,
+                failed=counts.failed,
+                not_attempted=counts.not_attempted,
+            )
+    except Exception:
+        log.exception("scheduler.github_link_refresh.failed")
+
+
+async def _refresh_expiring_github_links(
+    *,
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    fernet: MultiFernet | None,
+    throttle: _IntervalThrottle,
+    flight: _SingleFlight | None = None,
+    backoff: dict[int, datetime] | None = None,
+) -> None:
+    """Keep linked GitHub tokens from reaching refresh-token expiry; hourly, best effort.
+
+    With a `flight` the sweep runs in the background, one at a time, so a slow
+    GitHub never delays routine dispatch; without one (`--once`) it is awaited,
+    still within its budget. `backoff` is the caller's per-person failure memory.
+    """
+    app = settings.github_app
+    if fernet is None or app.client_id is None or app.client_secret is None:
+        return
+    if flight is not None and flight.running():
+        # Asked before the throttle, so a skipped hour is not consumed.
+        return
+    if not throttle.due():
+        return
+
+    async def sweep() -> None:
+        assert app.client_id is not None and app.client_secret is not None
+        await _run_github_link_refresh(
+            sm=sm,
+            fernet=fernet,
+            client_id=app.client_id,
+            client_secret=app.client_secret.get_secret_value(),
+            backoff=backoff if backoff is not None else {},
+            should_stop=flight.stopping if flight is not None else None,
+            settle_s=(
+                functools.partial(flight.settle_s, _GITHUB_LINK_REFRESH_DRAIN_S)
+                if flight is not None
+                else None
+            ),
+        )
+
+    if flight is None:
+        await sweep()
+    else:
+        flight.start(sweep)
 
 
 def run_sync() -> None:

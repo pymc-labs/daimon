@@ -242,6 +242,7 @@ async def mint_installation_token(
     installation_id: int,
     repository: str | None = None,
     repository_ids: list[int] | None = None,
+    repositories: list[str] | None = None,
     profile: PermissionProfile | None = None,
     permissions: Mapping[str, str] | None = None,
 ) -> str:
@@ -274,7 +275,22 @@ async def mint_installation_token(
         httpx.HTTPStatusError: On other non-2xx responses from GitHub.
     """
     url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
-    if repository_ids is not None:
+    if repositories is not None:
+        if (
+            repository is not None
+            or repository_ids is not None
+            or profile is None
+            or permissions is not None
+            or not repositories
+            or len(repositories) > 500
+            or any(not name or "/" in name for name in repositories)
+        ):
+            raise ValueError("name-scoped installation tokens require 1..500 names and a profile")
+        request_body: dict[str, object] = {
+            "repositories": repositories,
+            "permissions": dict(PERMISSION_PROFILES[profile]),
+        }
+    elif repository_ids is not None:
         if (
             repository is not None
             or not repository_ids

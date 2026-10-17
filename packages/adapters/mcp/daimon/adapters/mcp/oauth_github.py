@@ -2109,7 +2109,7 @@ def build_oauth_github_routes(
             except github_access.SecondInstallationError as exc:
                 return _error(str(exc), 400, retry_confirm_url)
             except DBAPIError as exc:
-                if getattr(exc.orig, "sqlstate", None) in ("40001", "40P01"):
+                if github_access.is_concurrent_grant_change(exc):
                     return _error(
                         "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                     )

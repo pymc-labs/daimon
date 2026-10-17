@@ -11,10 +11,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-JARS = (
-    Path("/home/derick/scratch/daimon-os-devenv/tla2tools.jar"),
-    Path.home() / ".cache/daimon/tla/tla2tools.jar",
-)
+JARS = (Path.home() / ".cache/daimon/tla/tla2tools.jar",)
 MAX_SECONDS = 180
 MAX_META_BYTES = 256 * 1024 * 1024
 

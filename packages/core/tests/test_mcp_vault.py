@@ -1627,6 +1627,12 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
             "auth": {"type": "environment_variable", "secret_name": "GH_TOKEN"},
         },
         {
+            "id": "vcrd_second",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": "GH_TOKEN_2"},
+        },
+        {
             "id": "vcrd_copilot",
             "type": "credential",
             "vault_id": "vlt_1",
@@ -1647,7 +1653,10 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
 
     access = AppSessionAccess(
         resources=(),
-        tokens=(AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "write", "GH_TOKEN"),),
+        tokens=(
+            AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "write", "GH_TOKEN"),
+            AppToken(uuid.uuid4(), "second-token", 1, (12,), "read", "GH_TOKEN_2"),
+        ),
         working_token="fresh-token",
     )
     await add_app_credentials(
@@ -1656,6 +1665,7 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
     assert {(method, path) for method, path, _ in writes} == {
         ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_repo"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_working"),
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_second"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
     }
     assert all(
@@ -1667,3 +1677,9 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
         "type": "static_bearer",
         "token": "fresh-token",
     }
+    assert (
+        next(body for _, path, body in writes if path.endswith("vcrd_second"))["auth"][
+            "secret_value"
+        ]
+        == "second-token"
+    )
