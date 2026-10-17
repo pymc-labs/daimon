@@ -12,6 +12,23 @@ from starlette.responses import HTMLResponse
 STATIC_DIR = Path(__file__).with_name("static")
 CSS_SHA256 = hashlib.sha256((STATIC_DIR / "web.css").read_bytes()).hexdigest()
 
+# Set once by the app factory; empty in production, so no chip renders there.
+_environment_label = ""
+
+
+def configure_environment_label(*, name: str, label: str) -> None:
+    """Pick the chip text: the label verbatim, else the name in sentence case."""
+    global _environment_label
+    spaced = name.replace("-", " ").replace("_", " ")
+    _environment_label = label or spaced[:1].upper() + spaced[1:]
+
+
+def _environment_chip() -> str:
+    if not _environment_label:
+        return ""
+    name = html.escape(_environment_label)
+    return f'<span class="web-env"><span class="web-sr-only">Environment: </span>{name}</span>'
+
 
 def render_page(
     *,
@@ -46,7 +63,7 @@ def render_page(
 <link rel="stylesheet" href="/web/web.css?v={CSS_SHA256}"></head>
 <body><header class="web-header"><div class="web-header-inner">
 <div class="web-brand"><img class="web-mark" src="/web/daimon-face.png" alt="Daimon">
-<span><strong>Daimon</strong><small>by PyMC Labs</small></span></div>{badge}
+<span><strong>Daimon</strong><small>by PyMC Labs</small></span>{_environment_chip()}</div>{badge}
 </div></header>
 <main class="web-main{" web-main--wide" if wide else ""}">{content}</main>
 </body></html>"""

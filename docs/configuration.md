@@ -442,6 +442,13 @@ Read from `daimon.core.config.EnvironmentSettings`. Prefix `DAIMON_ENVIRONMENT__
 
 Deployment name. Empty selects production Discord command behavior.
 
+### `DAIMON_ENVIRONMENT__LABEL`
+
+`str` · optional · default unset
+
+Environment chip text on MCP web pages, such as Staging. Empty falls back to the
+deployment name; both empty shows no chip. Does not affect Discord command sync.
+
 ## Discord
 
 Read from `daimon.core.config.DiscordSettings`. Prefix `DAIMON_DISCORD__`.

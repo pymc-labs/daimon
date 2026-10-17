@@ -450,6 +450,13 @@ class EnvironmentSettings(BaseModel):
         default="",
         description="Deployment name. Empty selects production Discord command behavior.",
     )
+    label: str = Field(
+        default="",
+        description=(
+            "Environment chip text on MCP web pages, such as Staging. Empty falls back to the "
+            "deployment name; both empty shows no chip. Does not affect Discord command sync."
+        ),
+    )
 
 
 class DiscordSettings(BaseModel):

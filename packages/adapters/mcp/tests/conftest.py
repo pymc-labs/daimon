@@ -40,6 +40,16 @@ def isolate_agent_faces() -> Iterator[None]:
     cancel_pending_agent_faces()
 
 
+@pytest.fixture(autouse=True)
+def reset_environment_chip() -> Iterator[None]:
+    """create_mcp_app sets the page shell's environment chip process-wide; an
+    app built with a non-empty name must not leak the chip into later pages."""
+    from daimon.adapters.mcp.web_shell import configure_environment_label
+
+    yield
+    configure_environment_label(name="", label="")
+
+
 @pytest_asyncio.fixture
 async def sessionmaker(
     db_session_factory: async_sessionmaker[AsyncSession],  # noqa: F811
