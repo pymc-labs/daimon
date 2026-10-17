@@ -14,6 +14,7 @@ from daimon.core.privacy import (
     PRIVACY_TITLE,
     PurgePreview,
     delete_scope_lines,
+    preview_example,
     privacy_lines,
     summary_line,
 )
@@ -81,13 +82,13 @@ def export_card(preview: PurgePreview, *, bot: str) -> AdaptiveCard:
 
 
 def _will_happen(preview: PurgePreview) -> list[str]:
-    def amount(count: int, singular: str) -> str:
-        return f"**{count}** {singular if count == 1 else singular + 's'}"
+    def amount(count: int, singular: str, plural: str | None = None) -> str:
+        return f"**{count}** {singular if count == 1 else plural or singular + 's'}"
 
     lines: list[str] = []
     if preview.linked_principals.count:
         n = amount(preview.linked_principals.count, "linked account")
-        ex = preview.linked_principals.example or "—"
+        ex = preview_example(preview.linked_principals)
         lines.append(f"🔑 Remove {n}, for example {ex}")
     if preview.routines.count:
         lines.append(f"⏰ Cancel {amount(preview.routines.count, 'routine')}")
@@ -99,12 +100,21 @@ def _will_happen(preview: PurgePreview) -> list[str]:
         lines.append("⚙ Remove your saved settings")
     if preview.user_skills.count:
         n = amount(preview.user_skills.count, "skill")
-        ex = preview.user_skills.example or "—"
+        ex = preview_example(preview.user_skills)
         lines.append(f"🧰 Forget {n} you synced, for example {ex}")
+    if preview.github_connect_requests.count:
+        n = amount(preview.github_connect_requests.count, "GitHub setup request")
+        lines.append(f"🔑 Delete {n}")
+    if preview.github_connect_click_intents.count:
+        n = amount(preview.github_connect_click_intents.count, "GitHub connect button")
+        lines.append(f"🔑 Delete {n}")
     if preview.github_user_links.count:
         lines.append(f"🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}")
     if preview.mcp_tokens.count:
         lines.append(f"🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}")
+    if preview.gemini_records.count:
+        n = amount(preview.gemini_records.count, "Gemini conversation record")
+        lines.append(f"💬 Delete {n}")
     if preview.slack_user_tokens.count:
         lines.append(
             f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
@@ -115,10 +125,35 @@ def _will_happen(preview: PurgePreview) -> list[str]:
     if preview.direct_message_conversations.count:
         n = amount(preview.direct_message_conversations.count, "private conversation")
         lines.append(f"💬 Delete Daimon's saved data for {n}")
+    if preview.credential_requests.count:
+        n = amount(preview.credential_requests.count, "credential request")
+        lines.append(f"Delete {n}")
+    if preview.wizard_sessions.count:
+        n = amount(preview.wizard_sessions.count, "wizard session")
+        lines.append(f"Delete {n}")
+    if preview.message_feedback.count:
+        n = amount(preview.message_feedback.count, "message feedback record")
+        lines.append(f"Delete {n}")
+    if preview.support_escalations.count:
+        n = amount(preview.support_escalations.count, "support escalation")
+        lines.append(f"Delete {n}")
     if preview.channel_admins.count:
         lines.append(
             f"Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
+    if preview.agent_post_requesters.count:
+        n = amount(
+            preview.agent_post_requesters.count,
+            "post an agent made for you",
+            "posts agents made for you",
+        )
+        lines.append(f"Forget that you requested {n}; keep the posts")
+    if preview.platform_user_names.count:
+        n = amount(preview.platform_user_names.count, "remembered name")
+        lines.append(f"Delete {n}")
+    if preview.teams_messages.count:
+        n = amount(preview.teams_messages.count, "Teams message record")
+        lines.append(f"Delete {n}")
     if preview.account.count > 0:
         lines.append("🪪 Remove your account")
     return lines or ["Nothing to delete."]

@@ -97,7 +97,11 @@ class PurgePreview(BaseModel):
 
 
 def summary_line(preview: PurgePreview) -> str:
-    """The non-zero held-data categories, comma-joined, for the privacy panels."""
+    """The non-zero held-data categories for export summaries.
+
+    The account itself and the links between its principals are structural
+    bookkeeping, omitted here but included in every deletion preview.
+    """
     categories = (
         (preview.linked_principals, "linked account"),
         (preview.routines, "routine"),
@@ -111,6 +115,10 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.slack_user_tokens, "saved Slack access token"),
         (preview.slack_turn_contexts, "temporary Slack request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.credential_requests, "credential request"),
+        (preview.wizard_sessions, "wizard session"),
+        (preview.message_feedback, "message feedback record"),
+        (preview.support_escalations, "support escalation"),
         (preview.channel_admins, "channel admin list"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -118,12 +126,18 @@ def summary_line(preview: PurgePreview) -> str:
     )
     parts = [
         "saved settings"
-        if row is preview.user_configs
+        if label == "saved settings"
         else f"{row.count} {label if row.count == 1 else _plural(label)}"
         for row, label in categories
         if row.count > 0
     ]
     return ", ".join(parts) if parts else "nothing listed here"
+
+
+def preview_example(row: PurgePreviewRow) -> str:
+    """Bound optional examples so they cannot crowd categories out of a card."""
+    example = row.example or "—"
+    return example if len(example) <= 100 else f"{example[:99]}…"
 
 
 def _plural(label: str) -> str:
