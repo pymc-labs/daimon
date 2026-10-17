@@ -116,7 +116,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | Package | Path | Owns |
 | --- | --- | --- |
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
-| `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
+| `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands; the `/routines` panel creates, pauses/resumes and confirms deletion through core stores. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |

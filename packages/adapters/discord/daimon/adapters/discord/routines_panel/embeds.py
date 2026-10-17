@@ -22,7 +22,9 @@ from daimon.core.cron_words import schedule_words
 
 import discord
 
-_EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
+_EMPTY_HINT = (
+    'No routines yet.\n\nChoose New routine, or ask your agent: "Schedule a daily summary at 9am."'
+)
 
 
 def _humanize_delta(target: datetime, now: datetime) -> str:

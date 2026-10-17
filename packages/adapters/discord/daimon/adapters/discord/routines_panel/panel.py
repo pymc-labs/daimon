@@ -1,8 +1,7 @@
-"""RoutinesPanelView (LayoutView) + picker + pause/resume button.
+"""RoutinesPanelView (LayoutView) and routine lifecycle controls.
 
-The panel is read-mostly: the only write is a Pause/Resume toggle gated on
-creator-or-manage_guild at click time (TOCTOU-safe refetch inside the
-session.begin() block).
+Create requires manage_guild; pause/resume and confirmed deletion require
+the creator or manage_guild, rechecked before writing.
 
 V2 Components format: the panel is a Container with ActionRows for controls
 appended inside the card, no embed.
@@ -18,6 +17,7 @@ import sentry_sdk
 import structlog
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
+from daimon.adapters.discord.routines_panel.mutations import DeleteRoutineButton, NewRoutineButton
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState, state_label
 from daimon.adapters.discord.routines_panel.write import (
@@ -40,7 +40,7 @@ __all__ = ["RoutinesPanelView"]
 log = structlog.get_logger()
 
 
-async def _send_callback_error(interaction: discord.Interaction, exc: Exception) -> None:
+async def send_callback_error(interaction: discord.Interaction, exc: Exception) -> None:
     """Best-effort ephemeral error surface for a failed panel button/select callback.
 
     Always logs and captures to Sentry. The user-visible text
@@ -106,9 +106,9 @@ class _RoutinePicker(discord.ui.Select["RoutinesPanelView"]):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
         except Exception as exc:  # routines-panel button-callback boundary
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
 
 
 class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
@@ -170,11 +170,11 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     await interaction.response.send_message(refusals[result], ephemeral=True)
                     return
 
-            await _rerender(interaction, self.view)
+            await rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
         except Exception as exc:  # routines-panel button-callback boundary
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
 
 
 class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
@@ -201,9 +201,9 @@ class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
         except Exception as exc:  # routines-panel button-callback boundary
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
 
 
 class _RefreshButton(discord.ui.Button["RoutinesPanelView"]):
@@ -217,11 +217,11 @@ class _RefreshButton(discord.ui.Button["RoutinesPanelView"]):
         if self.view is None:
             return
         try:
-            await _rerender(interaction, self.view)
+            await rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
         except Exception as exc:  # routines-panel button-callback boundary
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
 
 
 class _DoneButton(discord.ui.Button["RoutinesPanelView"]):
@@ -241,9 +241,9 @@ class _DoneButton(discord.ui.Button["RoutinesPanelView"]):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
         except Exception as exc:  # routines-panel button-callback boundary
-            await _send_callback_error(interaction, exc)
+            await send_callback_error(interaction, exc)
 
 
 class RoutinesPanelView(discord.ui.LayoutView):
@@ -266,12 +266,17 @@ class RoutinesPanelView(discord.ui.LayoutView):
         buttons_row: discord.ui.ActionRow[RoutinesPanelView] = discord.ui.ActionRow(
             _PauseButton(state),
             _ViewOutputButton(state),
+            DeleteRoutineButton(disabled=state.selected is None),
+        )
+        navigation_row: discord.ui.ActionRow[RoutinesPanelView] = discord.ui.ActionRow(
+            NewRoutineButton(),
             _RefreshButton(),
             _DoneButton(),
         )
         container.add_item(layout.hairline())
         container.add_item(picker_row)
         container.add_item(buttons_row)
+        container.add_item(navigation_row)
         self.add_item(container)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
@@ -284,7 +289,7 @@ class RoutinesPanelView(discord.ui.LayoutView):
         return True
 
 
-async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -> None:
+async def rerender(interaction: discord.Interaction, view: RoutinesPanelView) -> None:
     """Re-query and re-render the panel from scratch."""
     runtime = view.runtime
     guild_id = str(interaction.guild_id)

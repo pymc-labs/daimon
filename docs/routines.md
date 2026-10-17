@@ -107,9 +107,11 @@ The platform surfaces differ, and the difference is deliberate:
   (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). The
   shared rules (glyph, label, ordering, admin-or-creator) live in
   `daimon.core.routines`.
-- **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
-  view its last output. Creating one on Discord means asking the agent in
-  chat, which calls `create_routine`
+- **Discord** `/routines` supports creation through **New routine** (agent,
+  cron schedule, time zone and message), pause/resume, last output and deletion
+  behind an explicit confirmation. Creation requires **Manage Server**; deletion
+  rechecks the creator or admin at confirmation. The form shows up to 25 agents;
+  other agents remain available through conversational creation
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).
 - The CLI has no routine CRUD. `daimon routines backfill-agent-names` is an
   admin migration helper and nothing else.
@@ -358,10 +360,10 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 | Action | MCP | Discord | Slack and Teams |
 | --- | --- | --- | --- |
-| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
+| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | `Manage Server` in the panel, or via the agent calling the tool | workspace admin only |
 | list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
-| delete | admin or creator | not offered | admin or creator |
+| delete | admin or creator | admin or creator, re-checked at confirmation | admin or creator |
 
 Ownership is `created_by_user_id`, and the check fails closed on both nulls:
 a caller with no platform user id never matches, and an ownerless routine is
