@@ -98,7 +98,6 @@ def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
     for gate in (
         "Run migrations (blocking gate)",
         "Deploy MCP registered minters",
-        "Drain legacy MCP turns before first verifier cutover",
         "Refresh worker VM containers (recreate in place)",
         "Wait for notebook-host VM refresh",
         "Health gate",
@@ -208,112 +207,42 @@ def test_image_selection_shell_validation(
             assert "daimon=example/daimon:abc1234" in lines
 
 
-@pytest.mark.parametrize(
-    "state",
-    [
-        "first",
-        "repeat",
-        "missing-minters",
-        "missing-service",
-        "resume-live",
-        "resume-expired",
-        "missing-cutoff",
-    ],
-)
-def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
+@pytest.mark.parametrize("state", ["present", "missing-service"])
+def test_mcp_minters_shell_requires_an_already_provisioned_service(
     tmp_path: Path, state: str
 ) -> None:
-    """Execute both actual deploy phases offline, including old MCP requests."""
-    import json
-
-    from daimon.core.turn.ceiling import TURN_CEILING_S
-
+    """Execute the MCP image-update step offline; it never reopens the legacy-token window."""
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
-    names = [step.get("name") for step in steps]
-    assert names.index("Deploy MCP registered minters") < names.index(
-        "Refresh worker VM containers (recreate in place)"
+    script = next(step["run"] for step in steps if step.get("id") == "mcp_minters")
+    script = script.replace("${{ vars.GCP_AR_REPO }}", "offline").replace(
+        "${{ steps.images.outputs.daimon }}", "offline/image"
     )
-    assert names.index("Wait for notebook-host VM refresh") < names.index(
-        "Drain legacy MCP turns before first verifier cutover"
-    )
-    clock = tmp_path / "clock"
-    clock.write_text("1000")
-    env_rows = [{"name": "UNRELATED_SECRET", "value": "do-not-print"}]
-    if state in {"repeat", "resume-live", "resume-expired", "missing-cutoff"}:
-        env_rows += [
-            {
-                "name": "DAIMON_MCP__ALLOW_LEGACY_TOKENS",
-                "value": "false" if state == "repeat" else "true",
-            },
-            {
-                "name": "DAIMON_MCP__LEGACY_TOKEN_CUTOFF",
-                "value": "2026-10-16T05:00:00Z"
-                if state == "resume-live"
-                else "2026-10-16T00:00:00Z",
-            },
-        ]
-    if state == "missing-cutoff":
-        env_rows = [row for row in env_rows if row["name"] != "DAIMON_MCP__LEGACY_TOKEN_CUTOFF"]
-    receipt = {
-        "spec": {"template": {"spec": {"timeoutSeconds": 300, "containers": [{"env": env_rows}]}}}
-    }
-    (tmp_path / "service.json").write_text(json.dumps(receipt))
     commands = {
-        "gcloud": '#!/bin/sh\nif [ "$3" = describe ]; then [ "$STATE" != missing-service ] || exit 1; cat "$RUNNER_TEMP/service.json"; else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n',
-        "date": '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$RUNNER_TEMP/clock"; elif [ "$3" = "+5 hours" ]; then echo 2026-10-16T05:00:00Z; elif [ "$3" = "2026-10-16T05:00:00Z" ]; then echo 19000; elif [ "$3" = "2026-10-16T00:00:00Z" ]; then echo 500; else echo 2026-10-16T01:00:00Z; fi\n',
-        "sleep": '#!/bin/sh\necho "$(( $(cat "$RUNNER_TEMP/clock") + $1 ))" > "$RUNNER_TEMP/clock"\n',
+        "gcloud": '#!/bin/sh\nif [ "$3" = describe ]; then [ "$STATE" != missing-service ]; else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n',
     }
     for command, body in commands.items():
         executable = tmp_path / command
         executable.write_text(body)
         executable.chmod(0o700)
-    output = tmp_path / "outputs"
     env = {
         **os.environ,
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "RUNNER_TEMP": str(tmp_path),
-        "GITHUB_OUTPUT": str(output),
         "REGION": "offline",
         "STATE": state,
     }
-
-    def run(step_id: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
-        script = next(step["run"] for step in steps if step.get("id") == step_id)
-        script = script.replace("${{ vars.GCP_AR_REPO }}", "offline").replace(
-            "${{ steps.images.outputs.daimon }}", "offline/image"
-        )
-        return subprocess.run(
-            ["bash", "-euo", "pipefail", "-c", script],
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-    first = run("mcp_minters", env)
-    assert "do-not-print" not in first.stdout + first.stderr
-    if state in {"missing-service", "missing-cutoff"}:
-        assert first.returncode != 0 and not (tmp_path / "updates").exists()
-        return
-    assert first.returncode == 0, first.stderr
-    strict = state in {"repeat", "resume-expired"}
-    assert output.read_text() == ("window=false\n" if strict else "window=true\n")
-    updates = (tmp_path / "updates").read_text()
-    assert "ALLOW_LEGACY_TOKENS=" + ("false" if strict else "true") in updates
-    if state == "resume-live":
-        assert "LEGACY_TOKEN_CUTOFF=2026-10-16T05:00:00Z" in updates
-        assert "+5 hours" not in first.stdout
-    if state != "missing-minters":
-        (tmp_path / "workers-refreshed-at").write_text("1100")
-    second = run("mcp_cutover", {**env, "LEGACY_WINDOW": "false" if strict else "true"})
-    assert "do-not-print" not in second.stdout + second.stderr
-    if state == "missing-minters":
-        assert second.returncode != 0
-        assert len((tmp_path / "updates").read_text().splitlines()) == 1
-    elif state in {"first", "resume-live"}:
-        assert second.returncode == 0, second.stderr
-        assert int(clock.read_text()) >= 1000 + 300 + TURN_CEILING_S + 60
-        assert "ALLOW_LEGACY_TOKENS=false" in (tmp_path / "updates").read_text().splitlines()[-1]
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if state == "missing-service":
+        assert result.returncode != 0
+        assert not (tmp_path / "updates").exists()
     else:
-        assert second.returncode == 0 and clock.read_text() == "1000"
-        assert len((tmp_path / "updates").read_text().splitlines()) == 1
+        assert result.returncode == 0, result.stderr
+        updates = (tmp_path / "updates").read_text()
+        assert "--image offline/image" in updates
+        assert "ALLOW_LEGACY_TOKENS" not in updates
