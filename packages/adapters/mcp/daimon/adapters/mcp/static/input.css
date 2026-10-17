@@ -261,6 +261,8 @@
 .gh-editor-install a, .gh-dialog-link a { color: #315b7c; text-decoration: underline; }
 .gh-editor-notice { margin: 11px 0; padding: 10px 13px; border-radius: 7px; background: #f2f6f8; color: #42576e; font-size: 13px; }
 .gh-editor-notice a { text-decoration: underline; }
+.gh-editor-notice-warn { border: 1px solid #ecd08a; background: #fff7e3; color: #5f4408; }
+.gh-editor-notice-warn strong { display: block; margin-bottom: 2px; }
 .gh-repo-dialog { width: min(560px, calc(100vw - 32px)); max-height: min(90vh, 800px); margin: auto; padding: 0; border: 1px solid #dbe2ea; border-radius: 15px; background: #fff; color: #142b49; box-shadow: 0 18px 60px #101f3a33; }
 .gh-repo-dialog::backdrop { background: #12233d88; }
 .gh-dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 23px 24px 14px; }

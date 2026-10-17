@@ -193,6 +193,7 @@ def test_agent_editor_preselects_requested_repo_in_add_dialog(
             github_access.AgentRepo(
                 repo_id=1,
                 full_name="acme/data",
+                installation_id=1,
                 scope="agent",
                 max_access="read",
                 baseline_access="read",
@@ -1044,6 +1045,7 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
         github_access.AgentRepo(
             repo_id=repo_id,
             full_name=name,
+            installation_id=1,
             scope="agent",
             max_access="write",
             baseline_access="write",
@@ -1335,12 +1337,14 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
 
         state, hidden, rendered = await page()
         admin_ids.remove(102)
-        denied = await save(hidden, remove="102")
+        # Without GitHub permission on a repo, its access and working-repo status stay
+        # out of reach, but a manager can still remove it from the agent.
+        denied = await save(hidden, working="102")
         assert denied.status_code == 403
-        admin_ids.add(102)
         removed = await save(hidden, remove="102")
         assert removed.status_code == 200
         assert "repo-102" not in removed.text
+        admin_ids.add(102)
 
         state, hidden, rendered = await page()
         mixed = await save(hidden, repo="103", remove="101", working="103")

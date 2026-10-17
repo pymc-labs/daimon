@@ -55,7 +55,7 @@ from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.teams_graph import GraphClient, GraphUnavailable
 from mux.drivers import isolated_ssl_context
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import text as sql_text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -80,12 +80,18 @@ _MAX_CONFIRM_FIELDS = 10_000
 # (the mcp service sets none, so the platform default of 300 s applies; see the
 # `timeoutSeconds` fallback in .github/workflows/deploy.yml).
 _INSTALLATIONS_DEADLINE_SECONDS = 60.0
+# The agent editor lists one installation's repos, at most this many pages of 100.
+# Larger lists are cut and say so; the shared `_installations` lookup is uncapped.
+_EDITOR_MAX_REPO_PAGES = 20
+_EDITOR_MAX_REPOS = _EDITOR_MAX_REPO_PAGES * 100
+_EDITOR_CAP_NOTICE = f"This list is limited to {_EDITOR_MAX_REPOS:,} repos."
 # Form fields a failed save re-posts from its error page. Anything else a client
 # sent is dropped rather than echoed back into HTML.
 _RETRY_FIELD_NAMES = frozenset(
     {
         "state",
         "invitation",
+        "installation",
         "receipt",
         "snapshot",
         "snapshot_sig",
@@ -259,6 +265,7 @@ class _InstallationPayload(BaseModel):
     id: int
     account: _OwnerPayload
     repository_selection: str = "all"
+    suspended_at: str | None = None
 
 
 class _RepoPayload(BaseModel):
@@ -892,9 +899,32 @@ def _agent_editor_page(
     selection_error: str | None = None,
     clients_present: bool = False,
     pending_installation: _PendingInstallationRequest | None = None,
+    target_installation_id: int | None = None,
+    capped: bool = False,
+    stale_owner: str | None = None,
+    row_installations: list[_Installation] | None = None,
+    source_capped: bool | None = None,
+    switching: bool = False,
 ) -> Response:
-    """Render one agent's grants and an optional staged add dialog."""
+    """Render one agent's grants and an optional staged add dialog.
+
+    `installations` are the ones repos may be added from. `row_installations`
+    (default: the same) are the ones whose repos let a grant row show its name.
+    Every grant row can be removed whether or not its name shows.
+    `target_installation_id` rides in a hidden field so a save lists the same
+    installation. `capped` says the add list was cut at the page cap, and
+    `source_capped` that the list the rows are named from was.
+    `stale_owner` names the owner of a pinned installation this person cannot
+    use right now: adding is off unless `switching` to another installation.
+    """
     esc = html.escape
+    stale = stale_owner is not None
+    add_disabled = stale and not switching
+    row_source = installations if row_installations is None else row_installations
+    named_ids = {repo.id for item in row_source for repo in item.repos if repo.usable}
+    listed_ids = {repo.id for item in row_source for repo in item.repos}
+    if source_capped is None:
+        source_capped = capped
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
     needed = needed or {}
     usable = {
@@ -918,7 +948,7 @@ def _agent_editor_page(
     )
     repairable = [repo for repo in grants if repo.repo_id in usable and repo.repo_id in needed]
     working = next((repo for repo in grants if repo.is_working_repo), None)
-    may_change_working = working is None or working.repo_id in usable
+    may_change_working = switching or (not stale and (working is None or working.repo_id in usable))
     place = _place_label(platform)
     options = [
         _PickerOption(
@@ -945,7 +975,9 @@ def _agent_editor_page(
         f'<p class="gh-status-line">{len(grants)} '
         f"{'repo' if len(grants) == 1 else 'repos'} connected.</p>"
         + (
-            '<p class="gh-action-line">Add a repo, then choose its working repo.</p>'
+            ""
+            if add_disabled
+            else '<p class="gh-action-line">Add a repo, then choose its working repo.</p>'
             if not grants
             else '<p class="gh-action-line">Add repos or change the working repo.</p>'
         ),
@@ -962,12 +994,26 @@ def _agent_editor_page(
         f'value="{_snapshot_signature(state, invitation_hash, snapshot_digest, secret)}">',
         '<input type="hidden" name="access" value="write">',
         '<input id="working-input" type="hidden" name="working" value="keep" disabled>',
+        *(
+            [f'<input type="hidden" name="installation" value="{target_installation_id}">']
+            if target_installation_id is not None
+            else []
+        ),
         f'<div class="gh-context">{platform_mark(platform)}'
         f"<span>{place}: {esc(workspace)}</span></div>",
         '<div class="gh-editor-toolbar"><h2>Repos for this agent</h2>',
-        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
-        f"{icon('plus')}Add repos</button></div>",
+        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button"'
+        + (" disabled" if add_disabled else "")
+        + f">{icon('plus')}Add repos</button></div>",
     ]
+    if stale_owner is not None:
+        owner = esc(stale_owner)
+        parts.append(
+            '<div class="gh-editor-notice gh-editor-notice-warn" role="status">'
+            f"<strong>You can't add {owner} repos right now.</strong> "
+            f"Ask whoever manages {owner} on GitHub to check your access and the Daimon app. "
+            "You can still remove these repos.</div>"
+        )
     if pending_installation is not None and pending_installation.found:
         organization = pending_installation.account_login
         parts.append(
@@ -987,9 +1033,18 @@ def _agent_editor_page(
     if not grants:
         parts.append('<p class="gh-editor-empty">No repos connected yet.</p>')
     for repo in grants:
-        editable = repo.repo_id in usable
-        repo_name = esc(repo.full_name) if editable else "A connected repo you cannot access"
-        data_name = esc(repo.full_name, quote=True) if editable else ""
+        # A name shows only when GitHub told this person about the repo. Any row
+        # can still be removed: the server authorizes removal from the agent's own
+        # grants, not from what GitHub listed.
+        named = repo.repo_id in named_ids
+        repo_name = (
+            esc(repo.full_name)
+            if named
+            else "Hidden repo"
+            if stale
+            else "A connected repo you cannot access"
+        )
+        data_name = esc(repo.full_name, quote=True) if named else ""
         parts.append(
             f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
             f'data-name="{data_name}" '
@@ -997,30 +1052,30 @@ def _agent_editor_page(
             '<div class="gh-row-top"><strong class="gh-row-name">'
             f'{repo_name}</strong><div class="gh-row-actions gh-js">'
         )
-        if editable:
+        label = esc(repo.full_name, quote=True) if named else "a connected repo"
+        parts.append(
+            '<button class="gh-row-action gh-remove-action" type="button" '
+            f'data-action="remove" aria-label="Remove {label}">'
+            f"{icon('trash-2')}Remove</button>"
+            '<button class="gh-row-action gh-undo-action" type="button" '
+            'data-action="undo" '
+            f'aria-label="Undo removal of {label}" '
+            f"hidden>{icon('undo-2')}Undo</button>"
+        )
+        if repo.repo_id in usable and may_change_working and repo.status == "active":
             parts.append(
-                '<button class="gh-row-action gh-remove-action" type="button" '
-                f'data-action="remove" aria-label="Remove {esc(repo.full_name, quote=True)}">'
-                f"{icon('trash-2')}Remove</button>"
-                '<button class="gh-row-action gh-undo-action" type="button" '
-                'data-action="undo" '
-                f'aria-label="Undo removal of {esc(repo.full_name, quote=True)}" '
-                f"hidden>{icon('undo-2')}Undo</button>"
-            )
-            if may_change_working and repo.status == "active":
-                parts.append(
-                    '<button class="gh-row-action gh-working-action" type="button" '
-                    'data-action="working">'
-                    f'{icon("folder")}<span class="gh-working-action-label">'
-                    + (
-                        "Change working repo"
-                        if repo.is_working_repo
-                        else "Choose working repo"
-                        if working is None
-                        else "Use as working repo"
-                    )
-                    + "</span></button>"
+                '<button class="gh-row-action gh-working-action" type="button" '
+                'data-action="working">'
+                f'{icon("folder")}<span class="gh-working-action-label">'
+                + (
+                    "Change working repo"
+                    if repo.is_working_repo
+                    else "Choose working repo"
+                    if working is None
+                    else "Use as working repo"
                 )
+                + "</span></button>"
+            )
         parts.append('</div></div><div class="gh-row-meta">')
         parts.append(
             f'<span class="gh-working-badge"{"" if repo.is_working_repo else " hidden"}>'
@@ -1030,24 +1085,28 @@ def _agent_editor_page(
         if repo.status != "active":
             parts.append('<span class="gh-repo-state">Unavailable</span>')
         parts.append("</div>")
-        if not editable:
+        if not named:
             parts.append(
-                '<p class="gh-repo-locked">Your GitHub account has no permission on this repo, '
-                "so you can't edit it here.</p>"
+                '<p class="gh-repo-locked">'
+                + (
+                    f"Past the {_EDITOR_MAX_REPOS:,}-repo limit, so you can only remove it here."
+                    if source_capped and repo.repo_id not in listed_ids
+                    else "You can't see this repo on GitHub."
+                )
+                + "</p>"
             )
         if repo.repo_id in needed and needed[repo.repo_id]:
             parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
-        if editable:
-            parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
-            if repo in repairable:
-                parts.append(
-                    f'<input type="hidden" name="repo" value="{repo.repo_id}" disabled>'
-                    f'<input class="gh-scoped-access" type="hidden" '
-                    f'name="access_{repo.repo_id}" value="write" disabled>'
-                )
+        parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
+        if repo in repairable:
+            parts.append(
+                f'<input type="hidden" name="repo" value="{repo.repo_id}" disabled>'
+                f'<input class="gh-scoped-access" type="hidden" '
+                f'name="access_{repo.repo_id}" value="write" disabled>'
+            )
         parts.append("</article>")
     parts.append("</div>")
-    if not grants or not options:
+    if not add_disabled and (not grants or not options):
         parts.append(
             '<p class="gh-editor-install">Missing a repo? Add it to the Daimon GitHub '
             'App on GitHub. <a href="'
@@ -1070,7 +1129,8 @@ def _agent_editor_page(
         f'aria-label="Close add repos">{icon("x")}</button></div>'
         '<p class="gh-status-line gh-dialog-copy">The agent can read and change these repos.</p>'
         '<p class="gh-action-line gh-dialog-copy">Choose repos, then review your changes.</p>'
-        f'<div class="gh-dialog-search">{icon("search")}'
+        + (f'<p class="gh-action-line gh-dialog-copy">{_EDITOR_CAP_NOTICE}</p>' if capped else "")
+        + f'<div class="gh-dialog-search">{icon("search")}'
         '<input id="search-repos" class="gh-search" type="search" '
         'aria-label="Search repos" placeholder="Search repos" autocomplete="off"></div>'
         '<div class="gh-dialog-link gh-dialog-bulk">'
@@ -1082,7 +1142,8 @@ def _agent_editor_page(
             f'data-installation="{installation.id}">'
             f"Everything in {esc(installation.owner_login)}</button>"
             for installation in installations
-            if any(option.installation_id == installation.id for option in options)
+            # "Everything" would be false for a list cut at the cap.
+            if not capped and any(option.installation_id == installation.id for option in options)
         )
         + "</div>"
         '<div class="gh-dialog-choices">'
@@ -1159,12 +1220,17 @@ def _agent_editor_page(
     )
     # Browsers without scripting still get a complete native form.
     parts.append('<noscript><section class="gh-fallback"><h2>Edit repos</h2>')
-    for repo in grants:
-        if repo.repo_id not in usable:
-            continue
+    if capped:
+        parts.append(f"<p>{_EDITOR_CAP_NOTICE}</p>")
+    for index, repo in enumerate(grants, start=1):
         parts.append(
             f'<label><input type="checkbox" name="remove" value="{repo.repo_id}">'
-            f"Remove {esc(repo.full_name)}</label>"
+            + (
+                f"Remove {esc(repo.full_name)}"
+                if repo.repo_id in named_ids
+                else f"Remove connected repo {index} of {len(grants)}"
+            )
+            + "</label>"
         )
         if repo in repairable:
             parts.append(
@@ -1458,41 +1524,235 @@ def _github_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
 
-async def _installations(client: httpx.AsyncClient, token: str) -> list[_Installation]:
+@dataclass(frozen=True)
+class _InstallationInfo:
+    """One row of GitHub's `/user/installations`, before any repo is listed."""
+
+    id: int
+    owner_id: int
+    owner_login: str
+    owner_type: str
+    repository_selection: str
+    suspended: bool
+
+
+async def _list_user_installations(
+    client: httpx.AsyncClient, token: str
+) -> list[_InstallationInfo]:
+    """Every installation the signed-in person can see: all pages, none skipped."""
     raw = await list_github_pages(client, "/user/installations", token, "installations")
-    result: list[_Installation] = []
+    result: list[_InstallationInfo] = []
     for item in raw:
         parsed = _InstallationPayload.model_validate(item)
-        installation_id = parsed.id
-        owner_id = parsed.account.id
-        repos_raw = await list_github_pages(
-            client, f"/user/installations/{installation_id}/repositories", token, "repositories"
-        )
-        repos: list[_Repo] = []
-        for raw_repo in repos_raw:
-            repo = _RepoPayload.model_validate(raw_repo)
-            if repo.owner.id != owner_id:
-                continue
-            repos.append(
-                _Repo(
-                    id=repo.id,
-                    owner_id=owner_id,
-                    installation_id=installation_id,
-                    full_name=repo.full_name,
-                    permission=github_connect.github_permission(repo.permissions),
-                )
-            )
         result.append(
-            _Installation(
-                id=installation_id,
-                owner_id=owner_id,
+            _InstallationInfo(
+                id=parsed.id,
+                owner_id=parsed.account.id,
                 owner_login=parsed.account.login,
-                repository_selection=parsed.repository_selection,
-                repos=tuple(repos),
                 owner_type=parsed.account.type,
+                repository_selection=parsed.repository_selection,
+                suspended=parsed.suspended_at is not None,
             )
         )
     return result
+
+
+def _installation_with_repos(
+    info: _InstallationInfo, repos_raw: list[dict[str, object]]
+) -> _Installation:
+    repos: list[_Repo] = []
+    for raw_repo in repos_raw:
+        repo = _RepoPayload.model_validate(raw_repo)
+        if repo.owner.id != info.owner_id:
+            continue
+        repos.append(
+            _Repo(
+                id=repo.id,
+                owner_id=info.owner_id,
+                installation_id=info.id,
+                full_name=repo.full_name,
+                permission=github_connect.github_permission(repo.permissions),
+            )
+        )
+    return _Installation(
+        id=info.id,
+        owner_id=info.owner_id,
+        owner_login=info.owner_login,
+        repository_selection=info.repository_selection,
+        repos=tuple(repos),
+        owner_type=info.owner_type,
+    )
+
+
+async def _installations(client: httpx.AsyncClient, token: str) -> list[_Installation]:
+    """Every installation with all of its repos. Uncapped: other callers rely on that."""
+    result: list[_Installation] = []
+    for info in await _list_user_installations(client, token):
+        repos_raw = await list_github_pages(
+            client, f"/user/installations/{info.id}/repositories", token, "repositories"
+        )
+        result.append(_installation_with_repos(info, repos_raw))
+    return result
+
+
+async def _list_capped_pages(
+    client: httpx.AsyncClient, path: str, token: str, key: str, *, max_pages: int
+) -> tuple[list[dict[str, object]], bool]:
+    """List up to `max_pages` pages of 100; the flag says more rows may exist beyond them."""
+    rows: list[dict[str, object]] = []
+    total: object = None
+    for page in range(1, max_pages + 1):
+        response = await client.get(
+            f"https://api.github.com{path}",
+            params={"per_page": 100, "page": page},
+            headers=_github_headers(token),
+        )
+        response.raise_for_status()
+        body: object = response.json()
+        if isinstance(body, dict):
+            parsed = TypeAdapter(dict[str, object]).validate_python(body)
+            total = parsed.get("total_count")
+            body = parsed[key]
+        batch = TypeAdapter(list[dict[str, object]]).validate_python(body)
+        rows.extend(batch)
+        if len(batch) < 100:
+            return rows, False
+    # The last allowed page was full. GitHub's own total settles whether more follow.
+    return rows, not (type(total) is int and total <= len(rows))
+
+
+class _DestinationRejected(Exception):
+    """An `org` or `installation` value that the user's GitHub or the agent's pin refuses."""
+
+
+@dataclass(frozen=True)
+class _EditorListing:
+    """What the agent editor learned from GitHub, and which installation it rests on."""
+
+    # Installations whose repos were listed: none, the ones in play, or all of them.
+    installations: list[_Installation]
+    # The installation the page adds repos from: a verified destination, else the pin.
+    target_id: int | None = None
+    # The add list was cut at the page cap.
+    capped: bool = False
+    # The pinned (source) installation's list was cut at the page cap.
+    source_capped: bool = False
+    # The agent's pinned installation is gone, suspended, or not in this person's list.
+    pin_unusable: bool = False
+    # A verified destination other than the pin: the save may move the agent across.
+    switching: bool = False
+
+    @property
+    def add_installations(self) -> list[_Installation]:
+        """The installations repos may be added from."""
+        if self.target_id is None:
+            return self.installations
+        return [item for item in self.installations if item.id == self.target_id]
+
+
+async def _agent_editor_listing(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    pin: github_access.AgentInstallationPin,
+    destination: int | None,
+) -> _EditorListing:
+    """List the installations the agent editor needs, and no more.
+
+    A pinned agent lists the person's installations once and then only the
+    pinned installation's repos, so the cost no longer grows with the number of
+    installations. An agent with no grants lists everything, as it always did.
+    `destination` is an unverified request to look at one installation. It may
+    equal the pin; otherwise it must be a live installation in the person's
+    list, and a pinned agent then also lists its source installation (when that
+    still works) so its rows can show names. Whether a save may actually move
+    the agent there is decided by the caller from the submitted removals.
+    Staleness is decided from the installation list alone, never from a repo
+    being absent, so a cut list or a slow GitHub cannot look like a lost pin.
+    """
+    if pin.is_multiple:
+        return _EditorListing(installations=[])
+    pinned = pin.single
+    infos = await _list_user_installations(client, token)
+    by_id = {info.id: info for info in infos}
+    target = destination if destination is not None else pinned
+    if target is None:
+        installations: list[_Installation] = []
+        for info in infos:
+            repos_raw = await list_github_pages(
+                client, f"/user/installations/{info.id}/repositories", token, "repositories"
+            )
+            installations.append(_installation_with_repos(info, repos_raw))
+        return _EditorListing(installations=installations)
+
+    async def capped_listing(info: _InstallationInfo) -> tuple[_Installation, bool]:
+        repos_raw, capped = await _list_capped_pages(
+            client,
+            f"/user/installations/{info.id}/repositories",
+            token,
+            "repositories",
+            max_pages=_EDITOR_MAX_REPO_PAGES,
+        )
+        return _installation_with_repos(info, repos_raw), capped
+
+    switching = pinned is not None and target != pinned
+    target_info = by_id.get(target)
+    if target_info is None or target_info.suspended:
+        if pinned is None or switching:
+            raise _DestinationRejected
+        return _EditorListing(installations=[], target_id=target, pin_unusable=True)
+    target_installation, capped = await capped_listing(target_info)
+    if not switching:
+        return _EditorListing(
+            installations=[target_installation],
+            target_id=target,
+            capped=capped,
+            source_capped=capped,
+        )
+    assert pinned is not None
+    source_info = by_id.get(pinned)
+    if source_info is None or source_info.suspended:
+        return _EditorListing(
+            installations=[target_installation],
+            target_id=target,
+            capped=capped,
+            pin_unusable=True,
+            switching=True,
+        )
+    source_installation, source_capped = await capped_listing(source_info)
+    return _EditorListing(
+        installations=[source_installation, target_installation],
+        target_id=target,
+        capped=capped,
+        source_capped=source_capped,
+        switching=True,
+    )
+
+
+_INSTALLATION_ID_LIMIT = 2**63 - 1
+
+
+def _destination_hint(*, org: Sequence[str], installation: Sequence[str]) -> int | None:
+    """Parse the untrusted `org` query value and `installation` form value.
+
+    Each may appear once at most, must be a plain positive integer, and the two
+    must agree when both are sent. Raises ValueError otherwise. Whether the
+    installation exists, is live, and matches the agent's pin is checked later
+    against GitHub and the database.
+    """
+    if len(org) > 1 or len(installation) > 1:
+        raise ValueError("duplicate installation value")
+    parsed: list[int] = []
+    for value in (*org, *installation):
+        if not (value.isascii() and value.isdigit() and len(value) <= 19):
+            raise ValueError("malformed installation value")
+        number = int(value)
+        if not 0 < number <= _INSTALLATION_ID_LIMIT:
+            raise ValueError("installation value out of range")
+        parsed.append(number)
+    if len(set(parsed)) > 1:
+        raise ValueError("conflicting installation values")
+    return parsed[0] if parsed else None
 
 
 async def has_pending_installation_request(
@@ -1893,10 +2153,33 @@ def build_oauth_github_routes(
             already_added = frozenset(
                 repo.repo_id for repo in agent_repos if repo.status == "active"
             )
+            # Decides what to ask GitHub for. The pin that gates a save is read
+            # again below, with the snapshot, and must match this one.
+            provisional_pin = github_access.installation_pin(agent_repos)
+        destination: int | None = None
+        if invitation.agent_id is not None:
+            try:
+                destination = _destination_hint(
+                    org=request.query_params.getlist("org"),
+                    installation=fields.get("installation", []),
+                )
+            except ValueError:
+                return _error("Selection could not be verified.", 400, retry_confirm_url)
         token = decrypt_token(fernet, flow.encrypted_user_token)
+        listing: _EditorListing | None = None
+        row_installations: list[_Installation] | None = None
         try:
             async with factory() as client, asyncio.timeout(_INSTALLATIONS_DEADLINE_SECONDS):
-                installations = await _installations(client, token)
+                if invitation.agent_id is None:
+                    installations = await _installations(client, token)
+                else:
+                    listing = await _agent_editor_listing(
+                        client, token, pin=provisional_pin, destination=destination
+                    )
+                    installations = listing.add_installations
+                    row_installations = listing.installations
+        except _DestinationRejected:
+            return _error("GitHub access could not be verified.", 403, retry_confirm_url)
         except (httpx.HTTPError, ValueError, KeyError, TypeError, TimeoutError):
             used = await successful_page(state, cookie, invitation_hash)
             if used is not None:
@@ -1931,20 +2214,29 @@ def build_oauth_github_routes(
                 snapshot = await github_connect.agent_repo_snapshot(
                     session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
                 )
+            assert listing is not None
+            pin = github_access.installation_pin(grants)
+            if pin.installation_ids != provisional_pin.installation_ids:
+                return _error(
+                    "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
+                )
+            agent_label = invitation.agent_name or "This agent"
+            if pin.is_multiple:
+                # Chat's remove_repo works on any of the agent's repos by name, so
+                # removing the extra ones there is a real way out.
+                return _error(
+                    f"{agent_label} has repos from more than one GitHub account or org.",
+                    409,
+                    action="Remove the extra ones in chat, then reload this page.",
+                )
+            pinned_id = pin.single
+            stale = listing.pin_unusable
+            switching = listing.switching
+            stale_owner = pin.owners[pinned_id] if stale and pinned_id is not None else None
             cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
-            if request.method == "GET":
-                pending_installation = _PendingInstallationRequest(False)
-                if not any(repo.usable for item in installations for repo in item.repos):
-                    try:
-                        async with factory() as client:
-                            pending_installation = await has_pending_installation_request(
-                                client,
-                                app_id=app_id,
-                                private_key=private_key,
-                                github_user_id=flow.github_user_id,
-                            )
-                    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                        return transient_error("Couldn't reach GitHub", 502)
+
+            def editor_page(selection_error: str | None = None) -> Response:
+                assert listing is not None
                 return _agent_editor_page(
                     root=root,
                     state=state,
@@ -1961,9 +2253,33 @@ def build_oauth_github_routes(
                     needed=needed,
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
+                    selection_error=selection_error,
                     clients_present=clients_present,
                     pending_installation=pending_installation,
+                    target_installation_id=listing.target_id,
+                    capped=listing.capped,
+                    stale_owner=stale_owner,
+                    row_installations=row_installations,
+                    source_capped=listing.source_capped,
+                    switching=switching,
                 )
+
+            pending_installation = _PendingInstallationRequest(False)
+            if request.method == "GET":
+                if not stale and not any(
+                    repo.usable for item in installations for repo in item.repos
+                ):
+                    try:
+                        async with factory() as client:
+                            pending_installation = await has_pending_installation_request(
+                                client,
+                                app_id=app_id,
+                                private_key=private_key,
+                                github_user_id=flow.github_user_id,
+                            )
+                    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                        return transient_error("Couldn't reach GitHub", 502)
+                return editor_page()
             posted_snapshot = fields.get("snapshot", [""])[0]
             posted_signature = fields.get("snapshot_sig", [""])[0]
             if not hmac.compare_digest(
@@ -2006,6 +2322,19 @@ def build_oauth_github_routes(
                 if repo.usable
             }
             old = {repo.repo_id: repo for repo in grants}
+            # Removal rests on the agent's own grants, never on what GitHub listed
+            # (a cut list, the destination's list, or a stale installation shows
+            # nothing about them): each must be a grant in the checked snapshot that
+            # resolves to the pinned installation. Changing a row's access or making
+            # it the working repo still needs the person to see it on GitHub.
+            removable = {
+                repo.repo_id
+                for repo in grants
+                if pinned_id is not None and repo.installation_id == pinned_id
+            }
+            # Moving to another installation is a single save only when it removes
+            # every grant the agent has (revoked and shared ones included).
+            full_removal = bool(removable) and removable <= set(removed_ids)
             repairable = {repo.repo_id for repo in grants if repo.repo_id in needed}
             working_before = next((repo.repo_id for repo in grants if repo.is_working_repo), None)
             working_choice = working_values[0]
@@ -2016,17 +2345,38 @@ def build_oauth_github_routes(
                     return _error("Selection could not be verified.", 400, retry_confirm_url)
             else:
                 working_id = None
+            if switching and (selected_ids or removed_ids or working_choice != "keep"):
+                if not full_removal:
+                    return _error("GitHub access could not be verified.", 403, retry_confirm_url)
+                if working_choice == "keep" and selected_ids:
+                    # The first repo added becomes the working repo unless the form
+                    # names another added one; the old working repo is removed.
+                    working_choice = str(selected_ids[0])
+                    working_id = selected_ids[0]
+            if stale and not switching and selected_ids:
+                return _error(
+                    f"You can't add {stale_owner} repos right now.",
+                    403,
+                    retry_confirm_url,
+                    action=(
+                        f"Ask whoever manages {stale_owner} on GitHub to check your access "
+                        "and the Daimon app. You can still remove these repos."
+                    ),
+                )
             if (
                 any(
                     repo_id not in visible or (repo_id in old and repo_id not in repairable)
                     for repo_id in selected_ids
                 )
-                or any(repo_id not in old or repo_id not in visible for repo_id in removed_ids)
+                or any(repo_id not in removable for repo_id in removed_ids)
                 or bool(set(selected_ids) & set(removed_ids))
                 or (
                     working_choice != "keep"
                     and working_before is not None
                     and working_before not in visible
+                    # A working repo this person cannot see may only be replaced or
+                    # cleared by removing that same repo in this save.
+                    and working_before not in removed_ids
                 )
                 or (
                     working_id is not None
@@ -2039,25 +2389,7 @@ def build_oauth_github_routes(
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
             if not selected_ids and not removed_ids and working_choice == "keep":
-                return _agent_editor_page(
-                    root=root,
-                    state=state,
-                    invitation_hash=flow.invitation_hash,
-                    secret=secret,
-                    agent_name=invitation.agent_name or "Agent",
-                    workspace=invitation.workspace_label,
-                    platform=requester.platform,
-                    grants=grants,
-                    installations=installations,
-                    snapshot=snapshot,
-                    cancel_url=cancel_url,
-                    install_url=install_url,
-                    needed=needed,
-                    requested_repo=invitation.requested_repo,
-                    missing_names=tuple(missing_names),
-                    clients_present=clients_present,
-                    selection_error="Choose a change to save.",
-                )
+                return editor_page("Choose a change to save.")
             if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
@@ -2146,6 +2478,18 @@ def build_oauth_github_routes(
                         expected_agent_snapshot=snapshot,
                     )
                     if saved:
+                        # The snapshot above is compared under lock. The pin is
+                        # checked too, since an installation change need not show in it.
+                        if (
+                            await github_access.agent_installation_pin(
+                                session,
+                                tenant_id=invitation.tenant_id,
+                                agent_id=invitation.agent_id,
+                            )
+                        ).installation_ids != pin.installation_ids:
+                            raise github_connect.StaleAgentReposError(
+                                "The agent's repos changed. Reload and try again."
+                            )
                         for detail in details:
                             await github_app_installations.upsert_github_app(
                                 session,
@@ -2186,6 +2530,19 @@ def build_oauth_github_routes(
                                 agent_id=invitation.agent_id,
                                 repo_name=selected_name,
                                 account_id=invitation.requester_account_id,
+                            )
+                        # Whatever was removed and staged, the agent ends on at most one
+                        # installation (none is fine). Raising here rolls back the
+                        # removals and the spent invitation together.
+                        if (
+                            await github_access.agent_installation_pin(
+                                session,
+                                tenant_id=invitation.tenant_id,
+                                agent_id=invitation.agent_id,
+                            )
+                        ).is_multiple:
+                            raise github_access.SecondInstallationError(
+                                f"{agent_label} has repos from more than one GitHub account or org."
                             )
                         if repos:
                             resumed_requests = await finish_confirmed_requests(

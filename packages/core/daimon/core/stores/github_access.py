@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Literal, cast
 
@@ -169,6 +170,7 @@ class AgentRepo(BaseModel):
     model_config = ConfigDict(frozen=True)
     repo_id: int
     full_name: str
+    installation_id: int
     # "agent": connected for this agent only. "shared": a server-wide repo.
     scope: Literal["agent", "shared"]
     max_access: Literal["read", "write"]
@@ -199,6 +201,7 @@ async def list_agent_repos(
             AgentRepo(
                 repo_id=row.repo_id,
                 full_name=row.repo_full_name,
+                installation_id=row.installation_id,
                 scope="shared" if row.scope_agent_id is None else "agent",
                 max_access=cast(Literal["read", "write"], row.max_access),
                 baseline_access=grant.baseline_access,
@@ -214,6 +217,62 @@ async def list_agent_repos(
             )
         )
     return sorted(result, key=lambda repo: repo.full_name.casefold())
+
+
+class AgentInstallationPin(BaseModel):
+    """The GitHub installations an agent's grants rest on, with one owner login for each."""
+
+    model_config = ConfigDict(frozen=True)
+    owners: dict[int, str]
+
+    @property
+    def installation_ids(self) -> frozenset[int]:
+        return frozenset(self.owners)
+
+    @property
+    def single(self) -> int | None:
+        """The one installation the agent is pinned to; None when it has none or several."""
+        if len(self.owners) != 1:
+            return None
+        return next(iter(self.owners))
+
+    @property
+    def is_multiple(self) -> bool:
+        """More than one installation: a setup from before one agent was limited to one."""
+        return len(self.owners) > 1
+
+
+def installation_pin(
+    repos: Iterable[AgentRepo], *, excluding_repo_id: int | None = None
+) -> AgentInstallationPin:
+    """The pin implied by `list_agent_repos` output.
+
+    Every repo counts whatever its status, so a revoked repo still pins, and a
+    server-wide repo counts like the agent's own. `stage_grant` refuses a
+    second installation by the same rule, and a test holds the two together.
+    Owner-wide grants are not counted here; when they exist, their installation
+    ids belong in this pin too.
+    """
+    owners: dict[int, str] = {}
+    for repo in sorted(repos, key=lambda item: item.full_name.casefold()):
+        if repo.repo_id == excluding_repo_id:
+            continue
+        owners.setdefault(repo.installation_id, repo.full_name.split("/", 1)[0])
+    return AgentInstallationPin(owners=owners)
+
+
+async def agent_installation_pin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    excluding_repo_id: int | None = None,
+) -> AgentInstallationPin:
+    """Read the agent's installation pin from its grants now. See `installation_pin`."""
+    return installation_pin(
+        await list_agent_repos(session, tenant_id=tenant_id, agent_id=agent_id),
+        excluding_repo_id=excluding_repo_id,
+    )
 
 
 async def repo_id_for_agent_removal(

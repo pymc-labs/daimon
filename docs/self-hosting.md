@@ -402,6 +402,11 @@ The invitation is minted on that workspace admin's behalf. The recipient signs i
 to GitHub and picks repositories. No repository is preselected. The page lists
 the repositories the GitHub App installation covers that the signed-in account
 can see on GitHub, and notes how many it hides because the account can't.
+An agent that already has repos uses one GitHub account or org, so its page lists
+only that account's repos, up to 2,000. If GitHub no longer shows that installation to
+the signed-in account, or it is suspended, the page still lets a manager remove the
+agent's repos but not add any. Removing a repo never depends on the list GitHub returns.
+A save may move the agent to another account only if it removes every repo the agent has.
 Each selected repository is checked again against GitHub at confirmation.
 Every connected repository is read and write for the agent, within the GitHub
 App installation's permissions; the person's own GitHub role does not lower it.
