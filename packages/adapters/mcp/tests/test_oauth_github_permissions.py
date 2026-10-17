@@ -99,7 +99,7 @@ class _Editor:
     platform: Literal["discord", "slack"]
 
     async def page(
-        self, *, requester_platform_user_id: str = "editor"
+        self, *, requester_platform_user_id: str = "editor", org: str | None = None
     ) -> tuple[dict[str, str], str]:
         async with self.sessionmaker.begin() as session:
             invitation = await github_connect.mint_invitation(
@@ -118,7 +118,8 @@ class _Editor:
         start = await self.browser.get(f"/oauth/github/connect/{invitation}")
         state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
         await self.browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
-        rendered = await self.browser.get("/oauth/github/confirm", params={"state": state})
+        params = {"state": state} if org is None else {"state": state, "org": org}
+        rendered = await self.browser.get("/oauth/github/confirm", params=params)
         assert rendered.status_code == 200
         hidden = {
             name: html.unescape(value)
@@ -583,16 +584,18 @@ async def test_picker_offers_every_permission_level_and_counts_hidden(
     )
     other = _Org(78, 56, "beta", WRITE_INSTALLATION, [(201, "read"), (202, "none"), (203, "none")])
     async with _editor(committing_sessionmaker, monkeypatch, [org, other]) as editor:
-        _hidden, page = await editor.page()
+        _hidden, page = await editor.page(org="77")
+        _hidden, beta_page = await editor.page(org="78")
+    # An agent with no repos picks one account or org first; the page lists that one's repos.
     choices = _choices(page)
-    assert set(choices) == {1, 2, 3, 4, 5, 201}  # `none` repos are not offered
+    assert set(choices) == {1, 2, 3, 4, 5}  # `none` repos are not offered
     assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == ["write"] * 5
-    assert choices[201]["data-installation"] == "78"
+    assert {i: c["data-installation"] for i, c in _choices(beta_page).items()} == {201: "78"}
     assert "hidden because your GitHub account" not in page
     assert "Missing a repo? Add it to the Daimon GitHub App on GitHub." in page
-    # One bulk button per installation owner, a live shown count, and a clear button.
-    assert "Everything in alpha</button>" in page and "Everything in beta</button>" in page
-    assert 'id="select-shown"' in page and "Select all 6 shown" in page
+    # A bulk button for the owner, a live shown count, and a clear button.
+    assert "Everything in alpha</button>" in page and "Everything in beta" not in page
+    assert 'id="select-shown"' in page and "Select all 5 shown" in page
     assert 'id="clear-selection"' in page
     assert 'name="picker_access"' not in page
 
@@ -648,9 +651,10 @@ async def test_bulk_write_repos_in_one_installation(
     )
     org_levels = {repo_id: level for repo_id, level in big.repos}
     async with _editor(committing_sessionmaker, monkeypatch, [big, readonly]) as editor:
-        hidden, page = await editor.page()
-        # Every GitHub page was fetched: more than the 100 a page holds, and 378 in all.
-        assert len(_choices(page)) == 378
+        hidden, page = await editor.page(org="77")
+        # Every GitHub page of the chosen installation was fetched: more than the 100 a
+        # page holds.
+        assert len(_choices(page)) == 300
         ids = sorted(org_levels)
         body = {f"access_{repo_id}": "write" for repo_id in ids}
         saved = await editor.save(hidden, repo=[str(repo_id) for repo_id in ids], **body)

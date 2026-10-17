@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
 - The GitHub repo editor now lists only the account or org an agent already uses, up to 2,000 repos, always lets a manager remove its repos, and refuses adds when GitHub no longer lets you use that account or org's Daimon app unless the same save removes every repo to move the agent to another account or org.
+- An agent with no GitHub repos now starts by choosing which of your GitHub accounts or orgs to use, and an agent with repos has a "Use another account or org?" switch that marks every repo to remove and saves the move in one step.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.

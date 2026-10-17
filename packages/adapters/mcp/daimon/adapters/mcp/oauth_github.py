@@ -99,6 +99,7 @@ _RETRY_FIELD_NAMES = frozenset(
         "remove",
         "access",
         "working",
+        "navigate",
     }
 )
 _RETRY_FIELD_SCOPED_ACCESS = re.compile(r"access_\d+")
@@ -259,6 +260,7 @@ class _OwnerPayload(BaseModel):
     id: int
     login: str = ""
     type: str = ""
+    avatar_url: str = ""
 
 
 class _InstallationPayload(BaseModel):
@@ -619,6 +621,10 @@ _EDITOR_SCRIPT = """
   const workingSelect = document.getElementById("working-choice");
   const initialWorking = form.dataset.working || null;
   const mayChangeWorking = form.dataset.mayChangeWorking === "true";
+  const switching = form.dataset.switching === "true";
+  const switchOwner = form.dataset.switchOwner || "";
+  const resetUrl = form.dataset.resetUrl || "";
+  const chips = document.getElementById("pending-chips");
   const staged = new Map();
   const removed = new Set();
   let working = initialWorking;
@@ -629,6 +635,28 @@ _EDITOR_SCRIPT = """
   workingInput.disabled = false;
   const rows = () => [...list.querySelectorAll(".gh-agent-row")];
   const rowFor = id => rows().find(row => row.dataset.repoId === id);
+  // The server says which rows open marked to remove: every repo while switching (the
+  // server accepts a move only when it removes them all), or the removals the person
+  // had made before going to the account or org choice. Same as the ticked remove
+  // boxes of the page without scripting.
+  for (const id of (form.dataset.removed || "").split(",")) {
+    if (id && rowFor(id)) removed.add(id);
+  }
+  if (switching) working = null;
+  // While switching, the working repo is the first repo added unless one is chosen.
+  function currentWorking() {
+    if (switching && working === null && !workingExplicit) {
+      const first = rows().find(row => staged.has(row.dataset.repoId));
+      return first ? first.dataset.repoId : null;
+    }
+    return working;
+  }
+  function chip(text, tone) {
+    const item = document.createElement("li");
+    item.className = "gh-chip" + (tone ? " gh-chip--" + tone : "");
+    item.textContent = text;
+    return item;
+  }
   function closeMenus() {
     for (const menu of list.querySelectorAll(".gh-row-menu")) menu.hidden = true;
     for (const trigger of list.querySelectorAll(".gh-menu-trigger")) {
@@ -652,6 +680,7 @@ _EDITOR_SCRIPT = """
     return row;
   }
   function render() {
+    const shown = currentWorking();
     for (const row of rows()) {
       const id = row.dataset.repoId;
       const isRemoved = removed.has(id);
@@ -667,30 +696,44 @@ _EDITOR_SCRIPT = """
         accessInput.disabled = !isAdding;
         if (isAdding) accessInput.value = staged.get(id);
       }
-      row.querySelector(".gh-working-badge").hidden = isRemoved || working !== id;
+      row.querySelector(".gh-working-badge").hidden = isRemoved || shown !== id;
       row.querySelector(".gh-pending-label").textContent =
         isRemoved ? "Will be removed when you save" :
         isAdding ? "Will be added when you save" :
-        working === id && working !== initialWorking ? "Working repo when you save" : "";
+        shown === id && shown !== initialWorking ? "Working repo when you save" : "";
       const removeButton = row.querySelector(".gh-remove-action");
       const undoButton = row.querySelector(".gh-undo-action");
       if (removeButton) removeButton.hidden = isRemoved;
-      if (undoButton) undoButton.hidden = !isRemoved;
+      // A switch removes every repo or none, so only Discard takes a removal back.
+      if (undoButton) undoButton.hidden = !isRemoved || (switching && row.dataset.added !== "true");
       const action = row.querySelector(".gh-working-action");
       if (action) action.querySelector(".gh-working-action-label").textContent =
-        working === id ? "Change working repo" :
-        working === null ? "Choose working repo" : "Use as working repo";
+        shown === id ? "Change working repo" :
+        shown === null ? "Choose working repo" : "Use as working repo";
     }
     closeMenus();
     const added = staged.size;
     const removedCount = removed.size;
-    const workingChanged = working !== initialWorking;
+    const workingChanged = shown !== initialWorking;
     const parts = [];
     if (added) parts.push("add " + added + " " + plural(added));
     if (removedCount) parts.push("remove " + removedCount + " " + plural(removedCount));
     if (workingChanged) parts.push("change working repo");
     document.getElementById("selection-status").textContent =
-      parts.length ? "Not saved yet: " + parts.join(", ") : "No changes to save";
+      !parts.length ? "No changes to save" :
+      switching ? "Not saved yet" : "Not saved yet: " + parts.join(", ");
+    if (chips) {
+      const items = [];
+      if (added) items.push(chip(added + " to add", ""));
+      if (removedCount) items.push(chip(removedCount + " to remove", ""));
+      // The destination is set by what is added, not by the page being open.
+      if (added && switchOwner) items.push(chip("Switch to " + switchOwner + " on save", "switch"));
+      const target = shown && rowFor(shown);
+      if (added && target) items.push(chip("New working repo: " + target.dataset.name, ""));
+      else if (added && shown === null) items.push(chip("No working repo", ""));
+      chips.replaceChildren(...items);
+      chips.hidden = items.length === 0;
+    }
     const empty = list.querySelector(".gh-editor-empty");
     if (empty) empty.hidden = rows().length > 0;
     document.getElementById("discard-repos").hidden = !parts.length;
@@ -762,6 +805,10 @@ _EDITOR_SCRIPT = """
       rememberPicker();
     });
   }
+  // Enter here must not submit the form: its first button opens the account or org choice.
+  search.addEventListener("keydown", event => {
+    if (event.key === "Enter") event.preventDefault();
+  });
   search.addEventListener("input", () => {
     const query = search.value.trim().toLowerCase();
     for (const option of options) {
@@ -781,7 +828,7 @@ _EDITOR_SCRIPT = """
     }
     for (const row of rows()) {
       if (row.dataset.added === "true" && !staged.has(row.dataset.repoId)) {
-        if (working === row.dataset.repoId) { working = null; workingExplicit = true; }
+        if (working === row.dataset.repoId) { working = null; workingExplicit = !switching; }
         row.remove();
       }
     }
@@ -803,7 +850,7 @@ _EDITOR_SCRIPT = """
       return;
     }
     if (button.dataset.action === "working" && mayChangeWorking) {
-      if (working === id) {
+      if (currentWorking() === id) {
         workingSelect.replaceChildren();
         for (const choice of rows().filter(item =>
           !removed.has(item.dataset.repoId) && item.querySelector(".gh-working-action"))) {
@@ -826,7 +873,11 @@ _EDITOR_SCRIPT = """
       } else {
         removed.add(id);
       }
-      if (working === id) { working = null; if (id !== initialWorking) workingExplicit = true; }
+      if (working === id) {
+        working = null;
+        if (switching) workingExplicit = false;
+        else if (id !== initialWorking) workingExplicit = true;
+      }
     } else if (button.dataset.action === "undo") {
       removed.delete(id);
       if (!workingExplicit && id === initialWorking) working = id;
@@ -852,21 +903,51 @@ _EDITOR_SCRIPT = """
     }
   });
   document.getElementById("discard-repos").addEventListener("click", () => {
+    // Discarding a switch also drops the chosen destination: back to the saved page.
+    if (switching && resetUrl) { location.assign(resetUrl); return; }
     staged.clear(); removed.clear(); working = initialWorking; workingExplicit = false;
     for (const row of rows()) if (row.dataset.added === "true") row.remove();
     render();
   });
   form.addEventListener("submit", event => {
+    // Going to the account or org choice posts the form but saves nothing.
+    if (event.submitter && event.submitter.name === "navigate") return;
     if (saving || save.disabled) { event.preventDefault(); return; }
     saving = true;
     save.disabled = true;
     save.textContent = "Saving…";
     form.setAttribute("aria-busy", "true");
   });
+  // Reopened from the account or org choice: stage the adds that came back, and keep
+  // the working repo that was chosen.
+  // In the order they were added: the first one is the default working repo.
+  for (const id of (form.dataset.staged || "").split(",")) {
+    const option = options.find(item => item.dataset.repoId === id);
+    if (!id || !option || rowFor(id)) continue;
+    staged.set(id, "write");
+    makeAddedRow(id, option.dataset.name, "write");
+  }
+  updatePicker();
+  const carriedWorking = form.dataset.carriedWorking;
+  if (carriedWorking === "clear") { working = null; workingExplicit = true; }
+  else if (carriedWorking) { working = carriedWorking; workingExplicit = true; }
   render();
 })();
 </script>
 """
+
+
+@dataclass(frozen=True)
+class _CarriedState:
+    """Pending choices a page was reopened with, read from untrusted form fields.
+
+    The page keeps only what still makes sense (adds that this destination lists,
+    removals of grants the agent has) and the save re-checks all of it.
+    """
+
+    adds: tuple[int, ...] = ()
+    removals: frozenset[int] = frozenset()
+    working: str = "keep"
 
 
 @dataclass(frozen=True)
@@ -905,6 +986,12 @@ def _agent_editor_page(
     row_installations: list[_Installation] | None = None,
     source_capped: bool | None = None,
     switching: bool = False,
+    agent_label: str | None = None,
+    pinned_owner: str | None = None,
+    chooser: bool = False,
+    reset_url: str = "",
+    other_choices: int = 0,
+    carried: _CarriedState | None = None,
 ) -> Response:
     """Render one agent's grants and an optional staged add dialog.
 
@@ -916,8 +1003,19 @@ def _agent_editor_page(
     `source_capped` that the list the rows are named from was.
     `stale_owner` names the owner of a pinned installation this person cannot
     use right now: adding is off unless `switching` to another installation.
+
+    `pinned_owner` is the owner of the agent's saved repos. While `switching`
+    to another installation the page opens with every saved repo marked to
+    remove (a remove box ticked in the page without scripting), because the
+    server accepts a move only when it removes them all. `chooser` says the
+    page may open the account or org choice (a button that posts the form, so
+    the pending changes travel with it), `reset_url` is the saved page, and
+    `other_choices` is how many more installations that choice would offer.
+    `carried` reopens the page with the adds, removals and working-repo choice
+    the person had made before they went to the choice.
     """
     esc = html.escape
+    subject = agent_label or agent_name
     stale = stale_owner is not None
     add_disabled = stale and not switching
     row_source = installations if row_installations is None else row_installations
@@ -950,6 +1048,57 @@ def _agent_editor_page(
     working = next((repo for repo in grants if repo.is_working_repo), None)
     may_change_working = switching or (not stale and (working is None or working.repo_id in usable))
     place = _place_label(platform)
+    target_owner = next(
+        (item.owner_login for item in installations if item.id == target_installation_id), None
+    )
+    requested_owner = _requested_owner(requested_repo)
+    other_org_request = (
+        requested_repo is not None
+        and requested_owner is not None
+        and pinned_owner is not None
+        and not switching
+        and requested_owner.casefold() != pinned_owner.casefold()
+    )
+    # The choice is worth offering when there is another installation to pick, or the
+    # agent has repos and may move.
+    can_choose = chooser and (other_choices > 0 or switching or pinned_owner is not None)
+
+    def choose_button(css: str, label: str) -> str:
+        # A submit button, not a link: the form's pending adds, removals, working repo
+        # and signed snapshot travel with it and come back with the destination.
+        return (
+            f'<button class="{css}" type="submit" name="navigate" value="choose" '
+            f"formnovalidate>{label}</button>"
+        )
+
+    grant_ids = {repo.repo_id for repo in grants}
+    staged_ids: list[int] = []
+    if carried is not None:
+        for repo_id in carried.adds:
+            if repo_id in usable and repo_id not in current and repo_id not in staged_ids:
+                staged_ids.append(repo_id)
+    # Boxes ticked when the page opens: what was carried, else the repo chat asked for.
+    ticked_ids: set[int] = set(staged_ids)
+    if carried is None and requested_id is not None:
+        ticked_ids = {requested_id}
+    pre_removed = (
+        grant_ids
+        if switching
+        else (carried.removals & grant_ids if carried is not None else frozenset[int]())
+    )
+    carried_working: str | None = None
+    if carried is not None:
+        choice = carried.working
+        if choice == "clear" or (
+            choice.isascii()
+            and choice.isdigit()
+            and (int(choice) in staged_ids or (int(choice) in grant_ids - pre_removed))
+        ):
+            carried_working = choice
+        # With adds and a move, "keep" means the first repo added. Carry that repo itself,
+        # so the default cannot drift to another one when the page is rebuilt.
+        if carried_working is None and switching and staged_ids:
+            carried_working = str(staged_ids[0])
     options = [
         _PickerOption(
             repo_id=repo.repo_id,
@@ -984,7 +1133,29 @@ def _agent_editor_page(
         '<form id="github-connect-form" class="gh-editor" method="post" '
         f'data-working="{working.repo_id if working else ""}" '
         f'data-may-change-working="{str(may_change_working).lower()}" '
-        f'action="{esc(root, quote=True)}/oauth/github/confirm">',
+        + (
+            'data-switching="true" '
+            f'data-switch-owner="{esc(target_owner or "", quote=True)}" '
+            f'data-reset-url="{esc(reset_url, quote=True)}" '
+            if switching
+            else ""
+        )
+        + (
+            f'data-removed="{",".join(str(repo_id) for repo_id in sorted(pre_removed))}" '
+            if pre_removed
+            else ""
+        )
+        + (
+            f'data-staged="{",".join(str(repo_id) for repo_id in staged_ids)}" '
+            if staged_ids
+            else ""
+        )
+        + (
+            f'data-carried-working="{esc(carried_working, quote=True)}" '
+            if carried_working is not None
+            else ""
+        )
+        + f'action="{esc(root, quote=True)}/oauth/github/confirm">',
         f'<input type="hidden" name="state" value="{esc(state, quote=True)}">',
         f'<input type="hidden" name="invitation" value="{esc(invitation_hash, quote=True)}">',
         f'<input type="hidden" name="receipt" '
@@ -1013,6 +1184,13 @@ def _agent_editor_page(
             f"<strong>You can't add {owner} repos right now.</strong> "
             f"Ask whoever manages {owner} on GitHub to check your access and the Daimon app. "
             "You can still remove these repos.</div>"
+        )
+    if other_org_request:
+        parts.append(
+            '<div class="gh-editor-notice gh-editor-notice-warn" role="status">'
+            f"<strong>{esc(cast(str, requested_repo))} is in {esc(cast(str, requested_owner))}, "
+            f"but {esc(subject)} has {esc(cast(str, pinned_owner))} repos.</strong> "
+            "To add it, switch orgs below.</div>"
         )
     if pending_installation is not None and pending_installation.found:
         organization = pending_installation.account_login
@@ -1113,6 +1291,17 @@ def _agent_editor_page(
             + esc(install_url, quote=True)
             + '">Open GitHub setup</a></p>'
         )
+    if pinned_owner is not None and not switching and can_choose:
+        parts.append(
+            '<details id="switch-org" class="gh-switch"'
+            + (" open" if other_org_request else "")
+            + "><summary>Use another account or org?</summary>"
+            f'<div class="gh-switch-body"><p>{esc(subject)} has {esc(pinned_owner)} repos.</p>'
+            '<div class="gh-switch-actions">'
+            + choose_button("gh-add-button", "Remove all and switch")
+            + '<span class="gh-switch-note">Nothing changes until you save.</span>'
+            "</div></div></details>"
+        )
     parts.append(
         '<details class="gh-access-help"><summary>'
         f"{icon('info')}How this works</summary>"
@@ -1124,7 +1313,9 @@ def _agent_editor_page(
     )
     parts.append(
         '<dialog id="repo-picker" class="gh-repo-dialog" aria-labelledby="repo-picker-title">'
-        '<div class="gh-dialog-head"><h2 id="repo-picker-title">Add repos</h2>'
+        '<div class="gh-dialog-head"><h2 id="repo-picker-title">'
+        + (f"Add {esc(target_owner)} repos" if target_owner else "Add repos")
+        + "</h2>"
         '<button id="close-repo-picker" class="gh-dialog-close" type="button" '
         f'aria-label="Close add repos">{icon("x")}</button></div>'
         '<p class="gh-status-line gh-dialog-copy">The agent can read and change these repos.</p>'
@@ -1159,7 +1350,7 @@ def _agent_editor_page(
             f'data-max-access="{"write" if option.can_write else "read"}" '
             f'data-required-write="{str(required_write).lower()}">'
             '<label class="gh-picker-label"><input class="gh-picker-toggle" type="checkbox"'
-            + (" checked" if option.repo_id == requested_id else "")
+            + (" checked" if option.repo_id in ticked_ids else "")
             + ">"
             f"<span>{esc(option.name)}"
             + ("<small>Finish setup</small>" if option.repair else "")
@@ -1176,6 +1367,13 @@ def _agent_editor_page(
         )
     parts.append(
         '<p id="no-search-results" hidden>No matching repos.</p></div>'
+        + (
+            '<p class="gh-dialog-link">'
+            + choose_button("gh-link-button", "Choose another account or org")
+            + "</p>"
+            if can_choose
+            else ""
+        )
         + '<p class="gh-dialog-link">Missing a repo? Add it to the Daimon GitHub App '
         + 'on GitHub. <a href="'
         + esc(install_url, quote=True)
@@ -1220,11 +1418,23 @@ def _agent_editor_page(
     )
     # Browsers without scripting still get a complete native form.
     parts.append('<noscript><section class="gh-fallback"><h2>Edit repos</h2>')
+    if switching and pinned_owner is not None:
+        # Every saved repo is ticked: the server accepts a move only when it removes them all.
+        parts.append(
+            f"<p>Saving removes every {esc(pinned_owner)} repo and adds the "
+            f"{esc(target_owner or 'new')} repos you tick.</p>"
+        )
+    if can_choose:
+        parts.append(
+            "<p>" + choose_button("gh-link-button", "Choose another account or org") + "</p>"
+        )
     if capped:
         parts.append(f"<p>{_EDITOR_CAP_NOTICE}</p>")
     for index, repo in enumerate(grants, start=1):
         parts.append(
-            f'<label><input type="checkbox" name="remove" value="{repo.repo_id}">'
+            f'<label><input type="checkbox" name="remove" value="{repo.repo_id}"'
+            + (" checked" if repo.repo_id in pre_removed else "")
+            + ">"
             + (
                 f"Remove {esc(repo.full_name)}"
                 if repo.repo_id in named_ids
@@ -1241,30 +1451,95 @@ def _agent_editor_page(
     for repo in available:
         parts.append(
             f'<label><input type="checkbox" name="repo" value="{repo.id}"'
-            + (" checked" if repo.id == requested_id else "")
+            + (" checked" if repo.id in ticked_ids else "")
             + ">"
             f"Add {esc(repo.full_name)}</label>"
             f'<input type="hidden" name="access_{repo.id}" value="write">'
         )
+
+    def working_option(value: str, label: str) -> str:
+        chosen = " selected" if carried_working == value else ""
+        return f'<option value="{value}"{chosen}>{label}</option>'
+
+    # What the server does with "keep": a move makes the first repo added the working repo.
     parts.append(
-        '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
+        '<label>Working repo <select name="working">'
+        + working_option("keep", "First added repo" if switching else "Keep current")
     )
     if may_change_working:
-        parts.append('<option value="clear">None</option>')
+        parts.append(working_option("clear", "None"))
         for repo in grants:
             if repo.repo_id in usable and repo.status == "active":
-                parts.append(f'<option value="{repo.repo_id}">{esc(repo.full_name)}</option>')
+                parts.append(working_option(str(repo.repo_id), esc(repo.full_name)))
         for repo in available:
-            parts.append(f'<option value="{repo.id}">{esc(repo.full_name)} (add above)</option>')
+            parts.append(working_option(str(repo.id), f"{esc(repo.full_name)} (add above)"))
     parts.append("</select></label></section></noscript>")
+    # What a page without scripting says is pending, from the same facts the form posts.
+    added_n, removed_n = len(staged_ids), len(pre_removed)
+
+    def count(n: int) -> str:
+        return f"{n} {'repo' if n == 1 else 'repos'}"
+
+    if not (added_n or removed_n or carried_working):
+        status_text = "No changes to save"
+    elif switching:
+        status_text = "Not saved yet"
+    else:
+        status_text = "Not saved yet: " + ", ".join(
+            [f"add {count(added_n)}"] * bool(added_n)
+            + [f"remove {count(removed_n)}"] * bool(removed_n)
+            + ["change working repo"] * bool(carried_working)
+        )
+    chip_texts: list[str] = []
+    if switching:
+        first_added = staged_ids[0] if staged_ids else None
+        new_working = (
+            None
+            if carried_working == "clear"
+            else int(carried_working)
+            if carried_working is not None
+            else first_added
+        )
+        chip_texts = (
+            ([f"{added_n} to add"] if added_n else [])
+            + ([f"{removed_n} to remove"] if removed_n else [])
+            + ([f"Switch to {target_owner} on save"] if added_n and target_owner else [])
+            + (
+                [f"New working repo: {usable[new_working].full_name}"]
+                if added_n and new_working is not None
+                else ["No working repo"]
+                if added_n
+                else []
+            )
+        )
     parts.append(
         '<div class="gh-editor-footer"><div class="gh-editor-footer-inner">'
-        '<div><strong id="selection-status" aria-live="polite">No changes to save</strong>'
-        '<small id="save-help">Changes apply when you save.</small></div>'
+        f'<div><strong id="selection-status" aria-live="polite">{esc(status_text)}</strong>'
+        + (
+            '<ul id="pending-chips" class="gh-chips" aria-label="Pending changes" '
+            'aria-live="polite"'
+            + ("" if chip_texts else " hidden")
+            + ">"
+            + "".join(
+                f'<li class="gh-chip{" gh-chip--switch" if t.startswith("Switch") else ""}">'
+                f"{esc(t)}</li>"
+                for t in chip_texts
+            )
+            + "</ul>"
+            if switching
+            else ""
+        )
+        + '<small id="save-help">Changes apply when you save.</small></div>'
         '<div class="gh-editor-footer-actions">'
         '<button id="discard-repos" class="gh-editor-discard gh-js" type="button" hidden>'
         "Discard changes</button>"
-        '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>'
+        + (
+            f'<a id="discard-link" class="gh-editor-discard gh-nojs" '
+            f'href="{esc(reset_url, quote=True)}">Discard changes</a>'
+            if switching or carried is not None
+            else ""
+        )
+        + '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>'
         f'<a id="cancel-editor" class="gh-editor-cancel" '
         f'href="{esc(cancel_url, quote=True)}">Cancel</a>'
         "</div></div></div></form>"
@@ -1273,6 +1548,160 @@ def _agent_editor_page(
     return github_page(
         title=f"{agent_name}'s GitHub repos", body_html="".join(parts), kind="picker"
     )
+
+
+def _requested_owner(requested_repo: str | None) -> str | None:
+    """The owner part of a requested `owner/name`, or None for anything else."""
+    if requested_repo is None or requested_repo.count("/") != 1:
+        return None
+    owner, name = requested_repo.split("/")
+    return owner if owner and name else None
+
+
+_GITHUB_AVATAR_PREFIX = "https://avatars.githubusercontent.com/"
+# More rows than this and the choice gets a search field.
+_ORG_SEARCH_MIN_ROWS = 6
+
+
+def _owner_avatar(info: _InstallationInfo) -> str:
+    """GitHub's avatar for an account or org; its initial when the URL is not GitHub's own."""
+    shape = " gh-org-avatar--user" if info.owner_type == "User" else ""
+    if info.avatar_url.startswith(_GITHUB_AVATAR_PREFIX):
+        return (
+            f'<img class="gh-org-avatar{shape}" src="{html.escape(info.avatar_url, quote=True)}" '
+            'alt="" width="28" height="28" loading="lazy" referrerpolicy="no-referrer">'
+        )
+    initial = html.escape(info.owner_login[:1].upper())
+    return f'<span class="gh-org-avatar{shape}" aria-hidden="true">{initial}</span>'
+
+
+_ORG_SEARCH_SCRIPT = """
+<script>
+(() => {
+  const chooser = document.querySelector(".gh-chooser");
+  const search = document.getElementById("search-orgs");
+  const rows = [...chooser.querySelectorAll(".gh-org-row[data-org]")];
+  const none = document.getElementById("no-org-match");
+  const noneText = document.getElementById("no-org-match-text");
+  const clear = document.getElementById("clear-org-search");
+  chooser.classList.add("is-enhanced");
+  function render() {
+    const query = search.value.trim().toLowerCase();
+    let shown = 0;
+    for (const row of rows) {
+      row.hidden = !row.dataset.org.includes(query);
+      if (!row.hidden) shown++;
+    }
+    none.hidden = shown !== 0;
+    noneText.textContent = "No accounts or orgs match '" + search.value.trim() + "'.";
+  }
+  // Enter must not submit the form, which would pick the first row.
+  search.addEventListener("keydown", event => {
+    if (event.key === "Enter") event.preventDefault();
+  });
+  search.addEventListener("input", render);
+  clear.addEventListener("click", () => { search.value = ""; render(); search.focus(); });
+  render();
+})();
+</script>
+"""
+
+
+def _org_chooser_page(
+    *,
+    agent_label: str,
+    choices: Sequence[_InstallationInfo],
+    root: str,
+    state: str,
+    install_url: str,
+    back_url: str,
+    carried: Mapping[str, Sequence[str]] | None = None,
+) -> Response:
+    """Pick the one GitHub account or org an agent's repos come from.
+
+    Rows are submit buttons, so the choice works without scripting. Opened
+    fresh, the form is a GET that sends the editor `org`. Opened from an
+    editor with pending changes, it is a POST that sends back the editor's own
+    fields (signed snapshot, adds, removals, working repo) untouched next to
+    the chosen installation, so a move picked up here is the move that was
+    staged there. Either way the server verifies the installation against the
+    person's own list before showing anything, and checks the carried snapshot
+    against the agent's live grants. A suspended installation is listed but
+    cannot be chosen. Search narrows the rows in a browser with scripting;
+    without it every row shows.
+    """
+    esc = html.escape
+    rows: list[str] = []
+    for info in choices:
+        login = esc(info.owner_login)
+        data = esc(info.owner_login.casefold(), quote=True)
+        if info.suspended:
+            rows.append(
+                f'<li class="gh-org-row gh-org-row--paused" data-org="{data}">'
+                '<span class="gh-org-link" role="link" aria-disabled="true">'
+                f'{_owner_avatar(info)}<span class="gh-org-name">{login}</span>'
+                '<span class="gh-org-note">Paused on GitHub</span></span></li>'
+            )
+            continue
+        pick = (
+            f'name="navigate" value="to:{info.id}"'
+            if carried is not None
+            else (f'name="org" value="{info.id}"')
+        )
+        rows.append(
+            f'<li class="gh-org-row" data-org="{data}">'
+            f'<button class="gh-org-link" type="submit" {pick}>'
+            f'{_owner_avatar(info)}<span class="gh-org-name">{login}</span>'
+            f"{icon('chevron-right')}</button></li>"
+        )
+    rows.append(
+        '<li class="gh-org-row gh-org-row--setup"><div class="gh-org-link">'
+        '<span class="gh-org-name">Account or org not listed?</span>'
+        f'<a class="gh-add-button" href="{esc(install_url, quote=True)}">'
+        "Open GitHub setup</a></div></li>"
+    )
+    searchable = len(choices) > _ORG_SEARCH_MIN_ROWS
+    action = f"{root}/oauth/github/confirm"
+    form_open = (
+        f'<form id="org-choice" method="post" action="{esc(action, quote=True)}">'
+        + _retry_hidden_inputs(carried)
+        if carried is not None
+        else f'<form id="org-choice" method="get" action="{esc(action, quote=True)}">'
+        f'<input type="hidden" name="state" value="{esc(state, quote=True)}">'
+    )
+    body = (
+        f'<div class="gh-chooser"><p class="gh-action-line">{esc(agent_label)} can use repos '
+        "from one GitHub account or org at a time.</p>"
+        + form_open
+        + (
+            f'<div class="gh-dialog-search gh-org-search gh-js">{icon("search")}'
+            '<input id="search-orgs" class="gh-search" type="search" '
+            'aria-label="Search accounts and orgs" placeholder="Search accounts and orgs" '
+            'autocomplete="off"></div>'
+            if searchable
+            else ""
+        )
+        + '<ul class="gh-org-list" aria-label="Accounts and orgs">'
+        + "".join(rows)
+        + "</ul>"
+        + (
+            '<div id="no-org-match" class="gh-org-none" role="status" hidden>'
+            '<span id="no-org-match-text"></span> '
+            '<button id="clear-org-search" class="gh-link-button" type="button">'
+            "Clear search</button></div>"
+            if searchable
+            else ""
+        )
+        + '<div class="gh-actions">'
+        + (
+            '<button class="gh-link" type="submit" name="navigate" value="return">Cancel</button>'
+            if carried is not None
+            else f'<a class="gh-link" href="{esc(back_url, quote=True)}">Cancel</a>'
+        )
+        + "</div></form></div>"
+        + (_ORG_SEARCH_SCRIPT if searchable else "")
+    )
+    return github_page(title="Choose an account or org", body_html=body, kind="picker")
 
 
 _PICKER_SCRIPT = """
@@ -1534,6 +1963,7 @@ class _InstallationInfo:
     owner_type: str
     repository_selection: str
     suspended: bool
+    avatar_url: str = ""
 
 
 async def _list_user_installations(
@@ -1552,6 +1982,7 @@ async def _list_user_installations(
                 owner_type=parsed.account.type,
                 repository_selection=parsed.repository_selection,
                 suspended=parsed.suspended_at is not None,
+                avatar_url=parsed.account.avatar_url,
             )
         )
     return result
@@ -1641,6 +2072,11 @@ class _EditorListing:
     pin_unusable: bool = False
     # A verified destination other than the pin: the save may move the agent across.
     switching: bool = False
+    # The person has to pick an account or org first: these are the installations to
+    # offer, suspended ones included. No repos were listed.
+    choices: tuple[_InstallationInfo, ...] | None = None
+    # Installations other than the target and the pin, which "Choose another" could pick.
+    other_choices: int = 0
 
     @property
     def add_installations(self) -> list[_Installation]:
@@ -1656,6 +2092,9 @@ async def _agent_editor_listing(
     *,
     pin: github_access.AgentInstallationPin,
     destination: int | None,
+    page: bool = False,
+    choose: bool = False,
+    requested_owner: str | None = None,
 ) -> _EditorListing:
     """List the installations the agent editor needs, and no more.
 
@@ -1669,13 +2108,44 @@ async def _agent_editor_listing(
     the agent there is decided by the caller from the submitted removals.
     Staleness is decided from the installation list alone, never from a repo
     being absent, so a cut list or a slow GitHub cannot look like a lost pin.
+
+    Rendering the page (`page`) may stop at a choice instead: an agent with no
+    grants and no destination picks an account or org first, unless exactly one
+    is usable or the requested repo's owner names one; `choose` asks for the
+    choice whatever the person has (a pinned agent then offers the others). A
+    save never takes this branch, so the rules it enforces do not depend on it.
+    The choice lists installations only, and leaves every authorization to the
+    verified destination that comes back.
     """
     if pin.is_multiple:
         return _EditorListing(installations=[])
     pinned = pin.single
     infos = await _list_user_installations(client, token)
     by_id = {info.id: info for info in infos}
+    if page and destination is None and (pinned is None or choose):
+        usable = [info for info in infos if not info.suspended]
+        automatic: _InstallationInfo | None = None
+        if pinned is None and not choose:
+            named = [
+                info
+                for info in usable
+                if requested_owner and info.owner_login.casefold() == requested_owner.casefold()
+            ]
+            automatic = named[0] if len(named) == 1 else usable[0] if len(usable) == 1 else None
+        if pinned is not None or (infos and automatic is None):
+            return _EditorListing(
+                installations=[],
+                choices=tuple(
+                    sorted(
+                        (info for info in infos if info.id != pinned),
+                        key=lambda info: (info.owner_login.casefold(), info.id),
+                    )
+                ),
+            )
+        if automatic is not None:
+            destination = automatic.id
     target = destination if destination is not None else pinned
+    others = sum(1 for info in infos if info.id not in (target, pinned))
     if target is None:
         installations: list[_Installation] = []
         for info in infos:
@@ -1700,7 +2170,9 @@ async def _agent_editor_listing(
     if target_info is None or target_info.suspended:
         if pinned is None or switching:
             raise _DestinationRejected
-        return _EditorListing(installations=[], target_id=target, pin_unusable=True)
+        return _EditorListing(
+            installations=[], target_id=target, pin_unusable=True, other_choices=others
+        )
     target_installation, capped = await capped_listing(target_info)
     if not switching:
         return _EditorListing(
@@ -1708,6 +2180,7 @@ async def _agent_editor_listing(
             target_id=target,
             capped=capped,
             source_capped=capped,
+            other_choices=others,
         )
     assert pinned is not None
     source_info = by_id.get(pinned)
@@ -1718,6 +2191,7 @@ async def _agent_editor_listing(
             capped=capped,
             pin_unusable=True,
             switching=True,
+            other_choices=others,
         )
     source_installation, source_capped = await capped_listing(source_info)
     return _EditorListing(
@@ -1726,6 +2200,7 @@ async def _agent_editor_listing(
         capped=capped,
         source_capped=source_capped,
         switching=True,
+        other_choices=others,
     )
 
 
@@ -2156,15 +2631,40 @@ def build_oauth_github_routes(
             # Decides what to ask GitHub for. The pin that gates a save is read
             # again below, with the snapshot, and must match this one.
             provisional_pin = github_access.installation_pin(agent_repos)
+        # A POST that only moves between pages: "choose" opens the account or org choice,
+        # "to:<id>" opens the editor for the one picked there, "return" backs out of it.
+        # Each carries the editor's own fields and saves nothing.
+        # A `navigate` field that is present must be exactly one valid value: empty or
+        # repeated is refused, never read as "no navigation" and so never as a save.
+        navigate_values = fields.get("navigate") if request.method == "POST" else None
+        navigate = navigate_values[0] if navigate_values else ""
+        if navigate_values is not None and (
+            invitation.agent_id is None
+            or len(navigate_values) != 1
+            or not (
+                navigate in ("choose", "return")
+                or (
+                    navigate.startswith("to:") and navigate[3:].isascii() and navigate[3:].isdigit()
+                )
+            )
+        ):
+            return _error("Selection could not be verified.", 400, retry_confirm_url)
         destination: int | None = None
         if invitation.agent_id is not None:
             try:
                 destination = _destination_hint(
-                    org=request.query_params.getlist("org"),
-                    installation=fields.get("installation", []),
+                    org=[
+                        *request.query_params.getlist("org"),
+                        *([navigate[3:]] if navigate.startswith("to:") else []),
+                    ],
+                    installation=[]
+                    if navigate.startswith("to:")
+                    else fields.get("installation", []),
                 )
             except ValueError:
                 return _error("Selection could not be verified.", 400, retry_confirm_url)
+            if navigate == "choose":
+                destination = None
         token = decrypt_token(fernet, flow.encrypted_user_token)
         listing: _EditorListing | None = None
         row_installations: list[_Installation] | None = None
@@ -2174,7 +2674,15 @@ def build_oauth_github_routes(
                     installations = await _installations(client, token)
                 else:
                     listing = await _agent_editor_listing(
-                        client, token, pin=provisional_pin, destination=destination
+                        client,
+                        token,
+                        pin=provisional_pin,
+                        destination=destination,
+                        # Only a page may stop at the choice; a save never does.
+                        page=request.method == "GET" or navigate == "choose",
+                        choose=request.query_params.getlist("choose") == ["1"]
+                        or navigate == "choose",
+                        requested_owner=_requested_owner(invitation.requested_repo),
                     )
                     installations = listing.add_installations
                     row_installations = listing.installations
@@ -2232,8 +2740,49 @@ def build_oauth_github_routes(
             pinned_id = pin.single
             stale = listing.pin_unusable
             switching = listing.switching
-            stale_owner = pin.owners[pinned_id] if stale and pinned_id is not None else None
+            pinned_owner = pin.owners[pinned_id] if pinned_id is not None else None
+            stale_owner = pinned_owner if stale else None
             cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
+            editor_url = f"{root}/oauth/github/confirm?{urlencode({'state': state})}"
+            carried_fields: dict[str, list[str]] | None = None
+            carried_state: _CarriedState | None = None
+            if navigate:
+                # What the page was showing is what the person picked from: its signed
+                # snapshot must still be the agent's live one. A grant added meanwhile
+                # is refused here, never quietly folded into the removals.
+                carried_snapshot = fields.get("snapshot", [""])[0]
+                if not hmac.compare_digest(
+                    fields.get("snapshot_sig", [""])[0],
+                    _snapshot_signature(state, flow.invitation_hash, carried_snapshot, secret),
+                ):
+                    return _error("Selection could not be verified.", 400, retry_confirm_url)
+                if carried_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
+                    return _error(
+                        "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
+                    )
+                try:
+                    carried_state = _CarriedState(
+                        adds=tuple(int(value) for value in fields.get("repo", [])),
+                        removals=frozenset(int(value) for value in fields.get("remove", [])),
+                        working=fields.get("working", ["keep"])[0],
+                    )
+                except ValueError:
+                    return _error("Selection could not be verified.", 400, retry_confirm_url)
+                carried_fields = {
+                    name: values for name, values in fields.items() if name != "navigate"
+                }
+            if listing.choices is not None:
+                return _org_chooser_page(
+                    agent_label=agent_label,
+                    choices=listing.choices,
+                    root=root,
+                    state=state,
+                    install_url=install_url,
+                    # A pinned agent backs out to its saved repos; any other
+                    # cancels the connection like the editor's own Cancel.
+                    back_url=editor_url if pinned_id is not None else cancel_url,
+                    carried=carried_fields,
+                )
 
             def editor_page(selection_error: str | None = None) -> Response:
                 assert listing is not None
@@ -2262,9 +2811,17 @@ def build_oauth_github_routes(
                     row_installations=row_installations,
                     source_capped=listing.source_capped,
                     switching=switching,
+                    agent_label=agent_label,
+                    pinned_owner=pinned_owner,
+                    chooser=True,
+                    reset_url=editor_url,
+                    other_choices=listing.other_choices,
+                    carried=carried_state,
                 )
 
             pending_installation = _PendingInstallationRequest(False)
+            if navigate:
+                return editor_page()
             if request.method == "GET":
                 if not stale and not any(
                     repo.usable for item in installations for repo in item.repos

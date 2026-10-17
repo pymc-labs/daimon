@@ -263,6 +263,50 @@
 .gh-editor-notice a { text-decoration: underline; }
 .gh-editor-notice-warn { border: 1px solid #ecd08a; background: #fff7e3; color: #5f4408; }
 .gh-editor-notice-warn strong { display: block; margin-bottom: 2px; }
+/* Moving the agent to another account or org: the disclosure, pending chips and the choice. */
+.gh-switch { margin-top: 18px; border: 1px solid #dbe2ea; border-radius: 10px; background: #fff; font-size: 14px; }
+.gh-switch summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 0 16px; color: #132d4e; font-weight: 650; list-style: none; cursor: pointer; }
+.gh-switch summary::-webkit-details-marker { display: none; }
+.gh-switch summary::after { content: ""; flex: none; width: 8px; height: 8px; border-right: 2px solid #4a5873; border-bottom: 2px solid #4a5873; transform: translateY(-2px) rotate(45deg); }
+.gh-switch[open] summary::after { transform: translateY(2px) rotate(-135deg); }
+.gh-switch-body { padding: 0 16px 16px; }
+.gh-switch-body p { margin: 0; color: #4a5873; }
+.gh-switch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 12px; }
+.gh-switch-actions .gh-add-button { display: inline-flex; text-decoration: none; }
+.gh-dialog-link .gh-link-button { min-height: 44px; padding: 0; cursor: pointer; }
+.gh-fallback .gh-link-button { cursor: pointer; }
+.gh-editor.is-enhanced .gh-nojs { display: none; }
+.gh-switch-note { color: #4a5873; font-size: 13px; }
+.gh-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; padding: 0; list-style: none; }
+.gh-chip { padding: 3px 8px; border-radius: 6px; background: #e9eef3; color: #3f5068; font-size: 12px; font-weight: 650; }
+.gh-chip--switch { background: #e5f4f0; color: #225e55; }
+@media (max-width: 600px) { .gh-editor[data-switching] { padding-bottom: 260px; } }
+.gh-flow--picker:has(.gh-chooser) { max-width: 640px; margin-inline: auto; }
+.gh-chooser .gh-js { display: none; }
+.gh-chooser.is-enhanced .gh-js { display: block; }
+.gh-chooser [hidden] { display: none !important; }
+.gh-chooser .gh-org-search { margin: 18px 0 0; }
+.gh-org-list { margin: 16px 0 0; padding: 0; border: 1px solid #dbe2ea; border-radius: 12px; background: #fff; list-style: none; }
+.gh-org-row { border-bottom: 1px solid #e5e9ef; }
+.gh-org-row:first-child { border-radius: 12px 12px 0 0; }
+.gh-org-row:last-child { border-bottom: 0; border-radius: 0 0 12px 12px; }
+.gh-org-link { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 12px 20px; color: #132d4e; font-size: 17px; font-weight: 650; text-decoration: none; }
+button.gh-org-link { width: 100%; border: 0; background: none; font: inherit; font-size: 17px; font-weight: 650; text-align: left; cursor: pointer; }
+button.gh-org-link:hover, button.gh-org-link:focus-visible { background: #edf4f8; }
+button.gh-org-link:focus-visible { outline-offset: -3px; }
+.gh-chooser .gh-actions .gh-link { cursor: pointer; }
+.gh-org-link .gh-org-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.gh-org-link .web-icon { flex: none; width: 18px; height: 18px; color: #4a5873; }
+.gh-org-avatar { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 4px; background: #eef2f3; color: #4a5873; font-size: 13px; font-weight: 700; object-fit: cover; }
+.gh-org-avatar--user { border-radius: 50%; }
+.gh-org-row--paused { background: #f3f6f8; }
+.gh-org-row--paused .gh-org-link { color: #4a5873; cursor: default; }
+.gh-org-row--paused .gh-org-avatar { opacity: .6; }
+.gh-org-note { flex: none; color: #4a5873; font-size: 13px; font-weight: 400; }
+.gh-org-row--setup .gh-org-link { flex-wrap: wrap; justify-content: space-between; font-size: 14px; font-weight: 400; }
+.gh-org-row--setup .gh-add-button { display: inline-flex; text-decoration: none; }
+.gh-org-none { margin-top: 12px; color: #4a5873; font-size: 14px; }
+.gh-chooser .gh-actions { margin-top: 20px; }
 .gh-repo-dialog { width: min(560px, calc(100vw - 32px)); max-height: min(90vh, 800px); margin: auto; padding: 0; border: 1px solid #dbe2ea; border-radius: 15px; background: #fff; color: #142b49; box-shadow: 0 18px 60px #101f3a33; }
 .gh-repo-dialog::backdrop { background: #12233d88; }
 .gh-dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 23px 24px 14px; }

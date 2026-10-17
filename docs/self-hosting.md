@@ -407,6 +407,14 @@ only that account's repos, up to 2,000. If GitHub no longer shows that installat
 the signed-in account, or it is suspended, the page still lets a manager remove the
 agent's repos but not add any. Removing a repo never depends on the list GitHub returns.
 A save may move the agent to another account only if it removes every repo the agent has.
+An agent with no repos first shows the signed-in account's installations to choose from
+(skipped when only one is usable, or when the requested repo's owner names one), with
+suspended ones listed but not selectable. "Use another account or org?" on an agent with
+repos opens that choice, and the page for the account chosen starts with every current repo
+marked to remove. The choice is a form, so it works without scripting, and going to it and
+back carries the page's signed snapshot, adds, removals and working repo; if the agent's
+repos changed in between, the page asks for a reload instead of rebuilding the move. The
+server still decides from the saved repos and GitHub's own installation list.
 Each selected repository is checked again against GitHub at confirmation.
 Every connected repository is read and write for the agent, within the GitHub
 App installation's permissions; the person's own GitHub role does not lower it.
