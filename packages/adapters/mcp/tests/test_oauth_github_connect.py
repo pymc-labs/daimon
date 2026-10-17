@@ -6,12 +6,15 @@ import asyncio
 import html
 import re
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp import oauth_github
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
@@ -1477,3 +1480,450 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
         denied_operator = await browser.get("/oauth/github/confirm", params={"state": state})
         assert denied_operator.status_code == 403
+
+
+# --- Agent editor request limits, retry and deadline -------------------------
+
+
+@dataclass
+class _EditorEnv:
+    """An agent editor wired to a scripted GitHub, with switches to break it."""
+
+    browser: httpx.AsyncClient
+    sessionmaker: async_sessionmaker[AsyncSession]
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    github_calls: list[str] = field(default_factory=list)
+    listing_down: bool = False
+    details_down: bool = False
+    listing_delay: float = 0.0
+
+    async def open_editor(self) -> tuple[str, dict[str, str]]:
+        """Run the connect flow and return the state plus the editor's hidden fields."""
+        account_id = await self._account_id()
+        async with self.sessionmaker.begin() as session:
+            invitation = await github_connect.mint_invitation(
+                session,
+                tenant_id=self.tenant_id,
+                requester_account_id=account_id,
+                requester_label="Admin",
+                requester_platform_user_id="editor",
+                agent_id=self.agent_id,
+                agent_name="Editor",
+                agent_ma_id="ag_editor",
+                agent_manager_verified=True,
+                operator_issued=False,
+                origin_platform="discord",
+            )
+        start = await self.browser.get(f"/oauth/github/connect/{invitation}")
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        await self.browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
+        rendered = await self.browser.get("/oauth/github/confirm", params={"state": state})
+        assert rendered.status_code == 200
+        return state, _hidden_fields(rendered.text)
+
+    async def _account_id(self) -> uuid.UUID:
+        async with self.sessionmaker() as session:
+            row = await session.execute(
+                text("SELECT id FROM accounts WHERE tenant_id = :tenant"),
+                {"tenant": self.tenant_id},
+            )
+            return row.scalar_one()
+
+    async def saved_repo_ids(self) -> list[int]:
+        async with self.sessionmaker() as session:
+            grants = await github_access.list_agent_repos(
+                session, tenant_id=self.tenant_id, agent_id=self.agent_id
+            )
+        return sorted(grant.repo_id for grant in grants)
+
+
+def _hidden_fields(page_html: str) -> dict[str, str]:
+    return {
+        name: html.unescape(value)
+        for name, value in re.findall(
+            r'<input type="hidden" name="([^"]+)" value="([^"]*)">', page_html
+        )
+    }
+
+
+def _hidden_pairs(page_html: str) -> list[tuple[str, str]]:
+    return [
+        (name, html.unescape(value))
+        for name, value in re.findall(
+            r'<input type="hidden" name="([^"]+)" value="([^"]*)">', page_html
+        )
+    ]
+
+
+@pytest_asyncio.fixture
+async def editor_env(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[_EditorEnv]:
+    from types import SimpleNamespace
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.scope import DeploymentDefault
+
+    sessionmaker = committing_sessionmaker
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_editor")
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=tenant_id, workspace_id="limits-workspace")
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await set_role(session, account_id, Role.ADMIN)
+        await make_platform_principal(
+            session, platform="discord", external_id="editor", tenant=tenant, account=account
+        )
+
+    env: _EditorEnv
+
+    async def github_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.startswith(("/user/installations", "/app/installations")):
+            env.github_calls.append(path)
+        if path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "user-token"})
+        if path == "/applications/client/token":
+            return httpx.Response(204)
+        if path == "/user":
+            return httpx.Response(200, json={"id": 17})
+        if path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "installations": [
+                        {
+                            "id": 77,
+                            "account": {"id": 55, "login": "editor", "type": "User"},
+                            "repository_selection": "selected",
+                        }
+                    ]
+                },
+            )
+        if path == "/user/installations/77/repositories":
+            if env.listing_delay:
+                await asyncio.sleep(env.listing_delay)
+            if env.listing_down:
+                return httpx.Response(502)
+            return httpx.Response(
+                200,
+                json={
+                    "repositories": [
+                        {
+                            "id": repo_id,
+                            "owner": {"id": 55},
+                            "full_name": f"editor/repo-{repo_id}",
+                            "permissions": {"admin": True},
+                        }
+                        for repo_id in (101, 102, 103)
+                    ]
+                },
+            )
+        if path == "/app/installations/77":
+            if env.details_down:
+                return httpx.Response(502)
+            return httpx.Response(
+                200,
+                json={
+                    "id": 77,
+                    "account": {"id": 55, "login": "editor", "type": "User"},
+                    "repository_selection": "selected",
+                    "suspended_at": None,
+                    "permissions": _INSTALLATION_WRITE,
+                },
+            )
+        raise AssertionError(path)
+
+    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+        return SimpleNamespace(name="Editor", metadata={})
+
+    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    key = Fernet.generate_key().decode()
+    connect, callback, setup, confirm = build_oauth_github_routes(
+        settings=_settings(key),
+        sessionmaker=sessionmaker,
+        fernet=build_multifernet((key,)),
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        deployment_default=DeploymentDefault(),
+        anthropic=object(),  # type: ignore[arg-type]
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/callback", callback),
+            Route("/oauth/github/setup", setup),
+            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as browser:
+        env = _EditorEnv(browser, sessionmaker, tenant_id, agent_id)
+        yield env
+
+
+async def _submit(
+    browser: httpx.AsyncClient, url: str, pairs: list[tuple[str, str]]
+) -> httpx.Response:
+    """Post a form the way a browser does, repeating names that appear more than once."""
+    return await browser.post(
+        url,
+        content=urlencode(pairs),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+
+async def _no_github_calls_after(env: _EditorEnv, marker: int) -> None:
+    assert env.github_calls[marker:] == []
+    assert await env.saved_repo_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_an_oversize_body_before_any_work(editor_env: _EditorEnv) -> None:
+    state, hidden = await editor_env.open_editor()
+    calls_before = len(editor_env.github_calls)
+    oversize = oauth_github._MAX_CONFIRM_BODY_BYTES + 1
+
+    declared = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        content=urlencode({**hidden, "padding": "x" * oversize}),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert declared.status_code == 413
+    assert "That selection is too large to save." in declared.text
+    assert "Go back, choose fewer repos" in declared.text
+    assert "Ask the requester" not in declared.text
+    await _no_github_calls_after(editor_env, calls_before)
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_a_declared_oversize_body_without_reading_it(
+    editor_env: _EditorEnv,
+) -> None:
+    await editor_env.open_editor()
+    read_chunks = 0
+
+    async def body() -> AsyncIterator[bytes]:
+        nonlocal read_chunks
+        read_chunks += 1
+        yield b"x"
+
+    response = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        content=body(),
+        headers={
+            "content-type": "application/x-www-form-urlencoded",
+            "content-length": str(oauth_github._MAX_CONFIRM_BODY_BYTES + 1),
+        },
+    )
+
+    assert response.status_code == 413
+    assert read_chunks == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_too_many_fields(editor_env: _EditorEnv) -> None:
+    state, hidden = await editor_env.open_editor()
+    calls_before = len(editor_env.github_calls)
+    # Small in bytes, so only the field-count limit can stop it.
+    body = urlencode(hidden) + "&a=1" * (oauth_github._MAX_CONFIRM_FIELDS + 1)
+    assert len(body) < oauth_github._MAX_CONFIRM_BODY_BYTES
+
+    response = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        content=body,
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 413
+    await _no_github_calls_after(editor_env, calls_before)
+
+
+@pytest.mark.asyncio
+async def test_confirm_stops_reading_a_chunked_body_past_the_cap(editor_env: _EditorEnv) -> None:
+    state, hidden = await editor_env.open_editor()
+    calls_before = len(editor_env.github_calls)
+    chunk = b"x" * 16_384
+    total_chunks = 64  # 1 MiB, four times the cap
+    sent = 0
+
+    async def body() -> AsyncIterator[bytes]:
+        nonlocal sent
+        for _ in range(total_chunks):
+            sent += 1
+            yield chunk
+
+    request = editor_env.browser.build_request(
+        "POST",
+        "/oauth/github/confirm",
+        content=body(),
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert "content-length" not in request.headers
+
+    response = await editor_env.browser.send(request)
+
+    assert response.status_code == 413
+    assert sent * len(chunk) <= oauth_github._MAX_CONFIRM_BODY_BYTES + 2 * len(chunk)
+    assert sent < total_chunks
+    await _no_github_calls_after(editor_env, calls_before)
+
+
+@pytest.mark.asyncio
+async def test_confirm_does_not_trust_a_short_content_length(editor_env: _EditorEnv) -> None:
+    state, hidden = await editor_env.open_editor()
+    calls_before = len(editor_env.github_calls)
+    payload = b"x=" + b"y" * (oauth_github._MAX_CONFIRM_BODY_BYTES + 1)
+
+    response = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        content=payload,
+        headers={"content-type": "application/x-www-form-urlencoded", "content-length": "10"},
+    )
+
+    assert response.status_code == 413
+    await _no_github_calls_after(editor_env, calls_before)
+
+
+@pytest.mark.asyncio
+async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
+    editor_env: _EditorEnv,
+) -> None:
+    state, hidden = await editor_env.open_editor()
+    editor_env.details_down = True
+
+    failed = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        data={
+            **hidden,
+            "access": "read",
+            "working": "101",
+            "repo": ["101", "102"],
+            "access_101": "read",
+            "access_102": "write",
+            "ignored": '"><script>alert(1)</script>',
+        },
+    )
+
+    assert failed.status_code == 502
+    assert "Couldn't reach GitHub" in html.unescape(failed.text)
+    form = re.search(r'<form class="gh-actions" method="post" action="([^"]+)">', failed.text)
+    assert form is not None
+    # The POST has no state in its URL; the form carries it, and a link would
+    # have been a state-less GET that lands on the expired page.
+    assert form.group(1) == "https://mcp.test/oauth/github/confirm"
+    assert "state=" not in form.group(1)
+    assert "<script>" not in failed.text and 'name="ignored"' not in failed.text
+    carried = _hidden_pairs(failed.text)
+    assert ("state", state) in carried
+    assert [value for name, value in carried if name == "repo"] == ["101", "102"]
+    assert dict(carried)["access_102"] == "write"
+    assert dict(carried)["working"] == "101"
+    assert dict(carried)["receipt"] == hidden["receipt"]
+
+    # Pressing Try again is the browser posting exactly those fields.
+    editor_env.details_down = False
+    retried = await _submit(editor_env.browser, form.group(1), carried)
+    assert retried.status_code == 200
+    assert "Editor can use 2 repos." in retried.text
+    assert await editor_env.saved_repo_ids() == [101, 102]
+
+
+@pytest.mark.asyncio
+async def test_failed_get_keeps_a_try_again_link_with_state(editor_env: _EditorEnv) -> None:
+    state, _hidden = await editor_env.open_editor()
+    editor_env.listing_down = True
+
+    failed = await editor_env.browser.get("/oauth/github/confirm", params={"state": state})
+
+    assert failed.status_code == 502
+    assert f'href="https://mcp.test/oauth/github/confirm?state={state}"' in failed.text
+    assert "<form" not in failed.text
+
+
+@pytest.mark.asyncio
+async def test_listing_failure_on_save_returns_a_page_that_can_retry(
+    editor_env: _EditorEnv,
+) -> None:
+    """The listing runs again on every POST, so it needs the same retry as the details call."""
+    state, hidden = await editor_env.open_editor()
+    editor_env.listing_down = True
+
+    failed = await editor_env.browser.post(
+        "/oauth/github/confirm", data={**hidden, "access": "read", "working": "keep", "repo": "103"}
+    )
+
+    assert failed.status_code == 502
+    carried = _hidden_pairs(failed.text)
+    assert ("repo", "103") in carried and ("state", state) in carried
+    editor_env.listing_down = False
+    retried = await _submit(editor_env.browser, "/oauth/github/confirm", carried)
+    assert retried.status_code == 200
+    assert await editor_env.saved_repo_ids() == [103]
+
+
+@pytest.mark.asyncio
+async def test_slow_github_hits_the_total_deadline_with_selections_kept(
+    editor_env: _EditorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, hidden = await editor_env.open_editor()
+    monkeypatch.setattr(oauth_github, "_INSTALLATIONS_DEADLINE_SECONDS", 0.05)
+    editor_env.listing_delay = 30.0  # would hold the request open without the deadline
+
+    posted = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "read", "working": "keep", "repo": ["101", "102"]},
+    )
+    got = await editor_env.browser.get("/oauth/github/confirm", params={"state": state})
+
+    assert posted.status_code == 502
+    assert [value for name, value in _hidden_pairs(posted.text) if name == "repo"] == [
+        "101",
+        "102",
+    ]
+    assert got.status_code == 502
+    assert f"confirm?state={state}" in got.text
+    assert await editor_env.saved_repo_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_admin_check_outage_on_save_keeps_the_selection(
+    editor_env: _EditorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, hidden = await editor_env.open_editor()
+    monkeypatch.setattr(
+        oauth_github,
+        "_attest_native_admin",
+        AsyncMock(side_effect=oauth_github.AdminAttestationUnavailable("down")),
+    )
+
+    failed = await editor_env.browser.post(
+        "/oauth/github/confirm", data={**hidden, "access": "read", "working": "keep", "repo": "103"}
+    )
+
+    assert failed.status_code == 503
+    assert ("repo", "103") in _hidden_pairs(failed.text)
+    assert await editor_env.saved_repo_ids() == []
+
+
+def test_error_page_retry_form_escapes_and_drops_unknown_fields() -> None:
+    page = oauth_github._error(
+        "Couldn't reach GitHub",
+        502,
+        "https://mcp.test/oauth/github/confirm",
+        retry_fields={
+            "state": ['a"b'],
+            "repo": ["1", "2"],
+            "access_7": ["write"],
+            "access_x": ["write"],
+            "cookie": ["secret"],
+        },
+    ).body.decode()
+    assert 'name="state" value="a&quot;b"' in page
+    assert page.count('name="repo"') == 2
+    assert 'name="access_7"' in page
+    assert 'name="access_x"' not in page and 'name="cookie"' not in page

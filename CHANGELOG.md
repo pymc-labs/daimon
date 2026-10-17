@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.

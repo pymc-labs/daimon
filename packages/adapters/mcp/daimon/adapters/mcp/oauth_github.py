@@ -9,10 +9,11 @@ import hmac
 import html
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -66,6 +67,35 @@ ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
 _log = logging.getLogger(__name__)
 _ADMIN_RETRY = "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
+# A save posts about 40 bytes per ticked repo (`repo=<id>` plus `access_<id>=write`),
+# so 256 KiB covers several thousand repos while bounding what one request can
+# make the server read and parse. The cap is checked before any other work.
+_MAX_CONFIRM_BODY_BYTES = 256 * 1024
+# Handed to `parse_qs` so a body of nothing but `&` cannot allocate a huge field list.
+_MAX_CONFIRM_FIELDS = 10_000
+# One wall-clock budget for listing every installation and its repos. Each GitHub
+# call already times out at 20 s, but they run one after another, so many
+# installations or pages could hold the request open indefinitely. 60 s leaves
+# room for large organizations and stays well inside Cloud Run's request timeout
+# (the mcp service sets none, so the platform default of 300 s applies; see the
+# `timeoutSeconds` fallback in .github/workflows/deploy.yml).
+_INSTALLATIONS_DEADLINE_SECONDS = 60.0
+# Form fields a failed save re-posts from its error page. Anything else a client
+# sent is dropped rather than echoed back into HTML.
+_RETRY_FIELD_NAMES = frozenset(
+    {
+        "state",
+        "invitation",
+        "receipt",
+        "snapshot",
+        "snapshot_sig",
+        "repo",
+        "remove",
+        "access",
+        "working",
+    }
+)
+_RETRY_FIELD_SCOPED_ACCESS = re.compile(r"access_\d+")
 
 
 async def _attest_native_admin(
@@ -261,32 +291,89 @@ class _PendingInstallationRequest:
     account_login: str | None = None
 
 
+def _retry_hidden_inputs(fields: Mapping[str, Sequence[str]]) -> str:
+    """Hidden inputs that re-post the editor's own fields, repeating multi-value ones."""
+    return "".join(
+        f'<input type="hidden" name="{html.escape(name, quote=True)}" '
+        f'value="{html.escape(value, quote=True)}">'
+        for name, values in fields.items()
+        if name in _RETRY_FIELD_NAMES or _RETRY_FIELD_SCOPED_ACCESS.fullmatch(name)
+        for value in values
+    )
+
+
 def _error(
     message: str = "This link has expired.",
     status: int = 400,
     retry_url: str | None = None,
+    *,
+    retry_fields: Mapping[str, Sequence[str]] | None = None,
+    action: str | None = None,
 ) -> Response:
-    retry = (
-        '<div class="gh-actions"><a class="gh-primary" '
-        f'href="{html.escape(retry_url, quote=True)}">Try again{icon("chevron-right")}</a></div>'
-        if retry_url
-        else ""
-    )
+    """Render a branded error page.
+
+    `retry_url` adds a Try again link. With `retry_fields` it becomes a form that
+    POSTs those fields back to `retry_url`, so a failed save does not drop what
+    the person ticked. `action` replaces the default follow-up sentence.
+    """
+    if retry_url and retry_fields is not None:
+        retry = (
+            f'<form class="gh-actions" method="post" action="{html.escape(retry_url, quote=True)}">'
+            f"{_retry_hidden_inputs(retry_fields)}"
+            f'<button class="gh-primary" type="submit">Try again{icon("chevron-right")}</button>'
+            "</form>"
+        )
+    elif retry_url:
+        retry = (
+            '<div class="gh-actions"><a class="gh-primary" '
+            f'href="{html.escape(retry_url, quote=True)}">'
+            f"Try again{icon('chevron-right')}</a></div>"
+        )
+    else:
+        retry = ""
+    if action is None:
+        action = (
+            "Try again. If it keeps failing, ask for a new setup link."
+            if retry_url
+            else "Ask the requester for a new setup link."
+        )
     return github_page(
         title=message,
         body_html=(
             f'<div class="gh-status-icon">{icon("triangle-alert")}</div>'
             f'<p class="gh-status-line">{html.escape(message)}</p>'
-            + (
-                '<p class="gh-action-line">Try again. If it keeps failing, '
-                "ask for a new setup link.</p>"
-                if retry_url
-                else '<p class="gh-action-line">Ask the requester for a new setup link.</p>'
-            )
-            + retry
+            f'<p class="gh-action-line">{html.escape(action)}</p>' + retry
         ),
         status=status,
         error=True,
+    )
+
+
+async def _read_capped_body(request: Request, limit: int) -> bytes | None:
+    """Read the request body, or return None as soon as it exceeds `limit` bytes.
+
+    The declared Content-Length is checked first so an honest oversize request
+    costs nothing. The streamed total is checked too, because a chunked body has
+    no Content-Length and a declared length can be wrong.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isascii() and declared.isdigit() and int(declared) > limit:
+        return None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _selection_too_large() -> Response:
+    return _error(
+        "That selection is too large to save.",
+        413,
+        action="Go back, choose fewer repos, and save again.",
     )
 
 
@@ -1708,10 +1795,19 @@ def build_oauth_github_routes(
 
     async def confirm(request: Request) -> Response:
         if request.method == "POST":
+            raw_body = await _read_capped_body(request, _MAX_CONFIRM_BODY_BYTES)
+            if raw_body is None:
+                return _selection_too_large()
             try:
-                fields = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+                fields = parse_qs(
+                    raw_body.decode("utf-8"),
+                    keep_blank_values=True,
+                    max_num_fields=_MAX_CONFIRM_FIELDS,
+                )
             except UnicodeDecodeError:
                 return _error("Selection could not be verified.")
+            except ValueError:  # parse_qs: more than _MAX_CONFIRM_FIELDS fields
+                return _selection_too_large()
             state = fields.get("state", [""])[0]
             invitation_hash = fields.get("invitation", [""])[0]
             signature = fields.get("receipt", [""])[0]
@@ -1754,6 +1850,18 @@ def build_oauth_github_routes(
         if used is not None:
             return used
         retry_confirm_url = f"{root}/oauth/github/confirm?{urlencode({'state': state})}"
+
+        def transient_error(message: str, status: int) -> Response:
+            """An upstream failure the person can retry.
+
+            After a POST the retry re-posts what they ticked: a link would be a
+            GET, which renders the page afresh and drops the selection. The form
+            posts to the bare confirm path, so state stays out of the URL.
+            """
+            if request.method == "POST":
+                return _error(message, status, f"{root}/oauth/github/confirm", retry_fields=fields)
+            return _error(message, status, retry_confirm_url)
+
         async with sessionmaker() as session:
             flow = await github_connect.get_flow(session, state=state, cookie=cookie)
             if flow is None or flow.encrypted_user_token is None or flow.github_user_id is None:
@@ -1787,13 +1895,13 @@ def build_oauth_github_routes(
             )
         token = decrypt_token(fernet, flow.encrypted_user_token)
         try:
-            async with factory() as client:
+            async with factory() as client, asyncio.timeout(_INSTALLATIONS_DEADLINE_SECONDS):
                 installations = await _installations(client, token)
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, TimeoutError):
             used = await successful_page(state, cookie, invitation_hash)
             if used is not None:
                 return used
-            return _error("Couldn't reach GitHub", 502, str(request.url))
+            return transient_error("Couldn't reach GitHub", 502)
         needed = {
             repo.id: missing_access[repo.full_name.casefold()]
             for installation in installations
@@ -1836,7 +1944,7 @@ def build_oauth_github_routes(
                                 github_user_id=flow.github_user_id,
                             )
                     except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                        return _error("Couldn't reach GitHub", 502, retry_confirm_url)
+                        return transient_error("Couldn't reach GitHub", 502)
                 return _agent_editor_page(
                     root=root,
                     state=state,
@@ -1967,7 +2075,7 @@ def build_oauth_github_routes(
                         )
                     ]
             except (httpx.HTTPError, ValueError):
-                return _error("Couldn't reach GitHub", 502, retry_confirm_url)
+                return transient_error("Couldn't reach GitHub", 502)
             if any(
                 detail.account_id != by_installation[detail.installation_id].owner_id
                 or detail.account_login.casefold()
@@ -2012,7 +2120,7 @@ def build_oauth_github_routes(
                         fernet=fernet,
                     )
                 except AdminAttestationUnavailable:
-                    return _error(_ADMIN_RETRY, 503, retry_confirm_url)
+                    return transient_error(_ADMIN_RETRY, 503)
                 if not still_admin:
                     return _error("You can no longer manage this agent.", 403, retry_confirm_url)
             try:
@@ -2190,7 +2298,7 @@ def build_oauth_github_routes(
                         )
                     ]
             except (httpx.HTTPError, ValueError):
-                return _error("Couldn't reach GitHub", 502, retry_confirm_url)
+                return transient_error("Couldn't reach GitHub", 502)
             if any(
                 detail.account_id != by_installation[detail.installation_id].owner_id
                 or detail.account_login.casefold()
@@ -2239,7 +2347,7 @@ def build_oauth_github_routes(
                         fernet=fernet,
                     )
                 except AdminAttestationUnavailable:
-                    return _error(_ADMIN_RETRY, 503, retry_confirm_url)
+                    return transient_error(_ADMIN_RETRY, 503)
                 if not still_admin:
                     return _error("You can no longer manage this agent.", 403, retry_confirm_url)
             try:
@@ -2375,7 +2483,7 @@ def build_oauth_github_routes(
                         github_user_id=flow.github_user_id,
                     )
             except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                return _error("Couldn't reach GitHub", 502, retry_confirm_url)
+                return transient_error("Couldn't reach GitHub", 502)
         if pending.found:
             return _pending_page(
                 html.escape(retry_confirm_url, quote=True),
