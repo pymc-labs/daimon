@@ -342,6 +342,20 @@ github_session_token	SessionToken	UnsafeRemoved	violates:RemovedAccessInvalid	6	
 github_session_token	SessionToken	UnsafeLongLock	violates:NoNetworkUnderLock	5	-	grant lock held across GitHub mint
 github_session_token	GrantInstall	GrantSafe	clean	9	-	transaction lock serializes first grants across installations
 github_session_token	GrantInstall	GrantUnsafe	violates:OneInstallation	31	-	read-then-write first grants race across installations
+# ---- GitHub issued-token prune ----
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSafe	clean	40	-	the code: grace hour, status filter, bounded store stall, late revoke may fail: no live token lost, no stored or delivered row deleted, a store never misses its row
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneStallUnbounded	clean	48	-	a store stalled past the grace: still no live token lost and no live row deleted (the late revoke covers it)
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneStallUnboundedMisses	violates:StoreNeverMissesRow	41	-	witness: a store stalled past the grace can miss its pruned row; the failure is safe, the session preparation fails
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoGraceMisses	violates:StoreNeverMissesRow	27	-	unsafe: pending rows pruned at expires_at; a mint in flight finds its row gone
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoGraceStillSafe	clean	50	-	no grace but a late revoke that succeeds: the token is still revoked
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoGraceRevokeFails	violates:NoLiveTokenLost	38	-	unsafe: no grace and the late revoke fails: a live token with no row
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoStatusFilter	violates:NeverDeleteLiveRow	38	-	unsafe: prune ignores status and deletes a stored row
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoStatusFilterNoGrace	violates:NoLiveTokenLost	27	-	unsafe: no status filter and no grace delete a stored row whose token is live
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSplitSafe	clean	46	-	two-statement prune behind the grace: safe only while stores finish within the hour
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSplitNoGrace	violates:NoLiveTokenLost	42	-	unsafe: select then delete by id without a recheck deletes a row stored in between
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSplitStallUnbounded	violates:NeverDeleteLiveRow	54	-	unsafe: select then delete by id loses to a store stalled past the grace
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneWitnessPending	violates:NoPendingPruned	25	-	witness: a pending row is pruned
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneWitnessRevoked	violates:NoRevokedPruned	30	-	witness: a revoked row is pruned
 # ---- agent tool rules (proposed) ----
 tool_rules	ToolRules	ToolRulesSafe	clean	8906	-	per-call rule read, admin-only Always allow saved after settlement, compare-and-set save
 tool_rules	ToolRules	ToolRulesRuleWitness	violates:NoRuleRun	7	-	witness: a call runs on a rule without a card

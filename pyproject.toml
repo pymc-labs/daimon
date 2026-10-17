@@ -184,6 +184,7 @@ source_modules = [
     "daimon.core.github_connect_delivery",
     "daimon.core.github_credentials",
     "daimon.core.github_installation_reconcile",
+    "daimon.core.github_issued_token_sweep",
     "daimon.core.github_new_repo_delivery",
     "daimon.core.github_removal_delivery",
     "daimon.core.github_notice_visibility",

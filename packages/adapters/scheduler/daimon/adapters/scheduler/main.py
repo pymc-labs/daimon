@@ -65,6 +65,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_installation_reconcile import (
     drain_github_installation_reconciliations,
 )
+from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tokens
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
@@ -674,6 +675,34 @@ async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> N
             await delete_expired_flows(session, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.github_connect_flow_sweep.failed")
+
+
+# How often to look for closed GitHub token rows. Each run scans the table, and
+# about 3,000 rows close a day, so a tick every 30 seconds would only repeat it.
+_GITHUB_TOKEN_PRUNE_INTERVAL = timedelta(minutes=10)
+# Start of the last run, under one key so the module needs no `global`.
+_last_github_token_prune: dict[str, datetime] = {}
+
+
+async def _sweep_github_issued_tokens(
+    sm: async_sessionmaker[AsyncSession], *, now: datetime | None = None
+) -> None:
+    """Delete closed GitHub token rows at most once per interval. Boundary catch:
+    a sweep failure must not kill the scheduler loop. A failed run waits out the
+    interval too, so a database fault is logged once per interval, not per tick.
+
+    No GitHub call: only revoked and never-stored rows go, and nothing is
+    revoked here.
+    """
+    current = now or datetime.now(UTC)
+    last = _last_github_token_prune.get("started")
+    if last is not None and current - last < _GITHUB_TOKEN_PRUNE_INTERVAL:
+        return
+    _last_github_token_prune["started"] = current
+    try:
+        await sweep_closed_github_issued_tokens(sm, now=current)
+    except SQLAlchemyError:
+        log.exception("scheduler.github_issued_token_sweep.failed")
 
 
 async def _sweep_github_app_tokens(
@@ -1307,6 +1336,7 @@ async def run(
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_github_connect_flows(sm)
+            await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet
@@ -1341,6 +1371,7 @@ async def run(
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_github_connect_flows(sm)
+            await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet

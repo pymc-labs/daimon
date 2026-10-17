@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Final, Literal, cast
 
 from cryptography.fernet import MultiFernet
 from daimon.core._models import Account, GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
@@ -13,8 +13,22 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text, update
+from sqlalchemy import CursorResult, and_, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+#: A revoked row is kept this long past its `expires_at` as a short forensic
+#: trail. GitHub installation tokens live one hour, so the token is long dead.
+#: The permanent record is the `security_audit_events` row, which is never pruned.
+REVOKED_RETENTION: Final = timedelta(days=7)
+#: A `pending` row exists only so the minter can record the token it is about to
+#: receive; it never holds a token (`encrypted_token` is null). The row is
+#: inserted 55 minutes before `expires_at` and the GitHub call follows at once,
+#: so a token minted for it dies one hour after the call, inside this hour; the
+#: app JWT the mint uses expires nine minutes after it is built, which bounds how
+#: late the call can be. The grace also keeps the row for a minter that is slow
+#: to store, though nothing bounds a store's delay. See
+#: formal/github_issued_tokens_prune/README.md.
+PENDING_GRACE: Final = timedelta(hours=1)
 
 
 class IssuedToken(BaseModel):
@@ -170,6 +184,50 @@ async def mark_revoked(session: AsyncSession, *, token_id: uuid.UUID) -> IssuedT
     row.revoked_at = datetime.now(UTC)
     await session.flush()
     return IssuedToken.model_validate(row)
+
+
+async def prune_closed_tokens(session: AsyncSession, *, now: datetime, batch: int) -> int:
+    """Delete up to `batch` closed rows; return how many went. The caller commits.
+
+    Closed means `revoked` more than REVOKED_RETENTION past `expires_at`, or
+    `pending` (never stored) more than PENDING_GRACE past `expires_at`. `stored`
+    and `delivered` rows are never deleted, whatever their age: they are the
+    record of a token that may still be live and of the session that holds it.
+
+    One statement selects, locks and deletes. The subquery locks its rows with
+    FOR UPDATE SKIP LOCKED, so a row another transaction is storing, revoking or
+    delivering is left for the next run, not waited on. A row that committed a
+    change after the scan started is rechecked against its new version at the
+    lock and drops out. Locked rows cannot change before the DELETE removes them,
+    so there is no stale selection to guard against. MATERIALIZED makes the
+    planner run the locking subquery exactly once. Oldest rows go first so a
+    backlog drains in order.
+    """
+    if batch <= 0:
+        raise ValueError("batch must be positive")
+    closed = or_(
+        and_(
+            GitHubIssuedToken.status == "revoked",
+            GitHubIssuedToken.expires_at < now - REVOKED_RETENTION,
+        ),
+        and_(
+            GitHubIssuedToken.status == "pending",
+            GitHubIssuedToken.expires_at < now - PENDING_GRACE,
+        ),
+    )
+    victims = (
+        select(GitHubIssuedToken.token_id)
+        .where(closed)
+        .order_by(GitHubIssuedToken.expires_at, GitHubIssuedToken.token_id)
+        .limit(batch)
+        .with_for_update(skip_locked=True)
+        .cte("victims")
+        .prefix_with("MATERIALIZED")
+    )
+    result = await session.execute(
+        delete(GitHubIssuedToken).where(GitHubIssuedToken.token_id.in_(select(victims.c.token_id)))
+    )
+    return cast(CursorResult[object], result).rowcount or 0
 
 
 async def record_revoke_attempt(session: AsyncSession, *, token_id: uuid.UUID) -> None:

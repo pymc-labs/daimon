@@ -32,6 +32,7 @@ from daimon.adapters.scheduler.main import (
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # MCP token renewal
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
+    _sweep_github_issued_tokens,  # pyright: ignore[reportPrivateUsage]  # test seam for the closed-token prune wrapper
     _sweep_privacy_deletes,  # pyright: ignore[reportPrivateUsage]  # privacy retry boundary
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
@@ -2199,6 +2200,100 @@ async def test_sweep_slack_event_dedup_forwards_sessionmaker_and_returns_cleanly
     assert captured_now[0].tzinfo is not None, (
         "wrapper must pass a timezone-aware `now` to the core sweep"
     )
+
+
+@pytest.fixture
+def token_prune_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, datetime]:
+    """Each test starts with the closed-token prune never having run."""
+    state: dict[str, datetime] = {}
+    monkeypatch.setattr("daimon.adapters.scheduler.main._last_github_token_prune", state)
+    return state
+
+
+async def test_github_token_prune_runs_at_most_once_per_ten_minutes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    token_prune_state: dict[str, datetime],
+) -> None:
+    starts = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
+    ran_at: list[datetime] = []
+
+    async def fake_sweep(sm: async_sessionmaker[AsyncSession], *, now: datetime) -> int:
+        assert sm is db_session_factory
+        ran_at.append(now)
+        return 0
+
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_closed_github_issued_tokens",
+        side_effect=fake_sweep,
+    ):
+        # The scheduler ticks every 30 seconds; only the first and the 10-minute mark run.
+        for tick in range(0, 21):
+            await _sweep_github_issued_tokens(
+                db_session_factory, now=starts + timedelta(seconds=30 * tick)
+            )
+        await _sweep_github_issued_tokens(
+            db_session_factory, now=starts + timedelta(minutes=10, seconds=1)
+        )
+
+    assert ran_at == [starts, starts + timedelta(minutes=10)]
+
+
+async def test_github_token_prune_waits_out_the_interval_after_a_database_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    token_prune_state: dict[str, datetime],
+) -> None:
+    starts = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
+    with unittest.mock.patch(
+        "daimon.adapters.scheduler.main.sweep_closed_github_issued_tokens",
+        side_effect=SQLAlchemyError("boom"),
+    ) as sweep:
+        await _sweep_github_issued_tokens(db_session_factory, now=starts)  # must not raise
+        await _sweep_github_issued_tokens(db_session_factory, now=starts + timedelta(seconds=30))
+        assert sweep.call_count == 1, "a failing database is retried per interval, not per tick"
+        await _sweep_github_issued_tokens(db_session_factory, now=starts + timedelta(minutes=10))
+        assert sweep.call_count == 2
+
+
+async def test_github_token_prune_deletes_closed_rows_and_keeps_live_ones(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    token_prune_state: dict[str, datetime],
+) -> None:
+    tenant = await make_tenant(db_session)
+    now = datetime.now(UTC)
+
+    async def insert(status: str, expired_ago: timedelta) -> uuid.UUID:
+        token_id = uuid.uuid4()
+        await db_session.execute(
+            text("""
+            INSERT INTO github_issued_tokens
+                (token_id, tenant_id, agent_id, session_id, installation_id, repo_ids,
+                 permissions, grant_versions, expires_at, status)
+            VALUES (:token_id, :tenant, gen_random_uuid(), 'sesn_prune', 77, ARRAY[1]::bigint[],
+                    '{}'::jsonb, '{}'::jsonb, :expires_at, :status)
+            """),
+            {
+                "token_id": token_id,
+                "tenant": tenant.id,
+                "expires_at": now - expired_ago,
+                "status": status,
+            },
+        )
+        return token_id
+
+    await insert("revoked", timedelta(days=8))
+    await insert("pending", timedelta(hours=2))
+    young_revoked = await insert("revoked", timedelta(days=1))
+    old_delivered = await insert("delivered", timedelta(days=30))
+    await db_session.commit()
+
+    await _sweep_github_issued_tokens(db_session_factory)
+
+    async with db_session_factory() as session:
+        remaining = set(
+            (await session.execute(text("SELECT token_id FROM github_issued_tokens"))).scalars()
+        )
+    assert remaining == {young_revoked, old_delivered}
 
 
 async def test_sweep_retired_turn_card_intents_swallows_sqlalchemy_error(

@@ -72,6 +72,10 @@ on:
       - "packages/core/daimon/core/github_installation_reconcile.py"
       - "packages/core/daimon/core/github_app_auth.py"
       - "packages/core/alembic/versions/0026_github_installation_reconciliation.py"
+      # github_issued_tokens_prune/
+      - "packages/core/daimon/core/stores/github_issued_tokens.py"
+      - "packages/core/daimon/core/github_issued_token_sweep.py"
+      - "packages/core/daimon/core/github_app_session.py"
       - "packages/core/daimon/core/skill_sync/resync_queue.py"
       - "packages/core/daimon/core/stores/github_push_resync.py"
       - "packages/core/daimon/core/skill_sync/resync.py"
@@ -260,6 +264,10 @@ on:
       - "packages/core/daimon/core/github_installation_reconcile.py"
       - "packages/core/daimon/core/github_app_auth.py"
       - "packages/core/alembic/versions/0026_github_installation_reconciliation.py"
+      # github_issued_tokens_prune/
+      - "packages/core/daimon/core/stores/github_issued_tokens.py"
+      - "packages/core/daimon/core/github_issued_token_sweep.py"
+      - "packages/core/daimon/core/github_app_session.py"
       # thread queue / adapter overlap
       - "packages/core/daimon/core/turn/run.py"
       - "packages/core/daimon/core/stores/thread_sessions.py"
