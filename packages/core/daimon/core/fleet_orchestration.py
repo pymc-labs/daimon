@@ -41,6 +41,8 @@ type Control = Literal["kill", "resume"]
 
 log = structlog.get_logger(__name__)
 
+WORKER_PREPARATION_TIMEOUT_S = 30.0
+
 
 def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
     result: dict[str, JsonValue] = {}
@@ -809,7 +811,8 @@ class HostFleetPorts:
                             if claimed is not None:
                                 try:
                                     try:
-                                        prepared = await request.for_worker(parent, resolved)
+                                        async with asyncio.timeout(WORKER_PREPARATION_TIMEOUT_S):
+                                            prepared = await request.for_worker(parent, resolved)
                                     except BaseException:
                                         with suppress(FleetConflict):
                                             await asyncio.shield(

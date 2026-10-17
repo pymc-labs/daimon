@@ -1486,3 +1486,64 @@ async def test_creation_input_counts_only_with_explicit_starting_state(db_sessio
         )
     _, (after,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
     assert after.turns_used == 1 and after.version == counted.version
+
+
+async def test_claim_expires_stale_tenant_work_and_preserves_other_tenants_and_holds(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = db_session_factory
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+    stale = await _run(sm, tenant=tenant)
+    started = await _worker(sm, stale, 0)
+    pending = await _worker(sm, stale, 1)
+    claimed = await fleet.claim_worker(sm, tenant_id=stale.tenant_id, run_id=stale.id, cap=1)
+    assert claimed is not None and claimed.id == started.id
+    other = await _run(sm, key="other")
+    other_worker = await _worker(sm, other, 0)
+    async with sm.begin() as db:
+        await db.execute(
+            text("UPDATE fleet_run SET deadline_at=now()-interval '1 second' WHERE id=:id"),
+            {"id": stale.id},
+        )
+    # A new run of the SAME tenant must not inherit the dead worker's cap slot.
+    fresh = await _run(sm, key="fresh", tenant=tenant)
+    fresh_worker = await _worker(sm, fresh, 0)
+    recovered = await fleet.claim_worker(sm, tenant_id=fresh.tenant_id, run_id=fresh.id, cap=1)
+    assert recovered is not None and recovered.id == fresh_worker.id
+    ended, rows = await fleet.run_status(sm, tenant_id=stale.tenant_id, run_id=stale.id)
+    assert ended.status == "failed"
+    assert {w.id for w in rows} == {started.id, pending.id}
+    assert all(w.status == "failed" and w.error_code == "deadline_expired" for w in rows)
+    assert all(w.result is None and w.reserved_usd == Decimal(0) for w in rows)
+    assert (await fleet.run_status(sm, tenant_id=other.tenant_id, run_id=other.id))[1][
+        0
+    ] == other_worker
+    assert await fleet.sweep_expired(sm) == (0, 0)
+
+
+@pytest.mark.parametrize("state", ["pending", "starting", "running"])
+async def test_deadline_sweep_ends_only_expired_workers_without_settling_money(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    state: str,
+) -> None:
+    sm = db_session_factory
+    run = await _run(sm)
+    worker = await _worker(sm, run, 0)
+    healthy = await _worker(sm, run, 1)
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET status=:state, deadline_at=now()-interval '1 second', reserved_usd=1.5 WHERE id=:id"
+            ),
+            {"state": state, "id": worker.id},
+        )
+    assert await fleet.sweep_expired(sm) == (1, 0)
+    retained, rows = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    done = next(w for w in rows if w.id == worker.id)
+    assert retained == run
+    assert done.status == "failed" and done.error_code == "deadline_expired"
+    assert done.version == worker.version + 1 and done.result is None
+    assert done.reserved_usd == Decimal("1.5")
+    assert next(w for w in rows if w.id == healthy.id) == healthy
+    assert await fleet.sweep_expired(sm) == (0, 0)

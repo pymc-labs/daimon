@@ -3043,3 +3043,22 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     async with db_session_factory() as session:
         assert await get_mcp_token(session, jti=expired_jti) is None
         assert await get_mcp_token(session, jti=recent_jti) is not None
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_fleet_deadline_sweep_uses_store_owner_and_isolates_tick_failures(monkeypatch, fails):
+    from daimon.adapters.scheduler.main import _sweep_fleet_deadlines
+    from daimon.core.stores import fleet
+
+    calls = []
+
+    async def sweep(sessions):
+        calls.append(sessions)
+        if fails:
+            raise RuntimeError("temporary database outage")
+        return (2, 1)
+
+    monkeypatch.setattr(fleet, "sweep_expired", sweep)
+    sessions = object()
+    await _sweep_fleet_deadlines(sessions)
+    assert calls == [sessions]

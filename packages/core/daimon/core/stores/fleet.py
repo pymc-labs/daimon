@@ -292,6 +292,100 @@ async def add_worker(
         return _worker(row)
 
 
+async def sweep_expired(
+    sessionmaker: Source, *, tenant_id: uuid.UUID | None = None
+) -> tuple[int, int]:
+    """End expired work through the state owners, without settling unknown usage.
+
+    Claims share the tenant lock with this sweep. Native termination and money
+    remain their respective owners' responsibility; no result or released hold
+    is inferred from a deadline.
+    """
+    workers_ended = runs_ended = 0
+    async with _transaction(sessionmaker) as session:
+        expired_worker = (
+            select(FleetWorkerRow.id)
+            .where(
+                FleetWorkerRow.run_id == FleetRunRow.id,
+                FleetWorkerRow.tenant_id == FleetRunRow.tenant_id,
+                FleetWorkerRow.status.not_in(TERMINAL),
+                or_(
+                    FleetWorkerRow.deadline_at <= func.now(), FleetRunRow.deadline_at <= func.now()
+                ),
+            )
+            .exists()
+        )
+        due = or_(
+            FleetRunRow.status.in_(tuple(RUN_TRANSITIONS))
+            & (FleetRunRow.deadline_at <= func.now()),
+            expired_worker,
+        )
+        tenants = (
+            [tenant_id]
+            if tenant_id is not None
+            else list(
+                (
+                    await session.scalars(
+                        select(FleetRunRow.tenant_id)
+                        .where(due)
+                        .distinct()
+                        .order_by(FleetRunRow.tenant_id)
+                    )
+                ).all()
+            )
+        )
+        for tenant in tenants:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"fleet:{tenant}"},
+            )
+            runs = (
+                await session.execute(
+                    select(FleetRunRow, (FleetRunRow.deadline_at <= func.now()).label("expired"))
+                    .where(FleetRunRow.tenant_id == tenant, due)
+                    .order_by(FleetRunRow.id)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+            for run, expired in runs:
+                workers = (
+                    await session.scalars(
+                        select(FleetWorkerRow)
+                        .where(
+                            FleetWorkerRow.tenant_id == tenant,
+                            FleetWorkerRow.run_id == run.id,
+                            FleetWorkerRow.status.not_in(TERMINAL),
+                            or_(
+                                FleetWorkerRow.deadline_at <= func.now(),
+                                expired,
+                            ),
+                        )
+                        .order_by(FleetWorkerRow.id)
+                        .with_for_update()
+                    )
+                ).all()
+                for worker in workers:
+                    await finish(
+                        session,
+                        tenant_id=tenant,
+                        worker_id=worker.id,
+                        expected_version=worker.version,
+                        status="failed",
+                        error_code="deadline_expired",
+                    )
+                    workers_ended += 1
+                if expired and run.status in RUN_TRANSITIONS:
+                    await set_run_status(
+                        session,
+                        tenant_id=tenant,
+                        run_id=run.id,
+                        expected_version=run.version,
+                        status="failed",
+                    )
+                    runs_ended += 1
+    return workers_ended, runs_ended
+
+
 async def claim_worker(
     sessionmaker: Source,
     *,
@@ -310,10 +404,7 @@ async def claim_worker(
     advisory lock, so concurrent claims (any process) never exceed `cap`.
     """
     async with _transaction(sessionmaker) as session:
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-            {"key": f"fleet:{tenant_id}"},
-        )
+        await sweep_expired(session, tenant_id=tenant_id)
         active = (
             await session.execute(
                 select(func.count())

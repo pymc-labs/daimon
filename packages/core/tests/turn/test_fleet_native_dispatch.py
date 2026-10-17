@@ -946,3 +946,54 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
         release.set()
         await ports.close()
     assert request.deps.running_turns.count() == 0
+
+
+async def test_wedged_preparation_fails_promptly_and_releases_its_claim(paused_source, monkeypatch):
+    from daimon.core import fleet_orchestration
+
+    worker_root, entered, _, _ = paused_source
+    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+    monkeypatch.setattr(fleet_orchestration, "WORKER_PREPARATION_TIMEOUT_S", 0.5)
+
+    async def preparation(parent):
+        return request
+
+    pool = fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=pool,
+        deps=request.deps,
+    )
+    try:
+        reply = await FleetOrchestrator(ports).spawn(
+            root,
+            await _policy(request),
+            **_spawn_terms(request, root, resolved, "wedged-preparation"),
+        )
+        async with asyncio.timeout(5):
+            await entered.wait()
+            ended = await _settled(ports, root, reply["worker_id"])
+        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        assert ended.binding_id is None and ended.turns_used == 0 and not calls
+        # A second real store claim must succeed through the same size-one pool.
+        _, rows = await fleet.run_status(
+            request.deps.sessionmaker, tenant_id=ended.tenant_id, run_id=ended.run_id
+        )
+        seeded = next(row for row in rows if row.ordinal == 0)
+        assert seeded.status == "starting" and seeded.turns_used == 0 and seeded.binding_id is None
+        pending = await fleet.requeue(
+            request.deps.sessionmaker, tenant_id=seeded.tenant_id, worker=seeded, max_attempts=2
+        )
+        claimed = await pool.claim(
+            request.deps.sessionmaker,
+            tenant_id=pending.tenant_id,
+            run_id=pending.run_id,
+            worker_id=pending.id,
+        )
+        assert claimed is not None
+        pool.release()
+    finally:
+        await ports.close()

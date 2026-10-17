@@ -52,7 +52,7 @@ TERMINAL: Final[frozenset[WorkerStatus]] = frozenset(
 """A worker in one of these never moves again."""
 
 WORKER_TRANSITIONS: Final[Mapping[WorkerStatus, frozenset[WorkerStatus]]] = {
-    "pending": frozenset({"starting", "cancelled"}),
+    "pending": frozenset({"starting", "cancelled", "failed"}),
     # Back to pending only through recovery, for a turn that was never sent.
     "starting": frozenset({"running", "pending", "failed", "cancelled", "timed_out"}),
     "running": frozenset(
