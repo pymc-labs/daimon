@@ -145,6 +145,7 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
         ("memory_read_only", True, "memory_access"),
         ("memory_store_id", "memstore_other", "memory_store"),
         ("vault_id", "vault_other", "vault"),
+        ("is_external", True, "external_caller"),
     ],
 )
 def test_decision_replaces_session_when_one_identity_field_differs(

@@ -148,6 +148,7 @@ async def _recorded_as_gated(
         agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
         account_id=auth.account_id,
         server_urls={server.name: server.url for server in agent.mcp_servers},
+        is_external=recorded.is_external,
     )
     # MA reporting the agent's own tools means it left the overrides out.
     if reported_tools_sha256 not in {

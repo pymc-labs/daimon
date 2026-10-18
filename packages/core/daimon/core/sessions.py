@@ -277,14 +277,19 @@ async def project_session_resources(
     if caller_vault and account_id is None:
         raise ScopeViolation("source-preparation", "caller vault has no authorized account")
     async with session_factory() as session:
-        keys = await agent_files.list_agent_file_revisions(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
+        keys = (
+            ()
+            if is_external
+            else await agent_files.list_agent_file_revisions(
+                session, tenant_id=tenant_id, agent_id=agent_uuid
+            )
         )
         credentials = (
             await credential_store.list_credential_revisions(
                 session, tenant_id=tenant_id, agent_id=agent_uuid
             )
-            if _agent_mcp_mirror_required(
+            if not is_external
+            and _agent_mcp_mirror_required(
                 vault_available=caller_vault,
                 account_id=account_id,
                 tenant_id=tenant_id,
@@ -306,6 +311,7 @@ async def project_session_resources(
             agent_id=agent_uuid,
             account_id=hiding_for,
             server_urls={server.name: server.url for server in agent.mcp_servers},
+            is_external=is_external,
         )
     public_url = (
         str(mcp_settings.public_url)
@@ -585,6 +591,11 @@ async def create_session(
     secrets; otherwise it is omitted entirely. ``resources`` composes
     alongside ``vault_ids`` — it never replaces the vault branch.
 
+    ``is_external`` (a person from another organisation) gets neither: no
+    ``.env`` and no agent-wide MCP token in their vault, and the servers only
+    such a token authenticates are left off their session like another
+    person's OAuth server. Their own sign-ins still reach them.
+
     The same gate (``tenant_id`` + ``agent_uuid`` + ``session_factory``) also
     attaches the agent's per-agent memory store via
     ``ensure_memory_store_and_mount`` (lazily provisioned on first use). This
@@ -795,9 +806,10 @@ async def create_session(
         # stored credentials in on every session create (same shape as the Copilot
         # mirror above) or callers who did not personally attach a server fail the
         # whole turn at MCP init. Not degrade-not-block: see
-        # mirror_credentials_into_vault.
+        # mirror_credentials_into_vault. Never for a person from another
+        # organisation: those servers come off their session instead.
         credential_vault_id = caller_vault_id if app_mode else vault_id
-        if _agent_mcp_mirror_required(
+        if not is_external and _agent_mcp_mirror_required(
             vault_available=credential_vault_id is not None,
             account_id=account_id,
             tenant_id=tenant_id,
@@ -836,12 +848,16 @@ async def create_session(
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
         if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-            mount = await upload_env_and_mount(
-                anthropic,
-                session_factory,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-                exclude_github=app_mode,
+            mount = (
+                None
+                if is_external
+                else await upload_env_and_mount(
+                    anthropic,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    exclude_github=app_mode,
+                )
             )
             if mount is not None:
                 resources.append(mount)
@@ -924,6 +940,7 @@ async def create_session(
                 agent_id=agent_uuid,
                 account_id=hiding_for,
                 server_urls={server.name: server.url for server in agent.mcp_servers},
+                is_external=is_external,
             )
             if hidden:
                 _log.info(
@@ -1250,6 +1267,7 @@ async def create_session(
                         vault_id=vault_id,
                         sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
+                        is_external=is_external,
                     )
                     if app_session_unmapped
                     else None

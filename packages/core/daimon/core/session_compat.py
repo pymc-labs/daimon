@@ -48,6 +48,7 @@ type ChangeReason = Literal[
     "memory_access",
     "personal_memory_store",
     "vault",
+    "external_caller",
     "tools",
     "mcp_servers",
     "env_file",
@@ -191,6 +192,7 @@ def identity_change_reasons(
             "personal_memory_store",
         ),
         (recorded.vault_id != desired.vault_id, "vault"),
+        (recorded.is_external != desired.is_external, "external_caller"),
     )
     return tuple(reason for differs, reason in checks if differs)
 

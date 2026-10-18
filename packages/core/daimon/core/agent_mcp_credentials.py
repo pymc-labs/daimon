@@ -463,13 +463,15 @@ async def resolve_hidden_mcp_server_names(
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
     server_urls: Mapping[str, str],
+    is_external: bool = False,
 ) -> frozenset[str]:
     """The servers to leave off this caller's session, read from the DB.
 
     The OAuth twin of `mirror_credentials_into_vault`: a token stored HERE
     reaches every caller, so the server stays; a grant somebody drove through
     their own browser reaches only them, so it comes off everyone else's
-    session (`mcp_personal_servers` decides which is which).
+    session (`mcp_personal_servers` decides which is which). An `is_external`
+    caller gets no token stored here, so those servers come off theirs too.
 
     `server_urls` is the agent's own `{name: url}`. An agent whose URLs
     nobody in the tenant has signed in to costs one indexed read and stops
@@ -481,7 +483,7 @@ async def resolve_hidden_mcp_server_names(
         grants = await flows_store.list_completed_grants(
             session, tenant_id=tenant_id, server_urls=server_urls.values()
         )
-        if not grants:
+        if not grants and not is_external:
             return frozenset()
         credentials = await cred_store.list_credential_revisions(
             session, tenant_id=tenant_id, agent_id=agent_id
@@ -492,4 +494,5 @@ async def resolve_hidden_mcp_server_names(
         account_id=account_id,
         shared_server_urls=[url for _, url, _ in credentials],
         server_urls=server_urls,
+        is_external=is_external,
     )

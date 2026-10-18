@@ -988,17 +988,25 @@ async def _prepare_session_for_turn_locked(
         tightening_memory = admission.memory_read_only and (
             recorded is None or not recorded.memory_read_only
         )
+        # The old session may hold the agent's keys and tokens, mounted or
+        # copied into its workspace: never run it, or carry its work, for a
+        # person from another organisation.
+        stripping_credentials = (
+            isinstance(decision, ReplaceSession) and "external_caller" in decision.reasons
+        )
         if (
             isinstance(decision, ReplaceSession)
             and (
                 "agent_identity" in decision.reasons
                 or "budget_channel" in decision.reasons
                 or tightening_memory
+                or stripping_credentials
             )
             and turn_is_active(row, now=moment)
         ):
-            # A changed billing channel, responder, or memory restriction
-            # cannot run against the old session while replacement is deferred.
+            # A changed billing channel, responder, memory restriction or a
+            # caller from another organisation cannot run against the old
+            # session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),
@@ -1073,8 +1081,11 @@ async def _prepare_session_for_turn_locked(
                 reasons=decision.reasons,
                 fresh_start=fresh_start,
                 # A checkpoint executes the old session. Never run it with
-                # a writable mount after the origin has become read-only.
-                transfer=None if tightening_memory or not carry else transfer,
+                # a writable mount after the origin has become read-only, or
+                # with the agent's keys for an external caller.
+                transfer=(
+                    None if tightening_memory or stripping_credentials or not carry else transfer
+                ),
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,

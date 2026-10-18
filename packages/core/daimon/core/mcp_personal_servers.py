@@ -23,6 +23,9 @@ import here would close a cycle. The grant rows are read by
 A server whose credential is agent-wide (`agent_mcp_credentials`, mirrored
 into every caller's vault at session create) is never personal, even when
 somebody also signed in to it personally: everyone can authenticate it.
+Everyone but a person from another organisation: the organisation's token is
+never mirrored into their vault, so for them such a server is hidden like a
+sign-in server until they sign in to it on this agent themselves.
 
 Otherwise a URL is a sign-in server as soon as anyone in the tenant has
 signed in to it, on any agent: whether a server wants a sign-in is a
@@ -67,6 +70,7 @@ def hidden_mcp_server_names(
     account_id: uuid.UUID,
     shared_server_urls: Iterable[str],
     server_urls: Mapping[str, str],
+    is_external: bool = False,
 ) -> frozenset[str]:
     """Of `server_urls`, the ones people sign in to that this caller has not
     signed in to on this agent.
@@ -75,7 +79,8 @@ def hidden_mcp_server_names(
     tenant's, so a sign-in on any agent marks the URL as one that needs a
     sign-in, and only a grant by this caller on this agent satisfies it — see
     the module docstring for why. Trailing slashes are ignored, as everywhere
-    a server URL is compared.
+    a server URL is compared. For an `is_external` caller the agent-wide
+    servers count as sign-in servers too.
     """
     signed_in: set[str] = set()
     mine: set[str] = set()
@@ -84,7 +89,8 @@ def hidden_mcp_server_names(
         signed_in.add(grant_url)
         if grant.agent_id == agent_id and grant.account_id == account_id:
             mine.add(grant_url)
-    hidden_urls = signed_in - mine - {canonical_mcp_url(url) for url in shared_server_urls}
+    shared = {canonical_mcp_url(url) for url in shared_server_urls}
+    hidden_urls = (signed_in | shared) - mine if is_external else signed_in - mine - shared
     return frozenset(
         name for name, url in server_urls.items() if canonical_mcp_url(url) in hidden_urls
     )

@@ -163,6 +163,34 @@ async def test_an_agent_wide_token_keeps_the_server_visible_to_everyone(
     ), "a token every caller's vault gets is not a personal connection"
 
 
+async def test_an_agent_wide_token_hides_the_server_from_an_external_caller(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """With no sign-in anywhere, the shared token is still read for a person
+    from another organisation: it never reaches their vault."""
+    tenant = await make_tenant(db_session)
+    guest = await make_account(db_session, tenant=tenant)
+    agent_id = uuid.uuid4()
+    await db_session.commit()
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        mcp_server_url=_SERVER_URL,
+        plaintext_token="tok_shared",
+    )
+
+    assert await resolve_hidden_mcp_server_names(
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        account_id=guest.id,
+        server_urls={"docs": _SERVER_URL},
+        is_external=True,
+    ) == frozenset({"docs"}), "an external caller must not be handed the organisation's server"
+
+
 async def test_a_fork_of_the_agent_hides_the_copied_server_from_the_person_who_signed_in(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
