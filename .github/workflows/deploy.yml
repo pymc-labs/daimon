@@ -168,6 +168,7 @@ jobs:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build + push daimon image
+        id: build_daimon
         if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -180,6 +181,7 @@ jobs:
           cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
+        id: build_notebook
         if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -192,6 +194,7 @@ jobs:
           cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
+        id: build_report
         if: steps.images.outputs.prebuilt != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -515,6 +518,7 @@ jobs:
           date +%s > "$RUNNER_TEMP/workers-refreshed-at"
 
       - name: Wait for notebook-host VM refresh
+        id: notebook_wait
         # Also after a failed worker refresh, so the notebook-host outcome is
         # always on record; not after a cancel, which ends the job anyway.
         if: ${{ !cancelled() && steps.notebook_refresh.outcome == 'success' }}
@@ -530,6 +534,41 @@ jobs:
             exit 1
           fi
           exit "$(cat "$RUNNER_TEMP/notebook-refresh.rc")"
+
+      - name: Record healthy notebook-host images
+        if: ${{ !cancelled() && steps.notebook_wait.outcome == 'success' }}
+        run: |
+          # Record only a healthy deploy so a failed refresh keeps the previous digests.
+          NOTEBOOK_IMAGE="${{ steps.images.outputs.notebook }}"
+          REPORT_IMAGE="${{ steps.images.outputs.report }}"
+          if [[ "$NOTEBOOK_IMAGE" != *@sha256:* ]]; then
+            NOTEBOOK_IMAGE="${NOTEBOOK_IMAGE%:*}@${{ steps.build_notebook.outputs.digest }}"
+          fi
+          if [[ "$REPORT_IMAGE" != *@sha256:* ]]; then
+            REPORT_IMAGE="${REPORT_IMAGE%:*}@${{ steps.build_report.outputs.digest }}"
+          fi
+          for IMAGE in "$NOTEBOOK_IMAGE" "$REPORT_IMAGE"; do
+            if [[ ! "$IMAGE" =~ ^[a-z0-9][a-z0-9.-]*/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]; then
+              echo "Invalid notebook-host image digest ref: $IMAGE" >&2
+              exit 1
+            fi
+          done
+          # The refresh gates report-host only; notebook-host must answer too
+          # before its digest becomes the boot image.
+          for i in $(seq 1 12); do
+            if curl -sf --max-time 5 "https://$NOTEBOOK_DOMAIN/health" >/dev/null; then
+              break
+            fi
+            if [ "$i" = "12" ]; then
+              gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-notebook \
+                --zone "$ZONE" --metadata "report-image=$REPORT_IMAGE"
+              echo "notebook-host not healthy after 60s; kept its previous boot digest" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-notebook \
+            --zone "$ZONE" --metadata "notebook-image=$NOTEBOOK_IMAGE,report-image=$REPORT_IMAGE"
 
       - name: Drain legacy MCP turns before first verifier cutover
         id: mcp_cutover
@@ -639,6 +678,20 @@ jobs:
             sleep 60
             verify
           fi
+
+      - name: Record verified worker image
+        run: |
+          # Only after every gate above passed: a failed deploy keeps the previous boot digest.
+          IMAGE="${{ steps.images.outputs.daimon }}"
+          if [[ "$IMAGE" != *@sha256:* ]]; then
+            IMAGE="${IMAGE%:*}@${{ steps.build_daimon.outputs.digest }}"
+          fi
+          if [[ ! "$IMAGE" =~ ^[a-z0-9][a-z0-9.-]*/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid daimon image digest ref: $IMAGE" >&2
+            exit 1
+          fi
+          gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-workers \
+            --zone "$ZONE" --metadata "daimon-image=$IMAGE"
 
       - name: Mark tested staging images promotable
         if: steps.images.outputs.prebuilt == 'true'

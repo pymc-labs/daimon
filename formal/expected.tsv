@@ -390,3 +390,11 @@ tool_rules	ToolRules	ToolRulesSnapshot	violates:RunAuthorized	37	-	unsafe: rules
 tool_rules	ToolRules	ToolRulesAnyClicker	violates:RunAuthorized	61	-	unsafe: a non-admin's Always allow runs the call
 tool_rules	ToolRules	ToolRulesBlindUpsert	violates:NoResurrection	553	-	unsafe: a save from before a clear restores the rule
 tool_rules	ToolRules	ToolRulesSaveIfLost	violates:SaveFollowsSettlement	534	-	unsafe: a click that lost to expiry or Deny still saves a rule
+# VM boot-image metadata after gated deploy
+vm_boot_image	Spec	Safe	clean	141590	-	verified keys, boot selection, conditional latest boot, fair deploy termination
+vm_boot_image	Spec	EarlyWorker	violates:KeyVerified	75	-	unsafe worker record during refresh precedes health smoke and defaults
+vm_boot_image	Spec	EarlyNotebook	violates:KeyVerified	15509	-	unsafe notebook record before notebook health
+vm_boot_image	Spec	TrustInvalid	violates:BootAuthorized	181	-	unsafe startup accepts invalid metadata response
+vm_boot_image	Spec	StaleDefault	violates:NoStaleBoot	233	-	stale rendered default boots after metadata lookup failure
+vm_boot_image	Spec	MidDeploy	violates:NoMidDeployOld	102405	-	reboot after worker gates before record uses previous verified key
+vm_boot_image	Spec	UnverifiedDefault	violates:NoUnverifiedBoot	306	-	operator rewrite of rendered default can boot unverified image when key absent
