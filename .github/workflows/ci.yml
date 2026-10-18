@@ -131,6 +131,61 @@ jobs:
           path: core-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
+  pytest-core-n4:
+    name: pytest-core-n4 (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Credential equivalence tests import the fixed base commit.
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - name: Create daimon_test database
+        env:
+          PGPASSWORD: daimon
+        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+      - name: alembic upgrade (test DB)
+        env:
+          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+        run: uv run alembic upgrade head
+      - name: pytest (core + cli + scheduler + testing + integration)
+        run: >-
+          uv run pytest qa/live/tests packages/core packages/adapters/cli
+          packages/adapters/scheduler packages/testing tests/integration
+          tests/test_*.py tests/performance -n 4
+          -p daimon.testing.ci_shard --ci-shard-index=${{ matrix.shard }}
+          --ci-shard-count=4 --durations=20
+          --junitxml=core-n4-shard-${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-n4-shard-${{ matrix.shard }}-junit
+          path: core-n4-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+
   pytest-mcp:
     name: pytest-mcp (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
@@ -323,8 +378,18 @@ jobs:
         run: uv run pytest packages/adapters/teams -n auto
 
   pytest-parity:
+    name: pytest-parity (${{ matrix.variant }} ${{ matrix.shard }}/${{ matrix.count }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: baseline, shard: 0, count: 1, workers: auto }
+          - { variant: split-n2, shard: 0, count: 2, workers: 2 }
+          - { variant: split-n2, shard: 1, count: 2, workers: 2 }
+          - { variant: split-n4, shard: 0, count: 2, workers: 4 }
+          - { variant: split-n4, shard: 1, count: 2, workers: 4 }
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -355,8 +420,20 @@ jobs:
         env:
           DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
         run: uv run alembic upgrade head
+      - name: runner cpus
+        run: nproc && python3 -c "import os; print(os.cpu_count())"
       - name: pytest (parity)
-        run: uv run pytest tests/parity -n auto
+        run: >-
+          uv run pytest tests/parity -n ${{ matrix.workers }}
+          -p daimon.testing.ci_shard --ci-shard-index=${{ matrix.shard }}
+          --ci-shard-count=${{ matrix.count }} --durations=0
+          --junitxml=parity-${{ matrix.variant }}-${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: parity-${{ matrix.variant }}-${{ matrix.shard }}-junit
+          path: parity-${{ matrix.variant }}-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
 
   pytest-notebook-host:
     runs-on: ubuntu-latest
