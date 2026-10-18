@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **People from another organisation get none of the agent's credentials.**
+  A Teams external participant or guest answered in a `readers: own`
+  channel used to get the agent's keys as a mounted `.env` and its shared
+  MCP tokens in their vault, though their tool calls were already
+  restricted. Their sessions now carry neither: a server only a shared
+  token reaches is left off until they sign in to it themselves, and their
+  own sign-ins still work. A member's session is replaced, not reused, the
+  next time such a person is answered in it, without carrying its work.
+
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.

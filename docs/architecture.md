@@ -226,6 +226,9 @@ config). The order is load-bearing and documented as such in the module:
    that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
    and keeps the stored role. An external account's stored role is always
    `user`, and it administers no channel. `reauthorize` checks it again.
+   Their sessions mount no agent keys and get no agent-wide MCP token
+   (`SessionSnapshot.is_external`, identity, so a member's session is
+   replaced for them, never reused or carried over).
 5. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are

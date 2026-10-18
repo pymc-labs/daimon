@@ -121,7 +121,11 @@ judged for a followed thread. Their turns run as a member (never an admin), comm
 conversation's tools: reading, searching and posting in it, files into it,
 their own sessions and timers, and signing in to an MCP server the agent
 already has. Anything else, including tools added later, returns a tool
-error the agent relays. Files are saved in a shared channel this
+error the agent relays. Their sessions get none of the agent's keys (no
+`.env`) and none of its shared MCP tokens: a server only such a token
+reaches is left off until they sign in to it themselves. A session made for
+a member is replaced, not reused, when they are next answered in it, and
+none of its work carries over. Files are saved in a shared channel this
 organisation hosts once an admin turned them on there (below); one hosted by
 another organisation keeps its files on that organisation's site.
 
