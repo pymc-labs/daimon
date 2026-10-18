@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import structlog
+from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.services._usage import MediaUsage
@@ -24,12 +25,14 @@ from daimon.adapters.mcp.services.youtube import (
 )
 from daimon.adapters.mcp.services.youtube import YouTubeService, YouTubeTranscriptError
 from daimon.adapters.mcp.tools._ctx import (
+    _AdminAttestation,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.config import Settings
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.media.youtube_url import extract_video_id
 from daimon.core.pricing import MODEL_PRICING
@@ -116,6 +119,8 @@ def register_media_tools(
     *,
     gemini_client: genai.Client,
     sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    fernet: MultiFernet | None,
     billing_config: BillingConfig | None,
     markup: Decimal,
 ) -> None:
@@ -124,6 +129,8 @@ def register_media_tools(
         mcp,
         youtube_service=YouTubeService(client=gemini_client),
         sessionmaker=sessionmaker,
+        settings=settings,
+        fernet=fernet,
         billing_config=billing_config,
         markup=markup,
     )
@@ -134,6 +141,8 @@ def _register_youtube(
     *,
     youtube_service: YouTubeService,
     sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    fernet: MultiFernet | None,
     billing_config: BillingConfig | None,
     markup: Decimal,
 ) -> None:
@@ -177,6 +186,9 @@ def _register_youtube(
             sessionmaker=sessionmaker,
             billing_config=billing_config,
             tool_name="fetch_youtube_transcript",
+            settings=settings,
+            fernet=fernet,
+            admin_attestation=_AdminAttestation(),
         )
         channel_id = await _media_budget_channel(
             auth,

@@ -79,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owners. Guest owners no longer count for channel-admin team grants
   (`role_ids`) either.
 
+- **Admin exemptions in MCP turns follow live admin status.** The hub's
+  admin exemption from agent pins, and the admin exemption from the
+  workspace's allowed-invoker list, now apply only if Discord, Slack, or
+  Teams confirms the person is an admin at the time of the call. Someone
+  the platform no longer treats as admin is held like any member. While the
+  admin check is unreachable, a stored admin who relies on the exemption is
+  refused on pinned or allowlisted paths (other requests are unaffected).
+
 - **Agents no longer narrate file delivery.** The file guidance tells the
   agent to say what it made and name each file, and to explain where files
   go only when asked, so answers stop saying files "should be" in the Files

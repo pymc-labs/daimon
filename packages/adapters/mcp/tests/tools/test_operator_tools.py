@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 from unittest.mock import MagicMock
 
 import pydantic_core
@@ -454,7 +455,14 @@ async def test_admit_bills_an_operator_token(
 ) -> None:
     operator = await _verified_operator_identity(sessionmaker)
     with pytest.raises(ToolError, match="credit is depleted"):
-        await _admit(operator, sessionmaker=sessionmaker, billing_config=None, tool_name="ask")
+        await _admit(
+            operator,
+            sessionmaker=sessionmaker,
+            billing_config=None,
+            tool_name="ask",
+            settings=cast(Settings, object()),
+            fernet=None,
+        )
 
 
 async def test_tenant_summary_lists_configured_and_budgeted_channels(

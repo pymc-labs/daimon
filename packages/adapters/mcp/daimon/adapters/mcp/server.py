@@ -566,6 +566,8 @@ def create_mcp_app(
             mcp,
             gemini_client=gemini_client,
             sessionmaker=effective_sessionmaker,
+            settings=effective_settings,
+            fernet=fernet,
             billing_config=effective_billing_config,
             markup=effective_settings.billing.markup,
         )

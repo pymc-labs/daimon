@@ -79,6 +79,7 @@ from daimon.adapters.mcp.resource_ports import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
+    _AdminAttestation,  # pyright: ignore[reportPrivateUsage]
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
@@ -1249,12 +1250,20 @@ def register_agent_chat_tools(
     async def pin_names(auth: AuthIdentity) -> tuple[str | None, ...]:
         return agent_pin_names(await _resolve_ma_agent(runtime, auth))
 
-    def recheck_for(auth: AuthIdentity, tool_name: str) -> Callable[[], Awaitable[None]]:
+    def recheck_for(
+        auth: AuthIdentity, tool_name: str, admin_attestation: _AdminAttestation
+    ) -> Callable[[], Awaitable[None]]:
         async def names() -> tuple[str | None, ...]:
             return await pin_names(auth)
 
         return _admission_recheck(
-            auth, sessionmaker=runtime.session_factory, tool_name=tool_name, agent_names=names
+            auth,
+            sessionmaker=runtime.session_factory,
+            tool_name=tool_name,
+            agent_names=names,
+            settings=runtime.settings,
+            fernet=runtime.fernet,
+            admin_attestation=admin_attestation,
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1304,15 +1313,23 @@ def register_agent_chat_tools(
         with the message 'bundle expired; re-upload' — that one specifically
         means push the archive again.
         """
+        admin_attestation = _AdminAttestation()
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name="start_turn",
             agent_names=pin_names,
+            settings=runtime.settings,
+            fernet=runtime.fernet,
+            admin_attestation=admin_attestation,
         )
         return await _start_turn_impl(
-            runtime, auth, message, bundle, recheck=recheck_for(auth, "start_turn")
+            runtime,
+            auth,
+            message,
+            bundle,
+            recheck=recheck_for(auth, "start_turn", admin_attestation),
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1326,12 +1343,16 @@ def register_agent_chat_tools(
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
         """
+        admin_attestation = _AdminAttestation()
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name="ask",
             agent_names=pin_names,
+            settings=runtime.settings,
+            fernet=runtime.fernet,
+            admin_attestation=admin_attestation,
         )
         return _ask_tool_result(  # type: ignore[return-value]
             await _ask_impl(
@@ -1339,7 +1360,7 @@ def register_agent_chat_tools(
                 auth,
                 message,
                 handle=handle,
-                recheck=recheck_for(auth, "ask"),
+                recheck=recheck_for(auth, "ask", admin_attestation),
                 on_read=_settle_when_finished(runtime),
             )
         )
@@ -1356,15 +1377,23 @@ def register_agent_chat_tools(
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
         """
+        admin_attestation = _AdminAttestation()
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
             tool_name="continue_turn",
             agent_names=pin_names,
+            settings=runtime.settings,
+            fernet=runtime.fernet,
+            admin_attestation=admin_attestation,
         )
         return await _continue_turn_impl(
-            runtime, auth, handle, message, recheck=recheck_for(auth, "continue_turn")
+            runtime,
+            auth,
+            handle,
+            message,
+            recheck=recheck_for(auth, "continue_turn", admin_attestation),
         )
 
     @mcp.tool(tags={"agent-chat"}, name="get_my_session")  # pyright: ignore[reportArgumentType]

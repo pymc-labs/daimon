@@ -42,6 +42,7 @@ from daimon.adapters.mcp.hub.identity import (
 from daimon.adapters.mcp.resource_ports import mcp_scope, walk_sessions
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
+    _AdminAttestation,  # pyright: ignore[reportPrivateUsage]
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _admit,  # pyright: ignore[reportPrivateUsage]
 )
@@ -291,6 +292,7 @@ def register_hub_tools(
             return agent_pin_names(agent)
 
         hub_exempt = subject.is_admin
+        admin_attestation = _AdminAttestation()
 
         admitted = await _admit(
             auth,
@@ -299,6 +301,9 @@ def register_hub_tools(
             tool_name=tool_name,
             agent_names=names,
             pin_exempt=hub_exempt,
+            settings=runtime.settings,
+            fernet=runtime.fernet,
+            admin_attestation=admin_attestation,
         )
         recheck = _admission_recheck(
             admitted,
@@ -306,6 +311,9 @@ def register_hub_tools(
             tool_name=tool_name,
             agent_names=names,
             pin_exempt=hub_exempt,
+            settings=runtime.settings,
+            fernet=runtime.fernet,
+            admin_attestation=admin_attestation,
         )
         return admitted, subject, recheck
 

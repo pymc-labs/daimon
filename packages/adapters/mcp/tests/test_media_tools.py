@@ -92,6 +92,8 @@ def _register(mcp: FastMCP, tmp_path: Path) -> None:
         mcp,
         gemini_client=cast(Any, _NoopGeminiClient()),
         sessionmaker=cast(Any, MagicMock()),
+        settings=cast(Settings, object()),
+        fernet=None,
         billing_config=None,
         markup=Decimal("1.0"),
     )
@@ -289,6 +291,8 @@ async def _registered_billing_mcp(
         mcp,
         gemini_client=make_stub_gemini(handler),
         sessionmaker=sessionmaker,
+        settings=cast(Settings, object()),
+        fernet=None,
         billing_config=None,
         markup=markup,
     )
@@ -318,6 +322,8 @@ async def test_fetch_youtube_transcript_returns_the_transcript_in_the_untrusted_
         mcp,
         gemini_client=make_stub_gemini(lambda _request: _transcript_response(spoken)),
         sessionmaker=cast(Any, MagicMock()),
+        settings=cast(Settings, object()),
+        fernet=None,
         billing_config=None,
         markup=Decimal("1.0"),
     )

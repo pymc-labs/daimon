@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import structlog
+from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
+from daimon.adapters.mcp.oauth_github import (
+    _attest_native_admin,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.config import Settings
+from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.permissions import agent_permissions, any_agent_rules, any_own_readers
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.accounts import get_account
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
@@ -28,6 +37,11 @@ log = structlog.get_logger()
 
 # How MCP refusals name the tenant, matching the invoker allowlist refusal below.
 _REFUSAL_NOUNS = RefusalNouns(scope="workspace", admin="a workspace admin", billing="/billing")
+
+
+@dataclass
+class _AdminAttestation:
+    result: bool | None = None
 
 
 async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFunction]
@@ -85,6 +99,9 @@ async def _policy_gate(
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
     pin_exempt: bool,
+    settings: Settings,
+    fernet: MultiFernet | None,
+    admin_attestation: _AdminAttestation | None = None,
 ) -> str | None:
     """The access-policy half of ``_admit``: the agent pin, then the invoker allowlist.
 
@@ -97,29 +114,42 @@ async def _policy_gate(
     def refused(reason: TerminationReason) -> None:
         _refused(sessionmaker, auth, tool_name, reason)
 
+    if admin_attestation is None:
+        admin_attestation = _AdminAttestation()
+
+    async def live_admin() -> bool:
+        if (
+            account is None
+            or account.is_external
+            or auth.is_external
+            or account.tenant_id != auth.tenant_id
+            or account.platform != auth.platform
+            or account.platform_user_id != auth.platform_user_id
+        ):
+            return False
+        if admin_attestation.result is None:
+            admin_attestation.result = False
+            if account.platform != "slack" or fernet is not None:
+                with suppress(AdminAttestationUnavailable):
+                    admin_attestation.result = await _attest_native_admin(
+                        requester=account,
+                        settings=settings,
+                        sessionmaker=sessionmaker,
+                        fernet=cast(MultiFernet, fernet),
+                    )
+        return admin_attestation.result
+
     try:
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-            account = await get_account(session, auth.account_id)
+            account = await get_account_with_tenant(session, account_id=auth.account_id)
     except AccessPolicyUnreadable as exc:
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
 
-    # The hub admin exemption needs no agent lookup (`authorize` allows it
-    # before reading names), so skip the lookup for it unless the budget needs
-    # it (below). The stored role is read again here, so a re-check also sees
-    # a demotion saved meanwhile.
-    hub_admin = (
-        pin_exempt
-        and auth.platform_user_id is not None
-        and account is not None
-        and account.role is Role.ADMIN
-    )
     names: tuple[str | None, ...] = ()
     gated = any_agent_rules(policy) or any_own_readers(policy)
-    # An isolated channel's own agent is charged to that channel, so the
-    # names are read for a hub admin too while anything is isolated.
-    if agent_names is not None and gated and (not hub_admin or any_own_readers(policy)):
+    if agent_names is not None and gated:
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.
@@ -127,16 +157,10 @@ async def _policy_gate(
         try:
             async with sessionmaker() as session:
                 policy = await load_access_policy(session, tenant_id=auth.tenant_id)
-                account = await get_account(session, auth.account_id)
+                account = await get_account_with_tenant(session, account_id=auth.account_id)
         except AccessPolicyUnreadable as exc:
             refused(TerminationReason.ADMISSION_DENIED)
             raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
-        hub_admin = (
-            pin_exempt
-            and auth.platform_user_id is not None
-            and account is not None
-            and account.role is Role.ADMIN
-        )
         gated = any_agent_rules(policy) or any_own_readers(policy)
     decision = (
         authorize(
@@ -156,10 +180,16 @@ async def _policy_gate(
             agent=AgentRef.of(*names),
             place=mcp_place(auth),
         )
-        if agent_names is not None and gated and not hub_admin
+        if agent_names is not None and gated
         else None
     )
-    if decision is not None and not decision:
+    hub_admin = (
+        pin_exempt
+        and auth.platform_user_id is not None
+        and account is not None
+        and account.role is Role.ADMIN
+    )
+    if decision is not None and not decision and not (hub_admin and await live_admin()):
         record_authz_denial(Action.RUN_AGENT, decision.reason)
         log.info(
             "mcp.admission_denied",
@@ -183,12 +213,19 @@ async def _policy_gate(
     owner = agent_permissions(policy, names).home if names else None
     if auth.platform_user_id is None:
         return owner
-    is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
     start = authorize(
         policy,
-        subject=mcp_subject(auth, is_admin=is_admin),
+        subject=mcp_subject(auth, is_admin=False),
         action=Action.START_TURN,
     )
+    if not start and (auth.is_admin or (account is not None and account.role is Role.ADMIN)):
+        admin_start = authorize(
+            policy,
+            subject=mcp_subject(auth, is_admin=True),
+            action=Action.START_TURN,
+        )
+        if admin_start and await live_admin():
+            start = admin_start
     if not start:
         record_authz_denial(Action.START_TURN, start.reason)
         log.info(
@@ -212,7 +249,10 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
+    settings: Settings,
+    fernet: MultiFernet | None,
     pin_exempt: bool = False,
+    admin_attestation: _AdminAttestation | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """The policy decision of ``_admit`` again, for the moment a turn acts.
 
@@ -223,6 +263,8 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
     each create and send (a resumed handle included). Billing is not
     re-checked: it was charged against at admission.
     """
+    if admin_attestation is None:
+        admin_attestation = _AdminAttestation()
 
     async def recheck() -> None:
         await _policy_gate(
@@ -231,6 +273,9 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
             tool_name=tool_name,
             agent_names=agent_names,
             pin_exempt=pin_exempt,
+            settings=settings,
+            fernet=fernet,
+            admin_attestation=admin_attestation,
         )
 
     return recheck
@@ -242,8 +287,11 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
+    settings: Settings,
+    fernet: MultiFernet | None,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None = None,
     pin_exempt: bool = False,
+    admin_attestation: _AdminAttestation | None = None,
 ) -> AuthIdentity:
     """Balance and cap gate for an already-resolved identity.
 
@@ -257,9 +305,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       a fallback that bills this path.
       It skips billing only: when ``agent_names`` is given its turn is still
       held to an agent pin (below), with no admin exemption.
-    - Otherwise checks the tenant's invoker allowlist first, exempting an
-      account whose stored role is admin (the hub pins ``is_admin=False``, so
-      the stored role is the only admin signal every caller has). A refusal,
+    - Otherwise checks the tenant's invoker allowlist first. A stored admin
+      exemption needs live platform attestation if the member check denies. A refusal,
       or a policy that can't be read, raises a ``TERMINAL ERROR:`` ``ToolError``.
     - Then, when ``agent_names`` is given and the tenant pins any agent,
       refuses a turn on a pinned agent outside its pin. An MCP turn has no
@@ -269,9 +316,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
       admin exemption. Only the hub passes ``pin_exempt``, for a caller
-      whose stored role is admin (`_session_access.load_hub_subject`;
-      refreshed by the person's next platform turn); its reply reaches only
-      them.
+      whose stored role is admin (`_session_access.load_hub_subject`); its
+      reply reaches only them, after live attestation if the pin would deny.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``, then the channel
@@ -294,6 +340,9 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
         tool_name=tool_name,
         agent_names=agent_names,
         pin_exempt=pin_exempt,
+        settings=settings,
+        fernet=fernet,
+        admin_attestation=admin_attestation,
     )
     if auth.platform_user_id is None:
         return auth
@@ -358,7 +407,10 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
     sessionmaker: async_sessionmaker[AsyncSession],
     billing_config: BillingConfig | None,
     tool_name: str,
+    settings: Settings,
+    fernet: MultiFernet | None,
     agent_names: Callable[[AuthIdentity], Awaitable[tuple[str | None, ...]]] | None = None,
+    admin_attestation: _AdminAttestation | None = None,
 ) -> AuthIdentity:
     """Shared admission gate for the billed media and agent-chat turn tools. See ``_admit``."""
     auth = await _auth(ctx)
@@ -373,4 +425,7 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
         billing_config=billing_config,
         tool_name=tool_name,
         agent_names=None if agent_names is None else names,
+        settings=settings,
+        fernet=fernet,
+        admin_attestation=admin_attestation,
     )
