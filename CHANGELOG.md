@@ -149,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as everyone in a Discord server already is. Group chats are answered
   whoever is in them, and a guest owner of the admin team is an admin. Teams
   still opens no 1:1 chat across organisations, so one naming another tenant
-  is refused. `DAIMON_TEAMS__RESTRICT_GUESTS`,
+  is refused, and a command answered there tells them so instead of pointing
+  them to it. `DAIMON_TEAMS__RESTRICT_GUESTS`,
   `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` and `daimon tenants
   access-policy --add-member-guest` are gone. Slack Connect is unchanged.
 

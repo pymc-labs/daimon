@@ -17,7 +17,12 @@ from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams import reactions
 from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
-from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
+from daimon.adapters.teams.commands import (
+    ANSWERED_IN_CHAT,
+    CHANNEL_POINTER,
+    NO_CHAT_ACROSS_ORGS,
+    fresh_start,
+)
 from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
@@ -553,6 +558,30 @@ async def test_a_channel_command_is_answered_in_the_senders_1_1_chat(
         assert (moved.kind, moved.conversation_id, moved.team_id) == ("dm", "a:direct", None)
     else:
         assert reply.text == CHANNEL_POINTER.format(name="memory") and seen == []
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_channel_command_from_another_organisation_is_not_sent_to_a_1_1_chat(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender, direct = FakeSender(), _Direct()
+    run = AsyncMock()
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={"support": run},
+        bot_token=bot_token,
+        direct=direct,
+    )
+    inbound = dataclasses.replace(
+        make_inbound("support", conversation=THREAD_ID, kind="channel"),
+        channel_id=CHANNEL_ID,
+        is_foreign=True,
+    )
+    await teams._handle(inbound)
+    [(_, reply, _)] = sender.sent
+    assert reply.text == NO_CHAT_ACROSS_ORGS.format(name="support"), "no pointer they can't use"
+    assert direct.looked_up == [] and run.await_count == 0, "no 1:1 chat is attempted"
 
 
 async def _outcomes(db_factory: async_sessionmaker[AsyncSession]) -> list[OutcomeRecord]:

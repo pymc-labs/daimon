@@ -23,6 +23,9 @@ from microsoft_teams.cards import AdaptiveCard
 
 CHANNEL_POINTER = "Commands work in our 1:1 chat. Open a chat with me and send `{name}` there."
 ANSWERED_IN_CHAT = "I've answered `{name}` in our 1:1 chat."
+NO_CHAT_ACROSS_ORGS = (
+    "`{name}` needs our 1:1 chat, which Teams doesn't open with people from another organisation."
+)
 NEW_IN_CHANNEL = "Each post is its own conversation: start a new post to begin afresh."
 
 

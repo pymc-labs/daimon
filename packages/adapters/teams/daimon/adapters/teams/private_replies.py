@@ -25,6 +25,7 @@ from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
     CHANNEL_POINTER,
     NEW_IN_CHANNEL,
+    NO_CHAT_ACROSS_ORGS,
     CommandContext,
     CommandHandler,
     parse_command,
@@ -215,6 +216,9 @@ class PrivateReplies:
                     await self.tell_sender(inbound, UNSHOWN.format(name=f"{name} {args}"))
                     return
                 # Otherwise nothing shown yet: answered in full in the 1:1 chat.
+        if inbound.is_foreign:
+            await self.tell_sender(inbound, NO_CHAT_ACROSS_ORGS.format(name=name))
+            return
         chat = await self._direct_chat(inbound)
         pointer = ANSWERED_IN_CHAT if chat else CHANNEL_POINTER
         if chat is None:

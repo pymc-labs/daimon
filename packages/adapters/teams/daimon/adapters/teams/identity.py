@@ -101,7 +101,9 @@ class TeamsInbound:
     `sender_id` is the sender's Bot Framework id (`29:…`), which a reply only
     they see is addressed to; Graph-read messages have none. `is_targeted`
     marks a channel message only the bot sees (a slash command, say): it is
-    answered privately and never enters the thread's session.
+    answered privately and never enters the thread's session. `is_foreign`
+    marks a sender from another organisation (`foreign_tenant`): Teams opens no
+    1:1 chat with them.
     """
 
     kind: Literal["dm", "channel", "group"]
@@ -128,6 +130,7 @@ class TeamsInbound:
     from_form: bool = False
     sender_id: str | None = None
     is_targeted: bool = False
+    is_foreign: bool = False
 
     @property
     def thread_id(self) -> str:
@@ -402,6 +405,7 @@ def parse_inbound(
         team_name=team.name if team is not None else None,
         sender_id=activity.from_.id or None,
         is_targeted=targeted,
+        is_foreign=home is not None,
     )
     return _admitted(inbound, addressed=addressed)
 
