@@ -209,7 +209,8 @@ async def native_port(
             ),
             key="session",
         )
-        stamp = datetime(2026, 10, 11, tzinfo=UTC).isoformat()
+        # Gemini workspaces expire seven days after creation: stamp it now.
+        stamp = datetime.now(UTC).isoformat()
         transport.responses.append(
             {
                 "id": "interaction-control",
