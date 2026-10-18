@@ -30,12 +30,7 @@ async def _require_admin(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> None:
     account = await session.get(Account, account_id)
-    if (
-        account is None
-        or account.tenant_id != tenant_id
-        or account.role != "admin"
-        or account.is_external
-    ):
+    if account is None or account.tenant_id != tenant_id or account.role != "admin":
         raise ValueError("Only a server or workspace admin can manage connected repos.")
 
 

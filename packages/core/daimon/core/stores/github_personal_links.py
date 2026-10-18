@@ -38,7 +38,6 @@ async def mint_link(
     if (
         account is None
         or account.tenant_id != tenant_id
-        or account.is_external
         or tenant is None
         or tenant.platform != platform
         or principal is None

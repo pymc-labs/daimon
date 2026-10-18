@@ -78,7 +78,6 @@ async def verified_platform_account(
         .where(
             Account.id == account_id,
             Account.tenant_id == tenant_id,
-            Account.is_external.is_(False),
             PlatformPrincipal.tenant_id == tenant_id,
             PlatformPrincipal.platform == platform,
             PlatformPrincipal.external_id == platform_user_id,
@@ -132,7 +131,7 @@ async def save_verified_link(
     await session.flush()
     for account_id in account_ids:
         account = await session.get(Account, account_id)
-        if account is None or account.is_external:
+        if account is None:
             continue
         link = await session.get(AccountGitHubLink, account_id, with_for_update=True)
         if link is not None and link.github_user_id != github_user_id:
@@ -259,7 +258,6 @@ async def unlink_verified_identity(
             PlatformPrincipal.account_id == account_id,
             PlatformPrincipal.platform == platform,
             PlatformPrincipal.external_id == platform_user_id,
-            Account.is_external.is_(False),
         )
     )
     if caller is None:
@@ -270,7 +268,6 @@ async def unlink_verified_identity(
         .where(
             PlatformPrincipal.platform == platform,
             PlatformPrincipal.external_id == platform_user_id,
-            Account.is_external.is_(False),
         )
     )
     if platform == "slack":

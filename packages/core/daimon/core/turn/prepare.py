@@ -421,20 +421,18 @@ __all__ = [
 
 
 async def _env_bytes_sha256(
-    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID, is_external: bool
+    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID
 ) -> str | None:
     """Hash of the `.env` bytes `create_session` is about to mount, or None.
 
     Mirrors `credential_env.upload_env_and_mount`: the same tenant-scoped rows
     through the same `assemble_env_bytes`, and None for an agent with no
-    secrets or an external caller (neither gets a `.env` resource). Read BEFORE the
+    secrets (that agent gets no `.env` resource at all). Read BEFORE the
     session is created, deliberately — a key written while `create_session`
     runs then records as stale rather than as current, and a stale hash costs
     one redundant refresh, where a falsely-current one would leave the session
     silently running the old secrets.
     """
-    if is_external:
-        return None
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
@@ -609,9 +607,7 @@ async def create_ma_session(
         else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     )
     github_mode = "app"
-    env_sha256 = await _env_bytes_sha256(
-        deps, tenant_id=tenant_id, agent_uuid=agent_uuid, is_external=admission.is_external
-    )
+    env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     native_controls: _NativeBudgetArgs = {}
     if preparation is not None and preparation.native_budget_usd is not None:
         native_controls["native_budget_usd"] = preparation.native_budget_usd
@@ -640,7 +636,6 @@ async def create_ma_session(
         github_app_id=deps.github_app_id,
         github_app_private_key=deps.github_app_private_key,
         agent_github_app=deps.agent_github_app,
-        is_external=admission.is_external,
         extra_resources=extra_resources,
         memory_read_only=admission.memory_read_only,
         # A chat session is keyed on the caller's account, so it belongs to one
@@ -703,7 +698,6 @@ async def create_ma_session(
         personal_memory_store_ids=(
             () if personal_memory_store_id is None else (personal_memory_store_id,)
         ),
-        is_external=admission.is_external,
     ).model_copy(
         update={
             "token_repo_urls": token_repo_urls,
@@ -752,7 +746,6 @@ async def insert_mapping(
         platform=platform,
         thread_id=thread_id,
         account_id=session_account_id,
-        is_external=admission.is_external,
         ma_session_id=created.ma_session_id,
         ma_agent_id=admission.agent.id,
         channel_id=admission.budget_channel_id,

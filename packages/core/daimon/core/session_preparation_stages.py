@@ -282,7 +282,6 @@ async def desired_snapshot_for(
     account_id: uuid.UUID,
     github_app: GithubAppSettings | None = None,
     fernet: MultiFernet | None = None,
-    is_external: bool = False,
     recorded: SessionSnapshot | None,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
@@ -324,9 +323,6 @@ async def desired_snapshot_for(
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
-        if is_external:
-            # A person from another organisation gets none of the agent's keys.
-            rows = []
         memory_store_id = await get_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid
         )
@@ -345,7 +341,6 @@ async def desired_snapshot_for(
         tenant_id=tenant_id,
         agent_id=agent_uuid,
         account_id=account_id,
-        is_external=is_external,
         config=github_app or GithubAppSettings(),
         fernet=fernet,
         excluded_repo_urls=excluded,
@@ -361,7 +356,6 @@ async def desired_snapshot_for(
             agent_id=agent_uuid,
             account_id=account_id,
             server_urls={server.name: server.url for server in agent.mcp_servers},
-            is_external=is_external,
         ),
         environment_id=environment_id,
         github_mode="app",
@@ -393,5 +387,4 @@ async def desired_snapshot_for(
         channel_skills=channel_skills,
         tool_safety=tool_safety,
         public_url=public_url,
-        is_external=is_external,
     )

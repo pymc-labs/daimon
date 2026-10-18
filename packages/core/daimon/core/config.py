@@ -923,27 +923,7 @@ class TeamsSettings(BaseModel):
             "admin means making them an owner of that team; no redeploy. The "
             "app must be installed in that team. To find the ID, open the "
             "team's ⋯ menu in Teams, choose Get link to team and copy the "
-            "groupId parameter. Guests and people from another organisation "
-            "are never admins. Unset: nobody is an admin."
-        ),
-    )
-    restrict_guests: bool = Field(
-        default=True,
-        description=(
-            "When True, guests (Entra B2B guest accounts in this tenant) are "
-            "treated as people from another organisation: answered only in a "
-            "channel kept to its own agents, with a few conversation tools and no commands or "
-            "admin role. The tenant access policy's member guest list exempts "
-            "some. When False, guests are treated as team members."
-        ),
-    )
-    restrict_external_participants: bool = Field(
-        default=True,
-        description=(
-            "When True, a shared channel's external participants (people from "
-            "another tenant, via B2B direct connect) are answered only in a "
-            "channel kept to its own agents, with a few conversation tools and no commands or "
-            "admin role. When False, they are treated as team members."
+            "groupId parameter. Unset: nobody is an admin."
         ),
     )
 

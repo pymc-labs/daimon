@@ -112,7 +112,6 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
-    mark_session_external,
     record_snapshot,
     set_budget_channel_stamp,
     update_mutable_fingerprint,
@@ -827,9 +826,6 @@ async def _prepare_session_for_turn_locked(
             return await from_fresh(fresh, CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
-        if admission.is_external and not row.is_external:
-            await mark_session_external(db, id=row.id)
-            row = row.model_copy(update={"is_external": True})
 
         await _heal_lineage(deps, db, row=row)
 
@@ -870,7 +866,6 @@ async def _prepare_session_for_turn_locked(
                 recorded is None
                 and not fresh_start
                 and not admission.memory_read_only
-                and not admission.is_external
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
@@ -911,7 +906,6 @@ async def _prepare_session_for_turn_locked(
             account_id=admission.shared_owner or admission.account_id,
             github_app=deps.agent_github_app,
             fernet=deps.fernet,
-            is_external=admission.is_external,
             recorded=recorded,
             tool_safety=deps.tool_safety,
             public_url=deps.public_url,
@@ -931,11 +925,8 @@ async def _prepare_session_for_turn_locked(
             decision = ReplaceSession(reasons=("budget_channel",))
         elif recorded is None:
             # A restricted turn must get a new read-only session when the
-            # previous mount cannot be established, never reuse unknown access;
-            # nor may a caller from another organisation reuse unknown keys.
-            decision = ReplaceSession(
-                reasons=("external_caller",) if admission.is_external else ("memory_access",)
-            )
+            # previous mount cannot be established, never reuse unknown access.
+            decision = ReplaceSession(reasons=("memory_access",))
         else:
             assert recorded is not None, "a readable row always has a recorded snapshot here"
             has_app_tokens = recorded.github_mode == "app" and bool(
@@ -1007,25 +998,17 @@ async def _prepare_session_for_turn_locked(
         tightening_memory = admission.memory_read_only and (
             recorded is None or not recorded.memory_read_only
         )
-        # The old session may hold the agent's keys and tokens, mounted or
-        # copied into its workspace: never run it, or carry its work, for a
-        # person from another organisation.
-        stripping_credentials = admission.is_external and (
-            recorded is None or not recorded.is_external
-        )
         if (
             isinstance(decision, ReplaceSession)
             and (
                 "agent_identity" in decision.reasons
                 or "budget_channel" in decision.reasons
                 or tightening_memory
-                or stripping_credentials
             )
             and turn_is_active(row, now=moment)
         ):
-            # A changed billing channel, responder, memory restriction or a
-            # caller from another organisation cannot run against the old
-            # session while replacement is deferred.
+            # A changed billing channel, responder or memory restriction
+            # cannot run against the old session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),
@@ -1100,11 +1083,8 @@ async def _prepare_session_for_turn_locked(
                 reasons=decision.reasons,
                 fresh_start=fresh_start,
                 # A checkpoint executes the old session. Never run it with
-                # a writable mount after the origin has become read-only, or
-                # with the agent's keys for an external caller.
-                transfer=(
-                    None if tightening_memory or stripping_credentials or not carry else transfer
-                ),
+                # a writable mount after the origin has become read-only.
+                transfer=None if tightening_memory or not carry else transfer,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
@@ -1147,7 +1127,6 @@ async def _prepare_session_for_turn_locked(
                 github_app_id=deps.github_app_id,
                 github_app_private_key=deps.github_app_private_key,
                 agent_github_app=deps.agent_github_app,
-                is_external=admission.is_external,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
                 confirmed_tools=backend_switch_tools_for_turn(deps),

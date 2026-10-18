@@ -8,6 +8,7 @@ keep a caller on a stale session forever.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -793,9 +794,9 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
     assert fingerprint_identity(with_personal) != fingerprint_identity(snapshot)
 
 
-def test_a_members_snapshot_keeps_its_recorded_fingerprint_and_json() -> None:
-    """Rows recorded before the external flag existed must not look changed:
-    only a session made for someone from another organisation records it."""
+def test_a_snapshot_recorded_with_the_external_flag_still_parses() -> None:
+    """Earlier builds recorded `is_external` for someone from another organisation:
+    such a row reads as anyone's, so their session is kept and upgraded in place."""
     snapshot = desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
@@ -806,14 +807,13 @@ def test_a_members_snapshot_keeps_its_recorded_fingerprint_and_json() -> None:
         memory_store_id=None,
         vault_id=None,
     )
-    external = snapshot.model_copy(update={"is_external": True})
+    stored = json.loads(snapshot.model_dump_json()) | {"is_external": True}
 
-    assert "is_external" not in snapshot.model_dump_json(), "a member's row omits the flag"
-    assert SessionSnapshot.model_validate_json(external.model_dump_json()) == external, (
-        "an external caller's flag survives the JSONB round trip"
-    )
-    assert fingerprint_identity(external) != fingerprint_identity(snapshot), (
-        "the flag is session identity: flipping it replaces the session"
+    parsed = SessionSnapshot.model_validate_json(json.dumps(stored))
+
+    assert parsed == snapshot, "the old flag is ignored"
+    assert fingerprint_identity(parsed) == fingerprint_identity(snapshot), (
+        "the old flag no longer counts as session identity"
     )
 
 

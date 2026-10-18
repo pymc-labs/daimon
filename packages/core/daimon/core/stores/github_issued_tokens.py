@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal, cast
 
 from cryptography.fernet import MultiFernet
-from daimon.core._models import Account, GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
+from daimon.core._models import GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
 from daimon.core.github_app_auth import group_repository_access
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
@@ -82,7 +82,6 @@ class LiveMcpAppSession(BaseModel):
     vault_id: str
     agent_id: uuid.UUID
     account_id: uuid.UUID | None
-    is_external: bool = False
     repo_urls: tuple[str, ...]
     repo_resource_ids: dict[str, str]
     expires_at: datetime | None
@@ -641,7 +640,6 @@ async def register_app_session_vault(
     vault_id: str,
     is_unmapped: bool = False,
     is_mcp: bool = False,
-    is_external: bool = False,
     agent_id: uuid.UUID | None = None,
     account_id: uuid.UUID | None = None,
     repo_urls: tuple[str, ...] = (),
@@ -656,7 +654,6 @@ async def register_app_session_vault(
             vault_id=vault_id,
             is_unmapped=is_unmapped,
             is_mcp=is_mcp,
-            is_external=is_external,
             agent_id=agent_id,
             account_id=account_id,
             repo_urls=list(repo_urls) if is_mcp else None,
@@ -755,18 +752,13 @@ async def list_live_app_sessions(
 ) -> list[LiveAppSession]:
     statement = (
         select(ThreadSession, GitHubIssuedToken)
-        .outerjoin(Account, Account.id == ThreadSession.account_id)
         .outerjoin(
             GitHubIssuedToken,
             (GitHubIssuedToken.session_id == ThreadSession.ma_session_id)
             & (GitHubIssuedToken.status == "delivered")
             & (GitHubIssuedToken.superseded_at.is_(None)),
         )
-        .where(
-            ThreadSession.status == "live",
-            ThreadSession.is_external.is_(False),
-            Account.is_external.is_(False),
-        )
+        .where(ThreadSession.status == "live")
     )
     if session_id is not None:
         statement = statement.where(ThreadSession.ma_session_id == session_id)
@@ -825,16 +817,10 @@ async def list_live_mcp_app_sessions(
     session_id: str | None = None,
     include_expired: bool = False,
 ) -> list[LiveMcpAppSession]:
-    statement = (
-        select(GitHubAppSessionVault)
-        .outerjoin(Account, Account.id == GitHubAppSessionVault.account_id)
-        .where(
-            GitHubAppSessionVault.is_mcp.is_(True),
-            GitHubAppSessionVault.is_external.is_(False),
-            (Account.is_external.is_(False) | Account.id.is_(None)),
-            GitHubAppSessionVault.closed_at.is_(None),
-            GitHubAppSessionVault.finished_at.is_(None),
-        )
+    statement = select(GitHubAppSessionVault).where(
+        GitHubAppSessionVault.is_mcp.is_(True),
+        GitHubAppSessionVault.closed_at.is_(None),
+        GitHubAppSessionVault.finished_at.is_(None),
     )
     if not include_expired:
         statement = statement.where(
@@ -862,7 +848,6 @@ async def list_live_mcp_app_sessions(
                 vault_id=vault.vault_id,
                 agent_id=vault.agent_id,
                 account_id=vault.account_id,
-                is_external=vault.is_external,
                 last_started_at=vault.last_started_at,
                 repo_urls=tuple(vault.repo_urls or ()),
                 repo_resource_ids=vault.repo_resource_ids or {},

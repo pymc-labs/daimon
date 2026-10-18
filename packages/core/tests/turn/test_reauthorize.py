@@ -11,20 +11,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import AdmissionDenied, admit, reauthorize
-from daimon.testing.ma import resolved_agent_env_router
-from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_admission import (
-    _ISOLATED,
     _NOW,
-    _admit_as,
     _admittable_router,
-    _answer_in,
     _deps,
     _seed_admittable_tenant,
 )
@@ -249,28 +244,3 @@ async def test_an_isolated_channels_own_agent_keeps_its_memory_writable(
 
     current = await reauthorize(deps, admission)
     assert current.source_sealed and not current.memory_read_only
-
-
-async def test_an_external_participant_is_refused_once_their_channel_is_no_longer_isolated(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    admission = await _admit_as(db_session_factory, tmp_path, tenant, is_external=True)
-    router = resolved_agent_env_router(
-        ma_agent(id="ag_own", name="own", tenant_id=tenant.id),
-        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
-    )
-    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
-
-    inside = TenantAccessPolicy(
-        channel_rules={"chan-1": ChannelRule(readers="inside")},
-        agent_rules={"daimon": AgentRule(runs_in=("chan-1",))},
-    )
-    await _set_policy(db_session, tenant, inside)
-
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await reauthorize(deps, admission)
-    assert exc_info.value.reason == "external_participant"

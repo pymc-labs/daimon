@@ -169,20 +169,16 @@ async def _replace_env_file(
     tenant_id: uuid.UUID,
     agent_uuid: uuid.UUID,
     scope: Scope,
-    is_external: bool = False,
 ) -> SessionSnapshot:
     """Swap the session's `.env` for the agent's current secrets, in place.
 
     Delete-then-add, in that order: MA rejects a second resource at an occupied
     mount path (P0.f/P3.a), and the vacated path is visible to the same turn
     (P3.c). An agent whose last secret was removed keeps no `.env` at all,
-    which is what a fresh session for it would mount, as does an external
-    caller's.
+    which is what a fresh session for it would mount.
     """
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-    if is_external:
-        rows = []
     if snapshot.github_mode == "app":
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 
@@ -242,7 +238,6 @@ async def apply_update_ops(
     github_app_id: str | None,
     github_app_private_key: str | None,
     agent_github_app: GithubAppSettings | None = None,
-    is_external: bool = False,
     now: dt.datetime,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
@@ -301,7 +296,6 @@ async def apply_update_ops(
                     tenant_id=tenant_id,
                     agent_uuid=agent_uuid,
                     scope=scope,
-                    is_external=is_external,
                 )
                 applied.append("env_file")
             case ReplaceToolsAndMcpServers():
@@ -311,7 +305,6 @@ async def apply_update_ops(
                     agent_id=agent_uuid,
                     account_id=account_id,
                     server_urls={server.name: server.url for server in agent.mcp_servers},
-                    is_external=is_external,
                 )
                 public_url = None if mcp.public_url is None else str(mcp.public_url)
                 tools = session_tools(
@@ -363,7 +356,6 @@ async def apply_update_ops(
                     tenant_id=tenant_id,
                     agent_id=agent_uuid,
                     account_id=account_id,
-                    is_external=is_external,
                     vault_id=snapshot.vault_id,
                     resource_ids=op.resource_ids,
                     unavailable_repos=snapshot.unavailable_repos,
@@ -398,17 +390,11 @@ async def apply_update_ops(
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():
-                # The organisation's tokens never reach an external caller's vault.
-                if (
-                    not is_external
-                    and fernet is not None
-                    and mcp.public_url is not None
-                    and mcp.jwt_secret is not None
-                ):
+                if fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None:
                     await sync_agent_mcp_credentials(
                         anthropic,
                         sessionmaker=sessionmaker,
-                        fernet=cast(MultiFernet, fernet),
+                        fernet=fernet,
                         tenant_id=tenant_id,
                         agent_id=agent_uuid,
                         account_id=account_id,

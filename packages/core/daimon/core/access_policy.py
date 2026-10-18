@@ -120,10 +120,6 @@ class TenantAccessPolicy(BaseModel):
     dm_memory_read_only: bool = False
     # Agent name -> its rule. An agent not named here runs wherever the cascade sends it.
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)
-    # Teams guests (Entra object ids, lower case) treated as members of the
-    # organisation; any other guest is answered as from another organisation.
-    # Only read while `teams.restrict_guests` is on.
-    member_guest_ids: tuple[str, ...] = ()
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
 
     @field_validator("enabled_backends")
@@ -138,7 +134,8 @@ class TenantAccessPolicy(BaseModel):
     def _read_lists(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
-        fields = cast("dict[str, Any]", data)
+        # Earlier builds kept a Teams guest list; guests are members now.
+        fields = {k: v for k, v in cast("dict[str, Any]", data).items() if k != "member_guest_ids"}
         return _from_lists(fields) if _LEGACY_KEYS & fields.keys() else fields
 
     @field_validator("channel_rules", "category_rules")

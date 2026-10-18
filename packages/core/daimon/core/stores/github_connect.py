@@ -113,7 +113,6 @@ def _may_hold_link(
     return (
         account is not None
         and account.tenant_id == tenant_id
-        and not account.is_external
         and (account.role == "admin" or agent_id is not None)
     )
 
@@ -142,7 +141,6 @@ async def admin_account_for_platform_user(
             PlatformPrincipal.platform == Tenant.platform,
             PlatformPrincipal.external_id == external_id,
             Account.role == "admin",
-            Account.is_external.is_(False),
         )
     )
     if account_id is None:
@@ -281,7 +279,7 @@ async def record_connect_request(
 ) -> None:
     """Keep one durable setup request per person and agent for the admin panel."""
     account = await session.get(Account, requester_account_id)
-    if account is None or account.tenant_id != tenant_id or account.is_external:
+    if account is None or account.tenant_id != tenant_id:
         raise ValueError("requester must belong to this workspace")
     await session.execute(
         pg_insert(GitHubConnectRequest)

@@ -373,7 +373,6 @@ async def validate_agent_mcp_token(
             identity is None
             or str(identity.tenant_id) != scope.tenant_id
             or identity.role.value != "user"
-            or identity.is_external
             or row is None
             or row.kind != "agent"
             or row.scopes

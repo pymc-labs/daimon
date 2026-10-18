@@ -459,7 +459,6 @@ async def test_late_store_after_its_pending_row_was_pruned_revokes_the_github_to
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 account_id=None,
-                is_external=False,
                 provisional_session_id="pending-pruned",
                 config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
                 fernet=fernet,

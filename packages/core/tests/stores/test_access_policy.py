@@ -87,17 +87,16 @@ async def test_an_empty_pin_map_is_left_out_of_the_stored_row(db_session: AsyncS
     )
 
 
-async def test_an_empty_member_guest_list_is_left_out_of_the_stored_row(
-    db_session: AsyncSession,
-) -> None:
-    """A process built before member guests existed must still read the row."""
+async def test_a_row_with_the_old_member_guest_list_still_loads(db_session: AsyncSession) -> None:
+    """Earlier builds stored a Teams guest list; guests are members now, so it is dropped."""
     tenant = await make_tenant(db_session)
-    policy = TenantAccessPolicy(sealed_channel_ids=("c1",))
-    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
-    stored = (
-        await db_session.execute(
-            text("SELECT policy FROM tenant_access_policies WHERE tenant_id = :t"),
-            {"t": tenant.id},
-        )
-    ).scalar_one()
-    assert "member_guest_ids" not in stored
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": '{"sealed_channel_ids": ["c1"], "member_guest_ids": ["g1"]}'},
+    )
+
+    assert await load_access_policy(db_session, tenant_id=tenant.id) == TenantAccessPolicy(
+        sealed_channel_ids=("c1",)
+    ), "the guest list is ignored, the rest kept"

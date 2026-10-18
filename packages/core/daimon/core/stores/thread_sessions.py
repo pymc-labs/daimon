@@ -290,7 +290,6 @@ async def create_thread_session(
     thread_id: str,
     account_id: _uuid.UUID,
     ma_session_id: str,
-    is_external: bool = False,
     ma_agent_id: str | None = None,
     channel_id: str | None = None,
     budget_channel_id: str | None = None,
@@ -327,7 +326,6 @@ async def create_thread_session(
         "platform": platform,
         "thread_id": thread_id,
         "account_id": account_id,
-        "is_external": is_external,
         "ma_session_id": ma_session_id,
         "ma_agent_id": ma_agent_id,
         "channel_id": channel_id,
@@ -349,13 +347,6 @@ async def create_thread_session(
     await session.flush()
     await session.refresh(orm)
     return ThreadSessionRow.model_validate(orm)
-
-
-async def mark_session_external(session: AsyncSession, *, id: _uuid.UUID) -> None:
-    """Remember a turn-only external finding for the lifetime of this MA session."""
-    await session.execute(
-        update(ThreadSession).where(ThreadSession.id == id).values(is_external=True)
-    )
 
 
 async def set_budget_channel_stamp(

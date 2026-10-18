@@ -74,7 +74,6 @@ class AccountRow(BaseModel):
     role: Role
     created_at: datetime
     platform_role_ids: tuple[str, ...] = ()
-    is_external: bool = False
 
 
 class AccountIdentityRow(BaseModel):
@@ -95,8 +94,6 @@ class AccountIdentityRow(BaseModel):
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
     # accounts.platform_role_ids as of the account's last chat turn.
     platform_role_ids: tuple[str, ...] = ()
-    # accounts.is_external: the last positive evidence about the account's organisation.
-    is_external: bool = False
 
 
 class ChannelSkillRow(BaseModel):
@@ -268,7 +265,6 @@ class ThreadSessionRow(BaseModel):
     platform: str
     thread_id: str
     account_id: uuid.UUID | None
-    is_external: bool = False
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None
@@ -1095,7 +1091,6 @@ class TurnOriginRow(BaseModel):
     configuration_target_ma_agent_id: str | None
     configuration_target_name: str | None
     is_setup: bool = False
-    is_external: bool = False
     role: Role
     created_at: datetime
     expires_at: datetime

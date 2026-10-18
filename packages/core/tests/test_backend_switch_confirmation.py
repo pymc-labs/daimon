@@ -294,23 +294,16 @@ async def test_click_rechecks_real_preview_and_rejects_changed_facts(owned_previ
     assert not trace.violations and not trace.replies
 
 
-@pytest.mark.parametrize("bad_scope", ["tenant", "account", "requester", "external"])
+@pytest.mark.parametrize("bad_scope", ["tenant", "account", "requester"])
 async def test_card_scope_refuses_before_any_agent_read(owned_preview, bad_scope):
     from unittest.mock import AsyncMock
     from uuid import uuid4
 
-    from daimon.core._models import Account
     from daimon.core.confirmation import backend_switch_callbacks
-    from sqlalchemy import update
 
     service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
     tenant_id = uuid4() if bad_scope == "tenant" else agent.tenant_id
     account_id = uuid4() if bad_scope == "account" else actor.account_id
-    if bad_scope == "external":
-        async with sessions.begin() as session:
-            await session.execute(
-                update(Account).where(Account.id == actor.account_id).values(is_external=True)
-            )
     admin = AsyncMock(return_value=True)
     _, check = backend_switch_callbacks(
         service,
@@ -409,14 +402,12 @@ async def test_only_explicit_backend_tools_are_gated_when_safety_is_off(enabled)
     )
 
 
-@pytest.mark.parametrize("stage", ["agent", "preview", "admin"])
+@pytest.mark.parametrize("stage", ["agent", "preview"])
 async def test_permission_revocation_during_awaited_evidence_refuses(
     owned_preview, monkeypatch, stage
 ):
     from daimon.core import channel_backend
-    from daimon.core._models import Account
     from daimon.core.confirmation import backend_switch_callbacks
-    from sqlalchemy import update
 
     service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
     admin_state = {"allowed": True}
@@ -436,11 +427,6 @@ async def test_permission_revocation_during_awaited_evidence_refuses(
         return result
 
     async def current_admin(clicker):
-        if stage == "admin":
-            async with sessions.begin() as session:
-                await session.execute(
-                    update(Account).where(Account.id == actor.account_id).values(is_external=True)
-                )
         return admin_state["allowed"]
 
     monkeypatch.setattr(channel_backend, "load_backend_agent", changing_load)

@@ -114,14 +114,13 @@ class SessionSnapshot(BaseModel):
     def _omit_empty_refusal_state(
         self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
     ) -> dict[str, Any]:
-        # Refusal fields and `is_external` are absent from every snapshot written
-        # before them; keep stored and compared JSON unchanged while they are empty.
+        # Refusal fields are absent from every snapshot written before them; keep
+        # stored and compared JSON unchanged while they are empty.
         data: dict[str, Any] = handler(self)
         for name in (
             "unavailable_repos",
             "unavailable_notice_pending",
             "unavailable_notice_sent",
-            "is_external",
             "token_scopes",
             "token_issued_at_by_installation",
             "github_repo_map_sha256",
@@ -173,10 +172,6 @@ class SessionSnapshot(BaseModel):
     # session only to add it.
     personal_memory_store_id: str | None = None
     vault_id: str | None
-    # Created for a person from another organisation: no `.env`, no agent-wide
-    # MCP tokens. A session created for anyone else may hold copies of both in
-    # its workspace, so it is replaced rather than stripped in place.
-    is_external: bool = False
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -283,8 +278,6 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
         # Only when set, so every snapshot without one keeps the fingerprint
         # it was recorded with.
         fields = (*fields, "personal_memory_store_id")
-    if snapshot.is_external:
-        fields = (*fields, "is_external")
     return _fingerprint(snapshot, fields)
 
 
@@ -330,7 +323,6 @@ def snapshot_from_created_session(
     sent_skills: Sequence[MaSkill],
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
-    is_external: bool = False,
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
 
@@ -356,7 +348,6 @@ def snapshot_from_created_session(
         vault_id=vault_id,
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
-        is_external=is_external,
     )
 
 
@@ -395,7 +386,6 @@ def _snapshot_from_session(
     vault_id: str | None,
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
-    is_external: bool = False,
 ) -> SessionSnapshot:
     env_resource_id: str | None = None
     resolved_env_file_id = env_file_id
@@ -469,7 +459,6 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
-        is_external=is_external,
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,
@@ -582,7 +571,6 @@ def desired_snapshot(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     public_url: str | None = None,
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
-    is_external: bool = False,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -623,7 +611,6 @@ def desired_snapshot(
         and (memory_store_id is not None or personal_memory_store_id is not None),
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
-        is_external=is_external,
         tools_sha256=hash_tools(
             session_tools(
                 agent,

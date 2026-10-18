@@ -6,12 +6,10 @@ per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
 message reads here, `TeamMember.Read.Group` the owner list
-(`list_team_owner_ids`, for native admin-team owners) and `ChannelMember.Read.Group`
-a channel's members (`list_channel_members`, for who is from another
-organisation); `ChatMessage.Read.Chat`, granted when the app is added to a
-group chat, the chat reads (`list_chat_messages`, `get_chat_message`);
-`teams_sharepoint` sends its file calls through
-`send`. The subscription calls (`create_subscription` and its renewal and
+(`list_team_owner_ids`, for native admin-team owners); `ChatMessage.Read.Chat`,
+granted when the app is added to a group chat, the chat reads
+(`list_chat_messages`, `get_chat_message`); `teams_sharepoint` sends its file
+calls through `send`. The subscription calls (`create_subscription` and its renewal and
 delete) watch a private or shared channel, where the resource-specific
 consent does not reach: they need the application permission
 `ChannelMessage.Read.All`, which a tenant admin consents to. Writes are never
@@ -134,14 +132,10 @@ class GraphPage(_Model):
 
 
 class GraphMember(_Model):
-    """A team or channel member as Graph's `aadUserConversationMember` gives one.
-
-    `tenant_id` is the member's home tenant; `roles` holds "owner" or "guest".
-    """
+    """A team member as Graph's `aadUserConversationMember` gives one; `roles` may hold "owner"."""
 
     user_id: str | None = None
     roles: list[str] = Field(default_factory=list[str])
-    tenant_id: str | None = None
 
 
 class GraphMemberPage(_Model):
@@ -176,8 +170,6 @@ class ChangeNotificationBatch(_Model):
 
 MAX_OWNER_PAGES = 5
 """Owner pages read before giving up; a team has at most 100 owners."""
-MAX_MEMBER_PAGES = 5
-"""Channel member pages read; a longer list is cut short, not refused."""
 
 
 def is_graph_url(url: httpx.URL) -> bool:
@@ -287,7 +279,7 @@ class GraphClient:
         return _parse(GraphMessage, await self._get(url))
 
     async def list_team_owner_ids(self, group_id: str) -> frozenset[str]:
-        """The Entra object ids (lower-case) of a team's owners, guests left out.
+        """The Entra object ids (lower-case) of a team's owners.
 
         Needs `TeamMember.Read.Group`; a team that never granted it raises
         `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
@@ -302,29 +294,12 @@ class GraphClient:
             owners.update(
                 member.user_id.lower()
                 for member in page.value
-                # A guest made an owner in Entra still administers nothing here.
-                if member.user_id and "owner" in member.roles and "guest" not in member.roles
+                if member.user_id and "owner" in member.roles
             )
             url, params = page.next_link, None
         if url is None:
             return frozenset(owners)
         raise GraphUnavailable("too many owner pages")
-
-    async def list_channel_members(self, group_id: str, channel_id: str) -> list[GraphMember]:
-        """A channel's members with their home tenants, shared channels' external ones too.
-
-        Needs `ChannelMember.Read.Group`. At most `MAX_MEMBER_PAGES` pages: a
-        member past them is simply not listed.
-        """
-        url: str | None = f"{self._channel(group_id, channel_id)}/allMembers"
-        members: list[GraphMember] = []
-        for _ in range(MAX_MEMBER_PAGES):
-            if url is None:
-                break
-            page = _parse(GraphMemberPage, await self.send("GET", url))
-            members.extend(page.value)
-            url = page.next_link
-        return members
 
     async def create_subscription(
         self,

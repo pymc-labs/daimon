@@ -164,13 +164,6 @@ class ChannelPermissions:
     own: it may lie in one, so it is treated as one with no own agents."""
 
     @property
-    def answers_external(self) -> bool:
-        """Whether people from another organisation (a Teams guest the tenant doesn't
-        list as a member) are answered here: only in a channel kept to its own
-        agents, and never in a setup conversation or a DM."""
-        return self.home is not None
-
-    @property
     def keeps_content(self) -> bool:
         """Whether whatever a turn here writes stays here: posts, direct messages,
         publishing, new agents and routine results (`held_to`)."""

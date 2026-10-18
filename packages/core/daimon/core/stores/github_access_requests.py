@@ -87,7 +87,6 @@ async def list_server_admin_recipients(
         .where(
             Account.tenant_id == tenant_id,
             Account.role == "admin",
-            Account.is_external.is_(False),
             PlatformPrincipal.tenant_id == tenant_id,
             PlatformPrincipal.platform == platform,
             *([Account.id != exclude_account_id] if exclude_account_id is not None else []),
@@ -126,7 +125,7 @@ async def request_access(
     if not thread_id or not parent_channel_id or not requester_platform_user_id:
         raise ValueError("This request needs a conversation and an asker.")
     account = await session.get(Account, requester_account_id)
-    if account is None or account.tenant_id != tenant_id or account.is_external:
+    if account is None or account.tenant_id != tenant_id:
         raise ValueError("GitHub requests are unavailable here.")
     key = f"github-access:{tenant_id}:{platform}:{thread_id}:{requester_account_id}:{agent_id}"
     await session.execute(
@@ -473,7 +472,6 @@ async def record_delivery(
         or request.expires_at <= datetime.now(UTC)
         or recipient is None
         or recipient.tenant_id != tenant_id
-        or recipient.is_external
     ):
         return False
     row = await session.get(GitHubAccessRequestDelivery, (request_id, recipient_account_id))

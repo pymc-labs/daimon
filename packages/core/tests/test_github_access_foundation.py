@@ -623,7 +623,7 @@ async def test_github_removal_waits_for_confirmation_then_notifies_once(
 
 
 @pytest.mark.asyncio
-async def test_app_zero_grants_and_external_asker_mint_nothing(
+async def test_app_zero_grants_mint_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
@@ -640,27 +640,14 @@ async def test_app_zero_grants_and_external_asker_mint_nothing(
             tenant_id=tenant_id,
             agent_id=agent_id,
             account_id=None,
-            is_external=False,
             provisional_session_id="pending",
             config=GithubAppSettings(),
             fernet=None,
             cache=PermissionCache(),
         )
-        external = await prepare_app_access(
-            db_session_factory,
-            client,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            account_id=uuid.uuid4(),
-            is_external=True,
-            provisional_session_id="pending",
-            config=GithubAppSettings(),
-            fernet=None,
-            cache=PermissionCache(),
-        )
-    assert zero.resources == external.resources == ()
-    assert zero.tokens == external.tokens == ()
-    assert zero.working_token is external.working_token is None
+    assert zero.resources == (), "no grant, no resource"
+    assert zero.tokens == (), "no grant, no token"
+    assert zero.working_token is None, "no grant, no working token"
 
     async def empty_credentials(*, vault_id: str):
         if False:
@@ -749,7 +736,6 @@ async def test_mint_revocation_race_revokes_late_github_token(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 account_id=None,
-                is_external=False,
                 provisional_session_id="pending-race",
                 config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
                 fernet=fernet,

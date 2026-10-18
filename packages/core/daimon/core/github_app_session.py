@@ -248,7 +248,6 @@ async def effective_repo_urls(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
     mounted_only: bool = False,
@@ -259,7 +258,6 @@ async def effective_repo_urls(
         tenant_id=tenant_id,
         agent_id=agent_id,
         account_id=account_id,
-        is_external=is_external,
         config=config,
         fernet=fernet,
         mounted_only=mounted_only,
@@ -273,7 +271,6 @@ async def effective_repo_url_sets(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[TokenScope, ...]]:
@@ -283,7 +280,6 @@ async def effective_repo_url_sets(
         tenant_id=tenant_id,
         agent_id=agent_id,
         account_id=account_id,
-        is_external=is_external,
         config=config,
         fernet=fernet,
     )
@@ -296,7 +292,6 @@ async def effective_repo_plan(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
     excluded_repo_urls: tuple[str, ...] = (),
@@ -307,8 +302,6 @@ async def effective_repo_plan(
     tuple[tuple[str, str], ...],
 ]:
     """One grant view determines scope, mount and non-secret helper map."""
-    if is_external:
-        return (), (), (), ()
     rows, _, _ = await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
@@ -365,13 +358,10 @@ async def effective_repo_state(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
     mounted_only: bool = False,
 ) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
-    if is_external:
-        return (), {}
     rows, _, _ = await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
@@ -515,7 +505,6 @@ async def prepare_app_access(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     provisional_session_id: str,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
@@ -527,8 +516,6 @@ async def prepare_app_access(
     vault_id: str | None = None,
 ) -> AppSessionAccess:
     """Mint only this session's effective repository groups, recording every token."""
-    if is_external:
-        return AppSessionAccess((), (), None)
     rows, user_id, link_generation = grant_view or await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
@@ -1328,7 +1315,6 @@ async def _rotate_live_app_tokens_unlocked(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     vault_id: str,
     resource_ids: dict[str, str],
     config: GithubAppSettings,
@@ -1353,15 +1339,11 @@ async def _rotate_live_app_tokens_unlocked(
         swapped = True
 
     async with httpx.AsyncClient() as client:
-        grant_view = (
-            ((), None, None)
-            if is_external
-            else await effective_app_grant_view(
-                sessionmaker,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                fernet=fernet,
-            )
+        grant_view = await effective_app_grant_view(
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            fernet=fernet,
         )
         old_access: AppSessionAccess | None = None
         if active_turn or installation_ids:
@@ -1392,7 +1374,6 @@ async def _rotate_live_app_tokens_unlocked(
             tenant_id=tenant_id,
             agent_id=agent_id,
             account_id=account_id,
-            is_external=is_external,
             provisional_session_id=provisional,
             config=config,
             fernet=fernet,
@@ -1604,7 +1585,6 @@ async def rotate_live_app_tokens(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    is_external: bool,
     vault_id: str,
     resource_ids: dict[str, str],
     config: GithubAppSettings,
@@ -1621,7 +1601,6 @@ async def rotate_live_app_tokens(
         tenant_id=tenant_id,
         agent_id=agent_id,
         account_id=account_id,
-        is_external=is_external,
         vault_id=vault_id,
         resource_ids=resource_ids,
         config=config,

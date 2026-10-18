@@ -125,43 +125,6 @@ def test_a_server_with_an_agent_wide_credential_is_not_hidden_from_members() -> 
     ), "a token stored on the agent is mirrored into every caller's vault, trailing slash or not"
 
 
-def test_an_agent_wide_server_is_hidden_from_an_external_caller_until_they_sign_in() -> None:
-    """The organisation's token never reaches an external caller's vault, so
-    only their own sign-in on this agent shows them the server."""
-    shared_only = hidden_mcp_server_names(
-        (),
-        agent_id=_AGENT,
-        account_id=_OTHER,
-        shared_server_urls=(_SERVER_URL,),
-        server_urls={"docs": _SERVER_URL + "/"},
-        is_external=True,
-    )
-    assert shared_only == frozenset({"docs"}), "a shared token is not theirs to use"
-    own_grant = (McpOAuthGrantRow(agent_id=_AGENT, account_id=_OTHER, mcp_server_url=_SERVER_URL),)
-    assert (
-        hidden_mcp_server_names(
-            own_grant,
-            agent_id=_AGENT,
-            account_id=_OTHER,
-            shared_server_urls=(_SERVER_URL,),
-            server_urls=_SERVERS,
-            is_external=True,
-        )
-        == frozenset()
-    ), "their own sign-in on this agent shows them the server"
-    assert (
-        hidden_mcp_server_names(
-            (),
-            agent_id=_AGENT,
-            account_id=_OTHER,
-            shared_server_urls=(),
-            server_urls=_SERVERS,
-            is_external=True,
-        )
-        == frozenset()
-    ), "a server nobody holds a token or grant for stays, as it does for members"
-
-
 def test_visible_lists_drop_a_hidden_server_and_its_toolset_together() -> None:
     agent = ma_agent(
         mcp_servers=[

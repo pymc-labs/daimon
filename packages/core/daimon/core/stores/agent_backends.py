@@ -31,7 +31,6 @@ async def actor_exists(session: AsyncSession, tenant_id: uuid.UUID, account_id: 
             .where(
                 Account.id == account_id,
                 Account.tenant_id == tenant_id,
-                Account.is_external.is_(False),
             )
             .with_for_update(read=True, key_share=True)
         )

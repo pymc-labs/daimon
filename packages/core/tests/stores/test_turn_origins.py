@@ -8,7 +8,6 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import (
     create_origin,
     get_active_origin,
-    has_external_origin,
     list_active_origins,
 )
 from daimon.testing.factories import make_account, make_tenant
@@ -142,7 +141,7 @@ async def test_account_deletion_cascades_turn_origin(db_session: AsyncSession) -
     ), "account deletion removes turn origin attribution and authority through its FK cascade"
 
 
-async def test_running_origins_are_listed_per_caller_and_mark_an_external_turn(
+async def test_running_origins_are_listed_per_caller(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -150,7 +149,7 @@ async def test_running_origins_are_listed_per_caller_and_mark_an_external_turn(
     other = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
 
-    async def origin(account_id: uuid.UUID, thread: str, *, external: bool, ttl: int) -> None:
+    async def origin(account_id: uuid.UUID, thread: str, *, ttl: int) -> None:
         await create_origin(
             db_session,
             tenant_id=tenant.id,
@@ -165,16 +164,11 @@ async def test_running_origins_are_listed_per_caller_and_mark_an_external_turn(
             role=Role.USER,
             expires_at=now + timedelta(minutes=ttl),
             now=now - timedelta(minutes=1),
-            is_external=external,
         )
 
-    await origin(account.id, "t-1", external=False, ttl=10)
-    await origin(other.id, "t-2", external=True, ttl=10)
+    await origin(account.id, "t-1", ttl=10)
+    await origin(other.id, "t-2", ttl=10)
     running = await list_active_origins(
         db_session, tenant_id=tenant.id, account_id=account.id, platform="teams", now=now
     )
     assert [row.thread_id for row in running] == ["t-1"], "only this caller's turns"
-    assert not await has_external_origin(db_session, account_id=account.id, now=now)
-    assert await has_external_origin(db_session, account_id=other.id, now=now)
-    later = now + timedelta(minutes=11)
-    assert not await has_external_origin(db_session, account_id=other.id, now=later), "expired"

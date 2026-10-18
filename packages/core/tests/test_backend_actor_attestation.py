@@ -10,7 +10,7 @@ from daimon.core._models import Account, Tenant
 from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.config import Settings
 from daimon.core.native_admins import verify_backend_actor
-from daimon.core.stores import accounts, identity
+from daimon.core.stores import identity
 from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy import text, update
 
@@ -190,7 +190,6 @@ async def test_http_failures_refuse_without_leaking_token(actor, failure):
         "unknown_tenant",
         "unbound_user",
         "foreign_account",
-        "external",
         "unknown_platform",
         "no_settings",
         "invalid_id",
@@ -198,7 +197,7 @@ async def test_http_failures_refuse_without_leaking_token(actor, failure):
 )
 async def test_unbound_identity_refuses_before_http_without_creating_state(actor, change):
     sm, tenant, principal = actor
-    if change in ("foreign_account", "external", "unknown_platform"):
+    if change in ("foreign_account", "unknown_platform"):
         async with sm.begin() as db:
             if change == "foreign_account":
                 other = await make_tenant(db, workspace_id=OTHER)
@@ -207,8 +206,6 @@ async def test_unbound_identity_refuses_before_http_without_creating_state(actor
                     .where(Account.id == principal.account_id)
                     .values(tenant_id=other.id)
                 )
-            if change == "external":
-                await accounts.set_external(db, principal.account_id, True)
             if change == "unknown_platform":
                 await db.execute(
                     update(Tenant).where(Tenant.id == tenant.id).values(platform="slack")

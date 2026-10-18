@@ -188,8 +188,6 @@ class NativeCredentialAdapter:
             if (
                 place is None
                 or actor is None
-                or place.is_external
-                or actor.is_external
                 or actor.tenant_id != place.tenant_id
                 or actor.platform != place.platform
                 or not actor.platform_user_id

@@ -123,15 +123,12 @@ async def turn_origin(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     is_setup: bool = False,
-    is_external: bool = False,
     message_text: str | None = None,
     queued_message: bool = False,
     keep_fleet_root: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
-    `is_external` (`Admission.is_external`) holds the turn's MCP calls to what
-    an external participant may do, even when nothing about them was stored.
     `message_text` is the person's own message that started this turn, as the
     adapter received it; it settles their open skill-add previews in this
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
@@ -155,7 +152,6 @@ async def turn_origin(
             expires_at=now + timedelta(hours=2),
             now=now,
             is_setup=is_setup,
-            is_external=is_external,
         )
         if message_text is not None:
             if not queued_message:

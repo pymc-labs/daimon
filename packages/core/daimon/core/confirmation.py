@@ -356,7 +356,6 @@ def backend_switch_callbacks(
             identity is None
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
-            or identity.is_external
         ):
             raise ValueError("This confirmation is unavailable. Preview again.")
         agent = await load_backend_agent(

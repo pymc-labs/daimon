@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from daimon.core._models import Account, PlatformPrincipal, Tenant, UserConfig
 from daimon.core.stores.domain import AccountIdentityRow, AccountRow, Role
-from sqlalchemy import ARRAY, Text, any_, bindparam, case, delete, func, or_, select, update
+from sqlalchemy import ARRAY, Text, any_, bindparam, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,7 +44,6 @@ async def get_account_with_tenant(
             Tenant.external_id,
             PlatformPrincipal.external_id,  # platform_user_id — null when no matching principal
             Account.platform_role_ids,
-            Account.is_external,
         )
         .select_from(Account)
         .join(Tenant, Tenant.id == Account.tenant_id)
@@ -58,7 +57,7 @@ async def get_account_with_tenant(
     row = (await session.execute(stmt)).one_or_none()
     if row is None:
         return None
-    acct_id, role_str, tenant_id, platform, ext_id, platform_user_id, role_ids, external = row
+    acct_id, role_str, tenant_id, platform, ext_id, platform_user_id, role_ids = row
     return AccountIdentityRow(
         account_id=acct_id,
         tenant_id=tenant_id,
@@ -67,7 +66,6 @@ async def get_account_with_tenant(
         external_id=ext_id,
         platform_user_id=platform_user_id,
         platform_role_ids=tuple(role_ids),
-        is_external=external,
     )
 
 
@@ -83,48 +81,11 @@ async def set_role(
     account_id: uuid.UUID,
     role: Role,
 ) -> None:
-    """Set the role on an existing account. Raises no error if account not found.
-
-    An external account stays a user whatever is asked: no path makes one an
-    admin. One UPDATE, so it reads `is_external` as committed when it runs.
-    """
-    effective_role = case((Account.is_external, Role.USER.value), else_=role.value)
+    """Set the role on an existing account. Raises no error if account not found."""
     await session.execute(
         update(Account)
-        .where(Account.id == account_id, Account.role.is_distinct_from(effective_role))
-        .values(role=effective_role)
-    )
-
-
-async def get_external(session: AsyncSession, account_id: uuid.UUID) -> bool:
-    """Whether the account is known to be from another organisation; False if it is gone."""
-    stored = await session.scalar(select(Account.is_external).where(Account.id == account_id))
-    return stored is True
-
-
-async def has_external_accounts(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    """Whether a server contains any client accounts."""
-    return (
-        await session.scalar(
-            select(Account.id)
-            .where(Account.tenant_id == tenant_id, Account.is_external.is_(True))
-            .limit(1)
-        )
-        is not None
-    )
-
-
-async def set_external(session: AsyncSession, account_id: uuid.UUID, is_external: bool) -> None:
-    """Record positive evidence that the account is from another organisation, or ours.
-
-    Marking demotes it to user. One UPDATE that writes only a change, so
-    concurrent turns with the same evidence never contend or undo each other.
-    """
-    demote = {"role": Role.USER.value} if is_external else {}
-    await session.execute(
-        update(Account)
-        .where(Account.id == account_id, Account.is_external.is_not(is_external))
-        .values(is_external=is_external, **demote)
+        .where(Account.id == account_id, Account.role != role.value)
+        .values(role=role.value)
     )
 
 
@@ -233,9 +194,7 @@ async def list_platform_user_ids(
     """Platform user ids of the tenant's stored admins (`admins`), or of the listed
     users plus anyone whose stored roles overlap `role_ids`; sorted, at most `limit`
     (None: all). `among`, if given, keeps only those ids, compared lower-cased with
-    `fold_case`; it binds as one array, so a large group fits in one query.
-    Accounts from another organisation are never listed: no admin message
-    reaches them."""
+    `fold_case`; it binds as one array, so a large group fits in one query."""
     if admins:
         match = Account.role == Role.ADMIN.value
     else:
@@ -247,7 +206,7 @@ async def list_platform_user_ids(
         select(PlatformPrincipal.external_id)
         .join(Account, Account.id == PlatformPrincipal.account_id)
         .where(PlatformPrincipal.tenant_id == tenant_id, PlatformPrincipal.platform == platform)
-        .where(match, Account.is_external.is_(False))
+        .where(match)
         .order_by(PlatformPrincipal.external_id)
         .limit(limit)
     )
@@ -257,16 +216,3 @@ async def list_platform_user_ids(
         wanted = [uid.lower() if fold_case else uid for uid in among]
         stmt = stmt.where(column == any_(bindparam("among", wanted, type_=ARRAY(Text))))
     return list((await session.scalars(stmt)).all())
-
-
-async def list_external_platform_user_ids(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, user_ids: Collection[str]
-) -> set[str]:
-    """Which of `user_ids` belong to accounts held as from another organisation."""
-    stmt = (
-        select(PlatformPrincipal.external_id)
-        .join(Account, Account.id == PlatformPrincipal.account_id)
-        .where(PlatformPrincipal.tenant_id == tenant_id, PlatformPrincipal.platform == platform)
-        .where(PlatformPrincipal.external_id.in_(list(user_ids)), Account.is_external.is_(True))
-    )
-    return set((await session.scalars(stmt)).all())

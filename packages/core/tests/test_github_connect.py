@@ -675,13 +675,6 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
         await github_connect.mint_invitation(
             db_session, tenant_id=tenant_id, requester_account_id=member_id
         )
-    external_id = uuid.uuid4()
-    db_session.add(Account(id=external_id, tenant_id=tenant_id, role="admin", is_external=True))
-    await db_session.flush()
-    with pytest.raises(ValueError, match="tenant admin"):
-        await github_connect.mint_invitation(
-            db_session, tenant_id=tenant_id, requester_account_id=external_id
-        )
     token = await github_connect.mint_invitation(
         db_session,
         tenant_id=tenant_id,
@@ -692,13 +685,6 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
     assert invitation is not None and invitation.workspace_label == "this Discord server"
     assert invitation.requester_label == "Alex"
     assert invitation.expires_at > datetime.now(UTC) + timedelta(days=6)
-    admin = await db_session.get(Account, admin_id)
-    assert admin is not None
-    admin.is_external = True
-    await db_session.flush()
-    assert await github_connect.get_invitation(db_session, github_connect.digest(token)) is None
-    admin.is_external = False
-    await db_session.flush()
     await github_connect.create_flow(
         db_session,
         invitation_hash=github_connect.digest(token),
@@ -778,7 +764,7 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
     db_session: AsyncSession,
 ) -> None:
     tenant_id = uuid.uuid4()
-    admin_id, cli_id, member_id, external_id = (uuid.uuid4() for _ in range(4))
+    admin_id, cli_id, member_id = (uuid.uuid4() for _ in range(3))
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
     await db_session.flush()
     db_session.add_all(
@@ -786,7 +772,6 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
             Account(id=admin_id, tenant_id=tenant_id, role="admin"),
             Account(id=cli_id, tenant_id=tenant_id, role="user"),
             Account(id=member_id, tenant_id=tenant_id, role="user"),
-            Account(id=external_id, tenant_id=tenant_id, role="admin", is_external=True),
         ]
     )
     await db_session.flush()
@@ -798,9 +783,6 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
             ),
             PlatformPrincipal(
                 tenant_id=tenant_id, platform="discord", external_id="456", account_id=member_id
-            ),
-            PlatformPrincipal(
-                tenant_id=tenant_id, platform="discord", external_id="789", account_id=external_id
             ),
             PlatformPrincipal(
                 tenant_id=tenant_id,
@@ -829,7 +811,7 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
     invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
     assert invitation is not None and invitation.requester_account_id == admin_id
 
-    for platform_user_id in ("456", "789", "wrong-platform", "missing"):
+    for platform_user_id in ("456", "wrong-platform", "missing"):
         with pytest.raises(ValueError, match="workspace admin"):
             await github_connect.admin_account_for_platform_user(
                 db_session, tenant_id=tenant_id, external_id=platform_user_id

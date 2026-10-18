@@ -316,19 +316,14 @@ async def test_direct_mcp_uses_preview_and_reread_for_shared_service_cas(seam, b
     assert result["preview"]["cost_line"] == Preview().cost_line
 
 
-@pytest.mark.parametrize(
-    "admin,agent_key,external", [(False, False, False), (True, True, False), (True, False, True)]
-)
-async def test_direct_mcp_refuses_untrusted_admin_evidence_before_lookup(
-    seam, admin, agent_key, external
-):
+@pytest.mark.parametrize("admin,agent_key", [(False, False), (True, True)])
+async def test_direct_mcp_refuses_untrusted_admin_evidence_before_lookup(seam, admin, agent_key):
     auth = AuthIdentity(
         account_id=ACCOUNT,
         tenant_id=TENANT,
         role=Role.ADMIN,
         is_admin=admin,
         agent_id=AGENT if agent_key else None,
-        is_external=external,
     )
     with pytest.raises(ToolError):
         await mcp_agents._set_agent_backend_impl(seam.runtime, auth, "analyst", backend="openai")

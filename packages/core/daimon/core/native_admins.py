@@ -164,7 +164,6 @@ async def verify_backend_actor(
             or principal is None
             or account is None
             or account.tenant_id != tenant_id
-            or account.is_external
         ):
             raise AgentBackendRefused("actor_not_found")
         return tenant.external_id, account.id
@@ -331,7 +330,7 @@ async def read_stored_admin(
     """Read only the account's stored native admin role."""
     account = await get_account(session, account_id)
     return StoredAdmin(
-        is_admin=account is not None and account.role is Role.ADMIN and not account.is_external,
+        is_admin=account is not None and account.role is Role.ADMIN,
         platform_user_id=platform_user_id,
     )
 

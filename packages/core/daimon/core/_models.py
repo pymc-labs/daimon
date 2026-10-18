@@ -134,9 +134,6 @@ class Account(Base):
     platform_role_ids: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
-    # A person from another organisation (a Teams shared channel's external
-    # participant), refreshed with `role`; such an account is never an admin.
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -549,7 +546,6 @@ class ThreadSession(Base):
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The channel the session runs for, recorded at creation: a thread's parent,
@@ -2386,8 +2382,6 @@ class TurnOrigin(Base):
     configuration_target_ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     configuration_target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    # Answered as from another organisation, stored or for this turn only.
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -3089,7 +3083,6 @@ class GitHubAppSessionVault(Base):
     vault_id: Mapped[str] = mapped_column(Text)
     is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_mcp: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")

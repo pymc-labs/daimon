@@ -244,7 +244,6 @@ async def _root_context(
                     execution_origin
                     and (
                         execution is None
-                        or execution.is_external
                         or execution.is_setup
                         or execution.responder_ma_agent_id != parent.source_agents[0].id
                         or execution.parent_channel_id != facts.root.channel.channel_id
@@ -274,9 +273,7 @@ async def _root_context(
         or origin.responder_ma_agent_id != source_id
         or origin.parent_channel_id != binding.thread.channel.channel_id
         or origin.thread_id != binding.thread.thread_id
-        or origin.is_external
         or (account.tenant_id, account.platform) != (origin.tenant_id, origin.platform)
-        or account.is_external
         or intent.tenant_id != origin.tenant_id
         or intent.platform != origin.platform
         or intent.channel_id != origin.parent_channel_id
@@ -421,7 +418,6 @@ async def prepare_controlled_root(
         if (
             origin is None
             or origin.is_setup
-            or origin.is_external
             or (origin.responder_ma_agent_id, origin.parent_channel_id, origin.thread_id)
             != (request.admission.agent.id, grant.channel_id, request.thread_id)
         ):
@@ -1394,7 +1390,6 @@ async def capture_preparation_source(
         asks_before_publishing=request.admission.asks_before_publishing,
         mcp_settings=request.deps.mcp,
         agent_github_app=request.deps.agent_github_app,
-        is_external=request.admission.is_external,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
         private_dm_id=request.admission.private_dm_id,

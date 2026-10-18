@@ -379,7 +379,7 @@ async def require_may_grant(
     if repo.scope_agent_id is not None or account_id is None:
         return
     account = await session.get(Account, account_id)
-    if account is None or account.role != "admin" or account.is_external:
+    if account is None or account.role != "admin":
         raise ValueError(SERVER_WIDE_GRANT_MESSAGE)
 
 

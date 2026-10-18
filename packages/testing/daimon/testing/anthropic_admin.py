@@ -345,7 +345,6 @@ class AnthropicAdminBindings:
             or principal.external_id != identity.platform_user_id
             or str(identity.tenant_id) != scope.tenant_id
             or identity.role != Role.USER
-            or identity.is_external
             or identity.platform_user_id is None
         ):
             raise ScopeViolation("anthropic-admin", "real owned local member account required")

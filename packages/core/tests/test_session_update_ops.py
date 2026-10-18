@@ -141,7 +141,6 @@ async def _apply(
     agent_uuid: uuid.UUID,
     agent: BetaManagedAgentsAgent | None = None,
     account_id: uuid.UUID | None = None,
-    is_external: bool = False,
 ) -> AppliedOps | SessionBusy:
     return await apply_update_ops(
         client,
@@ -159,7 +158,6 @@ async def _apply(
         github_fallback_pat="ghp_fallback",
         github_app_id=None,
         github_app_private_key=None,
-        is_external=is_external,
         now=_NOW,
     )
 
@@ -455,45 +453,6 @@ async def test_env_replacement_leaves_no_env_when_the_agents_last_secret_was_rem
     assert isinstance(result, AppliedOps)
     assert result.snapshot.env_sha256 is None, "an agent with no secrets mounts no .env"
     assert state.resources[session_id] == [], "the old .env must be gone from the session"
-
-
-async def test_env_replacement_mounts_no_env_for_an_external_caller(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The agent's keys are the organisation's: someone from another one gets
-    none of them, even when the agent holds some."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
-    await db_session.commit()
-
-    state = FakeSessionsState(ma=FakeMAState())
-    _register_agent(state.ma)
-    client = _build_client(state)
-    session_id, recorded = await _session_with_env(client, content=b"OLD=1\n")
-
-    result = await _apply(
-        client,
-        db_session_factory,
-        ops=(ReplaceEnvFile(old_resource_id=recorded.env_resource_id, old_file_id=None),),
-        session_id=session_id,
-        recorded=recorded,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        is_external=True,
-    )
-
-    assert isinstance(result, AppliedOps)
-    assert result.snapshot.env_sha256 is None, "an external caller's session records no .env"
-    assert state.resources[session_id] == [], "and mounts none of the agent's keys"
 
 
 async def test_update_defers_as_session_busy_when_ma_refuses_a_running_session(

@@ -178,20 +178,12 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "This channel uses an unavailable agent backend.",
         "Ask an admin to change or clear the channel backend.",
     ),
-    "external_participant": _Copy(
-        "Daimon can't accept this request from another organisation.",
-        "Ask in a channel that uses its own agents.",
-    ),
 }
 _DM_REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _Copy("{agent} only works in other channels.", "Ask it there."),
     "own_agents_only": _Copy("This channel only uses its own agents.", "Ask in that channel."),
     "writers_none": _Copy(
         "Daimon can't reply in this channel.", "Ask somewhere else, or ask an admin."
-    ),
-    "external_participant": _Copy(
-        "Daimon can't move this conversation to a DM.",
-        "Ask in a channel that uses its own agents.",
     ),
 }
 

@@ -165,7 +165,7 @@ async def set_access_policy(
     backends = payload.pop("enabled_backends")
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
-    for key in ("channel_rules", "category_rules", "agent_rules", "member_guest_ids"):
+    for key in ("channel_rules", "category_rules", "agent_rules"):
         if not payload.get(key):
             payload.pop(key, None)
     await session.execute(

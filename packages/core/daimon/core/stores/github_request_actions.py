@@ -28,7 +28,7 @@ async def approve_connected_request(
 ) -> bool:
     """Add every requested connected repo with today's limits, then resume once."""
     actor = await session.get(Account, account_id)
-    if actor is None or actor.tenant_id != tenant_id or actor.is_external or actor.role != "admin":
+    if actor is None or actor.tenant_id != tenant_id or actor.role != "admin":
         raise ValueError("Only a server or workspace admin can approve this request.")
     request = await session.get(GitHubAccessRequest, request_id, with_for_update=True)
     if (
@@ -39,7 +39,7 @@ async def approve_connected_request(
     ):
         return False
     requester = await session.get(Account, request.requester_account_id)
-    if requester is None or requester.is_external or requester.tenant_id != tenant_id:
+    if requester is None or requester.tenant_id != tenant_id:
         return False
     panel = await load_grants_panel(
         session, tenant_id=tenant_id, agent_id=request.agent_id, agent_name=request.agent_name
@@ -119,7 +119,7 @@ async def approve_connection_request(
 ) -> bool:
     """Remember the one admin decision while GitHub confirmation is pending."""
     actor = await session.get(Account, account_id)
-    if actor is None or actor.tenant_id != tenant_id or actor.is_external or actor.role != "admin":
+    if actor is None or actor.tenant_id != tenant_id or actor.role != "admin":
         raise ValueError("Only a server or workspace admin can connect repos.")
     request = await session.get(GitHubAccessRequest, request_id, with_for_update=True)
     if (
