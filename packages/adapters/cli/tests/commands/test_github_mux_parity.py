@@ -326,7 +326,7 @@ async def test_session_archive_error_keeps_type_and_stops_cleanup(
     assert engine.disposed
 
 
-@pytest.mark.parametrize("denial", ["missing", "foreign", "external", "member"])
+@pytest.mark.parametrize("denial", ["missing", "foreign", "member"])
 async def test_grant_cleanup_keeps_admin_gate_before_provider_io(
     monkeypatch: pytest.MonkeyPatch, denial: str
 ) -> None:
@@ -337,7 +337,6 @@ async def test_grant_cleanup_keeps_admin_gate_before_provider_io(
             account_id=ADMIN,
             tenant_id=AGENT if denial == "foreign" else TENANT,
             role=Role.USER if denial == "member" else Role.ADMIN,
-            is_external=denial == "external",
             platform="cli",
             external_id="local",
             platform_user_id="operator",

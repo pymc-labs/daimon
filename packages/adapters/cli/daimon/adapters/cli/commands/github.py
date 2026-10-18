@@ -350,12 +350,7 @@ def _run_grant_command(
                     if account_id is not None
                     else None
                 )
-                if (
-                    account is None
-                    or account.tenant_id != tenant
-                    or account.role is not Role.ADMIN
-                    or account.is_external
-                ):
+                if account is None or account.tenant_id != tenant or account.role is not Role.ADMIN:
                     raise ValueError("current CLI user is not a workspace admin")
                 if action == "add":
                     if repo is None:
@@ -420,7 +415,6 @@ def _run_grant_command(
                                     tenant_id=tenant,
                                     agent_id=agent,
                                     account_id=mapped.account_id,
-                                    is_external=False,
                                     config=settings.github_app,
                                     fernet=fernet,
                                     mounted_only=True,
@@ -443,7 +437,6 @@ def _run_grant_command(
                                                 tenant_id=tenant,
                                                 agent_id=agent,
                                                 account_id=mapped.account_id,
-                                                is_external=False,
                                                 vault_id=snapshot.vault_id,
                                                 resource_ids=snapshot.repo_resource_ids,
                                                 config=settings.github_app,

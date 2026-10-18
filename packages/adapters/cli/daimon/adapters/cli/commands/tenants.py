@@ -562,7 +562,6 @@ def _print_policy(
         return
     console.print(f"{label} access policy:")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
-    console.print(f"  member_guest_ids: {', '.join(policy.member_guest_ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
@@ -705,20 +704,6 @@ def tenants_access_policy_set_command(
             help="Give turns started from a DM read-only memory.",
         ),
     ] = None,
-    add_member_guest: Annotated[
-        list[str] | None,
-        typer.Option(
-            help=(
-                "Teams guest's Entra object id to treat as a member of the organisation "
-                "(repeatable). Other guests are answered as from another organisation. "
-                "Only used while DAIMON_TEAMS__RESTRICT_GUESTS is on."
-            )
-        ),
-    ] = None,
-    remove_member_guest: Annotated[
-        list[str] | None,
-        typer.Option(help="Teams guest's Entra object id to drop from the members (repeatable)."),
-    ] = None,
     drop_agent_rules: Annotated[
         bool,
         typer.Option(
@@ -731,9 +716,9 @@ def tenants_access_policy_set_command(
     ] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
-    """Set who may start turns, DM memory and Teams member guests.
+    """Set who may start turns and DM memory.
 
-    --invoker replaces the stored list; member guests are edited in place.
+    --invoker replaces the stored list.
     Rules are set with `daimon channels rule set` and `daimon agents rule set`.
     --clear drops the whole policy, rules included; with agent rules stored it
     needs --drop-agent-rules, since those agents would then run anywhere.
@@ -750,29 +735,12 @@ def tenants_access_policy_set_command(
                 external_id=external_id,
                 invoker=invoker,
                 dm_memory_read_only=dm_memory_read_only,
-                add_member_guest=add_member_guest,
-                remove_member_guest=remove_member_guest,
                 drop_agent_rules=drop_agent_rules,
                 clear=clear,
                 as_json=as_json,
             )
 
     run_cli(_with_runtime(), console=console)
-
-
-def _parse_member_guests(values: list[str] | None, *, platform: str) -> tuple[str, ...]:
-    """Repeated guest flags as lower-case Entra object ids; Teams only."""
-    if values is None:
-        return ()
-    if platform != "teams":
-        raise typer.BadParameter("member_guest_ids: only Teams has guests")
-    ids = tuple(dict.fromkeys(value.strip().lower() for value in values))
-    for value in ids:
-        if re.fullmatch(_ENTRA_OBJECT_ID, value) is None:
-            raise typer.BadParameter(f"member_guest_ids: invalid Entra object id {value!r}")
-    if not ids:
-        raise typer.BadParameter("member_guest_ids: pass at least one id")
-    return ids
 
 
 def _parse_invokers(values: list[str], *, platform: str) -> tuple[str, ...]:
@@ -800,30 +768,21 @@ async def tenants_access_policy_set(
     external_id: str,
     invoker: list[str] | None = None,
     dm_memory_read_only: bool | None = None,
-    add_member_guest: list[str] | None = None,
-    remove_member_guest: list[str] | None = None,
     drop_agent_rules: bool = False,
     clear: bool = False,
     as_json: bool = False,
 ) -> None:
     validated_platform = _validate_platform(platform)
-    guests_to_add = _parse_member_guests(add_member_guest, platform=validated_platform)
-    guests_to_remove = _parse_member_guests(remove_member_guest, platform=validated_platform)
-    if set(guests_to_add) & set(guests_to_remove):
-        raise typer.BadParameter(
-            "member_guest_ids: an id named in both --add-member-guest and --remove-member-guest"
-        )
     changes: dict[str, object] = {}
     if invoker is not None:
         changes["invoker_user_ids"] = _parse_invokers(invoker, platform=validated_platform)
     if dm_memory_read_only is not None:
         changes["dm_memory_read_only"] = dm_memory_read_only
-    edits_guests = bool(guests_to_add or guests_to_remove)
     if drop_agent_rules and not clear:
         raise typer.BadParameter("--drop-agent-rules only applies to --clear")
-    if clear and (changes or edits_guests):
+    if clear and changes:
         raise typer.BadParameter("--clear can't be combined with other policy flags")
-    if not clear and not changes and not edits_guests:
+    if not clear and not changes:
         raise typer.BadParameter("nothing to set: pass a policy flag or --clear")
 
     label = f"{platform}:{external_id}"
@@ -858,15 +817,6 @@ async def tenants_access_policy_set(
             # An unreadable stored row raises here rather than being overwritten
             # blind; --clear is the way out of that state.
             current = await load_access_policy(session, tenant_id=tenant_id)
-            if edits_guests:
-                missing = sorted(set(guests_to_remove) - set(current.member_guest_ids))
-                if missing:
-                    raise typer.BadParameter(
-                        f"member_guest_ids: {', '.join(missing)} is not listed. Nothing was "
-                        "changed."
-                    )
-                kept = (g for g in current.member_guest_ids if g not in guests_to_remove)
-                changes["member_guest_ids"] = tuple(dict.fromkeys((*kept, *guests_to_add)))
             try:
                 policy = TenantAccessPolicy.model_validate(current.model_dump() | changes)
             except ValidationError as exc:
