@@ -40,9 +40,7 @@ from daimon.adapters.teams.channel_subscriptions import (
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
-from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
-from daimon.adapters.teams.group_chats import ChatMember, GroupChatRoster
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.here import show_here
 from daimon.adapters.teams.installations import TeamInstalls
@@ -65,7 +63,6 @@ from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow, TeamsInstallationRow
 from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
 from daimon.core.stores.teams_installations import list_teams_installations
@@ -273,67 +270,13 @@ def create_teams_http_service(
     )
     runtime = dataclasses.replace(runtime, team_owners=owner_reads)
 
-    async def roster_member(conversation_id: str, aad_object_id: str) -> MemberFacts | None:
-        conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
-        try:
-            member = await conversations.get_member_by_id(conversation_id, aad_object_id)
-        except httpx.HTTPStatusError as err:
-            if err.response.status_code in (403, 404):
-                return None
-            raise
-        if (member.aad_object_id or "").lower() != aad_object_id.lower():
-            return None
-        guest = None if member.user_role is None else member.user_role.lower() == "guest"
-        return MemberFacts(tenant_id=member.tenant_id, is_guest=guest)
-
-    async def chat_members(chat_id: str) -> list[ChatMember]:
-        conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
-        return [
-            ChatMember(m.id, m.aad_object_id, m.tenant_id, m.user_role)
-            for m in await conversations.get_members(chat_id)
-        ]
-
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
         channels = await api.teams.get_conversations(team_id)
         return next((channel.type for channel in channels if channel.id == channel_id), None)
 
-    async def channel_members(
-        team_id: str | None, team_group_id: str | None, channel_id: str
-    ) -> dict[str, MemberFacts]:
-        group = await groups.group_id(team_id, known=team_group_id)
-        return {
-            member.user_id.lower(): MemberFacts(member.tenant_id, "guest" in member.roles)
-            for member in await graph.list_channel_members(group, channel_id)
-            if member.user_id
-        }
-
     teams_tenant = derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id)
 
-    async def member_guests() -> frozenset[str]:
-        async with runtime.sessionmaker() as session:
-            policy = await load_access_policy(session, tenant_id=teams_tenant)
-        return frozenset(policy.member_guest_ids)
-
-    roster = GroupChatRoster(
-        tenant_id=settings.tenant_id,
-        members=chat_members,
-        member_guests=member_guests,
-        restrict_guests=settings.restrict_guests,
-    )
-    runtime = dataclasses.replace(
-        runtime,
-        externals=ExternalParticipants(
-            tenant_id=settings.tenant_id,
-            roster_member=roster_member,
-            channel_type=channel_type,
-            channel_members=channel_members,
-            member_guests=member_guests,
-            restrict_guests=settings.restrict_guests,
-            restrict_external=settings.restrict_external_participants,
-        ),
-        group_chats=roster,
-    )
     installs = TeamInstalls(
         runtime.sessionmaker,
         groups,
@@ -438,7 +381,6 @@ def create_teams_http_service(
     feedback = TeamsFeedback(runtime, direct, spawn=spawn)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
-    teams_app.on_conversation_update(roster.on_conversation_update)
     if subscriptions is not None:
         watched = subscriptions
 

@@ -137,13 +137,7 @@ async def test_credential_request_persona_matrix(
     fake = PersonaTeamsApiFake(active=requester)
     settings = build_teams_runtime(db_session_factory).settings.teams
     assert settings is not None
-    settings = settings.model_copy(
-        update={
-            "admin_team_id": ADMIN_TEAM,
-            "restrict_guests": True,
-            "restrict_external_participants": True,
-        }
-    )
+    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM})
     runtime = build_teams_runtime(
         db_session_factory,
         teams=settings,
@@ -182,9 +176,7 @@ async def test_credential_request_persona_matrix(
         assert "https://daimon.example.com/" in json.dumps(opened), opened
         assert stored.used_at is not None
         return
-    permitted = requester.name in ("admin", "member") and (
-        kind == "env_member" or requester.name == "admin"
-    )
+    permitted = kind == "env_member" or requester.name == "admin"
     if kind == "repo":
         permitted = requester.name == "admin"
     if permitted:
@@ -197,8 +189,6 @@ async def test_credential_request_persona_matrix(
     else:
         assert submitted is not None and "cannot be empty" not in json.dumps(submitted), submitted
         assert submitted["task"]["type"] == "message", submitted
-        if kind == "repo" and requester.name == "member":
+        if kind == "repo":
             assert "needs an admin" in json.dumps(opened), opened
-        elif kind == "repo":
-            assert "no longer valid" in json.dumps(opened), opened
         assert stored.used_at is None

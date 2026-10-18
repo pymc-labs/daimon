@@ -316,14 +316,13 @@ class TeamsCredentialRequests:
         self, activity: InvokeActivity, fields: Mapping[str, object]
     ) -> tuple[Actor | None, CredentialRequestRow | None, Refusal | None]:
         """The verified clicker, the request row, and why it is refused."""
-        # Someone from another organisation may only sign in with their own account.
-        actor = await card_actor(self._runtime, activity, allow_external=True)
+        actor = await card_actor(self._runtime, activity)
         token = fields.get("token")
         if actor is None or not isinstance(token, str) or not token:
             return actor, None, "invalid"
         async with self._runtime.sessionmaker() as session:
             row = await store.peek_credential_request(session, token=token)
-        if row is None or (actor.is_external and row.kind != "mcp_oauth"):
+        if row is None:
             return actor, None, "invalid"
         reason = refusal(
             row,

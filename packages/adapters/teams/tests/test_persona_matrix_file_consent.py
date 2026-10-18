@@ -12,9 +12,6 @@ import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.core import output_delivery
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import build_fake_anthropic, list_response
 from daimon.testing.ma import MARouter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -53,13 +50,6 @@ async def test_file_consent_persona_matrix(
 ) -> None:
     """Mocked permission tests let each requester decide their own offer."""
     monkeypatch.setattr(output_delivery, "_POLL_DELAYS_S", (0.0,))
-    if requester.name == "guest":
-        async with db_session_factory.begin() as session:
-            await set_access_policy(
-                session,
-                tenant_id=derive_tenant_uuid(platform="teams", workspace_id=PERSONAS[0].tenant_id),
-                policy=TenantAccessPolicy(member_guest_ids=(requester.user_id,)),
-            )
     uploads: list[httpx.Request] = []
     deletes: list[str] = []
     listing = FileMetadata(
@@ -92,7 +82,7 @@ async def test_file_consent_persona_matrix(
     graph = OwnerGraphFake()
     settings = build_teams_runtime(db_session_factory).settings.teams
     assert settings is not None
-    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM, "restrict_guests": True})
+    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM})
     runtime = build_teams_runtime(
         db_session_factory,
         teams=settings,

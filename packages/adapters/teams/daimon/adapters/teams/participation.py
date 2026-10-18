@@ -94,7 +94,7 @@ class TeamsParticipation:
 
         A thread the cascade resolves to anything but `on` costs one indexed
         read: no liveness read, no sender lookup, no timer, no classifier, no
-        turn. `admitted` then gives the reply as classified, or None to drop it.
+        turn. `admitted` then gives the reply, or None to drop it.
         """
         key = inbound.conversation_id
         if self._is_busy(key):

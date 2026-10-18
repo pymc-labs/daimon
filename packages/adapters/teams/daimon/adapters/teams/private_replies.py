@@ -55,9 +55,7 @@ NOT_YET_PRIVATE = (
 )
 UNSHOWN = "I ran `{name}`, but couldn't show you its result privately here."
 # Admission refusals about the sender, not the thread: only they see them.
-SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset(
-    {"invoker_not_allowed", "external_participant", "cap_exceeded"}
-)
+SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset({"invoker_not_allowed", "cap_exceeded"})
 _TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 
 
@@ -158,9 +156,7 @@ class PrivateReplies:
         self._is_admin = is_admin
 
     def command(self, inbound: TeamsInbound) -> tuple[str, str] | None:
-        # Someone from another organisation gets no command: the agent hears their words,
-        # and a command's 1:1 chat cannot be opened across organisations.
-        return None if inbound.is_external else parse_command(inbound.text, self._commands)
+        return parse_command(inbound.text, self._commands)
 
     async def tell_sender(self, inbound: TeamsInbound, text: str) -> None:
         """`text` for `inbound`'s sender only; where Teams refuses that, posted as before."""

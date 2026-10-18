@@ -290,10 +290,6 @@ class TeamsApiFake:
     """Roster names by Entra object id; a member lookup answers with the person's name."""
     absent: set[str] = dataclasses.field(default_factory=set[str])
     """Entra object ids no roster has: a member lookup answers 404."""
-    chat_guests: list[dict[str, object]] = dataclasses.field(
-        default_factory=list[dict[str, object]]
-    )
-    """Members a group chat's roster lists beside the sender and the bot."""
 
     async def send(
         self,
@@ -329,7 +325,10 @@ class TeamsApiFake:
                 "tenantId": ENTRA_TENANT_ID,
                 "userRole": "user",
             }
-            roster = [ours, {"id": BOT_ACCOUNT_ID, "name": "daimon"}, *self.chat_guests]
+            roster = [
+                ours,
+                {"id": BOT_ACCOUNT_ID, "name": "daimon"},
+            ]
             return httpx.Response(200, json=roster, request=request)
         if context.method == "GET" and "/members/" in context.url:
             aad_object_id = httpx.URL(context.url).path.rsplit("/", 1)[-1]

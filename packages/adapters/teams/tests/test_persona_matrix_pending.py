@@ -84,13 +84,7 @@ def _runtime(
 ) -> TeamsRuntime:
     settings = build_teams_runtime(db).settings.teams
     assert settings is not None
-    settings = settings.model_copy(
-        update={
-            "admin_team_id": ADMIN_TEAM,
-            "restrict_guests": requester.name != "guest",
-            "restrict_external_participants": requester.name != "external",
-        }
-    )
+    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM})
     return build_teams_runtime(
         db,
         teams=settings,

@@ -725,20 +725,12 @@ def _from_another_organisation(
     return payload
 
 
-async def test_an_external_participant_may_only_open_a_sign_in(
+async def test_someone_from_another_organisation_opens_a_request_like_anyone(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
 ) -> None:
     env = await _request(db_session_factory, account_id)
-    oauth = await _request(db_session_factory, account_id, kind="mcp_oauth")
     async with _running(TeamsApiFake(), _runtime(db_session_factory, mcp=True)) as (service, _):
-        refused = await post_activity(service, _from_another_organisation(_open(env.token)))
-        ours = await post_activity(
-            service, _from_another_organisation(_open(env.token), ENTRA_TENANT_ID)
-        )
-        link = await post_activity(service, _from_another_organisation(_open(oauth.token)))
+        theirs = await post_activity(service, _from_another_organisation(_open(env.token)))
         await service.turns.drain(5)
 
-    assert refused["task"]["value"] == NO_LONGER_VALID_MESSAGE, "no key or token form"
-    assert "value" not in _field(ours), "the same click from our own tenant gets the form"
-    (button,) = link["task"]["value"]["card"]["content"]["actions"]
-    assert button["type"] == "Action.OpenUrl", "their own sign-in"
+    assert "value" not in _field(theirs), "a channel click from another tenant gets the form"

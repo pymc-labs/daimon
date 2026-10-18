@@ -4,9 +4,7 @@ The owners of `admin_team_id` are the only admins, read live through the
 runtime's short team-owner cache (`TeamMember.Read.Group`), so making someone
 an owner needs no redeploy and a removed owner lapses when the cache expires;
 each read also demotes their stored role, which routines and tools act on.
-Someone from another organisation (a guest held as one, an external
-participant, a group chat with outsiders) is never an admin, and Graph leaves
-guests out of the owners. A failed owner read is logged once per lookup and
+A failed owner read is logged once per lookup and
 answered by the last successful one for up to an hour (`STALE_OWNERS_S`);
 after that nobody is an admin until the next good read, and a turn records
 no role, so stored admin roles stand until then.
@@ -131,16 +129,12 @@ async def deployment_role(
     owners: GroupMembers | None,
     *,
     user_id: str,
-    is_external: bool,
-    home_tenant_id: str | None = None,
 ) -> Role | None:
     """ADMIN for an owner of the admin team, else USER; None if the owners are unknown.
 
     None is a user's turn that records no role (`admit`): an outage must not
     write USER over the stored ADMIN that an owner's routines and tools use.
     """
-    if is_external or (home_tenant_id is not None and home_tenant_id.lower() != settings.tenant_id):
-        return Role.USER
     try:
         owner_ids = await _owner_ids(settings, owners)
     except GroupLookupFailed:
@@ -153,33 +147,22 @@ async def is_deployment_admin(
     owners: GroupMembers | None,
     *,
     user_id: str,
-    is_external: bool,
-    home_tenant_id: str | None = None,
 ) -> bool:
     """Whether `user_id` administers the deployment: an owner of the admin team."""
-    role = await deployment_role(
-        settings, owners, user_id=user_id, is_external=is_external, home_tenant_id=home_tenant_id
-    )
-    return role is Role.ADMIN
+    return await deployment_role(settings, owners, user_id=user_id) is Role.ADMIN
 
 
 async def inbound_role(
     runtime: TeamsRuntime, settings: TeamsSettings, inbound: TeamsInbound
 ) -> Role | None:
-    """A message sender's `deployment_role`, as classified (`is_external`)."""
-    return await deployment_role(
-        settings,
-        admin_team_owners(runtime),
-        user_id=inbound.user_id,
-        is_external=inbound.is_external,
-        home_tenant_id=inbound.home_tenant_id,
-    )
+    """A message sender's `deployment_role`."""
+    return await deployment_role(settings, admin_team_owners(runtime), user_id=inbound.user_id)
 
 
 async def inbound_is_admin(
     runtime: TeamsRuntime, settings: TeamsSettings, inbound: TeamsInbound
 ) -> bool:
-    """Whether a message's sender administers the deployment, as classified (`is_external`)."""
+    """Whether a message's sender administers the deployment."""
     return await inbound_role(runtime, settings, inbound) is Role.ADMIN
 
 

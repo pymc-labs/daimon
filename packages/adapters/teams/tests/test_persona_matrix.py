@@ -31,12 +31,10 @@ from daimon.adapters.teams import (
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.adapters.teams.thread_handoff import VERB as HANDOFF_VERB
 from daimon.adapters.teams.tool_confirmation import VERB as TOOL_CONFIRM_VERB
-from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
-from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -78,22 +76,15 @@ class Case:
     op: str = ""
     admin: Outcome = "admit"
     member: Outcome = "admit"
-    guest: Outcome = "refuse"
-    external: Outcome = "refuse"
 
     def expected(self, persona: Persona) -> Outcome:
         if persona.name == "admin":
             return self.admin
-        if persona.name == "member":
-            return self.member
-        if persona.name == "guest":
-            return self.guest
-        return self.external
+        # Every case is a 1:1 chat, which Teams never opens across organisations.
+        return "refuse" if persona.name == "external" else self.member
 
 
-# The configured defaults here are restrict_guests=True,
-# restrict_external_participants=True, member_guest_ids=(). The Graph fake lists
-# the guest as an admin-team owner: Graph's real owner parser must discard it.
+# A guest is answered as a member is; only the admin owns the admin team.
 CASES: tuple[Case, ...] = (
     Case("command", "setup", "command", "setup"),
     Case("command", "here", "command", "here"),
@@ -292,18 +283,9 @@ async def test_message_persona_matrix(
             await post_activity(service, payload)
             await finish_turns(service.turns)
     evidence = _sent_text(fake)
-    expected: Outcome = "admit" if persona.name in {"admin", "member"} else "refuse"
-    if expected == "refuse":
-        assert any(
-            refusal in evidence
-            for refusal in (
-                "not available for this account",
-                "another organisation",
-                "Ask in a channel that uses its own agents.",
-                "outsiders",
-                "outside this organisation",
-            )
-        ), evidence
+    # Teams never opens a 1:1 chat across organisations: one naming a foreign tenant is refused.
+    if persona.name == "external" and kind == "personal":
+        assert "not available for this account" in evidence, evidence
     else:
         assert any(
             request.body.get("text") == "Hello from the agent!"
@@ -311,85 +293,17 @@ async def test_message_persona_matrix(
         ), evidence
 
 
-@pytest.mark.parametrize(
-    ("case", "persona", "restrict_guests", "restrict_external", "member_guests"),
-    (
-        ("guest_unrestricted", PERSONAS[2], False, True, ()),
-        ("guest_allowlisted", PERSONAS[2], True, True, (PERSONAS[2].user_id,)),
-        ("external_unrestricted", PERSONAS[3], True, False, ()),
-    ),
-    ids=["guest_unrestricted", "guest_allowlisted", "external_unrestricted"],
-)
-async def test_membership_policy_overrides(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    case: str,
-    persona: Persona,
-    restrict_guests: bool,
-    restrict_external: bool,
-    member_guests: tuple[str, ...],
-) -> None:
-    """Mocked permission tests exercise both settings and the member guest list."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
-    )
-    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    if member_guests:
-        async with db_session_factory.begin() as session:
-            await set_access_policy(
-                session,
-                tenant_id=tenant,
-                policy=TenantAccessPolicy(member_guest_ids=member_guests),
-            )
-    graph = OwnerGraphFake()
-    fake = PersonaTeamsApiFake(active=persona)
-    settings = build_teams_runtime(db_session_factory).settings.teams
-    assert settings is not None
-    settings = settings.model_copy(
-        update={
-            "admin_team_id": ADMIN_TEAM,
-            "restrict_guests": restrict_guests,
-            "restrict_external_participants": restrict_external,
-        }
-    )
-    runtime = build_teams_runtime(
-        db_session_factory,
-        teams=settings,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(graph)),
-    )
-    payload = (
-        make_channel_activity(text="help", aad_object_id=persona.user_id)
-        if persona.name == "external"
-        else make_message_activity(text="help", aad_object_id=persona.user_id)
-    )
-    if persona.name == "external":
-        sender = payload["from"]
-        assert isinstance(sender, dict)
-        sender["tenantId"] = persona.tenant_id
-    async with running_service(runtime, fake) as service:
-        await post_activity(service, payload)
-        await finish_turns(service.turns)
-    evidence = _sent_text(fake)
-    assert fake.activity_requests, case
-    assert "not available for this account" not in evidence, evidence
-    assert "another organisation" not in evidence, evidence
-    assert "Ask in a channel that uses its own agents." not in evidence, evidence
-
-
-async def test_guest_owner_cannot_open_admin_dialog_even_when_guests_are_unrestricted(
+async def test_a_guest_owner_of_the_admin_team_is_an_admin(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Mocked permission tests keep a Graph guest owner out of the admin role."""
+    """A guest who owns the admin team administers the deployment, as any owner does."""
     await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     guest = PERSONAS[2]
-    graph = OwnerGraphFake()
-    assert guest.user_id in graph.owners
+    graph = OwnerGraphFake(owners={guest.user_id})
     fake = PersonaTeamsApiFake(active=guest)
     settings = build_teams_runtime(db_session_factory).settings.teams
     assert settings is not None
-    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM, "restrict_guests": False})
+    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM})
     runtime = build_teams_runtime(
         db_session_factory,
         teams=settings,
@@ -400,7 +314,8 @@ async def test_guest_owner_cannot_open_admin_dialog_even_when_guests_are_unrestr
     )
     async with running_service(runtime, fake) as service:
         result = await post_activity(service, activity)
-    assert "Only an admin" in json.dumps(result)
+    assert result is not None, "the dialog opens"
+    assert "Only an admin" not in json.dumps(result), result
     assert any(f"/teams/{ADMIN_TEAM}/members" in url for url in graph.requests)
 
 
@@ -458,13 +373,7 @@ async def test_tool_confirmation_only_requester_can_answer(
     fake = PersonaTeamsApiFake(active=requester)
     settings = build_teams_runtime(db_session_factory).settings.teams
     assert settings is not None
-    settings = settings.model_copy(
-        update={
-            "admin_team_id": ADMIN_TEAM,
-            "restrict_guests": requester.name != "guest",
-            "restrict_external_participants": requester.name != "external",
-        }
-    )
+    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM})
     runtime = build_teams_runtime(
         db_session_factory,
         teams=settings,
@@ -586,12 +495,8 @@ async def test_thread_handoff_persona_matrix(
             ),
             default=runtime.deployment_default,
         )
-    if persona.name in {"admin", "member"}:
-        assert route.responder_ma_agent_id == "ag_research", answer
-        assert "handed this conversation over" in json.dumps(answer)
-    else:
-        assert route.thread_binding_id is None, answer
-        assert "not available for this account" in json.dumps(answer)
+    assert route.responder_ma_agent_id == "ag_research", answer
+    assert "handed this conversation over" in json.dumps(answer)
 
 
 @pytest.mark.parametrize("persona", PERSONAS, ids=lambda persona: persona.name)
@@ -642,7 +547,7 @@ async def test_routine_create_submit_persona_matrix(
     evidence = json.dumps(answer)
     if persona.name == "admin":
         assert "Routine created for daimon" in evidence, answer
-    elif persona.name == "member":
-        assert "Only an admin can create routines" in evidence, answer
+    elif persona.name == "external":
+        assert "not available for this account" in evidence, "a 1:1 across organisations"
     else:
-        assert "not available for this account" in evidence, answer
+        assert "Only an admin can create routines" in evidence, answer

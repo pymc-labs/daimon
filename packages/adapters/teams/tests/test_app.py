@@ -7,7 +7,7 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any, cast, get_args
+from typing import Any, get_args
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -19,7 +19,6 @@ from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
 from daimon.adapters.teams.context import HistoryBlock
-from daimon.adapters.teams.externals import Membership
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
@@ -27,7 +26,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.accounts import get_account, set_external, set_role
+from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
@@ -35,9 +34,8 @@ from daimon.core.stores.thread_agent_bindings import create_binding, update_life
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
-from daimon.core.turn.admission import AdmissionDenied, ExternalFinding
+from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, MissingTurnConfigError
-from daimon.core.turn.notices import admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
@@ -173,20 +171,18 @@ async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
 
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
-    ("policy", "external", "marked"),
+    ("policy", "marked"),
     [
-        (TenantAccessPolicy(), False, True),
-        (TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,)), False, False),
-        (TenantAccessPolicy(protected_channel_ids=(CONVERSATION_ID,)), False, False),
-        (TenantAccessPolicy(), True, False),
+        (TenantAccessPolicy(), True),
+        (TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,)), False),
+        (TenantAccessPolicy(protected_channel_ids=(CONVERSATION_ID,)), False),
     ],
-    ids=["allowed", "off-the-invoker-allowlist", "protected", "external-not-isolated"],
+    ids=["allowed", "off-the-invoker-allowlist", "protected"],
 )
 async def test_an_hourglass_only_for_a_message_admission_would_let_start(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     policy: TenantAccessPolicy,
-    external: bool,
     marked: bool,
 ) -> None:
     """⌛ promises an answer, so it waits on the gates the turn itself would meet."""
@@ -212,7 +208,7 @@ async def test_an_hourglass_only_for_a_message_admission_would_let_start(
             started.set()
             await release.wait()
 
-    queued = dataclasses.replace(make_inbound("two", kind="channel"), is_external=external)
+    queued = make_inbound("two", kind="channel")
     with patch.object(TeamsApp, "_run_turn", _turn):
         running = asyncio.create_task(
             teams._orchestrate(make_inbound("one", kind="channel"), TENANT)
@@ -889,33 +885,6 @@ async def test_an_unprompted_turn_stays_silent_when_refused_or_without_its_threa
     assert sender.activities == [] and turns == []
 
 
-def _external(text: str = "hi") -> TeamsInbound:
-    inbound = make_inbound(text, conversation=THREAD_ID, kind="channel")
-    return dataclasses.replace(inbound, channel_id=CHANNEL_ID, is_external=True)
-
-
-@pytest.mark.usefixtures("provisioned_tenant")
-async def test_an_external_participants_command_is_not_intercepted(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    sender, direct, memory = FakeSender(), _Direct(), AsyncMock()
-    teams = TeamsApp(
-        runtime=build_teams_runtime(db_session_factory),
-        sender=sender,
-        commands={"memory": memory, "new": fresh_start},
-        bot_token=bot_token,
-        direct=direct,
-    )
-    orchestrate = AsyncMock()
-    for text in ("memory", "new"):
-        with patch.object(teams, "_orchestrate", orchestrate):
-            await teams._handle(_external(text))
-    assert [call.args[0].text for call in orchestrate.await_args_list] == ["memory", "new"]
-    assert (memory.await_count, direct.looked_up, sender.sent) == (0, [], []), (
-        "no command, no 1:1 chat attempt, no pointer"
-    )
-
-
 async def test_an_owner_of_the_admin_team_gets_the_admin_role(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -924,7 +893,6 @@ async def test_an_owner_of_the_admin_team_gets_the_admin_role(
     owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
     teams.runtime = dataclasses.replace(teams.runtime, team_owners=owners)
     assert await teams._role(make_inbound()) is Role.ADMIN, "an owner of the admin team"
-    assert await teams._role(_external()) is Role.USER, "an owner, but held as from outside"
     owners.assert_awaited_with(ADMIN_TEAM)
 
 
@@ -979,114 +947,6 @@ async def test_a_turn_while_the_owners_cannot_be_read_keeps_a_stored_admin_role(
     async with db_session_factory() as session:
         account = await get_account(session, principal.account_id)
     assert account is not None and account.role is Role.ADMIN, "the stored role stands"
-
-
-@dataclasses.dataclass
-class _Externals:
-    membership: Membership
-    asked: list[dict[str, Any]] = dataclasses.field(default_factory=list[dict[str, Any]])
-
-    async def classify(self, **kwargs: Any) -> Membership:
-        self.asked.append(kwargs)
-        return self.membership
-
-
-async def test_every_sender_is_classified_with_what_the_activity_said(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    teams = _app(db_session_factory, FakeSender())
-    externals = _Externals(Membership(is_external=True, is_known=True, home_tenant_id="other"))
-    teams.runtime = dataclasses.replace(teams.runtime, externals=cast(Any, externals))
-    channel = dataclasses.replace(_external(), is_external=False, channel_type="shared")
-    marked = await teams._classified(channel)
-    assert (marked.is_external, marked.is_external_known, marked.home_tenant_id) == (
-        True,
-        True,
-        "other",
-    )
-    dm = await teams._classified(make_inbound())
-    foreign = dataclasses.replace(_external(), is_external_known=True, home_tenant_id="other")
-    await teams._classified(foreign)
-    asked = [(a["kind"], a["conversation_id"], a["foreign_tenant"]) for a in externals.asked]
-    assert asked == [
-        ("channel", CHANNEL_ID, None),
-        ("dm", CONVERSATION_ID, None),
-        ("channel", CHANNEL_ID, "other"),
-    ], "a 1:1 chat too (guests); a foreign tenant the activity named is passed on"
-    assert dm.is_external, "a guest in a 1:1 chat gets the external rules"
-
-
-@pytest.mark.usefixtures("provisioned_tenant")
-async def test_a_stored_external_flag_holds_when_nothing_placed_the_sender(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    teams = _app(db_session_factory, FakeSender())
-    async with db_session_factory.begin() as session:
-        principal = await get_or_create_platform_principal(
-            session, tenant_id=TENANT, platform="teams", external_id=AAD_OBJECT_ID
-        )
-        await set_external(session, principal.account_id, True)
-    unknown = make_inbound()
-    assert (await teams._stored_external(unknown, TENANT)).is_external
-    known = dataclasses.replace(unknown, is_external_known=True)
-    assert await teams._stored_external(known, TENANT) is known, "evidence wins"
-    other = make_inbound(user="22222222-2222-4222-8222-222222222222")
-    assert not (await teams._stored_external(other, TENANT)).is_external
-
-
-async def test_an_external_participant_outside_an_isolated_channel_is_told_where_to_ask(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    sender = FakeSender()
-    teams = _app(db_session_factory, sender)
-    denied = AsyncMock(side_effect=AdmissionDenied(reason="external_participant"))
-    with patch.object(app_module, "admit", denied):
-        await teams._run_turn(_external(), TENANT)
-        await teams._run_turn(make_inbound(), TENANT)
-    flags = [call.kwargs["external"] for call in denied.await_args_list]
-    assert flags == [ExternalFinding(True, False), ExternalFinding(False, False)], (
-        "admission is told how each is treated, and that nothing placed them"
-    )
-    refusal = admission_refusal_text("external_participant", app_module.TEAMS_REFUSAL_NOUNS)
-    dm_refusal = admission_refusal_text(
-        "external_participant", app_module.TEAMS_REFUSAL_NOUNS, in_dm=True
-    )
-    assert [a.text for a in sender.activities] == [refusal, dm_refusal]
-
-
-@dataclasses.dataclass
-class _Following:
-    """A participation that follows every thread and records what it would batch."""
-
-    batched: list[TeamsInbound | None] = dataclasses.field(
-        default_factory=list[TeamsInbound | None]
-    )
-
-    async def observe(self, inbound: TeamsInbound, tenant_id: uuid.UUID, *, admitted: Any) -> None:
-        self.batched.append(await admitted())
-
-
-@pytest.mark.usefixtures("provisioned_tenant")
-async def test_an_unmentioned_external_reply_is_judged_only_inside_an_isolated_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    teams = _app(db_session_factory, FakeSender())
-    externals = _Externals(Membership(is_external=True, is_known=True, home_tenant_id="other"))
-    teams.runtime = dataclasses.replace(teams.runtime, externals=cast(Any, externals))
-    following = _Following()
-    teams._participation = cast(Any, following)
-    reply = dataclasses.replace(_external(), is_external=False)
-    await teams._observe(reply)
-    async with db_session_factory.begin() as session:
-        policy = TenantAccessPolicy(
-            isolated_channel_ids=(CHANNEL_ID,), sealed_channel_ids=(CHANNEL_ID,)
-        )
-        await set_access_policy(session, tenant_id=TENANT, policy=policy)
-    await teams._observe(reply)
-    outside, inside = following.batched
-    assert outside is None, "admission would refuse them: nothing they wrote is judged"
-    assert inside is not None and inside.is_external, "batched as classified"
-    assert len(externals.asked) == 2, "classified inside admitted, after the cheap checks"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

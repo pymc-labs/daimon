@@ -1,18 +1,13 @@
-"""card_actor: a clicker from another organisation is refused unless the handler opts in."""
+"""card_actor: a clicker from another organisation is treated as anyone, except in a 1:1."""
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from typing import Any, cast
 
 import pytest
 from daimon.adapters.teams.card_actions import card_actor
-from daimon.adapters.teams.externals import INTERNAL, Membership
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.accounts import set_external
-from daimon.core.stores.identity import get_or_create_platform_principal
 from microsoft_teams.api import InvokeActivity
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -28,24 +23,10 @@ from .conftest import (
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
 OTHER_TENANT = str(uuid.UUID(int=99))
-TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 
-@dataclasses.dataclass
-class _Externals:
-    membership: Membership
-    asked: list[dict[str, Any]] = dataclasses.field(default_factory=list[dict[str, Any]])
-
-    async def classify(self, **kwargs: Any) -> Membership:
-        self.asked.append(kwargs)
-        if (home := kwargs["foreign_tenant"]) is not None:
-            return Membership(is_external=True, is_known=True, home_tenant_id=home)
-        return self.membership
-
-
-def _runtime(db: async_sessionmaker[AsyncSession], membership: Membership) -> TeamsRuntime:
-    runtime = build_teams_runtime(db, admins=(AAD_OBJECT_ID,))
-    return dataclasses.replace(runtime, externals=cast(Any, _Externals(membership)))
+def _runtime(db: async_sessionmaker[AsyncSession]) -> TeamsRuntime:
+    return build_teams_runtime(db, admins=(AAD_OBJECT_ID,))
 
 
 def _click(*, channel: bool = True, tenant: str = ENTRA_TENANT_ID) -> InvokeActivity:
@@ -58,84 +39,39 @@ def _click(*, channel: bool = True, tenant: str = ENTRA_TENANT_ID) -> InvokeActi
     return TypeAdapter[InvokeActivity](InvokeActivity).validate_python(payload)
 
 
-async def test_a_foreign_clicker_in_a_channel_needs_the_opt_in_and_is_never_an_admin(
+async def test_a_foreign_clicker_in_a_channel_is_answered_like_anyone(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = _runtime(db_session_factory, INTERNAL)
-    click = _click(tenant=OTHER_TENANT)
-    assert await card_actor(runtime, click) is None, "refused by default"
-    actor = await card_actor(runtime, click, allow_external=True)
-    assert actor is not None
-    assert (actor.is_external, actor.home_tenant_id, actor.is_admin) == (True, OTHER_TENANT, False)
+    actor = await card_actor(_runtime(db_session_factory), _click(tenant=OTHER_TENANT))
+    assert actor is not None and actor.user_id == AAD_OBJECT_ID, "a shared channel may hold them"
 
 
-async def test_a_foreign_clicker_in_a_1_1_chat_is_refused_even_with_the_opt_in(
+async def test_a_foreign_clicker_in_a_1_1_chat_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = _runtime(db_session_factory, INTERNAL)
     click = _click(channel=False, tenant=OTHER_TENANT)
-    assert await card_actor(runtime, click, allow_external=True) is None, "1:1 stays strict"
+    assert await card_actor(_runtime(db_session_factory), click) is None, (
+        "Teams opens no 1:1 chat across organisations"
+    )
 
 
-async def test_the_roster_marks_a_channel_clicker_the_activity_does_not(
+async def test_our_own_admin_clicking_is_an_admin(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = _runtime(db_session_factory, Membership(is_external=True, is_known=True))
-    assert await card_actor(runtime, _click()) is None, "external per the roster"
-    externals = cast(_Externals, runtime.externals)
-    assert externals.asked[0]["conversation_id"] == CHANNEL_ID, "the channel, not the thread"
-
-
-async def test_a_guest_clicking_in_a_1_1_chat_is_refused(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    guest = Membership(is_external=True, is_known=True, is_guest=True)
-    runtime = _runtime(db_session_factory, guest)
-    assert await card_actor(runtime, _click(channel=False)) is None
-    assert cast(_Externals, runtime.externals).asked[0]["kind"] == "dm"
-
-
-async def test_a_stored_flag_holds_a_clicker_nothing_placed(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    runtime = _runtime(db_session_factory, Membership(is_external=False, is_known=False))
-    assert await card_actor(runtime, _click(channel=False)) is not None, "no flag: as today"
-    async with db_session_factory.begin() as session:
-        principal = await get_or_create_platform_principal(
-            session, tenant_id=TENANT, platform="teams", external_id=AAD_OBJECT_ID
-        )
-        await set_external(session, principal.account_id, True)
-    assert await card_actor(runtime, _click(channel=False)) is None, "and never an admin"
-
-
-async def test_our_own_admin_clicking_is_unchanged(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    runtime = _runtime(db_session_factory, INTERNAL)
+    runtime = _runtime(db_session_factory)
     for click in (_click(), _click(channel=False)):
         actor = await card_actor(runtime, click)
-        assert actor is not None and actor.is_admin and not actor.is_external
+        assert actor is not None and actor.is_admin, "the admin list decides, wherever they click"
 
 
-@dataclasses.dataclass
-class _Roster:
-    closed: bool
-
-    async def has_outsiders(self, chat_id: str) -> bool:
-        assert chat_id == "19:g@thread.v2"
-        return self.closed
-
-
-@pytest.mark.parametrize(("roster", "allowed"), [(None, False), (True, False), (False, True)])
-async def test_a_group_chat_click_needs_a_chat_of_ours_only(
-    db_session_factory: async_sessionmaker[AsyncSession], roster: bool | None, allowed: bool
+async def test_a_group_chat_click_is_answered(
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    runtime = _runtime(db_session_factory, INTERNAL)
-    group_chats = None if roster is None else cast(Any, _Roster(roster))
-    runtime = dataclasses.replace(runtime, group_chats=group_chats)
     action = {"type": "Action.Execute", "verb": "x", "data": {"action": "x"}}
     payload = make_invoke("adaptiveCard/action", {"action": action}, chat="19:g@thread.v2")
     cast(dict[str, Any], payload["conversation"])["conversationType"] = "groupChat"
-    payload["channelData"] = {"tenant": {"id": ENTRA_TENANT_ID}}
+    payload["channelData"] = {"tenant": {"id": OTHER_TENANT}}
     click = TypeAdapter[InvokeActivity](InvokeActivity).validate_python(payload)
-    assert (await card_actor(runtime, click, allow_external=True) is not None) is allowed
+    assert await card_actor(_runtime(db_session_factory), click) is not None, (
+        "a group chat may hold other organisations"
+    )

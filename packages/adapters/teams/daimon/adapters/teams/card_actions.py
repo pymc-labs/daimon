@@ -1,8 +1,7 @@
 """What every card action and dialog shares: the verified clicker, the answers, the error boundary.
 
 Invokes skip `parse_inbound`, so every handler re-verifies the organisation and
-the clicker's Entra id through `card_actor` before acting. A clicker from
-another organisation (`externals`) is refused unless the handler opts in.
+the clicker's Entra id through `card_actor` before acting.
 """
 
 from __future__ import annotations
@@ -23,11 +22,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
-from daimon.core.stores.accounts import get_external
-from daimon.core.stores.identity import (
-    find_platform_principal,
-    get_or_create_platform_principal,
-)
+from daimon.core.stores.identity import get_or_create_platform_principal
 from microsoft_teams.api import (
     AdaptiveCardActionCardResponse,
     AdaptiveCardActionMessageResponse,
@@ -53,7 +48,6 @@ from microsoft_teams.cards import (
     TextBlock,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -72,21 +66,13 @@ class Actor:
     tenant_id: uuid.UUID
     is_admin: bool
     conversation_id: str
-    # Answered as from another organisation, never an admin; known on positive evidence.
-    is_external: bool = False
-    is_external_known: bool = False
-    home_tenant_id: str | None = None
 
 
-async def card_actor(
-    runtime: TeamsRuntime, activity: InvokeActivity, *, allow_external: bool = False
-) -> Actor | None:
+async def card_actor(runtime: TeamsRuntime, activity: InvokeActivity) -> Actor | None:
     """The clicker, or None when the org, the id or the tenant does not check out.
 
-    The conversation must be the configured tenant's. A clicker from another
-    organisation (or an unlisted guest) is classified as a message sender is,
-    and gets None unless `allow_external`; in a 1:1 chat a foreign tenant is
-    refused outright, as is any click in a group chat holding someone from outside.
+    The conversation must be the configured tenant's. Teams opens no 1:1 chat
+    across organisations, so a 1:1 click naming a foreign tenant is refused.
     """
     teams = runtime.settings.teams
     conversation = activity.conversation
@@ -95,15 +81,9 @@ async def card_actor(
     user_id = canonical_uuid(activity.from_.aad_object_id)
     if user_id is None:
         return None
-    channel_data = activity.channel_data
-    home = foreign_tenant(activity.from_, channel_data, ours=teams.tenant_id)
-    is_channel = conversation.conversation_type == "channel"
-    if home is not None and not is_channel:
+    home = foreign_tenant(activity.from_, activity.channel_data, ours=teams.tenant_id)
+    if home is not None and conversation.conversation_type == "personal":
         return None
-    if conversation.conversation_type == "groupChat":
-        roster = runtime.group_chats  # a chat with anyone from outside takes no clicks
-        if roster is None or await roster.has_outsiders(conversation.id.split(";", 1)[0]):
-            return None
     tenant_id = await live_tenant_id(runtime.sessionmaker, teams.tenant_id)
     if tenant_id is None:
         return None
@@ -115,52 +95,12 @@ async def card_actor(
         user_id=user_id,
         display_name=activity.from_.name,
     )
-    is_external = is_known = home is not None
-    if runtime.externals is not None:
-        channel = channel_data.channel if channel_data is not None else None
-        team = channel_data.team if channel_data is not None else None
-        membership = await runtime.externals.classify(
-            foreign_tenant=home,
-            kind="channel" if is_channel else "dm",
-            conversation_id=conversation.id.split(";", 1)[0],
-            user_id=user_id,
-            team_id=team.id if team is not None else None,
-            team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
-            channel_type=channel.type if channel is not None else None,
-        )
-        is_external, is_known = membership.is_external, membership.is_known
-        home = membership.home_tenant_id
-        if not is_known and not is_external:
-            # No evidence either way: what was last known about them stands.
-            is_external = await stored_external(runtime.sessionmaker, tenant_id, user_id)
-    if is_external and not allow_external:
-        return None
     return Actor(
         user_id=user_id,
         tenant_id=tenant_id,
-        is_admin=await is_deployment_admin(
-            teams,
-            admin_team_owners(runtime),
-            user_id=user_id,
-            is_external=is_external,
-            home_tenant_id=home,
-        ),
+        is_admin=await is_deployment_admin(teams, admin_team_owners(runtime), user_id=user_id),
         conversation_id=conversation.id,
-        is_external=is_external,
-        is_external_known=is_known,
-        home_tenant_id=home,
     )
-
-
-async def stored_external(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, user_id: str
-) -> bool:
-    """Whether the last evidence about this Teams user placed them in another organisation."""
-    async with sessionmaker() as session:
-        principal = await find_platform_principal(
-            session, tenant_id=tenant_id, platform="teams", external_id=user_id
-        )
-        return principal is not None and await get_external(session, principal.account_id)
 
 
 async def get_or_create_account(runtime: TeamsRuntime, actor: Actor) -> uuid.UUID:

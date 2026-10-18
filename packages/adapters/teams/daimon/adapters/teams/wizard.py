@@ -121,9 +121,6 @@ def _inbound(
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
         user_name=activity.from_.name,
         timestamp=datetime.now(UTC).isoformat(),
-        is_external=actor.is_external,
-        is_external_known=actor.is_external_known,
-        home_tenant_id=actor.home_tenant_id,
         from_form=True,
     )
 
@@ -152,8 +149,7 @@ class TeamsWizards:
     ) -> AdaptiveCardInvokeResponse:
         activity = ctx.activity
         data = submitted_fields(activity.value.action.data)
-        # A form is answered like a message: admission decides where an external one runs.
-        actor = await card_actor(self._runtime, activity, allow_external=True)
+        actor = await card_actor(self._runtime, activity)
         if actor is None:
             return toast(_NOT_AVAILABLE)
         async with self._runtime.sessionmaker() as session:

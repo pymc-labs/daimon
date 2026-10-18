@@ -25,6 +25,7 @@ from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.stores.domain import TeamsInstallationRow
 from daimon.core.teams_graph import GraphClient
 from daimon.core.tool_safety import ToolCall
+from daimon.core.turn.provider_actions import ProviderActionPrompt
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -36,11 +37,21 @@ from .conftest import (
     FakeSender,
     make_inbound,
 )
-from .test_provider_actions import SESSION
-from .test_turn_hooks import question
+from .test_provider_actions import SESSION, prompt
 
 TEAM_ID = "19:general@thread.tacv2"
 REPLY_ID = "1700000000555"
+
+
+def question(thread_id: str) -> ProviderActionPrompt:
+    """A provider question from `thread_id` that expires unanswered at once."""
+    value = prompt()
+    requester = dataclasses.replace(value.context.requester, thread_id=thread_id)
+    expires_at = datetime.now(UTC) + timedelta(milliseconds=10)
+    return dataclasses.replace(
+        value,
+        context=dataclasses.replace(value.context, requester=requester, expires_at=expires_at),
+    )
 
 
 class _Feed:
@@ -325,7 +336,6 @@ async def test_a_turns_cards_notify_the_inbound_team_without_a_lookup(card: str)
         prepared=SimpleNamespace(session_ref=SESSION),
         admission=SimpleNamespace(account_id=uuid.uuid4()),
         tenant_id=uuid.uuid4(),
-        roster_open=None,
     )
     now = datetime.now(UTC)
     if card == "confirmation":

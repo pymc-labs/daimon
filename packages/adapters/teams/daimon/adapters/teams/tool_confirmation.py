@@ -111,7 +111,7 @@ async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
         return False
     for fresh in (False, True):
         owners = admin_team_owners(runtime, fresh=fresh)
-        if not await is_deployment_admin(settings, owners, user_id=clicker, is_external=False):
+        if not await is_deployment_admin(settings, owners, user_id=clicker):
             return False
     return True
 
@@ -225,13 +225,10 @@ class TeamsConfirmationCards:
         account_id: uuid.UUID | None = None,
         prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
-        roster_open: Callable[[bool], Awaitable[bool]] | None = None,
     ) -> ConfirmationHook:
         """A hook that posts each prompt's card into the turn's conversation.
 
         `team_group_id` is the channel's team, from the inbound activity, for its notice.
-        `roster_open` is a group chat's `group_chats.turn_guard`: a closed chat gets no
-        card, and the prompt expires unanswered while the guard stops the turn.
         """
 
         if runtime is not None:
@@ -330,10 +327,6 @@ class TeamsConfirmationCards:
                 posted.retired.set()
                 await self._edit(posted, state)
 
-            # Cached: a join evicts the roster, and the card would show the tool's input.
-            if roster_open is not None and not await roster_open(False):
-                log.info("teams.confirmation.withheld")
-                return "expired"
             result = await self._controls.confirm(
                 prompt, post=post, retire=retire, post_errors=TEAMS_SEND_ERRORS
             )

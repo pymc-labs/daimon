@@ -105,13 +105,7 @@ async def test_cancel_requester_persona_matrix(
     fake = PersonaTeamsApiFake(active=requester)
     settings = build_teams_runtime(db_session_factory).settings.teams
     assert settings is not None
-    settings = settings.model_copy(
-        update={
-            "admin_team_id": ADMIN_TEAM,
-            "restrict_guests": requester.name != "guest",
-            "restrict_external_participants": requester.name != "external",
-        }
-    )
+    settings = settings.model_copy(update={"admin_team_id": ADMIN_TEAM})
     runtime = build_teams_runtime(
         db_session_factory,
         teams=settings,

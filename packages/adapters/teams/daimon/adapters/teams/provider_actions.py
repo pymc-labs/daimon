@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TypedDict
@@ -101,13 +101,8 @@ class TeamsProviderActions:
         service_url: str | None,
         thread_id: str,
         team_group_id: str | None = None,
-        roster_open: Callable[[bool], Awaitable[bool]] | None = None,
     ) -> ProviderActionHook:
-        """Posts each prompt's card; `team_group_id` is the channel's team, for its notice.
-
-        `roster_open` is a group chat's `group_chats.turn_guard`: a closed chat gets no
-        card, and the prompt goes unanswered while the guard stops the turn.
-        """
+        """Posts each prompt's card; `team_group_id` is the channel's team, for its notice."""
 
         async def request(prompt: ProviderActionPrompt) -> NativeActionResponse | None:
             if (
@@ -115,9 +110,6 @@ class TeamsProviderActions:
                 or prompt.context.requester.thread_id != thread_id
                 or datetime.now(UTC) >= prompt.context.expires_at
             ):
-                return None
-            if roster_open is not None and not await roster_open(False):
-                log.info("teams.provider_action.withheld")
                 return None
             answer: asyncio.Future[NativeActionResponse | None] = (
                 asyncio.get_running_loop().create_future()

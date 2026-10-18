@@ -11,15 +11,12 @@ then maps it to the organisation's live daimon tenant; a 1:1 chat names its
 organisation, so it needs no DM workspace choice. A group chat (`kind="group"`)
 is one conversation keyed by its chat id: only a mention, a quote of the bot
 or a targeted message addresses it, and its sender must be ours, as in a 1:1
-chat; `group_chats` refuses a chat that holds anyone else.
+chat.
 
-A channel must be the configured tenant's (`conversation.tenantId`, the host
-tenant), but its sender may be from another one: a shared channel's external
-participant (B2B direct connect), who stays in their home tenant. Any foreign
-tenant the activity names for its sender (`foreign_tenant`) marks them
-`is_external`; `externals.ExternalParticipants` asks the member lists when
-the activity names none, and finds guests. A 1:1 chat naming a foreign tenant
-is refused, as before.
+A channel or group chat must be the configured tenant's (`conversation.tenantId`,
+the host tenant), but its sender may be from another one (B2B direct connect),
+answered like anyone else. Teams opens no 1:1 chat across organisations, so a
+1:1 chat naming a foreign tenant for its sender (`foreign_tenant`) is refused.
 """
 
 from __future__ import annotations
@@ -99,9 +96,7 @@ class TeamsInbound:
     says otherwise (a thread reply) or ignores it (a root post).
     `composed_ids` are the earlier queued messages folded into this one.
     `timestamp` is when it was sent (ISO 8601); the channel and team names
-    come from the activity, General's filled in. `is_external` marks a sender
-    answered as from another organisation, `is_external_known` that it rests on
-    positive evidence (`externals.Membership`), `home_tenant_id` their tenant.
+    come from the activity, General's filled in.
     `from_form` marks a submitted form's turn: its `activity_id` names no message.
     `sender_id` is the sender's Bot Framework id (`29:…`), which a reply only
     they see is addressed to; Graph-read messages have none. `is_targeted`
@@ -130,9 +125,6 @@ class TeamsInbound:
     channel_name: str | None = None
     channel_type: str | None = None
     team_name: str | None = None
-    is_external: bool = False
-    is_external_known: bool = False
-    home_tenant_id: str | None = None
     from_form: bool = False
     sender_id: str | None = None
     is_targeted: bool = False
@@ -344,9 +336,8 @@ def parse_inbound(
         channel_tenant = channel_data.tenant.id
     user_id = canonical_uuid(activity.from_.aad_object_id)
     home = foreign_tenant(activity.from_, channel_data, ours=tenant) if tenant else None
-    # The conversation is always the host's. A channel may hold another
-    # organisation's people; a 1:1 or group chat sender is only ours.
-    sender_verified = kind == "channel" or (
+    # The conversation is always the host's; Teams opens no 1:1 chat across organisations.
+    sender_verified = kind != "personal" or (
         canonical_uuid(channel_tenant) == tenant and home is None
     )
     verified = (
@@ -409,9 +400,6 @@ def parse_inbound(
         else _channel_name(channel_id, team_id, channel.name if channel else None),
         channel_type=channel.type if channel is not None else None,
         team_name=team.name if team is not None else None,
-        is_external=home is not None,
-        is_external_known=home is not None,
-        home_tenant_id=home,
         sender_id=activity.from_.id or None,
         is_targeted=targeted,
     )
@@ -503,8 +491,6 @@ def parse_graph_message(
     user_id = canonical_uuid(user.id)
     if tenant is None or user_id is None or not message.id.strip():
         return Refusal(DENIED if addressed else None)
-    # Graph's sender tenant is not trusted to tell a guest from an external member (a guest
-    # may show their home tenant): the roster lookup classifies both, as for Bot Framework.
     quoted = "".join(
         describe_quote(_display_name(ref.message_sender), ref.message_preview) for ref in references
     )

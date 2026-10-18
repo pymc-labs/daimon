@@ -21,7 +21,7 @@ import contextlib
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -179,7 +179,6 @@ class TeamsTurnLifecycle:
         budget_channel_id: str | None = None,
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         acknowledge: Callable[[Acknowledgment], None] | None = None,
-        roster_open: Callable[[bool], Awaitable[bool]] | None = None,
         hold_controls: bool = False,
     ) -> None:
         self._sender = sender
@@ -191,9 +190,6 @@ class TeamsTurnLifecycle:
         self._finished_tools = 0
         self._tool_done_at: float | None = None
         self._tool_open = False
-        # A group chat's `group_chats.turn_guard`: False withholds all the turn's work.
-        self._roster_open = roster_open
-        self._withheld = False
         # Reacts on the asker's message, in the background; None when there is none.
         self._acknowledge = acknowledge
         # An answer, or a tool-only turn's result, reached the chat: ✅ is due.
@@ -330,8 +326,6 @@ class TeamsTurnLifecycle:
         if now - self._last_flush < _DEBOUNCE_S:
             return
         self._last_flush = now
-        if (self._state.draft or self._state.tool_lines) and await self._withhold(fresh=False):
-            return
         await self._send(self._status(), message_id=self._message_id)
 
     def _note_tools(self, state: TurnState) -> None:
@@ -348,16 +342,6 @@ class TeamsTurnLifecycle:
         if self._tool_done_at is None or self._tool_open:
             return None
         return self._clock() - self._tool_done_at
-
-    async def _withhold(self, *, fresh: bool) -> bool:
-        """True once the group chat holds an outsider: the card then says only that."""
-        if self._roster_open is None or self._withheld:
-            return self._withheld
-        if await self._roster_open(fresh):
-            return False
-        self._withheld = True
-        await self.close_with_notice(card.OUTSIDER_JOINED_NOTICE)
-        return True
 
     async def close_with_notice(
         self, text: str, *, actions: Sequence[ExecuteAction] = (), summary: str | None = None
@@ -451,8 +435,6 @@ class TeamsTurnLifecycle:
         pass an answer nobody saw.
         """
         self._note_tools(state)
-        if await self._withhold(fresh=True):  # the roster is read afresh before any answer
-            return
         self._terminal = True
         answer = self._answer_text(state)
         degraded = render_degraded_notice(state.mcp_failures)

@@ -1,13 +1,9 @@
-"""A turn's mid-turn cards: tool confirmations and provider-action questions.
-
-In a group chat both share the turn's `group_chats.turn_guard` with its status card.
-"""
+"""A turn's mid-turn cards: tool confirmations and provider-action questions."""
 
 from __future__ import annotations
 
 import uuid
 
-from daimon.adapters.teams.group_chats import RosterCheck
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.provider_actions import (
     ProviderActionOptions,
@@ -34,7 +30,6 @@ def turn_hooks(
     prepared: PreparedTurn,
     admission: Admission,
     tenant_id: uuid.UUID,
-    roster_open: RosterCheck | None,
 ) -> TurnHooks:
     """`run_prepared_turn`'s card hooks for one turn of `inbound`."""
     return {
@@ -47,7 +42,6 @@ def turn_hooks(
             service_url=inbound.service_url,
             team_group_id=inbound.team_group_id,
             requester_display_name=inbound.user_name,
-            roster_open=roster_open,
         ),
         **provider_action_options(
             prepared,
@@ -56,7 +50,6 @@ def turn_hooks(
                 service_url=inbound.service_url,
                 thread_id=inbound.thread_id,
                 team_group_id=inbound.team_group_id,
-                roster_open=roster_open,
             ),
         ),
     }

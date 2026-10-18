@@ -92,9 +92,9 @@ class PersonaTeamsApiFake(TeamsApiFake):
 
 @dataclasses.dataclass
 class OwnerGraphFake:
-    """Serve Graph owner and member reads through the runtime's HTTP transport."""
+    """Serve Graph owner reads through the runtime's HTTP transport."""
 
-    owners: set[str] = dataclasses.field(default_factory=lambda: {AAD_OBJECT_ID, GUEST_ID})
+    owners: set[str] = dataclasses.field(default_factory=lambda: {AAD_OBJECT_ID})
     requests: list[str] = dataclasses.field(default_factory=list[str])
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -110,21 +110,6 @@ class OwnerGraphFake:
                         }
                         for p in PERSONAS
                         if p.user_id in self.owners
-                    ]
-                },
-                request=request,
-            )
-        if request.method == "GET" and request.url.path.endswith("/allMembers"):
-            return httpx.Response(
-                200,
-                json={
-                    "value": [
-                        {
-                            "userId": p.user_id,
-                            "tenantId": p.tenant_id,
-                            "roles": ["guest"] if p.name == "guest" else [],
-                        }
-                        for p in PERSONAS
                     ]
                 },
                 request=request,

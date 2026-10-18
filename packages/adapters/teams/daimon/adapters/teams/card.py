@@ -55,7 +55,6 @@ INTERRUPTED_NOTICE = (
 CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
 TOOLS_DONE_NOTICE = "Done."
 # A group chat closed mid-turn: no word of the turn's work.
-OUTSIDER_JOINED_NOTICE = "Stopped: someone from outside this organisation is in this chat."
 ASK_HUMAN = f"{ESCALATE} {ASK_THE_TEAM}"
 ASK_HUMAN_DIALOG = "ask_human"
 VOTE_UP_DIALOG = "feedback_up"

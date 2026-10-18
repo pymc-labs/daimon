@@ -338,7 +338,7 @@ def test_a_group_chat_mention_is_one_conversation_keyed_on_the_chat() -> None:
         "Launch crew",
         False,
     )
-    assert inbound.team_id is None and not inbound.is_external
+    assert inbound.team_id is None
 
 
 def test_a_group_chat_quote_of_the_bot_addresses_it() -> None:
@@ -370,20 +370,20 @@ def test_a_typed_name_in_a_group_chat_waits_for_the_tenant_switch() -> None:
 
 @pytest.mark.parametrize(
     "overrides",
-    [
-        {"channel_tenant_id": str(uuid.UUID(int=99))},
-        {"aad_object_id": None},
-        {"tenant_id": str(uuid.UUID(int=99))},
-    ],
+    [{"aad_object_id": None}, {"tenant_id": str(uuid.UUID(int=99))}],
 )
-def test_a_group_chat_sender_from_elsewhere_is_denied(overrides: dict[str, Any]) -> None:
+def test_a_group_chat_without_an_id_or_of_another_tenant_is_denied(
+    overrides: dict[str, Any],
+) -> None:
     assert _parse(make_group_activity(**overrides)) == Refusal(DENIED)
 
 
-def test_a_group_chat_sender_naming_a_foreign_tenant_is_denied() -> None:
+def test_a_group_chat_sender_from_another_tenant_is_answered() -> None:
     payload = make_group_activity()
     payload["from"]["tenantId"] = str(uuid.UUID(int=99))  # type: ignore[index]
-    assert _parse(payload) == Refusal(DENIED), "a group chat sender is ours, as in a 1:1 chat"
+    assert isinstance(_parse(payload), TeamsInbound), "a group chat may hold other organisations"
+    named = make_group_activity(channel_tenant_id=str(uuid.UUID(int=99)))
+    assert isinstance(_parse(named), TeamsInbound), "whichever field names their tenant"
 
 
 @pytest.mark.parametrize("chat", ["19:meeting_abc@thread.skype", "a:not-a-group"])
@@ -505,20 +505,14 @@ def test_our_own_tenant_everywhere_is_not_foreign_and_garbage_is() -> None:
     assert foreign_tenant(odd, None, ours=ENTRA_TENANT_ID) == "contoso", "not ours: foreign"
 
 
-def test_a_channel_sender_from_another_tenant_is_accepted_as_external() -> None:
+def test_a_channel_sender_from_another_tenant_is_accepted() -> None:
     inbound = _parse(make_channel_activity(channel_tenant_id=OTHER_TENANT))
     assert isinstance(inbound, TeamsInbound), "a shared channel may hold them"
-    assert (inbound.is_external, inbound.is_external_known, inbound.home_tenant_id) == (
-        True,
-        True,
-        OTHER_TENANT,
-    )
 
 
 def test_a_channel_without_a_channel_data_tenant_is_accepted_as_ours() -> None:
     inbound = _parse(make_channel_activity(channel_tenant_id=None))
     assert isinstance(inbound, TeamsInbound), "the conversation tenant is the check"
-    assert inbound.is_external is False, "nothing names another tenant"
 
 
 def test_a_channel_in_another_tenant_is_still_denied() -> None:
@@ -528,13 +522,7 @@ def test_a_channel_in_another_tenant_is_still_denied() -> None:
 def test_a_personal_chat_whose_sender_names_another_tenant_is_denied() -> None:
     payload = make_message_activity()
     cast(dict[str, object], payload["from"])["tenantId"] = OTHER_TENANT
-    assert _parse(payload) == Refusal(DENIED), "1:1 stays strict"
-
-
-def test_an_internal_channel_sender_is_not_external() -> None:
-    inbound = _parse(make_channel_activity())
-    assert isinstance(inbound, TeamsInbound)
-    assert (inbound.is_external, inbound.home_tenant_id) == (False, None)
+    assert _parse(payload) == Refusal(DENIED), "Teams opens no 1:1 chat across organisations"
 
 
 def test_an_oversize_typed_bot_name_is_refused_once_the_switch_is_known() -> None:

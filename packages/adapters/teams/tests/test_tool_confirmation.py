@@ -432,25 +432,6 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     assert cards._controls.missing_message(token.group(1)) == EXPIRED_MESSAGE
 
 
-@pytest.mark.parametrize("still_ours", [True, False])
-async def test_a_closed_group_chat_gets_no_card_and_the_prompt_expires(still_ours: bool) -> None:
-    """A group chat's card waits on the turn's cached roster check: a closed chat sees nothing."""
-    checks: list[bool] = []
-
-    async def roster_open(fresh: bool) -> bool:
-        checks.append(fresh)
-        return still_ours
-
-    sender = FakeSender()
-    hook = TeamsConfirmationCards(sender).hook(
-        conversation_id=CONVERSATION_ID, service_url=None, roster_open=roster_open
-    )
-    answer = await hook(_prompt(expires_in=timedelta(milliseconds=10)))
-    assert answer == "expired", "unanswered either way"
-    assert checks == [False], "one cached check: a join evicts the roster"
-    assert bool(sender.sent) is still_ours, "only a chat still ours sees the card"
-
-
 async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
     sender = FakeSender()
     cards = TeamsConfirmationCards(sender)

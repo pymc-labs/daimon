@@ -37,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .conftest import AAD_OBJECT_ID, ENTRA_TENANT_ID, OTHER_AAD_OBJECT_ID, teams_settings
 
 TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
-FOREIGN_TENANT = "99999999-9999-9999-9999-999999999999"
 REMOVED_OWNER = str(uuid.UUID(int=4))
 
 
@@ -72,7 +71,7 @@ async def _is_admin(
     runtime: MagicMock, settings: TeamsSettings, user_id: str, **kwargs: Any
 ) -> bool:
     return await is_deployment_admin(
-        settings, admin_team_owners(runtime), user_id=user_id, is_external=False, **kwargs
+        settings, admin_team_owners(runtime), user_id=user_id, **kwargs
     )
 
 
@@ -80,22 +79,6 @@ async def test_an_owner_of_the_admin_team_is_an_admin_and_a_member_is_not() -> N
     runtime = _runtime(_Owners(AAD_OBJECT_ID))
     assert await _is_admin(runtime, _settings(), AAD_OBJECT_ID.upper()), "an owner administers"
     assert not await _is_admin(runtime, _settings(), OTHER_AAD_OBJECT_ID), "a non-owner does not"
-
-
-async def test_an_owner_held_as_from_outside_is_never_an_admin() -> None:
-    """A guest held as one, an external participant or a group chat with outsiders."""
-    owners = admin_team_owners(_runtime(_Owners(AAD_OBJECT_ID)))
-    settings = _settings()
-    external = await is_deployment_admin(settings, owners, user_id=AAD_OBJECT_ID, is_external=True)
-    assert not external, "someone answered as from outside is never an admin, owner or not"
-    foreign = await is_deployment_admin(
-        settings, owners, user_id=AAD_OBJECT_ID, is_external=False, home_tenant_id=FOREIGN_TENANT
-    )
-    assert not foreign, "someone from another tenant is never an admin"
-    home = await is_deployment_admin(
-        settings, owners, user_id=AAD_OBJECT_ID, is_external=False, home_tenant_id=ENTRA_TENANT_ID
-    )
-    assert home, "our own tenant's owner still is"
 
 
 async def test_a_failed_owner_read_grants_nothing_and_logs_once() -> None:
@@ -242,7 +225,7 @@ async def test_an_outage_keeps_the_last_owners_for_an_hour_then_nobody_until_a_g
     assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "the last read stands in"
     clock[0] = STALE_OWNERS_S
     owners = admin_team_owners(runtime)
-    role = await deployment_role(settings, owners, user_id=AAD_OBJECT_ID, is_external=False)
+    role = await deployment_role(settings, owners, user_id=AAD_OBJECT_ID)
     assert role is None, "past the hour, ownership is unknown: no role to record"
     assert await deployment_admin_ids(settings, owners) == (), "nobody is an admin"
     graph.failure, clock[0] = None, STALE_OWNERS_S + 61.0

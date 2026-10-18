@@ -319,7 +319,7 @@ async def test_a_followed_reply_is_batched_as_admitted_returns_it(
     await _follow(db_session, tenant_id, ParticipationScope.THREAD, THREAD_ID)
     rig = _Rig(db_session_factory)
     reply = _reply("is the release on?")
-    classified = dataclasses.replace(reply, is_external=True, is_external_known=True)
+    classified = dataclasses.replace(reply, user_name="as admitted")
 
     async def _admitted() -> TeamsInbound | None:
         return classified
@@ -327,4 +327,4 @@ async def test_a_followed_reply_is_batched_as_admitted_returns_it(
     await rig.participation.observe(reply, tenant_id, admitted=_admitted)
     rig.timers[-1].cancel()
     await rig.participation.judge(THREAD_ID, tenant_id)
-    assert rig.fired == [classified], "the turn runs as the sender was placed"
+    assert rig.fired == [classified], "the turn runs as admitted returned it"

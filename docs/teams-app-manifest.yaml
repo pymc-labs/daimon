@@ -57,7 +57,7 @@
 
 manifestVersion: "1.30"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.6.0"                       # bump on every change, then re-upload
+version: "0.6.1"                       # bump on every change, then re-upload
 supportsChannelFeatures: tier1          # private and shared channels (see above)
 developer:
   name: daimon
@@ -179,10 +179,6 @@ authorization:
       - name: ChannelMessage.Read.Group
         type: Application
       - name: TeamMember.Read.Group
-        type: Application
-      # List a channel's members and their home tenants, to tell people from
-      # another organisation (shared channels' external participants, guests).
-      - name: ChannelMember.Read.Group
         type: Application
       # Read the messages and images of the group chats the app is added to.
       - name: ChatMessage.Read.Chat

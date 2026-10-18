@@ -144,7 +144,6 @@ async def setup(
             activity_id=str(next(ids)),
             text="hello",
             service_url=SERVICE_URL,
-            is_external_known=True,
         )
         return await backend_selection_turn(
             BackendTurnEnvelope(app, inbound, tenant.id, CHANNEL, thread, user)
@@ -303,7 +302,6 @@ async def test_timeout_restores_observers_and_does_not_certify_a_binding(
         activity_id="timeout-input",
         text="hello",
         service_url=SERVICE_URL,
-        is_external_known=True,
     )
     envelope = BackendTurnEnvelope(app, inbound, tenant, CHANNEL, THREAD, USER, timeout_s=1e-9)
 
