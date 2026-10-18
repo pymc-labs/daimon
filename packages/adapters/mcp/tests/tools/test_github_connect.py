@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -25,6 +25,7 @@ from daimon.core.config import (
 )
 from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -33,6 +34,169 @@ from daimon.testing.factories import make_account, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "live_result", "repo_name", "principal_changed", "manages", "expected"),
+    [
+        ("slack", True, "owner/repo", False, False, "granted"),
+        ("slack", True, "owner/repo", True, False, "ask_admin"),
+        ("slack", False, "owner/repo", False, False, "ask_admin"),
+        # A manager who is no longer admin can't instantly grant an all-agents repo.
+        ("slack", False, "owner/repo", False, True, "sent"),
+        ("teams", False, "owner/repo", False, False, "ask_admin"),
+        ("slack", AdminAttestationUnavailable("lookup failed"), "owner/repo", False, False, "sent"),
+        (
+            "teams",
+            AdminAttestationUnavailable("Graph lookup failed"),
+            "owner/repo",
+            False,
+            False,
+            "sent",
+        ),
+        ("discord", True, "owner/repo", False, False, "granted"),
+        (
+            "discord",
+            AdminAttestationUnavailable("lookup failed"),
+            "owner/repo",
+            False,
+            False,
+            "sent",
+        ),
+        ("slack", None, None, False, False, "sent"),
+    ],
+)
+async def test_admin_fast_grant_requires_live_platform_standing(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    live_result: bool | AdminAttestationUnavailable | None,
+    repo_name: str | None,
+    principal_changed: bool,
+    manages: bool,
+    expected: str,
+) -> None:
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    principal = SimpleNamespace(
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        platform=platform,
+        platform_user_id="requester",
+        is_external=False,
+    )
+    open_sessions = 0
+
+    class SessionFactory:
+        @asynccontextmanager
+        async def __call__(self):  # type: ignore[no-untyped-def]
+            nonlocal open_sessions
+            open_sessions += 1
+            try:
+                yield object()
+            finally:
+                open_sessions -= 1
+
+        @asynccontextmanager
+        async def begin(self):  # type: ignore[no-untyped-def]
+            nonlocal open_sessions
+            open_sessions += 1
+            try:
+                yield object()
+            finally:
+                open_sessions -= 1
+
+    async def attest(**_kwargs: object) -> bool:
+        assert open_sessions == 0
+        if isinstance(live_result, AdminAttestationUnavailable):
+            raise live_result
+        assert live_result is not None
+        return live_result
+
+    attestation = AsyncMock(side_effect=attest)
+    monkeypatch.setattr(connect_tool, "_attest_native_admin", attestation)
+    current = (
+        SimpleNamespace(**{**vars(principal), "platform_user_id": "someone-else"})
+        if principal_changed
+        else principal
+    )
+    monkeypatch.setattr(
+        connect_tool,
+        "get_account_with_tenant",
+        AsyncMock(side_effect=[principal, current])
+        if repo_name is not None
+        else AsyncMock(return_value=current),
+    )
+    origin = SimpleNamespace(
+        configuration_target_name="Agent",
+        configuration_target_ma_agent_id="ma_agent",
+        responder_name="Agent",
+        responder_ma_agent_id="ma_agent",
+        parent_channel_id="channel",
+        thread_id="thread",
+    )
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr(connect_tool, "require_app_eligible_agent", AsyncMock())
+    monkeypatch.setattr(connect_tool, "requester_manages_agent", AsyncMock(return_value=manages))
+    monkeypatch.setattr(connect_tool, "record_connect_request", AsyncMock())
+    monkeypatch.setattr(connect_tool, "append_event", AsyncMock())
+    repo = SimpleNamespace(
+        repo_full_name="owner/repo",
+        status="active",
+        installation_id=1,
+        scope_agent_id=uuid.uuid4(),
+        repo_id=2,
+    )
+    monkeypatch.setattr(connect_tool, "list_authorized_repos", AsyncMock(return_value=[repo]))
+    monkeypatch.setattr(connect_tool, "get_app_installation", AsyncMock(return_value=object()))
+    monkeypatch.setattr(connect_tool, "installation_covers_repo", Mock(return_value=True))
+    monkeypatch.setattr(connect_tool, "list_agent_grants", AsyncMock(return_value=[]))
+    grant = AsyncMock()
+    monkeypatch.setattr(connect_tool, "stage_grant", grant)
+    monkeypatch.setattr(connect_tool, "mint_invitation", AsyncMock(return_value="token"))
+    monkeypatch.setattr(connect_tool, "set_invitation_encrypted_token", AsyncMock())
+    monkeypatch.setattr(connect_tool, "encrypt_token", Mock(return_value="encrypted"))
+    monkeypatch.setattr(connect_tool, "_post_slack_connect_card", AsyncMock())
+    monkeypatch.setattr(connect_tool, "_post_teams_connect_card", AsyncMock())
+    monkeypatch.setattr(
+        connect_tool, "create_discord_connect_intent", AsyncMock(return_value=uuid.uuid4())
+    )
+    monkeypatch.setattr(connect_tool, "_post_discord_connect_card", AsyncMock())
+    runtime = SimpleNamespace(
+        session_factory=SessionFactory(),
+        settings=SimpleNamespace(
+            mcp=SimpleNamespace(app_root_url="https://mcp.test"),
+            github_app=SimpleNamespace(
+                app_id="42",
+                app_slug="app",
+                private_key="key",
+                client_id="client",
+                client_secret="secret",
+            ),
+        ),
+        fernet=object(),
+        deployment_default=DeploymentDefault(),
+    )
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        platform=platform,
+        external_id="workspace",
+        platform_user_id="requester",
+        is_admin=True,
+    )
+    result = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        auth,
+        origin_context_id="origin",
+        repo_name=repo_name,
+    )
+    assert result.status == expected
+    assert grant.await_count == (1 if expected == "granted" else 0)
+    assert attestation.await_count == (0 if repo_name is None else 1)
+    assert open_sessions == 0
 
 
 @pytest.mark.asyncio

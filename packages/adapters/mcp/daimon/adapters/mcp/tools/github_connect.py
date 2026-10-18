@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import suppress
 from typing import Literal
 
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.oauth_github import (
+    _attest_native_admin,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
@@ -31,7 +35,8 @@ from daimon.core.github_connect_cards import (
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.accounts import get_account
+from daimon.core.native_admins import AdminAttestationUnavailable
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
     list_agent_grants,
@@ -205,6 +210,29 @@ async def _github_connect_impl(
     )
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     requested_repo: str | None = None
+    attested_account = None
+    live_admin: bool | None = None
+    if repo_name is not None and auth.is_admin:
+        async with runtime.session_factory() as session:
+            candidate = await get_account_with_tenant(session, account_id=auth.account_id)
+        if (
+            candidate is not None
+            and candidate.role == Role.ADMIN
+            and candidate.tenant_id == auth.tenant_id
+            and candidate.platform == auth.platform
+            and candidate.platform_user_id == auth.platform_user_id
+            and not candidate.is_external
+        ):
+            attested_account = candidate
+            # Unavailable: no instant grant below; the connect link's OAuth confirm
+            # checks live authority itself before saving anything.
+            with suppress(AdminAttestationUnavailable):
+                live_admin = await _attest_native_admin(
+                    requester=candidate,
+                    settings=runtime.settings,
+                    sessionmaker=runtime.session_factory,
+                    fernet=runtime.fernet,
+                )
     async with runtime.session_factory.begin() as session:
         try:
             await require_app_eligible_agent(
@@ -215,10 +243,20 @@ async def _github_connect_impl(
             )
         except PinnedAgentConnectionError as exc:
             return ConnectResult(status="client_agent", message=str(exc))
-        account = await get_account(session, auth.account_id)
+        account = await get_account_with_tenant(session, account_id=auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
-        is_admin = account.role == Role.ADMIN and auth.is_admin
+        stored_admin = account.role == Role.ADMIN and auth.is_admin
+        same_principal = (
+            attested_account is not None
+            and account.tenant_id == attested_account.tenant_id
+            and account.platform == attested_account.platform
+            and account.platform_user_id == attested_account.platform_user_id
+        )
+        is_admin = stored_admin and (
+            repo_name is None or (same_principal and live_admin is not False)
+        )
+        immediate_grant_allowed = not stored_admin or (same_principal and live_admin is not None)
         manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
@@ -283,6 +321,7 @@ async def _github_connect_impl(
                 grantable = (
                     installation is not None
                     and installation_covers_repo(installation, repo.repo_full_name)
+                    and immediate_grant_allowed
                     and (is_admin or repo.scope_agent_id == agent_id)
                 )
                 if grantable:

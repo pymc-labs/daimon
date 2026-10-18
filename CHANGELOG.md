@@ -62,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
 - `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
+- Asking Daimon to connect a repo that is already authorised grants it instantly only if the requester is a Discord, Slack, or Teams admin right now. Someone the platform no longer treats as admin is handled like any member; if the admin check can't be reached, they get the normal connect link instead of an instant grant.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
 - Offer “Opus 5.5 fast” as a separate model choice for new Managed Agents sessions, with twice the standard token rates.
 
