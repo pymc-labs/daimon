@@ -13,7 +13,11 @@ import re
 from collections.abc import Sequence
 
 import anthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsAnthropicSkill,
+    BetaManagedAgentsCustomSkill,
+)
 from daimon.core.errors import UserFacingError
 
 _UNRESOLVED = re.compile(
@@ -23,7 +27,15 @@ _UNRESOLVED = re.compile(
 
 
 class SkillUnavailable(UserFacingError):
-    """The session was refused because a skill it mounts no longer exists."""
+    """The session was refused because a skill it mounts no longer exists.
+
+    `skill_id` names it when known, so a caller may retry without a skill it
+    added itself (`daimon.core.turn.prepare.create_ma_session`).
+    """
+
+    def __init__(self, message: str, *, skill_id: str | None = None) -> None:
+        super().__init__(message)
+        self.skill_id = skill_id
 
 
 def unresolved_skill_id(error: BaseException) -> tuple[str, str | None] | None:
@@ -40,7 +52,7 @@ def skill_unavailable(
     *,
     skill_id: str,
     agent: BetaManagedAgentsAgent,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill],
+    channel_skills: Sequence[BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill],
     channel_skill_name: str | None,
 ) -> SkillUnavailable:
     """The user-facing error for `skill_id`, attributed to the channel or the agent.
@@ -69,7 +81,8 @@ def skill_unavailable(
         )
     return SkillUnavailable(
         f"Daimon couldn't start this conversation: the skill {label} that {where} "
-        f"no longer exists. {fix}"
+        f"no longer exists. {fix}",
+        skill_id=skill_id,
     )
 
 

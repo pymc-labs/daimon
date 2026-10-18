@@ -401,9 +401,14 @@ def test_daimon_answers_replay_with_their_previews_and_saved_files_readable() ->
         attached=Attached(
             images={"301": 1, "303": 1},
             downloads={chart: "https://dl.example/chart", deck: "https://dl.example/deck"},
+            versions={deck: "{D},2"},
         ),
     )
     text = "\n".join(block.lines)
+    assert f'link="{deck}" version="{{D}},2"' in text, (
+        "a file with a known version carries what replace_channel_file takes"
+    )
+    assert text.count("version=") == 1, "a file without one gets no link to replace"
     assert "Saved to this channel" not in text, "an older answer's heading goes too"
     assert "- chart.png" not in text and "- [" not in text, "daimon's links are not its words"
     assert "Here it is." in text and "Done." in text, "the answers themselves stay"

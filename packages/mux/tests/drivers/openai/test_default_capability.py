@@ -34,7 +34,7 @@ TAPE = ROOT / "tests/conformance/recordings/openai/F1-scripted.json"
 @pytest.fixture
 def manifest() -> DefaultManifest:
     raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
-    names = tuple(item["skill_id"] for item in raw["skills"])
+    names = tuple(item["skill_id"] for item in raw["skills"] if item["type"] == "custom")
     skills: list[NamedSkill] = []
     for name in names:
         directory = ROOT / "defaults/skills" / name

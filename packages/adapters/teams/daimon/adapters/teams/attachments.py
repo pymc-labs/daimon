@@ -82,18 +82,24 @@ class InboundFile:
     ]
     name: str
     url: str = ""
+    # A channel file's SharePoint link and version (`version_of` its eTag), what
+    # `replace_channel_file` takes.
+    link: str = ""
+    version: str = ""
 
 
 @dataclass(frozen=True)
 class SharedFile:
     """A file shared in a channel: its SharePoint URL, and a download URL once resolved.
 
-    `refused` when Graph denied daimon the channel's files."""
+    `version` is its bare eTag when resolved; `refused` when Graph denied daimon the
+    channel's files."""
 
     name: str
     content_url: str | None = None
     download_url: str | None = None
     refused: bool = False
+    version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -239,9 +245,16 @@ def _link_line(file: InboundFile, reason: str | None) -> str:
     warning = ""
     if file.name.lower().endswith(_IMAGE_EXTENSIONS):
         warning = f" Downscale it under {MAX_VISION_IMAGE_DIMENSION}px before viewing it."
+    replace = ""
+    if file.link and file.version:
+        replace = (
+            " To save an edited file over it as a new version, pass replace_channel_file "
+            f"link `{file.link}` and version `{file.version}`."
+        )
     return (
         f"[attachment] `{file.name}`, shared by the user with this message{skipped}. "
         f"Short-lived download URL, fetch it now (curl to disk, then read it): {file.url}{warning}"
+        f"{replace}"
     )
 
 
@@ -255,7 +268,13 @@ def _resolve_embedded(
         return [f for f in files if f not in embedded], embedded
     kept = [InboundFile("graph_image", "image", url) for url in media.image_urls]
     kept += [
-        InboundFile("shared_file", sanitize_title(f.name), f.download_url)
+        InboundFile(
+            "shared_file",
+            sanitize_title(f.name),
+            f.download_url,
+            link=f.content_url or "",
+            version=f.version or "",
+        )
         if f.download_url
         else InboundFile("refused" if f.refused else "unreachable", sanitize_title(f.name))
         for f in media.files

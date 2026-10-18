@@ -19,7 +19,13 @@ import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.teams_graph import GraphUnavailable, TeamGroups
-from daimon.core.teams_sharepoint import DriveFolder, DriveItem, SharePoint
+from daimon.core.teams_sharepoint import (
+    DriveFolder,
+    DriveItem,
+    SharePoint,
+    download_url_of,
+    version_of,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -105,7 +111,7 @@ class ChannelFiles:
         return await self._sharepoint.thumbnail_url(item)
 
     async def resolve(self, media: ChannelMedia, *, group_id: str, channel_id: str) -> ChannelMedia:
-        """`media` with a download URL on each shared file inside the channel's Files folder."""
+        """`media` with a download URL and version on each shared file in the channel's Files."""
         if not any(file.content_url and not file.download_url for file in media.files):
             return media
         try:
@@ -124,8 +130,10 @@ class ChannelFiles:
         for file in media.files:
             if file.content_url and not file.download_url:
                 try:
-                    url = await self._sharepoint.download_url(file.content_url, folder=folder)
-                    file = dataclasses.replace(file, download_url=url)
+                    item = await self._sharepoint.shared_item(file.content_url, folder=folder)
+                    file = dataclasses.replace(
+                        file, download_url=download_url_of(item), version=version_of(item.e_tag)
+                    )
                 except GraphUnavailable as err:
                     log.warning(
                         "teams.channel_file.unreachable", status=err.status, reason=err.reason

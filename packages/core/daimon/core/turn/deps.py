@@ -22,6 +22,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotifier
+from daimon.core.channel_skills import PlatformSkillMemory
 from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
@@ -29,12 +30,14 @@ from daimon.core.config import (
     TurnSettings,
     load_turn_settings,
 )
+from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
+from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
@@ -107,6 +110,14 @@ class TurnDeps:
     fleet_root_grants: (
         Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]] | None
     ) = None
+    # Each default agent's platform-limited skills, read from `defaults_root`
+    # once (`load_platform_skills`); admission adds them on their platforms.
+    platform_skills: Mapping[str, tuple[SkillRef, ...]] = field(
+        default_factory=dict[str, tuple[SkillRef, ...]]
+    )
+    # What admission learned about those skills in this process: the last ids
+    # read, and the ones the provider refused (`create_ma_session`).
+    platform_skill_memory: PlatformSkillMemory = field(default_factory=PlatformSkillMemory)
 
     @property
     def backend_selection_enabled(self) -> bool:
@@ -191,4 +202,5 @@ def build_turn_deps(
         fleet_enabled=settings.fleet.enabled,
         fleet_max_workers=settings.fleet.max_workers_per_run,
         fleet_root_grants=fleet_root_grants,
+        platform_skills=load_platform_skills(settings.defaults_root),
     )

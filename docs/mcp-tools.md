@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 115 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 116 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -150,6 +150,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `read_channel` | Discord callers, Slack callers, Teams callers | Read channel messages, oldest-first, with pagination metadata. |
 | `read_thread` | Discord callers, Slack callers, Teams callers | Read messages from a thread, oldest-first. |
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
+| `replace_channel_file` | Teams callers | Save an edited file over a Teams channel file as its new version. |
 | `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
 | `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |

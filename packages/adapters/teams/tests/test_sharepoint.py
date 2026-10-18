@@ -16,7 +16,12 @@ from daimon.adapters.teams.channel_files import RECHECK_S, ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
-from daimon.core.teams_sharepoint import UPLOAD_TIMEOUT_S, DriveFolder, SharePoint
+from daimon.core.teams_sharepoint import (
+    UPLOAD_TIMEOUT_S,
+    DriveFolder,
+    SharePoint,
+    download_url_of,
+)
 
 from .conftest import make_inbound
 
@@ -88,6 +93,7 @@ def _file_routes(
     found = {"id": "01Q3", "parentReference": {"driveId": drive}}
     item = {
         "id": "01Q3",
+        "eTag": '"{Q3},4"',
         "parentReference": {"driveId": drive, "id": parent},
         "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
     }
@@ -163,14 +169,15 @@ async def test_channel_folder_is_files_folder_with_no_fallback_when_refused() ->
     assert [r.url.path for r in seen] == [FILES_FOLDER], "no site or library lookup"
 
 
-async def test_download_url_finds_a_shared_file_in_the_channels_folder_through_shares() -> None:
+async def test_shared_item_finds_a_shared_file_in_the_channels_folder_through_shares() -> None:
     """The URL resolves through `/shares`, then by drive and id; no site or library lookup."""
     seen: list[httpx.Request] = []
     url = f"{LIBRARY}/Planning/q3%20plan.xlsx"
     sharepoint = _sharepoint(_file_routes(url), seen)
 
-    assert await sharepoint.download_url(url, folder=FOLDER) == DOWNLOAD_URL
-    assert await sharepoint.download_url(url, folder=FOLDER) == DOWNLOAD_URL
+    for _ in range(2):
+        item = await sharepoint.shared_item(url, folder=FOLDER)
+        assert download_url_of(item) == DOWNLOAD_URL, "the item inside the folder has one"
     paths = [r.url.path for r in seen]
     assert not any(p.startswith(("/v1.0/sites", "/v1.0/groups")) for p in paths), (
         "only Files.ReadWrite.All calls"
@@ -179,14 +186,14 @@ async def test_download_url_finds_a_shared_file_in_the_channels_folder_through_s
     assert "/v1.0/drives/b!drive-1/items/01FOLDER" not in paths, "its parent's id answers"
 
 
-async def test_download_url_shares_the_encoded_form_of_the_unencoded_path_teams_sends() -> None:
+async def test_shared_item_shares_the_encoded_form_of_the_unencoded_path_teams_sends() -> None:
     """As captured, a channel file's `contentUrl` is not percent-encoded: `#` is in the name."""
     raw = "https://example.sharepoint.com/sites/team/Shared Documents/Planning/q3 #2?.xlsx"
     encoded = f"{LIBRARY}/Planning/q3%20%232%3F.xlsx"
 
-    url = await _sharepoint(_file_routes(encoded), []).download_url(raw, folder=FOLDER)
+    item = await _sharepoint(_file_routes(encoded), []).shared_item(raw, folder=FOLDER)
 
-    assert url == DOWNLOAD_URL, "the share id carries the file's whole name"
+    assert download_url_of(item) == DOWNLOAD_URL, "the share id carries the file's whole name"
 
 
 @pytest.mark.parametrize(
@@ -199,26 +206,26 @@ async def test_download_url_shares_the_encoded_form_of_the_unencoded_path_teams_
         ("b!drive-1", "01ROOT", "the library's root"),
     ],
 )
-async def test_download_url_refuses_a_file_outside_the_channels_folder(
+async def test_shared_item_refuses_a_file_outside_the_channels_folder(
     drive: str, parent: str, where: str
 ) -> None:
     """The tenant-wide permission reads any file: the channel's folder is the only boundary."""
     url = "https://example.sharepoint.com/sites/finance/Shared%20Documents/Payroll/pay.xlsx"
 
     with pytest.raises(GraphUnavailable, match="outside the channel's folder") as refused:
-        await _sharepoint(_file_routes(url, drive=drive, parent=parent), []).download_url(
+        await _sharepoint(_file_routes(url, drive=drive, parent=parent), []).shared_item(
             url, folder=FOLDER
         )
     assert refused.value.status == 200, f"{where}: unreachable, not a missing permission"
 
 
-async def test_download_url_refuses_another_drive_before_reading_the_item() -> None:
+async def test_shared_item_refuses_another_drive_before_reading_the_item() -> None:
     """A file in another drive is refused on the share's answer, without a second read."""
     seen: list[httpx.Request] = []
     url = "https://example.sharepoint.com/sites/finance/Shared%20Documents/pay.xlsx"
 
     with pytest.raises(GraphUnavailable, match="outside the channel's folder"):
-        await _sharepoint(_file_routes(url, drive="b!finance"), seen).download_url(
+        await _sharepoint(_file_routes(url, drive="b!finance"), seen).shared_item(
             url, folder=FOLDER
         )
     assert [r.url.path for r in seen] == [_shares(url)], "nothing in that drive is read"
@@ -234,13 +241,13 @@ async def test_download_url_refuses_another_drive_before_reading_the_item() -> N
         "https://example.sharepoint.com/sites/team/Shared Documents/q3\x00.xlsx",
     ],
 )
-async def test_download_url_refuses_a_link_off_a_sharepoint_site_without_a_request(
+async def test_shared_item_refuses_a_link_off_a_sharepoint_site_without_a_request(
     content_url: str,
 ) -> None:
     """Only a team site's file on a SharePoint host is looked up; the URL is untrusted input."""
     seen: list[httpx.Request] = []
     with pytest.raises(GraphUnavailable):
-        await _sharepoint({}, seen).download_url(content_url, folder=FOLDER)
+        await _sharepoint({}, seen).shared_item(content_url, folder=FOLDER)
     assert seen == [], "a refused link costs no call"
 
 
@@ -256,7 +263,7 @@ async def test_download_url_refuses_a_download_url_off_sharepoint() -> None:
     routes["GET", "/v1.0/drives/b!drive-1/items/01Q3"] = _ok(item)
 
     with pytest.raises(GraphUnavailable, match="no SharePoint download URL"):
-        await _sharepoint(routes, []).download_url(url, folder=FOLDER)
+        download_url_of(await _sharepoint(routes, []).shared_item(url, folder=FOLDER))
 
 
 async def test_a_refused_upload_marks_the_channel_unavailable_until_the_recheck() -> None:
@@ -351,9 +358,39 @@ async def test_resolve_links_a_file_in_the_channels_folder_and_names_the_rest() 
         ChannelMedia(files=(inside, elsewhere)), group_id=GROUP, channel_id=CHANNEL
     )
 
-    assert media.files == (dataclasses.replace(inside, download_url=DOWNLOAD_URL), elsewhere), (
-        "the channel's file is linked; the other, which its members may not share, is not"
+    linked = dataclasses.replace(inside, download_url=DOWNLOAD_URL, version="{Q3},4")
+    assert media.files == (linked, elsewhere), (
+        "the channel's file is linked, with its bare version a replace checks; the other, which "
+        "its members may not share, is not"
     )
+
+
+async def test_resolve_links_a_file_read_without_an_etag_with_no_version() -> None:
+    """Graph leaving the eTag out costs only the version: the file is still linked."""
+    seen: list[httpx.Request] = []
+    shared = SharedFile("q3.xlsx", f"{LIBRARY}/Planning/q3.xlsx")
+    routes = {("GET", FILES_FOLDER): _ok(FOLDER_ITEM), **_file_routes(shared.content_url or "")}
+    item_path = "/v1.0/drives/b!drive-1/items/01Q3"
+    routes[("GET", item_path)] = _ok(
+        {
+            "id": "01Q3",
+            "parentReference": {"driveId": "b!drive-1", "id": "01FOLDER"},
+            "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
+        }
+    )
+
+    media = await _files(_sharepoint(routes, seen)).resolve(
+        ChannelMedia(files=(shared,)), group_id=GROUP, channel_id=CHANNEL
+    )
+
+    assert media.files == (dataclasses.replace(shared, download_url=DOWNLOAD_URL),), (
+        "linked as before, with no version to offer a replace"
+    )
+    assert [r.url.path for r in seen] == [
+        FILES_FOLDER,
+        _shares(shared.content_url or ""),
+        item_path,
+    ], "no extra Graph call for the version"
 
 
 async def test_resolve_marks_shared_files_refused_without_the_permission() -> None:

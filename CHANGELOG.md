@@ -102,6 +102,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agents edit Office files and update Teams channel files in place.** On
+  Teams, the default agent's sessions add Anthropic's built-in `docx`, `pptx`
+  and `xlsx` skills; other backends run without them, and Slack and Discord
+  are unchanged. They count toward the 20-skill session limit, so a Teams
+  channel answered by the default agent now adds at most 6 skills of its own,
+  down from 9; adding a seventh is refused, and extras added earlier are
+  left out of its turns, logged once rather than on every turn. Live Teams
+  sessions of the default agent are replaced once after upgrading, since
+  their skills change.
+  On Teams, the new `replace_channel_file` tool saves an edited file over one
+  in the channel's Files folder as a new version, so "update the deck" no
+  longer leaves `deck 1.pptx` behind. It writes only at the version the agent
+  read and only in the channel the turn runs in, and says whether a failed
+  write may have saved. Shared and replayed channel files carry the link and
+  version it takes. No new permission is needed.
+
 - **MCP sign-in works with authorization servers that offer no dynamic
   client registration**, such as Microsoft Entra ID. List clients registered
   by hand in `DAIMON_MCP_OAUTH__CLIENTS`; each names its authorization server

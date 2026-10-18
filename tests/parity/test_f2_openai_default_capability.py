@@ -70,7 +70,8 @@ def _manifest() -> DefaultManifest:
     """The default agent, as F1's OpenAI test builds it, with an authenticated MCP."""
     raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
     skills: list[NamedSkill] = []
-    for name in (item["skill_id"] for item in raw["skills"]):
+    # Anthropic's built-in skills run only there; OpenAI gets the authored ones.
+    for name in (item["skill_id"] for item in raw["skills"] if item["type"] == "custom"):
         directory = ROOT / "defaults/skills" / name
         paths = sorted(path for path in directory.rglob("*") if path.is_file())
         skills.append(

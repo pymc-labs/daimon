@@ -10,6 +10,7 @@ from daimon.adapters.teams.attachments import (
     MAX_ATTACHMENTS,
     ChannelMedia,
     InboundFile,
+    SharedFile,
     parse_attachments,
     prepare_attachments,
 )
@@ -135,6 +136,33 @@ async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
         )
 
     assert DOWNLOAD_URL in prepared.prefix and "`report.pdf`" in prepared.prefix
+    assert "replace_channel_file" not in prepared.prefix, (
+        "a file without a link and version is never offered for replacing"
+    )
+
+
+async def test_a_channel_file_line_names_the_link_and_version_a_replace_takes() -> None:
+    """A file in the channel's Files can be saved over, so its line says how."""
+    link = "https://example.sharepoint.com/sites/team/Shared Documents/General/deck.pptx"
+    media = ChannelMedia(
+        files=(SharedFile("deck.pptx", link, DOWNLOAD_URL, version="{D},3"),), group_id="g"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(500))
+    ) as http:
+        prepared = await prepare_attachments(
+            http,
+            [],
+            bot_token=_bot_token,
+            service_url=SERVICE_URL,
+            channel=True,
+            channel_media=media,
+        )
+
+    assert DOWNLOAD_URL in prepared.prefix, "the file is still fetched by its download URL"
+    assert f"replace_channel_file link `{link}` and version `{{D}},3`." in prepared.prefix, (
+        "the link and version that save a new version over it, each quoted unambiguously"
+    )
 
 
 async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() -> None:

@@ -62,6 +62,9 @@ from .test_gemini_runtime_transport import clients_for
 
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+# Anthropic's built-in skills have no bytes to represent: Gemini runs without them.
+CUSTOM = [s for s in DEFAULT["skills"] if s["type"] == "custom"]
+BUILT_IN = [s for s in DEFAULT["skills"] if s["type"] == "anthropic"]
 PARAMS = {
     "backend": "gemini",
     "caller_mcp": True,
@@ -82,8 +85,11 @@ PARAMS = {
         },
     ],
     "skills": [
-        {"type": "custom", "skill_id": f"source-{s['skill_id']}", "version": "1"}
-        for s in DEFAULT["skills"]
+        *(
+            {"type": "custom", "skill_id": f"source-{s['skill_id']}", "version": "1"}
+            for s in CUSTOM
+        ),
+        *({"type": "anthropic", "skill_id": s["skill_id"], "version": "1"} for s in BUILT_IN),
     ],
 }
 
@@ -225,7 +231,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
         ),
     )
     bundles, archives, deployments = [], [], []
-    for item in DEFAULT["skills"]:
+    for item in CUSTOM:
         name = item["skill_id"]
         directory = ROOT / "defaults/skills" / name
         files = {
@@ -270,7 +276,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
         pytest.fail("Source attachment resolution must not enumerate other custom skills")
 
     router.add("GET", r"/v1/skills", no_catalogue)
-    for item in DEFAULT["skills"]:
+    for item in CUSTOM:
         skill_id = f"source-{item['skill_id']}"
         router.add(
             "GET",
@@ -426,7 +432,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
         skill_bundle_publisher=RetainedSkillDeployments(tuple(deployments)),
     )
     mappings = []
-    for item, bundle, path in zip(DEFAULT["skills"], bundles, archives, strict=True):
+    for item, bundle, path in zip(CUSTOM, bundles, archives, strict=True):
         skill = await backend.skills.create(scope, bundle, key=item["skill_id"])
         version = skill.latest_version.version
         mappings.append(
@@ -663,7 +669,10 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
     gated = request.node.callspec.params["full"]
     assert isinstance(full, tuple), "full source could not retain its authority"
     request, plan, canonical, native, calls, posts, token, *_ = full
-    assert len(canonical.target_spec.skills) == 11
+    assert BUILT_IN, "the default agent carries Anthropic built-ins for this test to skip"
+    assert len(canonical.target_spec.skills) == len(CUSTOM) == 11, (
+        "every authored skill is represented and the Anthropic built-ins are left out"
+    )
     # Assert the native request carries the complete represented authority.
     expected_tools = {tool.name for tool in canonical.target_spec.tools}
     assert {

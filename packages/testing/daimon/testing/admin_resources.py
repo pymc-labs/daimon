@@ -27,6 +27,7 @@ from daimon.core.neutral_resources import NativeCatalogReadback, NeutralResource
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.skills.add import add_agent_skill, add_host_agent_skill
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError
+from daimon.core.specs import SkillRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
@@ -58,6 +59,10 @@ class ResourceAdminBindings:
     host: NeutralResourceHost | None = field(default=None, init=False)
     bundles: Mapping[str, SkillBundle] = field(default_factory=dict[str, SkillBundle])
     channel_labels: Mapping[str, str] = field(default_factory=dict[str, str])
+    # `load_platform_skills`' map, for a channel skill added on the default agent.
+    platform_skills: Mapping[str, tuple[SkillRef, ...]] = field(
+        default_factory=dict[str, tuple[SkillRef, ...]]
+    )
 
     def __post_init__(self) -> None:
         if self.backend is not None:
@@ -333,6 +338,7 @@ class ResourceAdminBindings:
                     skill=skill,
                     default=binding.default,
                     actor_account_id=uuid.UUID(binding.scope.account_id),
+                    platform_skills=self.platform_skills,
                 )
                 if isinstance(row, str):
                     return AdminReceipt(

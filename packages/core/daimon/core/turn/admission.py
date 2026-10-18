@@ -30,11 +30,7 @@ from typing import Literal
 
 import structlog
 from anthropic import APIError, APIStatusError
-from anthropic.types.beta import (
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsCustomSkill,
-)
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import (
     TenantAccessPolicy,
@@ -62,7 +58,7 @@ from daimon.core.channel_backend import (
 )
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
-from daimon.core.channel_skills import turn_channel_skills
+from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_identity import derive_agent_uuid
@@ -82,6 +78,7 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
+from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
@@ -120,6 +117,7 @@ __all__ = [
     "DmSource",
     "MissingTurnConfigError",
     "admit",
+    "backend_platform_skills",
     "reauthorize",
 ]
 
@@ -199,9 +197,14 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
-    # The channel's extra skills (`daimon.core.channel_skills`), decided once
-    # so creating the session and checking it for drift add the same ones.
-    channel_skills: tuple[BetaManagedAgentsCustomSkill, ...] = ()
+    # The skills the session adds to the agent's, decided once so creating the
+    # session and checking it for drift add the same ones: the platform's
+    # (`turn_platform_skills`, on the Anthropic backend only), then the
+    # channel's (`daimon.core.channel_skills`).
+    channel_skills: tuple[MaSkill, ...] = ()
+    # Which of `channel_skills` are the platform's, so a create the provider
+    # refuses for one of them can run without it (`create_ma_session`).
+    platform_skill_ids: frozenset[str] = frozenset()
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -355,6 +358,17 @@ async def admit(
             ),
         )
     return replace(result, observation=observation)
+
+
+def backend_platform_skills(
+    platform_skills: tuple[MaSkill, ...], profile: str | None
+) -> tuple[MaSkill, ...]:
+    """The platform's skills a session on backend `profile` (None: the default) runs. Pure.
+
+    Another backend than Managed Agents has no Anthropic built-in skills and
+    carries a channel's skills only as a declared loss, so it gets none.
+    """
+    return platform_skills if profile in (None, MANAGED_AGENTS.profile_id) else ()
 
 
 async def admit_impl(
@@ -887,6 +901,16 @@ async def admit_impl(
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
+    platform_skills = await turn_platform_skills(
+        deps.anthropic,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent=agent,
+        platform_skills=deps.platform_skills,
+        now=now,
+        memory=deps.platform_skill_memory,
+        cache=deps.resolver_cache,
+    )
     channel_skills = (
         ()
         if is_dm
@@ -900,6 +924,7 @@ async def admit_impl(
             agent_names=grant.agent.names,
             rows=channel_skill_rows,
             cache=deps.resolver_cache,
+            platform_skills=platform_skills,
         )
     )
 
@@ -907,6 +932,10 @@ async def admit_impl(
 
     if deps.agent_backends:
         await resolve_preference()
+    platform_skills = backend_platform_skills(
+        platform_skills, None if backend_revision is None else backend_revision.profile
+    )
+    channel_skills = (*platform_skills, *channel_skills)
 
     result = Admission(
         backend_revision=backend_revision,
@@ -934,6 +963,7 @@ async def admit_impl(
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
         channel_skills=channel_skills,
+        platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
     )
     mark("result")

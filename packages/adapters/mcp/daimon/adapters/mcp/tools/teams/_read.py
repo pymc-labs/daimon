@@ -54,6 +54,7 @@ from daimon.core.teams_graph import (
     message_text,
     skiptoken_of,
 )
+from daimon.core.teams_sharepoint import DriveItem, version_of
 from daimon.core.teams_threads import is_group_chat
 from fastmcp.exceptions import ToolError
 
@@ -77,13 +78,20 @@ def _order(message: GraphMessage) -> int:
     return int(message.id) if message.id.isdigit() else 0
 
 
+def _file(name: str, link: str | None, links: Mapping[str, DriveItem]) -> TeamsFileRow:
+    item = links.get(link or "")
+    if link is None or item is None:
+        return TeamsFileRow(name=name)
+    return TeamsFileRow(name=name, url=item.download_url, link=link, version=version_of(item.e_tag))
+
+
 def _row(
-    message: GraphMessage, *, channel_id: str, root_id: str, links: Mapping[str, str] = {}
+    message: GraphMessage, *, channel_id: str, root_id: str, links: Mapping[str, DriveItem] = {}
 ) -> TeamsReadMessage | None:
     """The message as a row; None for a system event or a deleted message.
 
-    `links` maps a shared file's content URL, or a bot's file link, to its download URL
-    (`file_links`).
+    `links` maps a shared file's content URL, or a bot's file link, to its item inside
+    the channel's Files folder (`file_links`).
     """
     if message.message_type != "message" or message.deleted_date_time is not None:
         return None
@@ -105,11 +113,11 @@ def _row(
         subject=message.subject or None,
         files=[
             *(
-                TeamsFileRow(name=a.name or "file", url=links.get(a.content_url or ""))
+                _file(a.name or "file", a.content_url, links)
                 for a in message.attachments
                 if a.content_type in _FILES
             ),
-            *(TeamsFileRow(name=name, url=links.get(url)) for name, url in linked_files(message)),
+            *(_file(name, url, links) for name, url in linked_files(message)),
         ],
         images=len(image_sources(html)) if html else 0,
         web_url=message.web_url,
@@ -117,7 +125,7 @@ def _row(
 
 
 def _post(
-    message: GraphMessage, *, channel_id: str, links: Mapping[str, str] = {}
+    message: GraphMessage, *, channel_id: str, links: Mapping[str, DriveItem] = {}
 ) -> TeamsPost | None:
     root = _row(message, channel_id=channel_id, root_id=message.id, links=links)
     if root is None:
@@ -469,7 +477,7 @@ async def _teams_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
     found.sort(key=lambda f: _order(f[2]), reverse=True)
     found = found[: max(1, min(limit, _MAX_SEARCH_RESULTS))]
     # Per channel: a file shared into two channels is linked only from its own site.
-    links: dict[str, dict[str, str]] = {}
+    links: dict[str, dict[str, DriveItem]] = {}
     for ref in refs[:_SEARCH_CHANNELS]:
         if mine := [m for r, _, m in found if r is ref]:
             links[ref.channel_id] = await file_links(client, ref, mine)

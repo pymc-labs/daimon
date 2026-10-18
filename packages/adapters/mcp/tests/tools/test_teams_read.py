@@ -183,7 +183,12 @@ class _Fake:
             name = path.removeprefix("/v1.0/drives/b!d/items/")
             download = f"https://example.sharepoint.com/download/{name}?tempauth=t"
             parent = {"driveId": "b!d", "id": "f1" if self._folders[name] == "research" else "f2"}
-            item = {"id": name, "parentReference": parent, "@microsoft.graph.downloadUrl": download}
+            item = {
+                "id": name,
+                "eTag": f'"{{{name}}},1"',
+                "parentReference": parent,
+                "@microsoft.graph.downloadUrl": download,
+            }
             return httpx.Response(200, json=item)
         return None
 
@@ -386,8 +391,16 @@ async def test_files_are_linked_only_where_the_files_permission_is_granted(
             "https://example.sharepoint.com/download/q3.xlsx?tempauth=t",
             "https://example.sharepoint.com/download/notes.docx?tempauth=t",
         ]
+        assert [f.version for f in files] == ["{q3.xlsx},1", "{notes.docx},1"], (
+            "each linked file carries the version replace_channel_file checks, without quotes"
+        )
+        assert all(f.link and f.link.startswith(_LIBRARY) for f in files), (
+            "and its SharePoint link, never the pre-authorised download URL"
+        )
     else:
-        assert all(f.url is None for f in files)
+        assert all(f.url is None and f.link is None and f.version is None for f in files), (
+            "without the permission no file is linked or versioned"
+        )
         paths = [r.url.path for r in fake.graph()]
         assert len([p for p in paths if p.endswith("/filesFolder")]) == 2, "one try per read"
         assert not [p for p in paths if p.startswith("/v1.0/shares/")], "no file is looked up"

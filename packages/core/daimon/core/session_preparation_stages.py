@@ -22,7 +22,6 @@ import structlog
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import (
     BetaManagedAgentsAgent,
-    BetaManagedAgentsCustomSkill,
     BetaManagedAgentsSession,
 )
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
@@ -43,6 +42,7 @@ from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.session_snapshot import (
+    MaSkill,
     SessionSnapshot,
     desired_snapshot,
     fingerprint_identity,
@@ -289,7 +289,7 @@ async def desired_snapshot_for(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    channel_skills: Sequence[MaSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 

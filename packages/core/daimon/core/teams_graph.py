@@ -62,6 +62,10 @@ class GraphUnavailable(DaimonError):
         self.status = status
 
 
+class GraphNotSent(GraphUnavailable):
+    """A Graph call that failed before its request went out, so it changed nothing."""
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="ignore")
 
@@ -357,27 +361,32 @@ class GraphClient:
         params: Mapping[str, str] | None = None,
         body: object = None,
         content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
         timeout: float = GRAPH_TIMEOUT_S,
     ) -> object:
-        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply (None on 204)."""
+        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply (None on 204).
+
+        `headers` add to the request's own, such as an `If-Match`; they never replace the token.
+        A failure before the request goes out raises `GraphNotSent`.
+        """
         # `params=None` would drop a query already in `url`, such as a next link's.
         target = httpx.URL(url, params=params) if params else httpx.URL(url)
         if not is_graph_url(target):
-            raise GraphUnavailable("not a Graph URL")
+            raise GraphNotSent("not a Graph URL")
         try:
             token = await self.token()
         except (ValueError, OSError, httpx.HTTPError) as err:  # MSAL's, or a raw token call's
-            raise GraphUnavailable(f"token: {type(err).__name__}") from err
+            raise GraphNotSent(f"token: {type(err).__name__}") from err
         if not token:
-            raise GraphUnavailable("no token")
-        headers = {"Authorization": f"Bearer {token}"}
+            raise GraphNotSent("no token")
+        sent = {**(headers or {}), "Authorization": f"Bearer {token}"}
         if content is not None:
-            headers["Content-Type"] = "application/octet-stream"
+            sent["Content-Type"] = "application/octet-stream"
         request = functools.partial(
             self._http.request,
             method,
             target,
-            headers=headers,
+            headers=sent,
             json=body,
             content=content,
             follow_redirects=False,

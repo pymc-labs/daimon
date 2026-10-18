@@ -21,7 +21,6 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
-    BetaManagedAgentsCustomSkill,
     BetaManagedAgentsSession,
     BetaManagedAgentsSkillParams,
 )
@@ -101,6 +100,7 @@ from daimon.core.session_ports_compat import (
 )
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
+    MaSkill,
     hash_mcp_servers,
     hash_skills,
     session_mcp_servers,
@@ -249,7 +249,7 @@ async def project_session_resources(
     resource_scope: Scope,
     memory_read_only: bool,
     fernet: MultiFernet | None = None,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    channel_skills: Sequence[MaSkill] = (),
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
     mcp_settings: McpSettings | None = None,
@@ -525,7 +525,7 @@ async def create_session(
         Awaitable[BetaManagedAgentsSession],
     ]
     | None = None,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    channel_skills: Sequence[MaSkill] = (),
     model_override: str | None = None,
     resource_source: BackendAgent | None = None,
     worker: ResolvedWorkerSpec | None = None,
@@ -549,8 +549,9 @@ async def create_session(
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
 
-    ``channel_skills`` are the turn's channel's extra skills, added after the
-    agent's own (`session_skills`, the shape the drift check hashes too).
+    ``channel_skills`` are the turn's extra skills (the platform's, then the
+    channel's), added after the agent's own (`session_skills`, the shape the
+    drift check hashes too).
 
     ``model_override`` replaces the model for this session through
     ``agent_with_overrides``. It never changes the stored agent.

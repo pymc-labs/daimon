@@ -23,7 +23,11 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsAnthropicSkill,
+    BetaManagedAgentsCustomSkill,
+)
 from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
 from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema import (
     BetaManagedAgentsCustomToolInputSchema,
@@ -106,6 +110,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import QueuePool
+from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _AGENT_ID = "ag_prep"
@@ -172,6 +177,8 @@ class _Transport:
         self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
         self.fail_message = "boom"
+        # A skill id the provider refuses to resolve on any create that sends it.
+        self.refuse_skill: str | None = None
         self.fail_shared_memory_create = False
         self.retrieve_error: int | None = None
         _register(self.state, _agent())
@@ -217,6 +224,21 @@ class _Transport:
                         "error": {"type": "invalid_request_error", "message": "outage"},
                     },
                 )
+            if self.refuse_skill is not None and (request.method, path) == ("POST", "/v1/sessions"):
+                agent = json.loads(request.content)["agent"]
+                sent = agent.get("skills", []) if isinstance(agent, dict) else []
+                if any(skill["skill_id"] == self.refuse_skill for skill in sent):
+                    return httpx.Response(
+                        400,
+                        json={
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "Could not resolve one or more skills: "
+                                f'skill "{self.refuse_skill}"',
+                            },
+                        },
+                    )
             if self.fail_session_create and (request.method, request.url.path) == (
                 "POST",
                 "/v1/sessions",
@@ -1216,19 +1238,29 @@ async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Create and the drift check build the same skill list; dropping one replaces the session."""
+    """Create and the drift check build the same skill list; dropping one replaces the session.
+
+    The list leads with a platform's built-in (Teams' Office skills), which
+    rides the same override at its latest version.
+    """
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     transport = _Transport()
     deps = _deps(db_session_factory, transport)
-    extra = (BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),)
+    extra = (
+        BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest"),
+        BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),
+    )
     with_skill = replace(_admission(account=account), channel_skills=extra)
 
     first = await _prepare(deps, with_skill, tenant=tenant, account=account)
     assert isinstance(first, PreparedTurn)
     frozen = transport.state.sessions[first.ma_session_id].agent.skills
-    assert [(s.skill_id, s.version) for s in frozen] == [("skill_team", "v7")]
+    assert [(s.type, s.skill_id, s.version) for s in frozen] == [
+        ("anthropic", "docx", "latest"),
+        ("custom", "skill_team", "v7"),
+    ], "the session runs the platform's skills, then the channel's"
 
     second = await _prepare(deps, with_skill, tenant=tenant, account=account)
     assert isinstance(second, PreparedTurn)
@@ -1573,6 +1605,50 @@ async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_ret
     assert "Ask again to retry" not in message
     still_live = await _live_row(db_session_factory, tenant=tenant, account=account)
     assert still_live is not None and still_live.ma_session_id == first.ma_session_id
+
+
+async def test_a_refused_platform_skill_is_left_out_without_a_message_or_a_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A built-in a platform adds that the provider refuses never fails the turn.
+
+    The create is retried without it and the user sees nothing about channel
+    skills; it stays out of new sessions for a while, so the next turn, whose
+    admission leaves it out, reuses the session instead of replacing it.
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    transport.refuse_skill = "docx"
+    deps = _deps(db_session_factory, transport)
+    team = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7")
+    docx = BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest")
+    admission = replace(
+        _admission(account=account),
+        channel_skills=(docx, team),
+        platform_skill_ids=frozenset({"docx"}),
+    )
+
+    with capture_logs() as logs:
+        first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn), "the turn runs"
+    frozen = transport.state.sessions[first.ma_session_id].agent.skills
+    assert [s.skill_id for s in frozen] == ["skill_team"], "it runs without the refused skill"
+    assert transport.creates == 2, "one retry"
+    assert [
+        log["skill_id"] for log in logs if log["event"] == "session.platform_skill_refused"
+    ] == ["docx"], "the operator is told once"
+    assert deps.platform_skill_memory.is_refused(tenant.id, "docx", now=datetime.now(UTC)), (
+        "admission leaves it out for a while"
+    )
+
+    without = replace(admission, channel_skills=(team,), platform_skill_ids=frozenset())
+    second = await _prepare(deps, without, tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id, "no replacement on the next turn"
+    assert transport.creates == 2
 
 
 async def test_the_missing_skill_message_holds_through_the_replacement_backoff(

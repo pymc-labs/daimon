@@ -49,9 +49,16 @@ async def resolve_refs(
     tenant-scoped display_title (built here from the bare ``ref.skill_id``
     authoring name). No bare-title fallback exists -- strict
     prefixed-only lookup from day one.
+
+    A platform-limited ref is refused: it never goes on the agent, and only
+    the defaults pipeline knows to leave it out and add it per session.
     """
     resolved: list[BetaManagedAgentsSkillParams] = []
     for ref in refs:
+        if ref.platforms is not None:
+            raise DefaultsError(
+                f"skill {ref.skill_id!r} is limited to platforms; only defaults/ agents may do that"
+            )
         if ref.type == "anthropic":
             resolved.append({"type": "anthropic", "skill_id": ref.skill_id})
         else:

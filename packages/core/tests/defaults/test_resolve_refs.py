@@ -217,3 +217,10 @@ async def test_resolve_refs_complete_empty_snapshot_does_not_fall_back_to_live_l
             skills_view=[],
         )
     assert list_calls == 0
+
+
+async def test_resolve_refs_refuses_a_platform_limited_skill() -> None:
+    """Only the defaults pipeline may limit a skill to platforms; it never reaches the agent."""
+    ref = SkillRef(type="anthropic", skill_id="docx", platforms=("teams",))
+    with pytest.raises(DefaultsError, match="limited to platforms"):
+        await resolve_refs(_make_client([]), refs=[ref], tenant_id=_TENANT_A)  # type: ignore[arg-type]

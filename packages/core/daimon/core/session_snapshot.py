@@ -480,13 +480,14 @@ def _snapshot_from_session(
 
 
 def session_skills(
-    agent: BetaManagedAgentsAgent, channel_skills: Sequence[BetaManagedAgentsCustomSkill] = ()
+    agent: BetaManagedAgentsAgent, channel_skills: Sequence[MaSkill] = ()
 ) -> list[MaSkill]:
-    """The skills a session runs: the agent's own, then its channel's extra ones.
+    """The skills a session runs: the agent's own, then the turn's extra ones.
 
     The one definition `create_session` and the drift check both use, so a
     session started with a channel's skills reads as current on its next turn.
-    The channel's are decided at admission (`daimon.core.channel_skills`).
+    The extra ones, the platform's then the channel's, are decided at
+    admission (`daimon.core.channel_skills`).
     """
     return [*agent.skills, *channel_skills]
 
@@ -570,7 +571,7 @@ def desired_snapshot(
     token_issued_at_by_installation: dict[int, int] | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     public_url: str | None = None,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    channel_skills: Sequence[MaSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 

@@ -167,6 +167,7 @@ class ThreadReader:
             messages, group_id=group, channel_id=inbound.channel_id, chat_id=chat
         )
         downloads: dict[str, str] = {}
+        versions: dict[str, str] = {}
         if (
             files
             and chat is None
@@ -181,10 +182,15 @@ class ThreadReader:
                 for f in resolved.files
                 if f.content_url and f.download_url
             }
+            versions = {
+                f.content_url: f.version
+                for f in resolved.files
+                if f.content_url and f.download_url and f.version
+            }
         if images is not None:
-            return build(attached=Attached(images=images, downloads=downloads))
+            return build(attached=Attached(images=images, downloads=downloads, versions=versions))
         order = [m.id for m in messages if m.id in found]
-        block = build(attached=Attached({i: len(found[i]) for i in order}, downloads))
+        block = build(attached=Attached({i: len(found[i]) for i in order}, downloads, versions))
         return dataclasses.replace(block, image_urls=tuple(u for i in order for u in found[i]))
 
     async def read_window(

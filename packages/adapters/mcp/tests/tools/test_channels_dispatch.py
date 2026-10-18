@@ -673,3 +673,26 @@ async def test_create_thread_discord_caller_routes_to_discord_impl_and_fails_on_
     assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
         f"Discord caller's create_thread must hit the Discord-side bot-token error; got {output_text!r}"
     )
+
+
+async def test_a_slack_caller_cannot_replace_a_channel_file(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """replace_channel_file is Teams-only: a Slack caller neither sees nor reaches it."""
+    account_id = await _seed_slack_bound_account(db_session, workspace_id="slack-replace-file")
+    token = await registered_account_token(sessionmaker, account_id=account_id, secret=_SECRET)
+    app = _make_app(sessionmaker)
+
+    assert "replace_channel_file" not in await _list_tool_names(app, token=token), (
+        "a Slack caller must not be offered replace_channel_file"
+    )
+    call_result = await _call_tool(
+        app,
+        token=token,
+        tool_name="replace_channel_file",
+        arguments={"channel_id": "C_TEST", "link": "x", "version": "1", "file_handle": "h"},
+    )
+    assert call_result.get("isError") is True, (
+        f"a Teams-only tool must be uncallable from Slack; got {call_result!r}"
+    )

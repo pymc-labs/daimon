@@ -26,6 +26,11 @@ class TeamsFileRow(BaseModel):
     url: str | None = None
     """A download link, only for a file in the channel's own Files folder.
     Anyone holding it can fetch the file for about an hour: fetch it, never post it."""
+    link: str | None = None
+    """The file's SharePoint link, set with `url`: pass it to replace_channel_file."""
+    version: str | None = None
+    """The file's version (its bare eTag) when read: replace_channel_file refuses once it
+    changes."""
 
 
 class TeamsReadMessage(BaseModel):

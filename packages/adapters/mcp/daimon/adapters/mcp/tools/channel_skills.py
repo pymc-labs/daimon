@@ -23,6 +23,7 @@ from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.authz import Action
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
+from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_skills as store
@@ -126,6 +127,7 @@ async def _add(
                 skill=skill,
                 default=runtime.deployment_default,
                 actor_account_id=auth.account_id,
+                platform_skills=load_platform_skills(runtime.settings.defaults_root),
             )
         except SkillsListTruncatedError as exc:
             raise ToolError(

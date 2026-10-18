@@ -351,6 +351,22 @@ setting off the routes answer 404 and nothing is subscribed.
   Where they are unavailable, `files_hint` tells the agent that an admin must
   grant `Files.ReadWrite.All`, rather than offer an artifact, report or
   notebook.
+- **Office skills.** A Teams turn of the default agent adds Anthropic's
+  built-in `docx`, `pptx` and `xlsx` skills to its session (Anthropic backend
+  only; see `platforms` in [Defaults](defaults.md)). They count toward the
+  20-skill session limit, so such a channel adds at most 6 skills of its own.
+- **Updating a channel file.** A file in the channel's Files folder reaches
+  the agent with its SharePoint link and version (its eTag) beside the
+  download link. `replace_channel_file` saves an edited file over it as a new
+  version instead of a renamed copy; SharePoint's version history keeps the
+  earlier ones. It is refused for a folder, a file outside the folder of the
+  channel the turn runs in, one of another type, or one changed since the
+  agent read it (the version is compared without the eTag's quotes), and
+  SharePoint refuses a file that is locked (open in a desktop app) or whose
+  permissions, retention policy or sensitivity label block app writes; the
+  agent then posts its version as a new file. A write is never retried: when
+  its answer is lost or SharePoint fails with a 5xx, the agent is told the file
+  may or may not have been saved. Slack and Discord have no equivalent.
 - **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as a
   base64 data URI downscaled to fit 1024x1024 and re-encoded under 512 KiB
   (PNG, else JPEG). Up to four, in delivery order, are added to the answer's
@@ -454,8 +470,8 @@ registration:
   channel is read only from a turn inside it. Graph has no message search for
   an app, so `search_messages` scans recent posts, bounded, and says when it
   stopped short. A 1:1 chat cannot be read back. A message's files come with
-  a download link where `Files.ReadWrite.All` is granted and the file is in
-  the channel's own Files folder, else by name: the permission ignores
+  a download link, SharePoint link and version where `Files.ReadWrite.All` is
+  granted and the file is in the channel's own Files folder, else by name: the permission ignores
   SharePoint's per-file permissions, so a file from another site, library or
   folder is never linked. The link lasts about an hour
   and anyone holding it can fetch the file, so only messages the read returns
@@ -466,6 +482,12 @@ registration:
   a 1:1 chat they are offered with a file consent card. An agent can edit or
   delete what it posted (`edit_message`, `delete_message`); closing a thread
   (`delete_thread`, `archive_thread`) is not on Teams.
+- **`replace_channel_file`** (Teams only) saves a staged upload over a file
+  in the channel's Files folder as its new version, for a requester who may
+  post there, from a turn in that channel (its `origin_context_id`), only
+  while the file is at the version the agent read (`If-Match`). It returns a
+  link line for the answer, and the link and new version for a further
+  replace.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and Daimon, named by Entra object ID.
 - **GitHub setup.** `github_connect` sends the Connect GitHub card to the

@@ -186,7 +186,8 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
 def default_manifest(root: Path, mcp_url: str) -> DefaultManifest:
     authored = yaml.safe_load((root / "defaults/agents/daimon.yaml").read_text())
     skills: list[NamedSkill] = []
-    if tuple(ref["skill_id"] for ref in authored["skills"]) != DEFAULT_SKILLS:
+    custom = tuple(ref["skill_id"] for ref in authored["skills"] if ref["type"] == "custom")
+    if custom != DEFAULT_SKILLS:
         raise LiveRefused("authored default skill inventory changed")
     for name in DEFAULT_SKILLS:
         directory = root / "defaults/skills" / name

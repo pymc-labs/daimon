@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.core.agent_guidance import (
@@ -1260,3 +1261,81 @@ async def test_reconcile_agent_non_isolated_spec_still_gets_full_mcp_wiring() ->
     )
     tool_types = [t.get("type") for t in created_payload.get("tools", [])]
     assert "mcp_toolset" in tool_types, "non-isolated spec must still gain the mcp_toolset tool"
+
+
+async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_hash() -> None:
+    """The shipped default agent seeds exactly as it would without its Teams-only skills.
+
+    `platforms` skills are added per session on their platforms, so the agent at
+    the provider, its skills and `daimon_spec_hash` match a spec that never
+    listed them: Slack and Discord see the same agent, and an existing
+    deployment's `defaults apply` stays SKIPPED.
+    """
+    from pathlib import Path
+
+    from daimon.core.defaults.loader import load_agent_specs
+
+    root = Path(__file__).resolve().parents[4] / "defaults" / "agents"
+    shipped = next(spec for spec in load_agent_specs(root) if spec.name == "daimon")
+    limited = [ref for ref in shipped.skills if ref.platforms is not None]
+    assert [(ref.type, ref.skill_id, ref.platforms) for ref in limited] == [
+        ("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")
+    ], "the Office built-ins are the default agent's Teams-only skills"
+    without = shipped.model_copy(
+        update={"skills": [ref for ref in shipped.skills if ref.platforms is None]}
+    )
+    listing = [
+        SkillListResponse(
+            id=f"sk_{ref.skill_id}",
+            type="skill",
+            display_title=tenant_scoped_display_title(tenant_id=TENANT_ID, name=ref.skill_id),
+            latest_version="1",
+            created_at="2026-04-21T00:00:00Z",
+            updated_at="2026-04-21T00:00:00Z",
+            source="custom",
+        ).model_dump(mode="json")
+        for ref in without.skills
+    ]
+
+    async def created(spec: AgentSpec) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        router = MARouter()
+        router.add("GET", r"/v1/skills", lambda req, _m: list_response(listing))
+        router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+
+        def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+            payload.update(json.loads(req.content))
+            return httpx.Response(
+                200, json=_tagged_agent(id_="ag", name="daimon", tenant_id=TENANT_ID)
+            )
+
+        router.add("POST", r"/v1/agents", on_create)
+        outcome = await reconcile_agent(
+            build_fake_anthropic_http(router.dispatch), spec, tenant_id=TENANT_ID, dry_run=False
+        )
+        assert outcome.action is Action.CREATED
+        return payload
+
+    seeded, reference = await created(shipped), await created(without)
+    assert seeded["skills"] == reference["skills"], "no Teams-only skill goes on the agent"
+    assert all(skill["type"] == "custom" for skill in seeded["skills"]), "no built-in either"
+    assert seeded["metadata"]["daimon_spec_hash"] == reference["metadata"]["daimon_spec_hash"], (
+        "the spec hash ignores platform-limited skills, so an applied deployment stays SKIPPED"
+    )
+
+
+async def test_a_users_agent_may_not_limit_a_skill_to_platforms() -> None:
+    """Only seeded agents get platform skills at admission, so a user's spec is refused."""
+    from daimon.core.errors import DefaultsError
+
+    spec = _agent_spec(skills=[SkillRef(type="anthropic", skill_id="docx", platforms=("teams",))])
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    with pytest.raises(DefaultsError, match="limited to platforms"):
+        await reconcile_agent(
+            build_fake_anthropic_http(router.dispatch),
+            spec,
+            tenant_id=TENANT_ID,
+            dry_run=False,
+            managed=False,
+        )

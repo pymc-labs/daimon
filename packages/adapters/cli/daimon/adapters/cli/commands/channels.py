@@ -47,6 +47,7 @@ from daimon.core.channel_rules import (
 from daimon.core.channel_skills import REFUSALS as CHANNEL_SKILL_REFUSALS
 from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.config import load_settings
+from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -632,6 +633,7 @@ async def channels_skills_add(
             skill=skill,
             default=rt.deployment_default,
             actor_account_id=None,
+            platform_skills=load_platform_skills(rt.settings.defaults_root),
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])

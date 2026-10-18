@@ -44,7 +44,7 @@ from mux.drivers.openai.skills import bundle_digest
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
-from .test_gemini_full_source import DEFAULT, F2_PARAMS, ROOT, archive
+from .test_gemini_full_source import CUSTOM, F2_PARAMS, ROOT, archive
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_openai_host import Wire
 from .test_openai_runtime_transport import clients_for
@@ -256,7 +256,7 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
         usage_revisions=OpenAIUsageRevisions(),
     )
     mappings, archives = [], []
-    for item in DEFAULT["skills"]:
+    for item in CUSTOM:
         name = item["skill_id"]
         directory = ROOT / "defaults/skills" / name
         files = {

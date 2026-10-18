@@ -16,11 +16,17 @@ import re
 from pathlib import Path
 from typing import cast
 
+import structlog
 import yaml
 from daimon.core.errors import DefaultsError
 from daimon.core.scope import DeploymentDefault
-from daimon.core.specs import AgentSpec, EnvironmentSpec, SkillSpec, SystemConfigSpec
+from daimon.core.specs import AgentSpec, EnvironmentSpec, SkillRef, SkillSpec, SystemConfigSpec
 from pydantic import ValidationError
+
+_log = structlog.get_logger(__name__)
+
+# Roots already warned about: every runtime of a process reads the same one.
+_MISSING_LOGGED: set[Path] = set()
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(?P<frontmatter>.*?)\n---\s*\n(?P<body>.*)$", re.DOTALL)
 
@@ -49,6 +55,27 @@ def load_agent_specs(root: Path) -> list[AgentSpec]:
             )
         specs.append(spec)
     return specs
+
+
+def load_platform_skills(defaults_root: Path) -> dict[str, tuple[SkillRef, ...]]:
+    """Each default agent's platform-limited skills (`SkillRef.platforms`), by agent name.
+
+    Read once per process for admission, which adds them to sessions on those
+    platforms. Empty when `defaults_root` has no `agents/` directory, logged once
+    per root: a process started outside the checkout would otherwise lose them
+    without a word.
+    """
+    agents_root = defaults_root / "agents"
+    if not agents_root.is_dir():
+        if defaults_root not in _MISSING_LOGGED:
+            _MISSING_LOGGED.add(defaults_root)
+            _log.warning("defaults.platform_skills_unread", defaults_root=str(defaults_root))
+        return {}
+    return {
+        spec.name: limited
+        for spec in load_agent_specs(agents_root)
+        if (limited := tuple(ref for ref in spec.skills if ref.platforms is not None))
+    }
 
 
 def load_environment_specs(root: Path) -> list[EnvironmentSpec]:

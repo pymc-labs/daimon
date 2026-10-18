@@ -1070,6 +1070,81 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
+@pytest.mark.parametrize("is_dm", [False, True], ids=["channel", "dm"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+    is_dm: bool,
+) -> None:
+    """A Teams turn of the seeded agent runs with docx, pptx and xlsx; others run as before.
+
+    They come from `defaults/agents/daimon.yaml`'s `platforms: [teams]` entries
+    and ride the session's skills override, so a Slack or Discord turn adds
+    nothing and its agent, skills and session match a deployment without them.
+    """
+    from daimon.core.defaults.loader import load_platform_skills
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        is_dm=is_dm,
+        now=_NOW,
+    )
+
+    expected = [("anthropic", n) for n in ("docx", "pptx", "xlsx")] if platform == "teams" else []
+    assert [(s.type, s.skill_id) for s in admission.channel_skills] == expected, (
+        "only a Teams turn adds the Office skills, in a channel and in a DM alike"
+    )
+    assert admission.platform_skill_ids == {n for _, n in expected}, (
+        "the platform's are marked, so a refused one can be left out at create"
+    )
+    assert admission.agent.skills == [], "the agent itself is never changed"
+
+
+@pytest.mark.parametrize(
+    ("profile", "kept"),
+    [
+        (None, True),
+        ("anthropic.managed_agents", True),
+        ("openai.persistent_workspace", False),
+        ("gemini.inline_reuse", False),
+    ],
+)
+def test_only_the_managed_agents_backend_gets_a_platforms_skills(
+    profile: str | None, kept: bool
+) -> None:
+    """Another backend has no Anthropic built-ins, so a Teams turn there adds none."""
+    from anthropic.types.beta import BetaManagedAgentsAnthropicSkill
+    from daimon.core.turn.admission import backend_platform_skills
+
+    office = (BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest"),)
+    assert backend_platform_skills(office, profile) == (office if kept else ()), (
+        "only the default backend and Managed Agents run the platform's skills"
+    )
+
+
 async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

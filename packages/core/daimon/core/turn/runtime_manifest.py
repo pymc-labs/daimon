@@ -1664,9 +1664,12 @@ async def _capture_source_capabilities(
                     },
                 }
             )
-            if {item.source.id for item in inputs.skills} != {s.id for s in spec.skills or ()}:
+            # The provider's built-in skills (docx, pptx, ...) have no bytes to
+            # carry and run only there: another backend goes without them.
+            portable = tuple(s for s in spec.skills or () if s.source in (None, "custom"))
+            if {item.source.id for item in inputs.skills} != {s.id for s in portable}:
                 raise ValueError("skill representation is incomplete")
-            unresolved = tuple(s for s in spec.skills or () if s.version in (None, "latest"))
+            unresolved = tuple(s for s in portable if s.version in (None, "latest"))
             latest: dict[str, str] = {}
             if unresolved:
                 # Grant reads only for ids captured from this actual source.

@@ -4370,6 +4370,71 @@
         'type': 'object',
       }),
     }),
+    'replace_channel_file': dict({
+      'description': '''
+        Save an edited file over a Teams channel file as its new version.
+        <blank line>
+        Use this when asked to update, fix or edit a file that is already in
+        the channel's Files, instead of posting a renamed copy. Download the
+        current file, edit it, stage the result with
+        ``create_file_upload_url`` (PUT the bytes) and pass that
+        ``file_handle``, of the same file type.
+        <blank line>
+        ``link`` and ``version`` come together from where you downloaded the
+        file: an ``[attachment]`` line or ``<attachment>`` element of this
+        conversation, or a file of read_channel, read_thread or get_message.
+        ``channel_id`` is this conversation's channel or thread id and
+        ``origin_context_id`` this turn's, from turn_controls: only a file
+        inside the Files folder of the channel this turn started in can be
+        replaced, and you must be able to post there.
+        <blank line>
+        SharePoint keeps every earlier version, so an edit can be restored.
+        Refusals say what to do: a file changed since you read it is not
+        overwritten (download it again and redo the edit); a file open in a
+        desktop app is locked; a permission, retention policy or sensitivity
+        label can block the write. Then post your version as a new file with
+        send_message instead. If saving did not finish, read the channel
+        before trying again: it may have been saved. Put the returned
+        ``markdown`` line in your reply as it is: it opens the file in Office
+        for the web. To replace it again, pass the returned ``link`` and
+        ``version``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'type': 'string',
+          }),
+          'file_handle': dict({
+            'type': 'string',
+          }),
+          'link': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'version': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'channel_id',
+          'link',
+          'version',
+          'file_handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_agent_key': dict({
       'description': '''
         Give an agent an API key or token for any service: Toggl, OpenAI,

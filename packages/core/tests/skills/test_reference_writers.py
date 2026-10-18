@@ -193,6 +193,7 @@ async def test_sync_keeps_an_orphan_a_channel_still_adds(
             skill=SKILL,
             default=DeploymentDefault(agent_name="target"),
             actor_account_id=None,
+            platform_skills={},
         )
         assert not isinstance(rule, str), rule
     tarball = make_tarball({"r1-main/README.md": b"empty"})

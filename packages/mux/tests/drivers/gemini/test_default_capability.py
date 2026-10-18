@@ -56,6 +56,7 @@ ROOT = Path(__file__).resolve().parents[5]
 
 
 class SkillName(BaseModel):
+    type: str
     skill_id: str
 
 
@@ -81,6 +82,8 @@ def manifest() -> DefaultManifest:
     )
     skills: list[NamedSkill] = []
     for ref in authored.skills:
+        if ref.type != "custom":
+            continue  # Anthropic's built-in skills run only there.
         directory = ROOT / "defaults/skills" / ref.skill_id
         skills.append(
             NamedSkill(

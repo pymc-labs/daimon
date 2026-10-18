@@ -99,9 +99,13 @@ async def reconcile_agent(
     if update:
         spec = spec.model_copy(update=update)
 
+    # A seeded agent's platform-limited skill stays off it: admission adds it
+    # to the sessions of turns on its platforms, so every other platform's
+    # agent, and the spec hash below, read as if it were not there. A user's
+    # agent has no such path, so `resolve_refs` refuses the ref instead.
     resolved_skills = await resolve_refs(
         client,
-        refs=spec.skills,
+        refs=[ref for ref in spec.skills if not (managed and ref.platforms is not None)],
         tenant_id=tenant_id,
         skills_view=skills_view if dry_run else None,
     )

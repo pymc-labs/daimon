@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -128,7 +129,12 @@ async def test_add_list_and_remove_a_channel_skill_audited(
             return httpx.Response(200, json=skill)
         return httpx.Response(200, json={"data": [], "next_page": None})
 
-    rt = build_cli_runtime(db_session_factory, anthropic=build_fake_anthropic(handler))
+    rt = build_cli_runtime(
+        db_session_factory,
+        anthropic=build_fake_anthropic(handler),
+        # Adding reads the defaults' platform skills; none here.
+        settings=SimpleNamespace(cli=FakeCliSettings.cli, defaults_root=Path("/nonexistent")),
+    )
     console = _console()
     args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
 

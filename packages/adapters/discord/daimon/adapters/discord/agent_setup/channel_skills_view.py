@@ -208,6 +208,7 @@ class AddChannelSkillModal(discord.ui.Modal):
                     skill=self.skill.value,
                     default=view.runtime.deployment_default,
                     actor_account_id=state.account_id,
+                    platform_skills=view.runtime.turn_deps.platform_skills,
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await interaction.response.send_message(UNREADABLE, ephemeral=True)

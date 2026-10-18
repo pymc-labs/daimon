@@ -72,7 +72,8 @@ def manifest() -> DefaultManifest:
     authored = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
     uploads = []
     for ref in authored["skills"]:
-        assert ref["type"] == "custom"
+        if ref["type"] != "custom":
+            continue  # A built-in (docx, pptx, xlsx) has nothing to upload.
         name = ref["skill_id"]
         directory = ROOT / "defaults/skills" / name
         files = tuple(
