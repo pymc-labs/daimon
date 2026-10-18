@@ -108,7 +108,7 @@ class GitHubReposView(PanelViewBase):
         admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
         async with self.runtime.sessionmaker() as session:
             account = await get_account(session, self.state.account_id)
-            if account is None or account.is_external or account.tenant_id != tenant_id:
+            if account is None or account.tenant_id != tenant_id:
                 return False
             caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": admin})
             facts = (

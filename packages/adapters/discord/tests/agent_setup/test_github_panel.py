@@ -63,17 +63,7 @@ async def test_discord_repo_read_rechecks_external_and_admin_actor(
     monkeypatch.setattr(
         repos_module,
         "get_account",
-        AsyncMock(
-            return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0], is_external=True)
-        ),
-    )
-    assert not await view.allowed(interaction), "an external account cannot manage repos"
-    monkeypatch.setattr(
-        repos_module,
-        "get_account",
-        AsyncMock(
-            return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0], is_external=False)
-        ),
+        AsyncMock(return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0])),
     )
     assert await view.allowed(interaction), "a live server admin may manage the agent"
 

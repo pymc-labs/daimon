@@ -189,7 +189,7 @@ async def github_pending_url(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
         )
         account = await get_account(session, principal.account_id)
-        if account is None or account.is_external:
+        if account is None:
             return None
         return await pending_connect_link(
             session,
