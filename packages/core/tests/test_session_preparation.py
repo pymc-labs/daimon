@@ -2251,6 +2251,86 @@ async def test_tightening_memory_access_never_runs_the_writable_session(
         assert third.ma_session_id == second.ma_session_id
 
 
+@pytest.mark.parametrize("budget_change", [False, True], ids=["same-channel", "new-channel"])
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_an_external_caller_never_runs_or_carries_a_members_session(
+    active: bool,
+    budget_change: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A member's session may hold the agent's keys, mounted or copied into its
+    workspace. Whatever else changed with it, someone from another
+    organisation never runs on it nor inherits its work."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    member = replace(_admission(account=account), budget_channel_id="channel-a")
+    first = await _prepare(deps, member, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
+    if active:
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(
+                session, id=first.mapping_id, active_turn_message_id="in-flight", now=_NOW
+            )
+
+    async def forbidden_checkpoint(**kwargs: Any) -> Any:
+        pytest.fail("a member's workspace must not be carried to an external caller")
+
+    external = replace(
+        member,
+        is_external=True,
+        budget_channel_id="channel-b" if budget_change else "channel-a",
+    )
+    second = await _prepare(
+        deps, external, tenant=tenant, account=account, transfer=forbidden_checkpoint
+    )
+
+    if active:
+        assert isinstance(second, PreparationBusy), "the busy member session is waited out"
+        assert transport.creates == 1, "and nothing is created meanwhile"
+        return
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id, "the member session is replaced"
+    current = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert current is not None and current.effective_config is not None
+    assert current.effective_config.is_external, "the successor records its external caller"
+    third = await _prepare(deps, external, tenant=tenant, account=account)
+    assert isinstance(third, PreparedTurn)
+    assert third.ma_session_id == second.ma_session_id, "and is reused for them after"
+
+
+async def test_a_member_after_an_external_caller_keeps_the_sessions_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An external caller's session holds none of the agent's keys: a member
+    answered next gets a session with them, carrying its work over."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    member = _admission(account=account)
+    first = await _prepare(deps, replace(member, is_external=True), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    carried: list[str] = []
+
+    async def _transfer(**kwargs: Any) -> PreparedReplacement:
+        carried.append(kwargs["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="history", user_prefix=""
+        )
+
+    second = await _prepare(deps, member, tenant=tenant, account=account, transfer=_transfer)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id, "the member gets a session of their own"
+    assert carried == [first.ma_session_id], "carrying the external session's work"
+
+
 @pytest.mark.parametrize(
     ("sealed", "is_dm", "dm_read_only", "expected"),
     [

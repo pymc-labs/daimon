@@ -867,6 +867,7 @@ async def _prepare_session_for_turn_locked(
                 recorded is None
                 and not fresh_start
                 and not admission.memory_read_only
+                and not admission.is_external
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
@@ -926,8 +927,11 @@ async def _prepare_session_for_turn_locked(
             decision = ReplaceSession(reasons=("budget_channel",))
         elif recorded is None:
             # A restricted turn must get a new read-only session when the
-            # previous mount cannot be established, never reuse unknown access.
-            decision = ReplaceSession(reasons=("memory_access",))
+            # previous mount cannot be established, never reuse unknown access;
+            # nor may a caller from another organisation reuse unknown keys.
+            decision = ReplaceSession(
+                reasons=("external_caller",) if admission.is_external else ("memory_access",)
+            )
         else:
             assert recorded is not None, "a readable row always has a recorded snapshot here"
             rotate_app_token = (
@@ -991,8 +995,8 @@ async def _prepare_session_for_turn_locked(
         # The old session may hold the agent's keys and tokens, mounted or
         # copied into its workspace: never run it, or carry its work, for a
         # person from another organisation.
-        stripping_credentials = (
-            isinstance(decision, ReplaceSession) and "external_caller" in decision.reasons
+        stripping_credentials = admission.is_external and (
+            recorded is None or not recorded.is_external
         )
         if (
             isinstance(decision, ReplaceSession)

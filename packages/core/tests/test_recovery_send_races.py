@@ -257,3 +257,30 @@ async def test_checkpoint_after_lock_wait(db_session, db_nullpool_engine, monkey
     else:
         await task
     assert not ran, "checkpoint executed the old session after the policy change"
+
+
+async def test_recovery_never_adopts_a_members_replacement_for_an_external_caller(
+    db_session, db_nullpool_engine
+):
+    """A replacement built for a member holds the agent's keys: someone from
+    another organisation recovering in the same thread waits instead."""
+    tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
+        db_session, db_nullpool_engine
+    )
+    first = await bind(admitted())
+    moved = _agent(model_id="claude-opus-4-6")
+    _register(transport.state, moved)
+    await bind(admitted(moved))
+    # No recorded grant: reauthorize keeps the hand-built external admission.
+    external = replace(first, admission=replace(first.admission, is_external=True, grant=None))
+    with pytest.raises(SessionBusyError) as raised:
+        await _replace_dead_session(
+            deps,
+            external,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            dead_session_id=first.ma_session_id,
+            dead_mapping_id=first.mapping_id,
+        )
+    assert raised.value.pending_reasons == ("external_caller",), "it waits for its own session"

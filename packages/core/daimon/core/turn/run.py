@@ -644,9 +644,18 @@ async def _replace_dead_session_locked(
                 # seal added since, or a replacement built writable that the
                 # current decision makes read-only, makes this turn wait (rolls
                 # back the dead-mark) so the next turn rebuilds it read-only.
+                # So does one built with the agent's keys for a caller from
+                # another organisation.
                 current = await reauthorize(deps, admission)
                 snapshot = live.effective_config
                 writable = snapshot is None or not snapshot.memory_read_only
+                if (admission.is_external or current.is_external) and (
+                    snapshot is None or not snapshot.is_external
+                ):
+                    raise SessionBusyError(
+                        pending_reasons=("external_caller",),
+                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
+                    )
                 if current.origin_seal_ids != admission.origin_seal_ids or (
                     current.memory_read_only and writable
                 ):
