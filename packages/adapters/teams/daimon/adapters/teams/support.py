@@ -23,7 +23,9 @@ picks it up answers there, and the form warns that the note leaves it.
 When it is, every answer also gets an Ask a human button (`card.ASK_HUMAN_DIALOG`),
 Slack's: it opens the same form in a dialog only the clicker sees, for the
 people who could have asked the agent there (`answer_access`), and the request
-links to the message the button is on, the card just below the answer.
+links to the message the button is on, the card just below the answer. It is
+how people from another organisation ask, in their own channel: the typed
+command never reaches them, as its 1:1 chat cannot be opened across organisations.
 One person asks once per answer: a second Send on it is told the first is in
 hand and spends nothing. Access is decided for the last
 time under the ledger and policy locks, in the transaction that spends. The
@@ -345,7 +347,7 @@ class SupportCommand:
         )
 
     async def _ask_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleResponse:
-        actor = await card_actor(self._runtime, activity)
+        actor = await card_actor(self._runtime, activity, allow_external=True)
         if actor is None or not activity.reply_to_id:
             return dialog_message(DENIED)
         place = AnswerPlace.of(activity, activity.reply_to_id)
@@ -363,7 +365,7 @@ class SupportCommand:
         id the form carries; a forged one only points the submitter's own
         request at another message in the same conversation.
         """
-        actor = await card_actor(self._runtime, activity)
+        actor = await card_actor(self._runtime, activity, allow_external=True)
         data = submitted_fields(activity.value.data)
         message_id = activity.reply_to_id or str(data.get("message") or "")
         if actor is None or not message_id:

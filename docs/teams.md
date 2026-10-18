@@ -99,7 +99,8 @@ button, which opens the `support` form for that answer, spending a credit; the
 post links to the card, just below the answer, and asking again about the same
 answer spends nothing. A turn that only ran tools gets both on its finished card; a
 cancelled turn gets neither. Only people who could start a turn at that
-answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
+answer can vote or ask, people from another organisation included on an
+answer in their `readers: own` channel. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
 submitted 👎 form is posted once to the support channel without spending a
 credit, and the form says it is shared. Feedback text is never logged.
 
@@ -125,8 +126,9 @@ error the agent relays. Their sessions get none of the agent's keys (no
 `.env`) and none of its shared MCP tokens: a server only such a token
 reaches is left off unless they sign in to it themselves, where it offers a
 sign-in. A session that may hold those credentials is replaced, not reused,
-when they are next answered in it, and none of its work carries over. Files are saved in a shared channel this
-organisation hosts once an admin turned them on there (below); one hosted by
+when they are next answered in it, and none of its work carries over. They can
+vote on and Ask a person about answers there, like members. Files are saved in a shared channel this
+organisation hosts once an admin granted `Files.ReadWrite.All` (below); one hosted by
 another organisation keeps its files on that organisation's site.
 
 A sender is placed from these signals, cheapest first: a foreign tenant on

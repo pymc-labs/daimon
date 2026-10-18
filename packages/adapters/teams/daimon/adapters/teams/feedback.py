@@ -20,7 +20,8 @@ shown. Answers posted before the custom mode still open Teams' built-in form,
 which arrives the same way with text only.
 
 Who may vote: the people who could have asked the agent there
-(`answer_access`), decided under the policy lock in the transaction that
+(`answer_access`), people from another organisation in their own channel
+included, decided under the policy lock in the transaction that
 writes, at the click and again on submit. A refused vote records nothing.
 The principal lookup never creates one; the session is an attribution hint.
 
@@ -290,7 +291,7 @@ class TeamsFeedback:
         self, activity: TaskFetchInvokeActivity | MessageFetchTaskInvokeActivity, vote: Vote
     ) -> TaskModuleResponse:
         """Record the click's vote; 👍 is thanked, 👎 gets the form."""
-        actor = await card_actor(self._runtime, activity)
+        actor = await card_actor(self._runtime, activity, allow_external=True)
         message_id = activity.reply_to_id
         if actor is None or not message_id:
             return dialog_message(DENIED)
@@ -303,7 +304,7 @@ class TeamsFeedback:
 
     async def _submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:
         """Submitting the form is a down-vote in its own right: upserted with the form."""
-        actor = await card_actor(self._runtime, activity)
+        actor = await card_actor(self._runtime, activity, allow_external=True)
         form = form_details(activity.value.data)
         if activity.reply_to_id:
             # The answer Teams says the dialog came from beats the client-built form's copy.
@@ -321,7 +322,7 @@ class TeamsFeedback:
         return dialog_message(THANKS_TEXT)
 
     async def _builtin(self, activity: MessageSubmitActionInvokeActivity) -> None:
-        actor = await card_actor(self._runtime, activity)
+        actor = await card_actor(self._runtime, activity, allow_external=True)
         message_id = activity.reply_to_id
         if actor is None or not message_id:
             log.info("teams.feedback.dropped")

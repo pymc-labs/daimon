@@ -39,6 +39,7 @@ from .conftest import (
     post_activity,
     running_service,
 )
+from .personas import EXTERNAL_ID, from_outside
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -237,6 +238,41 @@ async def test_someone_who_could_not_ask_there_cannot_vote(
 
     assert {_message(up), _message(down), _message(sent)} == {NOT_ALLOWED}, "told, every time"
     assert await _rows(db_session_factory) == [], "a refused vote records nothing"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [ChannelRule(readers="own", writers="own"), ChannelRule(readers="inside")],
+    ids=["own", "inside"],
+)
+async def test_someone_from_another_organisation_votes_only_in_a_channel_kept_to_its_agents(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    rule: ChannelRule,
+) -> None:
+    policy = TenantAccessPolicy(channel_rules={CHANNEL_ID: rule})
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    up = make_invoke("task/fetch", {"data": {"dialog_id": card.VOTE_UP_DIALOG}})
+    data = {"action": FEEDBACK_DIALOG, "message": ANSWER, "reasons": "other", "text": CRITICISM}
+    form = make_invoke("task/submit", {"data": data})
+    builtin = {"actionName": "feedback", "actionValue": {"reaction": "like", "feedback": ""}}
+    async with _running(db_session_factory, teams_api_fake) as service:
+        voted = await post_activity(service, from_outside(up))
+        sent = await post_activity(service, from_outside(form))
+        await post_activity(service, from_outside(make_invoke("message/submitAction", builtin)))
+        await _routed(service)
+
+    rows = [
+        (r["vote"], r["platform_user_id"], r["feedback_text"])
+        for r in await _rows(db_session_factory)
+    ]
+    if rule.readers == "own":
+        assert (_message(voted), _message(sent)) == (feedback.THANKS_VOTE, feedback.THANKS_TEXT)
+        assert rows == [("up", EXTERNAL_ID, CRITICISM)], "each route recorded on their row"
+    else:
+        assert {_message(voted), _message(sent)} == {NOT_ALLOWED}, "never answered there"
+        assert rows == []
 
 
 async def test_teams_own_thumbs_on_an_older_answer_still_vote(

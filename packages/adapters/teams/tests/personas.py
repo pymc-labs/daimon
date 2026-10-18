@@ -14,6 +14,7 @@ from .conftest import (
     AAD_OBJECT_ID,
     ADMIN_TEAM,
     ENTRA_TENANT_ID,
+    THREAD_ID,
     TeamsApiFake,
 )
 
@@ -40,6 +41,13 @@ PERSONAS: tuple[Persona, ...] = (
     Persona("guest", GUEST_ID, ENTRA_TENANT_ID, "guest"),
     Persona("external", EXTERNAL_ID, FOREIGN_TENANT, "user"),
 )
+
+
+def from_outside(invoke: dict[str, object]) -> dict[str, object]:
+    """`invoke` by the external persona, on an answer in `THREAD_ID`."""
+    sender = {"id": f"29:{EXTERNAL_ID}", "aadObjectId": EXTERNAL_ID, "tenantId": FOREIGN_TENANT}
+    conversation = {"id": THREAD_ID, "conversationType": "channel", "tenantId": ENTRA_TENANT_ID}
+    return invoke | {"from": sender, "conversation": conversation}
 
 
 @dataclasses.dataclass

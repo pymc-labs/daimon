@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **People from another organisation can vote and Ask a person.** On an
+  answer in their `readers: own` channel, a Teams external participant or
+  guest can now use 👍/👎, the "What went wrong?" form and Ask a person, as
+  anyone who could start a turn there can. Their clicks used to be refused
+  everywhere; anywhere else they still are.
+
 - OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
 
 - Fleet workers get distinct names, so later mentions keep reaching the original agent. Defaults updates leave live workers alone.

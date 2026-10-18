@@ -3,8 +3,9 @@
 Feedback and Ask a human on an answer are open to exactly the people the
 tenant lets start a turn at that answer's place (`authorize(START_TURN)`:
 protection and the invoker allowlist), as on Slack (`place_access`). The
-clicker is the verified one (`card_actor`), so someone from another
-organisation never gets here, as Slack refuses a Slack Connect member. Their
+clicker is the verified one (`card_actor`). Someone from another organisation
+is held to admission's rule as well: only on an answer in a channel kept to its
+own agents, or a thread in one (`answers_external`). Their
 admin role is the live one; the grant-named teams they own are looked up
 before any session opens, because Graph may be slow. The same policy read says
 whether the answer's place is sealed (`readers_limited_at`), which Ask a human
@@ -23,7 +24,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize, build_turn_place
 from daimon.core.native_admins import AdminCaller, load_live_subject
-from daimon.core.permissions import readers_limited_at
+from daimon.core.permissions import channel_permissions, readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.teams_threads import is_group_chat
 from microsoft_teams.api import InvokeActivity
@@ -83,6 +84,16 @@ def sealed_at(policy: TenantAccessPolicy, place: AnswerPlace) -> bool:
     )
 
 
+def _answers_external(policy: TenantAccessPolicy, place: AnswerPlace) -> bool:
+    """Whether someone from another organisation is answered at the answer's place."""
+    if not place.is_channel:
+        return False
+    here = channel_permissions(
+        policy, channel_id=place.conversation_id, parent_channel_id=place.channel_id
+    )
+    return here.answers_external
+
+
 async def clicker(runtime: TeamsRuntime, actor: Actor) -> AdminCaller:
     """The clicker with the grant-named teams they own. Network: call with no session open."""
     return await admin_caller(
@@ -98,6 +109,8 @@ async def may_start_turn_at(
     place: AnswerPlace,
 ) -> bool:
     """START_TURN at the answer's place, as admission decides it for a message there."""
+    if actor.is_external and not _answers_external(policy, place):
+        return False
     subject: Subject = await load_live_subject(
         session, tenant_id=actor.tenant_id, platform="teams", caller=caller
     )

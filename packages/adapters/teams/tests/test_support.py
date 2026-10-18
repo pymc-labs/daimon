@@ -45,6 +45,7 @@ from .conftest import (
     post_activity,
     running_service,
 )
+from .personas import EXTERNAL_ID, from_outside
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 OPS = "19:ops@thread.tacv2"
@@ -371,6 +372,36 @@ async def test_ask_a_human_is_refused_to_someone_who_could_not_ask_there(
         sent = await post_activity(service, _ask("send", message="m-7", note="help"))
     assert opened["task"]["value"] == sent["task"]["value"] == NOT_ALLOWED
     assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [ChannelRule(readers="own", writers="own"), ChannelRule(readers="inside")],
+    ids=["own", "inside"],
+)
+async def test_someone_from_another_organisation_asks_only_in_a_channel_kept_to_its_agents(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    rule: ChannelRule,
+) -> None:
+    policy = TenantAccessPolicy(channel_rules={CHANNEL_ID: rule})
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        opened = await post_activity(service, from_outside(_ask("open")))
+        sent = await post_activity(service, from_outside(_ask("send", message="m-7", note="help")))
+        await _delivered(service)
+
+    rows = await _rows(db_session_factory)
+    if rule.readers == "own":
+        assert opened["task"]["type"] == "continue", "the form"
+        assert sent["task"]["value"] == support.RECEIVED.format(remaining=2)
+        assert [(r.platform_user_id, r.channel_id) for r in rows] == [(EXTERNAL_ID, THREAD_ID)]
+        [posted] = _posts_to(teams_api_fake, OPS)
+        assert support.SEALED_LINE in posted, "answered in their channel, not by DM"
+    else:
+        assert opened["task"]["value"] == sent["task"]["value"] == NOT_ALLOWED
+        assert rows == [] and _posts_to(teams_api_fake, OPS) == []
 
 
 async def test_a_protected_support_channel_gets_no_post(
