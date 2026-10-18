@@ -382,6 +382,8 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
                 _send_callback_error=AsyncMock(side_effect=lambda *a: trace.append("error")),
+                rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
+                send_callback_error=AsyncMock(side_effect=lambda *a: trace.append("error")),
             )
             function = (
                 implementation.callback if implementation is old else module._PauseButton.callback

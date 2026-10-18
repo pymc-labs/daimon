@@ -167,6 +167,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord `/routines` now offers a New routine form and a Delete confirmation. Creation requires Manage Server; deletion rechecks the routine creator or server admin before removing it.
+
 - **Teams now answers in group chats.** Each group chat is one session: the
   bot answers an @mention, a reply to it or a command, replays the chat's
   history and images through Graph, and answers commands privately. It answers

@@ -379,7 +379,7 @@ async def test_creator_can_pause(monkeypatch: pytest.MonkeyPatch) -> None:
         invoked.append((_s, _id))
         return row
 
-    async def _fake_rerender(*_a: Any, **_k: Any) -> None:
+    async def _fakererender(*_a: Any, **_k: Any) -> None:
         return None
 
     monkeypatch.setattr(
@@ -389,7 +389,7 @@ async def test_creator_can_pause(monkeypatch: pytest.MonkeyPatch) -> None:
         "daimon.adapters.discord.routines_panel.panel.pause_routine_via_panel",
         _fake_pause,
     )
-    monkeypatch.setattr("daimon.adapters.discord.routines_panel.panel._rerender", _fake_rerender)
+    monkeypatch.setattr("daimon.adapters.discord.routines_panel.panel.rerender", _fakererender)
 
     interaction = MagicMock()
     interaction.user = MagicMock()
@@ -540,7 +540,7 @@ async def test_admin_can_pause_anyone(monkeypatch: pytest.MonkeyPatch) -> None:
         invoked.append((_s, _id))
         return row
 
-    async def _fake_rerender(*_a: Any, **_k: Any) -> None:
+    async def _fakererender(*_a: Any, **_k: Any) -> None:
         return None
 
     monkeypatch.setattr(
@@ -550,7 +550,7 @@ async def test_admin_can_pause_anyone(monkeypatch: pytest.MonkeyPatch) -> None:
         "daimon.adapters.discord.routines_panel.panel.pause_routine_via_panel",
         _fake_pause,
     )
-    monkeypatch.setattr("daimon.adapters.discord.routines_panel.panel._rerender", _fake_rerender)
+    monkeypatch.setattr("daimon.adapters.discord.routines_panel.panel.rerender", _fakererender)
 
     # Admin user is a real discord.Member-ish mock with manage_guild=True
     admin_member = MagicMock(spec=discord.Member)
