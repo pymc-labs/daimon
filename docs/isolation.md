@@ -230,8 +230,8 @@ every ordinary session created by `create_session`.
 
 | Credential | Keyed by | Shared with |
 | --- | --- | --- |
-| Agent keys, mounted as `.env` | (tenant, agent) (`packages/core/daimon/core/_models.py:1239-1246`) | every session of the agent, except one for a person from another organisation (`packages/core/daimon/core/sessions.py:417-425`) |
-| Token MCP server credentials | (tenant, agent) (`packages/core/daimon/core/agent_mcp_credentials.py:170`) | mirrored into every caller's vault except a person from another organisation's, whose session leaves the server off until they sign in (`packages/core/daimon/core/sessions.py:390-411`) |
+| Agent keys, mounted as `.env` | (tenant, agent) (`packages/core/daimon/core/_models.py:1239-1246`) | every session of the agent, except one for a person from another organisation (`packages/core/daimon/core/sessions.py:851-862`) |
+| Token MCP server credentials | (tenant, agent) (`packages/core/daimon/core/agent_mcp_credentials.py:170`) | mirrored into every caller's vault except a person from another organisation's, whose session leaves the server off unless they signed in to it (`packages/core/daimon/core/sessions.py:812-848`) |
 | OAuth MCP server grants | (account, agent) vault | the person who signed in only. The server is hidden from everyone else's session unless the agent also holds a shared token for that URL, in which case others use the token (`packages/core/daimon/core/sessions.py:506`, `packages/core/daimon/core/mcp_personal_servers.py:63-90`) |
 | Daimon MCP vault (the sandbox's call-back JWT) | (account, agent) (`packages/core/daimon/core/mcp_vault.py:236`) | the caller only; a Slack private turn gets its own execution vault |
 | Per-agent GitHub PAT | the agent (`packages/core/daimon/core/sessions.py:338`) | every session of the agent |
