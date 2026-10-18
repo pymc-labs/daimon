@@ -263,7 +263,8 @@ class GeminiWire:
             body = json_body(request)
             assert body["tools"] == []
             assert body["agent_config"]["model"] == "gemini-3.8-flash"
-        stamp = "2026-10-11T00:00:00Z"
+        # Gemini workspaces expire seven days after creation: stamp it now.
+        stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         return httpx.Response(
             200,
             json={
