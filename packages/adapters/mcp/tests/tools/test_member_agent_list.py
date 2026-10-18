@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @pytest.mark.parametrize("platform", ["slack", "discord"])
-@pytest.mark.parametrize("caller", ["member", "admin", "external", "bound-key", "unbound-key"])
+@pytest.mark.parametrize("caller", ["member", "admin", "bound-key", "unbound-key"])
 @pytest.mark.parametrize("origin_kind", ["valid", "omitted", "other-account", "expired"])
 async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
@@ -105,7 +105,6 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
         role=Role.USER,
         platform=platform,
         is_admin=caller == "admin",
-        is_external=caller == "external",
         chat_agent_id=executing,
     )
     if caller.endswith("key"):
@@ -119,7 +118,7 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
     expected: set[str] = set()
     if caller == "admin":
         expected |= {"shared", "local", "renamed", "draft"}
-    elif caller == "bound-key" or (caller in {"member", "external"} and origin_kind == "valid"):
+    elif caller == "bound-key" or (caller == "member" and origin_kind == "valid"):
         expected |= {"shared", "local"}
     result = await _list_agents_impl(runtime, auth, None, origin_id)
     assert {agent.name for agent in result} == expected

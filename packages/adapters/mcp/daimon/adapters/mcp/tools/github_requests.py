@@ -120,11 +120,6 @@ async def request_github_access_impl(
 ) -> GitHubRequestResult:
     """Request access for the verified asker's unfinished work in this thread."""
     origin = await require_turn_origin(runtime, auth, origin_context_id)
-    if origin.is_external or auth.is_external:
-        return GitHubRequestResult(
-            status="unavailable",
-            message="I can't use GitHub for people outside this workspace.",
-        )
     if origin.platform == "teams":
         return GitHubRequestResult(
             status="unavailable",
@@ -199,7 +194,6 @@ async def request_github_access_impl(
                 tenant_id=origin.tenant_id,
                 agent_id=agent_id,
                 account_id=origin.account_id,
-                is_external=False,
                 config=runtime.settings.github_app,
                 fernet=runtime.fernet,
             )

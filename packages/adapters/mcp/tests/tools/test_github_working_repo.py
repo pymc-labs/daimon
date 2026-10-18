@@ -106,11 +106,11 @@ async def test_set_working_repo_admin_none_and_member_refusal(
 
 
 @pytest.mark.asyncio
-async def test_teams_admin_sets_working_repo_and_external_caller_is_refused(
+async def test_teams_admin_sets_working_repo(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GitHub setup runs on Teams too; a guest from outside the workspace still cannot."""
+    """GitHub setup runs on Teams too."""
     async with committing_sessionmaker.begin() as session:
         tenant = await make_tenant(session, workspace_id=f"teams-working-{uuid.uuid4().hex[:8]}")
         account = await make_account(session, tenant=tenant)
@@ -151,19 +151,3 @@ async def test_teams_admin_sets_working_repo_and_external_caller_is_refused(
     assert result.message == "Agent has no working repo now. To set one, ask me for a repo.", (
         "a Teams admin should change the working repo like a Discord one"
     )
-    guest = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="teams",
-        external_id="entra-tenant",
-        platform_user_id="aad-guest",
-        is_external=True,
-    )
-    with pytest.raises(ToolError, match="member of this Discord, Slack or Teams workspace"):
-        await working_tool.set_working_repo_impl(
-            runtime,  # type: ignore[arg-type]
-            guest,
-            origin_context_id=str(uuid.uuid4()),
-            repo_name="none",
-        )

@@ -43,11 +43,7 @@ async def remove_repo_impl(
     expected_ma_agent_id: str | None = None,
     confirmed: bool = False,
 ) -> RemoveRepoResult:
-    if (
-        auth.is_external
-        or auth.platform not in ("discord", "slack", "teams")
-        or not auth.platform_user_id
-    ):
+    if auth.platform not in ("discord", "slack", "teams") or not auth.platform_user_id:
         raise ToolError("GitHub setup needs a member of this Discord, Slack or Teams workspace.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
@@ -72,7 +68,7 @@ async def remove_repo_impl(
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory.begin() as session:
         account = await get_account(session, auth.account_id)
-        if account is None or account.tenant_id != auth.tenant_id or account.is_external:
+        if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
         manages = is_admin or await requester_manages_agent(

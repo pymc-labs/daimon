@@ -64,7 +64,7 @@ async def register_native_credential_tools(
         target: str,
     ) -> NativeOfferReceipt:
         auth = await auth_resolver(ctx)
-        if auth.is_external or auth.agent_id is not None or auth.chat_agent_id is not None:
+        if auth.agent_id is not None or auth.chat_agent_id is not None:
             raise ToolError(
                 "Use a native execution credential; legacy agent identities are refused."
             )

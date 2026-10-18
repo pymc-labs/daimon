@@ -96,7 +96,6 @@ async def _resume_linked_requests(
                 tenant_id=tenant_id,
                 agent_id=request.agent_id,
                 account_id=account_id,
-                is_external=False,
                 config=settings.github_app,
                 fernet=fernet,
             )

@@ -37,7 +37,7 @@ async def set_working_repo_impl(
     agent_name: str | None = None,
     expected_ma_agent_id: str | None = None,
 ) -> WorkingRepoResult:
-    if auth.is_external or auth.platform not in ("discord", "slack", "teams"):
+    if auth.platform not in ("discord", "slack", "teams"):
         raise ToolError("GitHub setup needs a member of this Discord, Slack or Teams workspace.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
@@ -65,7 +65,7 @@ async def set_working_repo_impl(
         raise ToolError("Name one repo as owner/repo, or say none.")
     async with runtime.session_factory.begin() as session:
         account = await get_account(session, auth.account_id)
-        if account is None or account.tenant_id != auth.tenant_id or account.is_external:
+        if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
         manages = is_admin or await requester_manages_agent(

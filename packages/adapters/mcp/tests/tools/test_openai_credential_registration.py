@@ -54,8 +54,8 @@ async def test_existing_legacy_tools_are_never_overridden() -> None:
     assert content[0].text == "original dispatcher"
 
 
-@pytest.mark.parametrize("legacy", ["agent", "chat", "external"])
-async def test_legacy_or_external_credentials_never_reach_native_factory(
+@pytest.mark.parametrize("legacy", ["agent", "chat"])
+async def test_legacy_credentials_never_reach_native_factory(
     monkeypatch: pytest.MonkeyPatch, legacy: str
 ) -> None:
     server = FastMCP("native")
@@ -65,7 +65,6 @@ async def test_legacy_or_external_credentials_never_reach_native_factory(
         role=Role.ADMIN,
         agent_id=uuid.uuid4() if legacy == "agent" else None,
         chat_agent_id=uuid.uuid4() if legacy == "chat" else None,
-        is_external=legacy == "external",
     )
     calls: list[object] = []
 

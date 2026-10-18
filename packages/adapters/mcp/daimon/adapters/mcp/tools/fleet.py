@@ -160,7 +160,7 @@ class HostFleetToolService:
             origin = await get_verified_origin(
                 self._runtime, caller, str(origin_context_id) if origin_context_id else None
             )
-            if origin is None or origin.is_external or origin.is_setup:
+            if origin is None or origin.is_setup:
                 raise ToolError("Fleet orchestration refused: active_origin_required.")
         if self._parent_loader is None:
             from daimon.adapters.mcp.tools._authz_facts import mcp_subject
@@ -213,7 +213,6 @@ class HostFleetToolService:
             or parent.agent_id != caller.chat_agent_id
             or parent.subject.via_agent_key
             or (parent.subject.is_admin and not caller.is_admin)
-            or caller.is_external
             or caller.agent_id is not None
         ):
             raise ToolError("Fleet orchestration refused: caller_root_mismatch.")

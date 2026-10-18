@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import datetime as dt
 import json
 import time
@@ -243,14 +242,14 @@ async def test_files_refused_where_teams_takes_none_or_the_handle_is_unknown(
     assert fake.posts() == []
 
 
-async def test_an_external_participant_in_a_shared_channel_saves_to_its_files(
+async def test_a_shared_channel_message_saves_to_its_files(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The shared channel's own folder, which its members, external ones included, share."""
+    """The shared channel's own folder, which all its members share."""
     (auth, handle), fake = await _setup(db_session), _Fake()
     await _teams_send_message_impl(
         _runtime(fake, sessionmaker),
-        dataclasses.replace(auth, is_external=True),
+        auth,
         channel_id=_SHARED,
         content="x",
         file_handles=[handle],

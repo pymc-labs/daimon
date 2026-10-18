@@ -30,7 +30,7 @@ from daimon.core.config import (
 from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_app_installations, github_connect
-from daimon.core.stores.accounts import set_external, set_role
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
 from daimon.core.stores.security_audit import list_events
@@ -112,7 +112,6 @@ def test_picker_names_owner_type_for_screen_readers() -> None:
         secret="secret",
         cancel_url="https://discord.com",
         installations=installations,
-        clients_present=False,
         platform="discord",
         workspace="Test Server",
         agent_name="Test Agent",
@@ -158,7 +157,6 @@ def test_picker_preselects_only_available_requested_repo(
         secret="secret",
         cancel_url="https://discord.com",
         installations=[installation],
-        clients_present=False,
         platform="discord",
         workspace="Test Server",
         agent_name="Test Agent",
@@ -821,12 +819,6 @@ async def test_connection_happy_path_and_rechecks(
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         async with sessionmaker.begin() as session:
             await set_role(session, account_id, Role.ADMIN)
-            await set_external(session, account_id, True)
-        external = await browser.get("/oauth/github/confirm", params={"state": state})
-        assert external.status_code == 400
-        async with sessionmaker.begin() as session:
-            await set_external(session, account_id, False)
-            await set_role(session, account_id, Role.ADMIN)
         installation_available = False
         unavailable = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "101"}
@@ -956,8 +948,6 @@ async def test_connection_happy_path_and_rechecks(
         assert replay_after_cleanup.status_code == 200
         assert "Already connected" in replay_after_cleanup.text
         async with sessionmaker.begin() as session:
-            client = await make_account(session, tenant=tenant)
-            await set_external(session, client.id, True)
             client_token = await github_connect.mint_invitation(
                 session,
                 tenant_id=tenant_id,
@@ -972,7 +962,6 @@ async def test_connection_happy_path_and_rechecks(
             )
         ).status_code == 307
         client_form = await browser.get("/oauth/github/confirm", params={"state": client_state})
-        assert "Clients can see what connected agents share." in client_form.text
         assert "How this works" in client_form.text
         assert "Pick only the repos" not in client_form.text
         assert 'id="select-all-repos"' in client_form.text
@@ -999,7 +988,6 @@ def _agent_picker(
         secret="secret",
         cancel_url="https://discord.com",
         installations=[installation],
-        clients_present=False,
         platform="discord",
         workspace="Test Server",
         agent_name="ResearchBot",

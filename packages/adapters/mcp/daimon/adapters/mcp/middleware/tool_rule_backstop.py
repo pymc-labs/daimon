@@ -25,7 +25,6 @@ from typing import Final
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.middleware.external_participants import SEARCH_PROXY_TOOLS
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.stores import agent_tool_rules
@@ -41,6 +40,10 @@ DENIAL_REASON: Final = "agent_tool_rule_deny"
 #: Daimon tool, `search_tools` and `call_tool` included, tools added later too.
 #: Recognised only for the built-in server and only as an agent-wide `deny`.
 WILDCARD_TOOL_KEY: Final = f"{DAIMON_SERVER_NAME}/*"
+
+# The search transform's proxies: `call_tool` runs the middleware again with the
+# inner tool's name.
+SEARCH_PROXY_TOOLS: Final = frozenset({"call_tool", "search_tools"})
 
 
 def _enforced_for(identity: AuthIdentity) -> bool:

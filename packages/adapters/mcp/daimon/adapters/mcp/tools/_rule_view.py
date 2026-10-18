@@ -194,7 +194,7 @@ async def _load_view(
     refused while any channel is kept to its own agents.
     """
     policy = await load_policy_or_refuse(runtime, auth.tenant_id)
-    restrict_to_location = discovery and (not auth.is_admin or auth.is_external)
+    restrict_to_location = discovery and not auth.is_admin
     if not any_own_readers(policy) and not restrict_to_location:
         return OPEN_VIEW
     if agents is None:

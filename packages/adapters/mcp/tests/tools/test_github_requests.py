@@ -16,7 +16,7 @@ async def test_teams_request_points_to_connect_github_not_another_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Teams has no admin request cards yet; Connect GitHub works there instead."""
-    origin = SimpleNamespace(platform="teams", is_external=False)
+    origin = SimpleNamespace(platform="teams")
     monkeypatch.setattr(requests_module, "require_turn_origin", AsyncMock(return_value=origin))
     auth = AuthIdentity(
         account_id=uuid.uuid4(),

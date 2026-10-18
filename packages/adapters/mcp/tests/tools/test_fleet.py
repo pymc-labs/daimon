@@ -570,21 +570,12 @@ async def test_controller_refusal_persists_as_an_authz_denial(
 
 
 @pytest.mark.parametrize("tool", sorted(NAMES))
-@pytest.mark.parametrize("credential", ["external_account", "agent_session_token"])
-async def test_authenticated_nonroot_credentials_never_reach_fleet_owner(
+async def test_an_agent_session_token_never_reaches_fleet_owner(
     monkeypatch: pytest.MonkeyPatch,
     tool: str,
-    credential: str,
 ) -> None:
     root = host_parent()
-    caller = (
-        replace(AUTH, is_external=True)
-        if credential == "external_account"
-        else replace(
-            AUTH,
-            agent_id=AUTH.chat_agent_id,
-        )
-    )
+    caller = replace(AUTH, agent_id=AUTH.chat_agent_id)
     monkeypatch.setitem(globals(), "AUTH", caller)
     loads = []
 

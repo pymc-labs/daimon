@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -19,11 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @pytest.mark.asyncio
-async def test_teams_admin_reaches_remove_repo_and_external_caller_is_refused(
+async def test_teams_admin_reaches_remove_repo(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Teams passes the platform gate to the agent's list; a guest is still refused."""
+    """Teams passes the platform gate to the agent's list."""
     async with committing_sessionmaker.begin() as session:
         tenant = await make_tenant(session, workspace_id=f"teams-remove-{uuid.uuid4().hex[:8]}")
         account = await make_account(session, tenant=tenant)
@@ -59,13 +58,6 @@ async def test_teams_admin_reaches_remove_repo_and_external_caller_is_refused(
         await tool.remove_repo_impl(
             runtime,  # type: ignore[arg-type]
             admin,
-            origin_context_id=str(uuid.uuid4()),
-            repo_name="owner/missing",
-        )
-    with pytest.raises(ToolError, match="member of this Discord, Slack or Teams workspace"):
-        await tool.remove_repo_impl(
-            runtime,  # type: ignore[arg-type]
-            replace(admin, is_external=True),
             origin_context_id=str(uuid.uuid4()),
             repo_name="owner/missing",
         )

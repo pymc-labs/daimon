@@ -1033,8 +1033,8 @@ async def _set_agent_backend_impl(
     preview_only: bool = False,
 ) -> dict[str, JsonValue]:
     _require_admin(auth)
-    if auth.agent_id is not None or auth.is_external:
-        raise ToolError("An agent key or external account cannot change model backends.")
+    if auth.agent_id is not None:
+        raise ToolError("An agent key cannot change model backends.")
     try:
         require_outside_chat_turn(auth)
     except ToolError as exc:

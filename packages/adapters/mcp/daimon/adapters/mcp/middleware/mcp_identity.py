@@ -30,12 +30,10 @@ from typing import TypedDict, cast
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import (
-    EXTERNAL_CLAIM,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
 )
-from daimon.adapters.mcp.middleware.external_participants import external_refusal
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
@@ -331,9 +329,7 @@ class IdentityMiddleware(Middleware):
         # historical internal claims (jti-less tokens are refused by the verifier)
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
-        # An account from another organisation is never an admin, by any claim.
-        is_external = (_token.claims.get(EXTERNAL_CLAIM) if _token else None) is True
-        is_admin = not is_external and ((role == Role.ADMIN) or (is_admin_claim and internal_claim))
+        is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
         slack_turn_context_id: uuid.UUID | None = None
         raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
         if isinstance(raw_slack_context, str) and not internal_claim and agent_id is None:
@@ -359,15 +355,9 @@ class IdentityMiddleware(Middleware):
                 if isinstance(raw_bound_channel, str) and agent_id is not None
                 else None
             ),
-            is_external=is_external,
             **_token_fields(_token.claims if _token else {}),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)
-        if is_external and context.method == "tools/call":
-            refusal = external_refusal(str(getattr(context.message, "name", "")))
-            if refusal is not None:
-                record_denial("external_participant")
-                raise ToolError(refusal)
         if context.method == "tools/call":
             # A proxied `call_tool` re-enters this middleware with the inner
             # tool's name, so this one check covers direct and proxied calls.
