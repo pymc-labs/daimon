@@ -157,7 +157,6 @@ channel's and its category's rule.
 | Sessions read and continued by | turns inside | own agents inside | anyone allowed | `session_homes` |
 | Memory writable | no | own agents only | yes | `memory_writable` |
 | Content kept inside | no | yes | no | `keeps_content`, `held_to` |
-| People from another organisation answered | no | yes | no | `answers_external` |
 | Agents listed there | all | own only | all | `listed_at` |
 | Default agent | any | own only; never cleared | any | `binding_refusal`, `clear_refusal` |
 | Charged to its budget | its turns | its turns and its own agents' calls | its turns | `budget_channel` |
@@ -178,10 +177,6 @@ Daimon's server-wide name or avatar there. See [publishing](#publishing).
 
 **Listed** covers agents, their skills, environments, routines, timers and
 defaults. From outside, a channel's own agents are hidden everywhere.
-
-**People from another organisation** (a Teams guest the tenant doesn't list
-as a member) are answered only in a channel with `readers: own` or its
-threads, never in its setup thread or a DM.
 
 A thread whose channel is unknown fails closed while any channel's readers
 are `own`, since it may lie in one (`home_unknown`).
@@ -276,6 +271,6 @@ every channel, category and agent rule, and each agent's home.
 isolated channels and channel pins) reads as the same rules and is rewritten
 in the new shape on its next change, so no migration runs.
 
-The invoker allowlist, the Teams guests counted as members, read-only DM
+The invoker allowlist, read-only DM
 memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.

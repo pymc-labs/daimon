@@ -215,35 +215,21 @@ config). The order is load-bearing and documented as such in the module:
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
    and no MA call is made.
-4. External participant — a caller from another organisation (a Teams shared
-   channel's B2B direct connect participant or a guest,
-   `admit(external=ExternalFinding(…))`) raises
-   `AdmissionDenied("external_participant")` anywhere but a channel with
-   `readers: own` or a thread in one, and in its setup thread too. A Teams
-   group chat holding anyone from outside counts every sender there as
-   external, so it is never answered. Only a finding on
-   positive evidence is stored on `accounts.is_external`; one without holds
-   that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
-   and keeps the stored role. An external account's stored role is always
-   `user`, and it administers no channel. `reauthorize` checks it again.
-   Their sessions mount no agent keys and get no agent-wide MCP token
-   (`SessionSnapshot.is_external`, identity, so a member's session is
-   replaced for them, never reused or carried over).
-5. Resolve config through the cascade
+4. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+5. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-7. Resolve the agent and environment to live MA ids via
+6. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-8. Balance gate — `tenant_balance.is_over_balance`.
-9. Monthly cap gate — `billing.is_over_cap`.
-10. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
+7. Balance gate — `tenant_balance.is_over_balance`.
+8. Monthly cap gate — `billing.is_over_cap`.
+9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel, or for a DM the channel it was moved from with `/dm-me`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
    no budget. A channel's own agent counts toward its home channel wherever an
@@ -253,7 +239,7 @@ config). The order is load-bearing and documented as such in the module:
    DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
    (`daimon.core.channel_budget_notice`).
 
-The policy, writers, external participant, balance, cap and channel
+The policy, writers, balance, cap and channel
 budget gates each raise `AdmissionDenied` with a reason literal, which
 `admission_refusal_text` words in each platform's nouns. See
 [billing.md](billing.md).
@@ -501,8 +487,7 @@ earliest expiry). A notification reads the message once, `parse_graph_message`
 builds the same `TeamsInbound` as `parse_inbound`, and `handle_graph_message`
 claims it under the Bot Framework delivery key before the shared dispatch, so
 a message seen by both sources runs once. Graph @mentions are left to Bot
-Framework, and Graph's sender tenant is not used: guests and external
-members are classified by the same roster lookup. The permission is
+Framework. The permission is
 tenant-wide and no read tells whether the bot is in a channel, so a channel is
 dropped on the bot's removal event, an app removal (the whole team), or a send
 there refused with 403 `BotNotInConversationRoster` (`_RemovalWatch`).
@@ -618,11 +603,7 @@ adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 and routine fires have no live platform role, so they use the account's
 stored role, refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
-and skips the policy, as it skips billing. An account marked external is
-never an admin on any path: admission stores no group ids
-for it, the MCP verifier reads the mark from the row on every request, and
-the identity middleware refuses it the setup, channel setup, credential and
-direct-message tools (`middleware/external_participants.py`). Ids are the
+and skips the policy, as it skips billing. Ids are the
 platform's own (Discord snowflakes, Slack ids, Teams Entra object and
 conversation ids):
 
@@ -716,8 +697,6 @@ daimon tenants access-policy rules discord GUILD_ID [--json]
 daimon tenants access-policy get discord GUILD_ID [--json]
 daimon tenants access-policy set discord GUILD_ID --invoker USER_ID [--dm-memory-read-only]
 daimon tenants access-policy set discord GUILD_ID --clear [--drop-agent-rules]   # back to open
-daimon tenants access-policy set teams ENTRA_TENANT_ID \
-    --add-member-guest OBJECT_ID [--remove-member-guest OBJECT_ID]   # guests as members
 ```
 
 An agent with a rule runs only in its listed channels and the threads under

@@ -47,16 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
-- **People from another organisation get none of the agent's credentials.**
-  A Teams external participant or guest answered in a `readers: own`
-  channel used to get the agent's keys as a mounted `.env` and its shared
-  MCP tokens in their vault, though their tool calls were already
-  restricted. Their sessions now carry neither: a server only a shared
-  token reaches is left off unless they sign in to it themselves, and their
-  own sign-ins still work. A session that may hold those credentials is
-  replaced, not reused, the next time such a person is answered in it,
-  without carrying its work.
-
 - A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
@@ -71,8 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DAIMON_TEAMS__ADMIN_TEAM_ID` to the team's Entra group ID and add the app
   to that team; its owners, read live and cached for a minute, are Daimon's
   admins, so adding one needs no redeploy, and a removed one loses admin
-  within about a minute, routines and tools included. Guests and people from
-  another organisation never are. A failed owner read falls back to the last
+  within about a minute, routines and tools included. A failed owner read falls back to the last
   good one for up to an hour and demotes no one; once no owner list has been
   read within an hour, nobody is an admin until the next good read.
   Support requests and channel budget notices for the admins reach these
@@ -137,6 +126,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory, no Daimon model knobs).
 
 ### Removed
+
+- **Teams treats people from another organisation as members.** A shared
+  channel's external participants and Entra guests are answered wherever a
+  member is, with the same commands, cards, tools, credentials and sessions,
+  as everyone in a Discord server already is. Group chats are answered
+  whoever is in them, and a guest owner of the admin team is an admin. Teams
+  still opens no 1:1 chat across organisations, so one naming another tenant
+  is refused. `DAIMON_TEAMS__RESTRICT_GUESTS`,
+  `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` and `daimon tenants
+  access-policy --add-member-guest` are gone. Slack Connect is unchanged.
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins
   owners of the admin team; a leftover value is ignored, and anyone not an
@@ -963,6 +962,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Teams: leftover `DAIMON_TEAMS__RESTRICT_*` values and stored member guest lists are ignored. Uploading the rebuilt app package (0.6.1) is optional; it only drops the unused `ChannelMember.Read.Group` permission. The `is_external` columns are no longer read or written and are dropped in a later release.
 - Teams Ask a person: a deployment that put a Teams channel (`19:…`) in `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` moves it to `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`; until then Teams offers no Ask a person, and Discord ignores the Teams id.
 - Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
 - Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.

@@ -31,7 +31,7 @@ the adapter provisions that tenant and reconciles its defaults; turns are
 denied until the reconcile succeeds. The adapter fails closed unless the
 conversation tenant equals the configured one and the sender has a well-formed
 `aad_object_id`; in a 1:1 chat the channel-data tenant must match too. A
-channel sender from another tenant, or a guest, is from another organisation (below). Users need no setup: their
+channel or group chat sender from another tenant is a member (below). Users need no setup: their
 principal is created on first contact. Only the commercial Microsoft 365 cloud
 is supported; government and China clouds use other Bot Framework hosts.
 
@@ -77,7 +77,7 @@ from when the turn's last tool call ended, so it rarely adds more than two
 seconds, and Graph thumbnails are requested as each file uploads. Messages sent while a turn
 runs are queued, each marked ⌛ until its turn starts (only where the sender
 may start a turn: not in a protected place, not for someone off the invoker
-allowlist or from another organisation outside an isolated channel), and run
+allowlist), and run
 as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. A retried
@@ -110,48 +110,11 @@ form say so, so whoever picks it up answers in the channel.
 
 ### People from another organisation
 
-Two kinds of people count as from another organisation: a shared channel's
-external participants, who join through B2B direct connect and stay in their
-home tenant, and guests (Entra B2B guest accounts in ours), who can be in
-standard and private channels and 1:1 chats. Daimon answers them only inside
-a channel kept to its own agents (`readers: own`) and its threads. Anywhere else an addressed message gets
-one line saying so and runs no turn, and their unmentioned replies are never
-judged for a followed thread. Their turns run as a member (never an admin), commands go to the agent as plain text, and the agent sees
-`external="true"` on their message. Their tool calls get only the
-conversation's tools: reading, searching and posting in it, files into it,
-their own sessions and timers, and signing in to an MCP server the agent
-already has. Anything else, including tools added later, returns a tool
-error the agent relays. Their sessions get none of the agent's keys (no
-`.env`) and none of its shared MCP tokens: a server only such a token
-reaches is left off unless they sign in to it themselves, where it offers a
-sign-in. A session that may hold those credentials is replaced, not reused,
-when they are next answered in it, and none of its work carries over. Files are saved in a shared channel this
-organisation hosts once an admin turned them on there (below); one hosted by
-another organisation keeps its files on that organisation's site.
-
-A sender is placed from these signals, cheapest first: a foreign tenant on
-the activity (`channelData.tenant.id`, `from.tenantId`,
-`from.properties.tenantId`); their Bot Framework roster entry (`tenantId`,
-and `userRole` "guest"); then, in a channel, Graph's member list
-(`allMembers`: `tenantId` and the "guest" role), which needs the
-`ChannelMember.Read.Group` permission in the manifest. A foreign tenant is
-external; a guest is too, unless the tenant access policy lists them as a
-member (`daimon tenants access-policy --add-member-guest <object id>`). The
-list never overrides a foreign tenant. Our tenant with a member's role is
-internal.
-
-Without either, the sender is unknown and nothing is stored. In a channel
-not known to be standard or private (the activity, an earlier activity
-there or the team's channel list says) they are held as external for that
-turn. Elsewhere they are answered as before, unless the account is already
-marked external. Positive evidence is stored on the account, so queued work,
-routines and MCP tokens see it; a held turn's MCP calls are held too.
-Answers are cached in memory (an hour for an external, ten minutes for ours,
-a minute after a failure) and each lookup times out after a few seconds.
-
-`DAIMON_TEAMS__RESTRICT_GUESTS` and `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
-(both on) switch these rules off per kind: those people are then treated as
-members, and the lookups only their kind needs are skipped.
+A shared channel's external participants (B2B direct connect) and guests
+(Entra B2B guest accounts in ours) are treated as members, as everyone in a
+Discord server is. Teams opens no 1:1 chat across organisations, so a 1:1
+chat naming another tenant is refused. A shared channel another
+organisation hosts keeps its files on that organisation's site.
 
 ### Commands and admins
 
@@ -202,8 +165,7 @@ falls back to the last successful one for up to an hour, and demotes no one. If
 the app is removed from the admin team, or no owner list has been read within
 an hour, nobody is an admin in chats and cards until the next good read, while
 stored admin roles stand until then; re-adding the app restores the owners.
-Guests, people from another organisation and anyone in a group chat with
-outsiders are never admins. Admins' turns run with the admin role, and the
+Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog
 re-checks the organisation, the clicker and their role. Boot does the same
 demotion; support requests and budget notices for "the admins" reach the team's owners.
@@ -230,18 +192,7 @@ mentions on, a typed name counts too. It never joins in unprompted. A
 targeted message to it runs a command privately, and anything else there
 gets a one-line notice.
 
-Everyone in a group chat sees each answer, so the bot answers only while the
-whole roster is the organisation's: members of the tenant, plus guests listed
-with `--add-member-guest` (or every guest with
-`DAIMON_TEAMS__RESTRICT_GUESTS=false`). Anyone from another tenant, an
-unlisted guest, an anonymous member, or a roster that cannot be read closes
-the chat: the sender gets a private notice and no turn starts. The roster is
-read through Bot Framework and cached for a minute, or until someone joins.
-A running turn checks it again before its card shows any of its work or it
-posts an approval or question card, and reads it afresh before the answer. If
-the chat has closed meanwhile, the turn stops, no such card is posted (the
-approval or question goes unanswered), its card says only that someone from
-outside is in the chat, and the asker gets the private notice once. A group chat has no team, so its settings need a workspace admin.
+Everyone in a group chat sees each answer, whoever is in it. A group chat has no team, so its settings need a workspace admin.
 
 A turn replays the chat like a channel thread (Channel history, below): the
 first turn the newest 25 messages, a later one only newer messages, the
@@ -321,8 +272,7 @@ Graph change notifications for each private or shared channel it is in, so
 replies in followed threads, Replies quoting the bot and typed `@<bot name>`
 mentions (when plain-text mentions are on) work there as in a standard
 channel. Graph's notification carries no content: Daimon reads the new
-message once and routes it exactly as a Bot Framework message, guests and
-external members classified by the same roster lookup. @mentions still
+message once and routes it exactly as a Bot Framework message. @mentions still
 arrive through Bot Framework and are ignored here. Expect a few seconds
 of extra latency.
 

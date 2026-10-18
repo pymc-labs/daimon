@@ -540,10 +540,9 @@ Two things work differently from Discord and Slack:
   HTTPS address you give it, so the Teams service needs a public hostname
   with a valid certificate. Discord and Slack dial out for messages instead.
 - **One deployment serves one organisation.** The bot answers only people in
-  the Microsoft 365 organisation it is registered in, and turns away
-  messages from anywhere else, except from people of another organisation
-  (external participants and guests) inside a channel kept to its own agents
-  (below).
+  the Microsoft 365 organisation it is registered in. People of another
+  organisation (external participants and guests) in its channels and group
+  chats are answered as members (below).
 
 What the bot does once it is running (1:1 chats, channel threads, commands,
 files and its limits) is in [`teams.md`](teams.md).
@@ -787,8 +786,7 @@ your apps** → **Upload an app**.
   rebuild it and upload it again (see Updating the app).
 
 - **A group chat:** add the app from the chat's apps, and allow it to read
-  the chat's messages (`ChatMessage.Read.Chat`) when asked. The bot answers
-  there only while everyone in the chat is from your organisation. See
+  the chat's messages (`ChatMessage.Read.Chat`) when asked. See
   [`teams.md`](teams.md#group-chats).
 
 ### People from another organisation (optional)
@@ -812,7 +810,7 @@ Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
    participants don't use guest accounts, but guest access must be enabled
    to invite them. The SharePoint and Microsoft 365 Groups guest settings
    must stay on too (the default).
-4. Create the shared channel, set its readers and writers to `own` in Daimon
+4. Create the shared channel, optionally set a channel rule in Daimon
    (the setup panel's Channel settings, `set_channel_rule` or
    `daimon channels rule set`),
    then add the other organisation's people as channel members. Guests,
@@ -821,15 +819,8 @@ Teams](https://learn.microsoft.com/en-us/microsoftteams/shared-channels)):
    added as an external participant (in the admin center, search
    `ext:user@domain.com`).
 
-Daimon answers them only there, as a member who can't change its setup.
-Guests in standard and private channels and 1:1 chats get the same rules;
-list the ones who are colleagues with `daimon tenants access-policy
---add-member-guest <object id>`. `DAIMON_TEAMS__RESTRICT_GUESTS=false` treats
-every guest as a member; `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS=false`
-does the same for external participants. To tell guests apart, the manifest
-asks for the `ChannelMember.Read.Group` permission: an existing install
-needs the rebuilt package uploaded again (see Updating the app) and a team
-owner to accept it. See [`teams.md`](teams.md).
+Daimon treats them, and guests anywhere, as members. See
+[`teams.md`](teams.md#people-from-another-organisation).
 
 ### Channel files (optional)
 
