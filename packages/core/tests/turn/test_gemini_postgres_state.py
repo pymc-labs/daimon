@@ -296,6 +296,24 @@ async def test_open_records_do_not_block_account_update_fence(postgres_state):
         ) == UUID(scope.account_id)
 
 
+# The waiter's poll cadence and the pool headroom are asserted on counted events, not on
+# elapsed time. These bounds only end a hung run, so they sit far above the unloaded cost: the
+# holds reservation is ~25 serial database round trips, and it took 0.5s on a CI runner whose
+# four vCPUs were shared with four pytest workers and their Postgres, which failed a 0.5s bound.
+HUNG_RUN_BOUND_S = 30
+# A checkout waits only for the waiter's one in-flight attempt (~10 round trips). A pool
+# timeout is retried like any busy fence, so a pool the waiter exhausts shows up as the
+# headroom assertion below within seconds, not as a hang.
+POOL_WAIT_S = 1
+
+
+async def _within_hung_run_bound(awaitable, what: str):
+    try:
+        return await asyncio.wait_for(awaitable, HUNG_RUN_BOUND_S)
+    except TimeoutError:
+        pytest.fail(f"{what} did not finish within {HUNG_RUN_BOUND_S}s (hung, not slow)")
+
+
 async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
     postgres_state, db_preflight, db_schema, monkeypatch
 ):
@@ -304,7 +322,7 @@ async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
 
     _, scope, _, _ = postgres_state
     engine = build_test_engine(
-        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=0.5
+        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=POOL_WAIT_S
     )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     storage = PostgresGeminiStorage(sessions, scope=scope, project="polling")
@@ -324,24 +342,35 @@ async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
         async with storage.transaction(after_dispatch=True) as records:
             records.creations[("t", "a", "resolved")] = ("p", "d", "agent")
 
+    async def eighth_retry_or_waiter_exit():
+        """End at the eighth retry, or at the waiter's own exit so its error is reported."""
+        eighth = asyncio.create_task(polling.wait())
+        try:
+            await asyncio.wait({eighth, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            eighth.cancel()
+        assert polling.is_set(), f"the waiter ended after {len(sleeps)} retries: {waiter!r}"
+
     monkeypatch.setattr(session_fence_retry.random, "uniform", lambda low, high: high)
     monkeypatch.setattr(session_fence_retry.asyncio, "sleep", observed_sleep)
     try:
         async with storage.transaction():
             waiter = asyncio.create_task(resolve())
-            await asyncio.wait_for(polling.wait(), 7)
+            await _within_hung_run_bound(eighth_retry_or_waiter_exit(), "the eighth retry")
             # The eighth retry must still release the second pool connection;
             # nested durable holds retain capacity while Records is locked.
-            assert engine.pool.checkedout() == 1
-            await asyncio.wait_for(
+            assert engine.pool.checkedout() == 1, (
+                "the waiter kept its pool connection while sleeping between retries"
+            )
+            await _within_hung_run_bound(
                 holds(sessions, scope, project="polling").before_attempt(
                     model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
                 ),
-                0.5,
+                "a holds reservation while a post-dispatch waiter polls",
             )
         # An old waiter must not sleep for a second while new contenders start
         # at the short cadence. Use the longest jitter for a stable regression.
-        await asyncio.wait_for(waiter, 0.5)
+        await _within_hung_run_bound(waiter, "the waiter after Records unlocked")
         assert len(sleeps) >= 8 and max(sleeps) <= 0.075
         async with storage.transaction() as records:
             assert ("t", "a", "resolved") in records.creations
