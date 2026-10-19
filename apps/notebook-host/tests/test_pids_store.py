@@ -97,6 +97,19 @@ def test_reap_orphans_skips_dead_pids(tmp_path: Path) -> None:
     assert load_pids(path) == {}, "pids file must be cleared after sweep"
 
 
+def _wait_for_exec(pid: int, *, marker: str, within: float = 10.0) -> None:
+    """Wait until ``pid`` has exec'd, so ``/proc/<pid>/cmdline`` shows its own argv.
+
+    Right after ``Popen`` returns, the child may still be the forked copy of this
+    process, whose cmdline names pytest; the identity check would rightly skip it.
+    """
+    deadline = time.monotonic() + within
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    while marker.encode() not in cmdline.read_bytes():
+        assert time.monotonic() < deadline, f"pid {pid} never exec'd its {marker} argv"
+        time.sleep(0.01)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="identity check reads /proc, Linux only")
 def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Path) -> None:
     """A live PID whose cmdline still identifies it as that slug's marimo is SIGTERM'd."""
@@ -114,6 +127,7 @@ def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Pa
         ],
     )
     try:
+        _wait_for_exec(child.pid, marker="marimo")
         path = tmp_path / "pids.json"
         save_pids(
             path,
