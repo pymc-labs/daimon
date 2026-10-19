@@ -1,6 +1,7 @@
 """Owned PostgreSQL product admission/exposure, with mock tariffs and no SDK I/O."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -2103,6 +2104,11 @@ async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm,
         await asyncio.gather(task, return_exceptions=True)
 
 
+# The healthy reads after the stalled one must fit inside the read timeout, and
+# BUDGET_READ_TIMEOUT_LIMIT of them in a row fail closed, so 0.1s was a coin flip on a loaded runner.
+SLOW_READ_TIMEOUT_S = 0.5
+
+
 async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, monkeypatch):
     # Staging r13/r14 (2026-10-18): one budget read exceeded the 2s timeout while
     # sibling admissions held the run lock, and every registered worker was cancelled.
@@ -2120,7 +2126,7 @@ async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, mo
         nonlocal calls
         calls += 1
         if calls == 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(3600)  # a read that never returns; only the read timeout ends it
         result = await original(*args, **kwargs)
         if calls >= 3:
             finished.set()
@@ -2137,12 +2143,117 @@ async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, mo
                 cancelled=cancelled,
                 finished=finished,
                 poll_interval=0.01,
-                read_timeout=0.1,
+                read_timeout=SLOW_READ_TIMEOUT_S,
             ),
-            3,
+            10,
         )
     assert calls >= 3 and not cancelled[a.id].is_set()
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
+
+
+class _VirtualClock:
+    """A clock only the test advances, so the busy-window limit never races the wall clock."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _VirtualTimeLoop:
+    """The running loop with ``time()`` read from a ``_VirtualClock``; all else is delegated."""
+
+    def __init__(self, loop, clock: _VirtualClock) -> None:
+        self._loop, self._clock = loop, clock
+
+    def time(self) -> float:
+        return self._clock.now
+
+    def __getattr__(self, name):
+        return getattr(self._loop, name)
+
+
+class _VirtualTimeAsyncio:
+    """Stands in for ``asyncio`` inside ``channel_budget`` so the watch reads virtual time.
+
+    Only ``get_running_loop().time()`` is virtual. Timeouts, sleeps, events and the
+    database's own ``lock_timeout`` stay real, so a poll still waits for the lock.
+    """
+
+    def __init__(self, clock: _VirtualClock) -> None:
+        self._clock = clock
+
+    def get_running_loop(self) -> _VirtualTimeLoop:
+        return _VirtualTimeLoop(asyncio.get_running_loop(), self._clock)
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+
+class _WatchProbe:
+    """Counts the watch's polls so a test waits for events instead of sleeping.
+
+    ``polls`` rises when a poll opens its transaction, so ``polls >= n + 1`` means poll
+    ``n`` has finished. ``reads`` rises when a poll got the lock and read the budget.
+    """
+
+    def __init__(self, sm, monkeypatch, clock: _VirtualClock) -> None:
+        from daimon.core import channel_budget
+
+        self.polls = 0
+        self.reads = 0
+        self.watch: asyncio.Task | None = None
+        original = channel_budget.produce_fleet_budget
+
+        async def counted(*args, **kwargs):
+            self.reads += 1
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(channel_budget, "produce_fleet_budget", counted)
+        monkeypatch.setattr(channel_budget, "asyncio", _VirtualTimeAsyncio(clock))
+        self.sessionmaker = _CountingSessions(sm, self)
+
+    def watching(self, watch: asyncio.Task) -> asyncio.Task:
+        """Register the watch task so a wait ends the moment the watch does."""
+        self.watch = watch
+        return watch
+
+    async def until(self, condition, what: str, *, within: float = 30.0) -> None:
+        """Wait for ``condition``; fail naming ``what`` if the watch ends first or time runs out."""
+        async with asyncio.timeout(within):
+            while not condition():
+                if self.watch is not None and self.watch.done():
+                    outcome = (
+                        repr(self.watch.exception())
+                        if not self.watch.cancelled() and self.watch.exception()
+                        else f"result {self.watch.result()!r}"
+                        if not self.watch.cancelled()
+                        else "cancelled"
+                    )
+                    raise AssertionError(
+                        f"the watch ended before {what} (polls={self.polls}, "
+                        f"reads={self.reads}): {outcome}"
+                    )
+                await asyncio.sleep(0.005)
+
+    async def polls_since(self, start: int, count: int) -> None:
+        """Wait until ``count`` polls have finished after the poll counter read ``start``."""
+        await self.until(
+            lambda: self.polls >= start + count + 1,
+            f"{count} busy poll(s) finished after poll {start}",
+        )
+
+
+class _CountingSessions:
+    """The sessionmaker surface the watch uses, counting each poll's transaction."""
+
+    def __init__(self, sm, probe: _WatchProbe) -> None:
+        self._sm, self._probe = sm, probe
+
+    def begin(self):
+        self._probe.polls += 1
+        return self._sm.begin()
 
 
 async def _hold_tenant_lock(sm, parent, holding, release):
@@ -2157,10 +2268,35 @@ async def _hold_tenant_lock(sm, parent, holding, release):
         await release.wait()
 
 
+@asynccontextmanager
+async def _tenant_lock_held(sm, parent):
+    """Hold the tenant fleet lock, like admissions mid-dispatch, and always release it.
+
+    A holder left running would keep one of the shared engine's two pooled connections
+    and starve the next test.
+    """
+    holding, release = asyncio.Event(), asyncio.Event()
+    holder = asyncio.create_task(_hold_tenant_lock(sm, parent, holding, release))
+    try:
+        await asyncio.wait_for(holding.wait(), 10)
+        yield
+    finally:
+        release.set()
+        await holder
+
+
+# A poll's lock wait is 75% of its read timeout, so 25% is its headroom for connection
+# checkout and round trips. 0.1s left 25ms, which a loaded CI runner exceeds three times in
+# a row (the fail-closed count), so the tests use a read timeout with real headroom.
+BUSY_READ_TIMEOUT_S = 0.4
+
+
 async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeypatch):
     # Staging r19 (2026-10-18): budget reads queued behind admissions holding the
     # tenant fleet lock, timed out, and every in-flight dispatch was cancelled.
-    # The old blocking read would fail closed after ~3 x read_timeout = 0.3s.
+    # The old blocking read would fail closed after BUDGET_READ_TIMEOUT_LIMIT consecutive
+    # slow reads, so the first hold outlasts more polls than that. The busy limit is
+    # measured on a virtual clock, so each hold stays under it exactly.
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
@@ -2168,36 +2304,46 @@ async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeyp
     assert (await reserve(sm, parent, a)).admitted
     cancelled = {a.id: asyncio.Event()}
     finished = asyncio.Event()
-    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 1.0)
-    watch = asyncio.create_task(
-        watch_fleet_budget(
-            sessionmaker=sm,
-            parent=parent,
-            prices=tariffs(parent),
-            markup=Decimal(1),
-            cancelled=cancelled,
-            finished=finished,
-            poll_interval=0.01,
-            read_timeout=0.1,
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    limit = 1.0
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", limit)
+    busy_polls = channel_budget.BUDGET_READ_TIMEOUT_LIMIT + 1
+    watch = probe.watching(
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=probe.sessionmaker,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=BUSY_READ_TIMEOUT_S,
+            )
         )
     )
     try:
-        for _ in range(2):  # hold, release, hold again: the busy window resets on success
-            holding, release = asyncio.Event(), asyncio.Event()
-            holder = asyncio.create_task(_hold_tenant_lock(sm, parent, holding, release))
-            await holding.wait()
-            await asyncio.sleep(0.6)  # longer than the old 0.3s fail-closed path
-            assert not cancelled[a.id].is_set() and not watch.done()
-            release.set()
-            await holder
-            await asyncio.sleep(0.1)
+        # Hold, release, hold again: the busy window resets on success. Each hold lasts 0.9 of
+        # the limit, so the second one only stays under it if the first window was reset.
+        for polls_before_advance in (busy_polls, 1):
+            async with _tenant_lock_held(sm, parent):
+                await probe.polls_since(probe.polls, polls_before_advance)
+                assert not cancelled[a.id].is_set() and not watch.done()
+                clock.advance(0.9 * limit)
+                await probe.polls_since(probe.polls, 1)
+                assert not cancelled[a.id].is_set() and not watch.done()
+            reads = probe.reads
+            await probe.until(
+                lambda reads=reads: probe.reads > reads, "a successful read after release"
+            )
         finished.set()
-        assert await asyncio.wait_for(watch, 2) == "finished"
+        assert await asyncio.wait_for(watch, 5) == "finished"
         assert not cancelled[a.id].is_set()
     finally:
         finished.set()
-        if not watch.done():
-            watch.cancel()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
 
 
@@ -2208,28 +2354,35 @@ async def test_run_watch_fails_closed_when_the_tenant_lock_stays_busy(sm, monkey
     a = await add(sm, parent)
     assert (await reserve(sm, parent, a)).admitted
     cancelled = {a.id: asyncio.Event()}
-    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 0.3)
-    holding, release = asyncio.Event(), asyncio.Event()
-    holder = asyncio.create_task(_hold_tenant_lock(sm, parent, holding, release))
-    await holding.wait()
-    try:
-        result = await asyncio.wait_for(
-            watch_fleet_budget(
-                sessionmaker=sm,
-                parent=parent,
-                prices=tariffs(parent),
-                markup=Decimal(1),
-                cancelled=cancelled,
-                finished=asyncio.Event(),
-                poll_interval=0.01,
-                read_timeout=5,
-            ),
-            8,
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    limit = 1.0
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", limit)
+    async with _tenant_lock_held(sm, parent):
+        watch = probe.watching(
+            asyncio.create_task(
+                watch_fleet_budget(
+                    sessionmaker=probe.sessionmaker,
+                    parent=parent,
+                    prices=tariffs(parent),
+                    markup=Decimal(1),
+                    cancelled=cancelled,
+                    finished=asyncio.Event(),
+                    poll_interval=0.01,
+                    read_timeout=BUSY_READ_TIMEOUT_S,
+                )
+            )
         )
-        assert result == "usage_unavailable" and cancelled[a.id].is_set()
-    finally:
-        release.set()
-        await holder
+        try:
+            # Busy is judged by how long, not how often: no virtual time has passed.
+            await probe.polls_since(0, 2)
+            assert not cancelled[a.id].is_set() and not watch.done()
+            clock.advance(limit + 0.1)
+            result = await asyncio.wait_for(watch, 10)
+            assert result == "usage_unavailable" and cancelled[a.id].is_set()
+        finally:
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
 
 
