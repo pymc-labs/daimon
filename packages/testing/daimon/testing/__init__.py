@@ -10,6 +10,12 @@
 # resolve them lazily through `__getattr__` so plain `import daimon.testing`
 # (or any of its non-`ma`-dependent submodules) never requires pytest; only
 # actually touching an `ma`-backed name does.
+#
+# `factories` and `ma_models` are lazy for a different reason: speed. They pull in
+# the ORM schema and the Anthropic SDK models (about a second of imports), and the
+# pytest plugin entry point imports this package into every pytest process. A child
+# interpreter that never builds a tenant or an MA fixture (a shard collection, a
+# plugin-load probe, a `-O` conformance replay) should not pay for them.
 from typing import TYPE_CHECKING
 
 from daimon.testing.archives import make_tarball
@@ -22,47 +28,26 @@ from daimon.testing.asgi import (
     parse_jsonrpc_response,
 )
 from daimon.testing.crypto import make_fernet
-from daimon.testing.factories import (
-    link_principals,
-    make_account,
-    make_agent_memory_store,
-    make_cli_principal,
-    make_ledger_entry,
-    make_mcp_token,
-    make_platform_principal,
-    make_routine,
-    make_slack_user_token,
-    make_tenant,
-    make_tenant_config,
-    make_tenant_user_cap,
-    make_thread_session,
-    make_usage_event,
-    make_wizard_session,
-)
-from daimon.testing.ma_models import (
-    DEFAULT_AGENT_ID,
-    DEFAULT_AGENT_NAME,
-    DEFAULT_ENV_ID,
-    DEFAULT_ENV_NAME,
-    DEFAULT_MODEL_ID,
-    DEFAULT_SESSION_ID,
-    EMPTY_CLOUD_CONFIG,
-    EMPTY_SESSION_STATS,
-    EMPTY_SESSION_USAGE,
-    FIXED_TS,
-    FIXED_TS_STR,
-    ma_agent,
-    ma_environment,
-    ma_model_config,
-    ma_model_usage,
-    ma_session,
-    ma_session_agent,
-    ma_session_agent_from,
-    tenant_metadata,
-)
 
 if TYPE_CHECKING:
     # Only for type checkers; at runtime these resolve through `__getattr__`.
+    from daimon.testing.factories import (
+        link_principals,
+        make_account,
+        make_agent_memory_store,
+        make_cli_principal,
+        make_ledger_entry,
+        make_mcp_token,
+        make_platform_principal,
+        make_routine,
+        make_slack_user_token,
+        make_tenant,
+        make_tenant_config,
+        make_tenant_user_cap,
+        make_thread_session,
+        make_usage_event,
+        make_wizard_session,
+    )
     from daimon.testing.ma import (
         FakeMAState,
         FakeMemoryStoreState,
@@ -86,6 +71,27 @@ if TYPE_CHECKING:
         sse_response,
         stub_anthropic,
     )
+    from daimon.testing.ma_models import (
+        DEFAULT_AGENT_ID,
+        DEFAULT_AGENT_NAME,
+        DEFAULT_ENV_ID,
+        DEFAULT_ENV_NAME,
+        DEFAULT_MODEL_ID,
+        DEFAULT_SESSION_ID,
+        EMPTY_CLOUD_CONFIG,
+        EMPTY_SESSION_STATS,
+        EMPTY_SESSION_USAGE,
+        FIXED_TS,
+        FIXED_TS_STR,
+        ma_agent,
+        ma_environment,
+        ma_model_config,
+        ma_model_usage,
+        ma_session,
+        ma_session_agent,
+        ma_session_agent_from,
+        tenant_metadata,
+    )
     from daimon.testing.ma_sessions import (
         FakeSessionsState,
         make_fake_sessions_handler,
@@ -101,6 +107,40 @@ if TYPE_CHECKING:
     )
 
 _LAZY_MODULES_BY_NAME = {
+    "link_principals": "daimon.testing.factories",
+    "make_account": "daimon.testing.factories",
+    "make_agent_memory_store": "daimon.testing.factories",
+    "make_cli_principal": "daimon.testing.factories",
+    "make_ledger_entry": "daimon.testing.factories",
+    "make_mcp_token": "daimon.testing.factories",
+    "make_platform_principal": "daimon.testing.factories",
+    "make_routine": "daimon.testing.factories",
+    "make_slack_user_token": "daimon.testing.factories",
+    "make_tenant": "daimon.testing.factories",
+    "make_tenant_config": "daimon.testing.factories",
+    "make_tenant_user_cap": "daimon.testing.factories",
+    "make_thread_session": "daimon.testing.factories",
+    "make_usage_event": "daimon.testing.factories",
+    "make_wizard_session": "daimon.testing.factories",
+    "DEFAULT_AGENT_ID": "daimon.testing.ma_models",
+    "DEFAULT_AGENT_NAME": "daimon.testing.ma_models",
+    "DEFAULT_ENV_ID": "daimon.testing.ma_models",
+    "DEFAULT_ENV_NAME": "daimon.testing.ma_models",
+    "DEFAULT_MODEL_ID": "daimon.testing.ma_models",
+    "DEFAULT_SESSION_ID": "daimon.testing.ma_models",
+    "EMPTY_CLOUD_CONFIG": "daimon.testing.ma_models",
+    "EMPTY_SESSION_STATS": "daimon.testing.ma_models",
+    "EMPTY_SESSION_USAGE": "daimon.testing.ma_models",
+    "FIXED_TS": "daimon.testing.ma_models",
+    "FIXED_TS_STR": "daimon.testing.ma_models",
+    "ma_agent": "daimon.testing.ma_models",
+    "ma_environment": "daimon.testing.ma_models",
+    "ma_model_config": "daimon.testing.ma_models",
+    "ma_model_usage": "daimon.testing.ma_models",
+    "ma_session": "daimon.testing.ma_models",
+    "ma_session_agent": "daimon.testing.ma_models",
+    "ma_session_agent_from": "daimon.testing.ma_models",
+    "tenant_metadata": "daimon.testing.ma_models",
     "FakeMAState": "daimon.testing.ma",
     "FakeMemoryStoreState": "daimon.testing.ma",
     "MARouter": "daimon.testing.ma",

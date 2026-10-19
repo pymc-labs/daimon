@@ -42,7 +42,7 @@ from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from yarl import URL
 
@@ -207,19 +207,34 @@ def _result_text(response: dict[str, object]) -> str:
     return "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
 
 
+@pytest.fixture(scope="module")
+def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
+    """One real MCP app per platform for every ranking case.
+
+    Building an app registers the whole tool catalogue (about half a second); a search
+    reads that catalogue and nothing else, so the cases share the apps the way requests
+    to a running server do. The sessionmaker draws pooled connections only while a request
+    queues its audit row, and the next test's wipe removes whatever was written.
+    """
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    return {
+        platform: _make_app(sessionmaker, platform=platform)
+        for platform in ("discord", "slack", "teams")
+    }
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.query)
 async def test_setup_query_ranks_tool_and_siblings(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    search_apps: dict[str, Starlette],
     platform: str,
     case: SearchCase,
 ) -> None:
     expected = {case.top_hit} if isinstance(case.top_hit, str) else case.top_hit
     if platform == "teams" and (expected | case.co_surface) & _TEAMS_HIDDEN:
         pytest.skip("the case names a tool Teams hides on purpose")
-    app = _make_app(sessionmaker, platform=platform)
     response = await mcp_session(
-        app,
+        search_apps[platform],
         token="test-token",
         method="tools/call",
         params={

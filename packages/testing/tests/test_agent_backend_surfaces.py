@@ -979,31 +979,49 @@ def test_enabled_cli_registers_backend_set_clear_once(tmp_path):
     assert "set" in actual["backend_help"] and "clear" in actual["backend_help"]
 
 
-@pytest.mark.parametrize(
-    "arguments", [["--help"], ["version"], ["run", "--help"], ["help", "agents"]]
-)
-def test_unrelated_cli_commands_do_not_parse_malformed_turn_settings(tmp_path, arguments):
+UNRELATED_CLI_COMMANDS = (("--help",), ("version",), ("run", "--help"), ("help", "agents"))
+
+
+@pytest.fixture(scope="module")
+def unrelated_cli_runs(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[tuple[str, ...], dict[str, object]]:
+    """Run each unrelated command against a malformed backend flag, in one fresh process.
+
+    The environment is the same for every command, and a settings parse that fails raises
+    on every attempt (nothing caches a failure), so one interpreter shows what four would.
+    """
     program = """
 import json, sys
 from daimon.adapters.cli.main import app
 from typer.testing import CliRunner
-result = CliRunner().invoke(app, json.loads(sys.argv[1]))
-print(json.dumps({"exit": result.exit_code, "output": result.output,
-                  "exception": repr(result.exception)}))
+runner = CliRunner()
+runs = {}
+for arguments in json.loads(sys.argv[1]):
+    result = runner.invoke(app, arguments)
+    runs[json.dumps(arguments)] = {"exit": result.exit_code, "output": result.output,
+                                   "exception": repr(result.exception)}
+print(json.dumps(runs))
 """
     result = subprocess.run(
-        [sys.executable, "-c", program, json.dumps(arguments)],
-        cwd=tmp_path,
+        [sys.executable, "-c", program, json.dumps(UNRELATED_CLI_COMMANDS)],
+        cwd=tmp_path_factory.mktemp("unrelated_cli"),
         env={"PATH": os.defpath, "DAIMON_TURN__CHANNEL_BACKENDS": "not-a-boolean"},
         capture_output=True,
         text=True,
         check=True,
         timeout=60,
     )
-    actual = json.loads(result.stdout)
+    runs = json.loads(result.stdout)
+    return {tuple(json.loads(key)): value for key, value in runs.items()}
+
+
+@pytest.mark.parametrize("arguments", UNRELATED_CLI_COMMANDS, ids=" ".join)
+def test_unrelated_cli_commands_do_not_parse_malformed_turn_settings(unrelated_cli_runs, arguments):
+    actual = unrelated_cli_runs[arguments]
     assert actual["exit"] == 0, actual
-    assert actual["output"].strip()
-    assert "ValidationError" not in actual["exception"]
+    assert str(actual["output"]).strip()
+    assert "ValidationError" not in str(actual["exception"])
 
 
 @pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini", None])

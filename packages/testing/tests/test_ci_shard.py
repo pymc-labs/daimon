@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -58,41 +59,60 @@ def _collect(root: Path, *extra: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if "::" in line]
 
 
-@pytest.mark.parametrize("balanced", [False, True], ids=["hash", "balanced-with-unknown-files"])
-@pytest.mark.parametrize("count", [2, 3, 4])
-def test_file_shards_equal_unsharded_collection_without_importing_other_shards(
-    tmp_path: Path, count: int, balanced: bool
-) -> None:
-    suite = tmp_path / "suite"
+@dataclass(frozen=True)
+class ShardSuite:
+    """Eight test files of five cases each, plus a top-level file, and what they collect to."""
+
+    root: Path
+    imported: Path  # a file per suite module the collecting process imported
+    durations: Path  # a table that knows a..c; d..h are new since it was made
+    whole: list[str]
+
+
+@pytest.fixture(scope="module")
+def shard_suite(tmp_path_factory: pytest.TempPathFactory) -> ShardSuite:
+    """Build the suite once and collect it unsharded once for every shard count and mode.
+
+    Each collection is a fresh pytest process, because the proof is about which files a
+    process imports; the unsharded one is the same for every parametrization.
+    """
+    root = tmp_path_factory.mktemp("shard_suite")
+    suite = root / "suite"
     suite.mkdir()
-    marks = tmp_path / "imported"
-    marks.mkdir()
+    imported = root / "imported"
+    imported.mkdir()
     for module in "abcdefgh":
         (suite / f"test_{module}.py").write_text(
             "import pathlib, pytest\n"
-            f"pathlib.Path({str(marks)!r}, {module!r}).touch()\n"
+            f"pathlib.Path({str(imported)!r}, {module!r}).touch()\n"
             "@pytest.mark.parametrize('n', range(5))\n"
             "def test_case(n): pass\n"
         )
-    (tmp_path / "test_top.py").write_text("def test_top(): pass\n")
+    (root / "test_top.py").write_text("def test_top(): pass\n")
+    durations = root / "durations.json"
+    known = {"suite/test_a.py": 9.0, "suite/test_b.py": 7.0, "suite/test_c.py": 3.0}
+    durations.write_text(json.dumps({"s": known | {"test_top.py": 1.0}}))
+    whole = _collect(root)
+    assert len(whole) == 8 * 5 + 1
+    return ShardSuite(root, imported, durations, whole)
 
+
+@pytest.mark.parametrize("balanced", [False, True], ids=["hash", "balanced-with-unknown-files"])
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_file_shards_equal_unsharded_collection_without_importing_other_shards(
+    shard_suite: ShardSuite, count: int, balanced: bool
+) -> None:
     options: list[str] = []
     if balanced:
         # Only some files are in the table; d..h are new since it was made.
-        table = tmp_path / "durations.json"
-        known = {"suite/test_a.py": 9.0, "suite/test_b.py": 7.0, "suite/test_c.py": 3.0}
-        table.write_text(json.dumps({"s": known | {"test_top.py": 1.0}}))
-        options = ["--ci-shard-suite=s", f"--ci-shard-durations={table}"]
-
-    whole = _collect(tmp_path)
-    assert len(whole) == 8 * 5 + 1
+        options = ["--ci-shard-suite=s", f"--ci-shard-durations={shard_suite.durations}"]
 
     union: list[str] = []
     for index in range(count):
-        for mark in marks.iterdir():
+        for mark in shard_suite.imported.iterdir():
             mark.unlink()
         shard = _collect(
-            tmp_path,
+            shard_suite.root,
             "--ci-shard-by=file",
             *options,
             f"--ci-shard-index={index}",
@@ -102,11 +122,11 @@ def test_file_shards_equal_unsharded_collection_without_importing_other_shards(
         assert files.isdisjoint(nodeid.partition("::")[0] for nodeid in union)
         union += shard
         # A directory walk skips other shards' files before importing them.
-        assert {m.name for m in marks.iterdir()} == {
+        assert {m.name for m in shard_suite.imported.iterdir()} == {
             Path(f).stem.removeprefix("test_") for f in files if f.startswith("suite/")
         }
 
-    assert Counter(union) == Counter(whole)
+    assert Counter(union) == Counter(shard_suite.whole)
 
 
 def test_files_are_placed_greedily_longest_first(tmp_path: Path) -> None:
