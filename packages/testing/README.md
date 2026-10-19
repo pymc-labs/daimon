@@ -206,6 +206,17 @@ the next test is not hit as well. For every connection the test touched:
 - a session fence (`pool_headroom`) permit that was never released, or a
   replaced pool.
 
+Every pooled engine the fixtures build (`db_engine` and the committing pool)
+also fails the test that returns a connection to its pool inside an open
+transaction, naming the test and the backend pid, and terminates that
+connection. Without this, such a connection keeps its row and advisory locks,
+the next `COMMIT` on it is only a `RELEASE SAVEPOINT`, and the sibling pooled
+connection's wipe waits on those locks until the job times out. The usual
+cause is several tasks sharing one `AsyncConnection` (a test body plus a
+background task on `db_session_factory`): `daimon/testing/db.py` makes COMMIT and
+ROLLBACK on such a connection wait for the statement running on it, which is
+what lets a rollback and a new transaction interleave otherwise.
+
 Not checked: a `SET` of a setting outside that list, prepared statements a test
 creates with SQL `PREPARE`, and changes
 a test commits to `public` or to another schema. A test that needs any of these

@@ -22,6 +22,7 @@ from daimon.testing.db import (
     _drop_schema,  # pyright: ignore[reportPrivateUsage]
     _forget_touched_connections,  # pyright: ignore[reportPrivateUsage]
     _fresh_schema_session,  # pyright: ignore[reportPrivateUsage]
+    _raise_on_leaked_transactions,  # pyright: ignore[reportPrivateUsage]
     _ready_ddl_schema,  # pyright: ignore[reportPrivateUsage]
     _require_test_dsn,  # pyright: ignore[reportPrivateUsage]
     _schema_fingerprint,  # pyright: ignore[reportPrivateUsage]
@@ -533,3 +534,74 @@ async def test_background_face_transaction_finishes_before_fresh_schema_drop(
                     await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
             finally:
                 await cleanup.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_connection_returned_mid_transaction_is_closed_and_its_test_named(
+    db_engine: AsyncEngine,
+) -> None:
+    """A pool taking a connection back inside a transaction fails the leaking test at once.
+
+    ``BEGIN`` issued on the driver connection is a transaction SQLAlchemy does not
+    track, so the pool's rollback-on-return skips it, as in a hung CI run where
+    one pooled connection sat ``idle in transaction`` holding row locks until the
+    sibling connection's wipe timed out. The guard terminates that backend and the
+    teardown check names the test.
+    """
+    nodeid = "packages/example/tests/test_leaker.py::test_leaks"
+    async with db_engine.connect() as conn:
+        driver = (await conn.get_raw_connection()).driver_connection
+        assert driver is not None
+        leaked_pid: int = driver.get_server_pid()
+        await driver.execute("BEGIN")
+
+    with pytest.raises(AssertionError, match=re.escape(nodeid)) as caught:
+        _raise_on_leaked_transactions(db_engine.pool, nodeid)
+    assert f"backend pid {leaked_pid}" in str(caught.value), (
+        "the failure must say which backend was returned inside a transaction"
+    )
+    # The report is delivered once, and the leaked backend is not handed out again.
+    _raise_on_leaked_transactions(db_engine.pool, nodeid)
+    async with db_engine.connect() as conn:
+        next_driver = (await conn.get_raw_connection()).driver_connection
+        assert next_driver is not None
+        assert next_driver.get_server_pid() != leaked_pid, (
+            "the pool must not hand the transaction-holding backend out again"
+        )
+        assert not next_driver.is_in_transaction()
+
+
+@pytest.mark.asyncio
+async def test_a_connection_returned_clean_is_not_reported(db_engine: AsyncEngine) -> None:
+    async with db_engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    _raise_on_leaked_transactions(db_engine.pool, "packages/example/tests/test_clean.py::test_ok")
+
+
+@pytest.mark.asyncio
+async def test_rolling_back_a_shared_connection_waits_for_the_statement_running_on_it(
+    db_engine: AsyncEngine,
+) -> None:
+    """A teardown ``rollback`` no longer races a background task's statement.
+
+    Two tasks on one connection used to interleave their COMMIT / ROLLBACK with
+    each other's statements until SQLAlchemy forgot a transaction asyncpg still
+    held (see ``_end_transactions_under_the_statement_mutex``). Without the fix,
+    the rollback below raises ``InterfaceError: another operation is in progress``
+    and the connection goes back to the pool with its transaction open.
+    """
+    async with db_engine.connect() as conn:
+        driver = (await conn.get_raw_connection()).driver_connection
+        assert driver is not None
+        await conn.execute(text("SELECT 1"))
+        background = asyncio.create_task(conn.execute(text("SELECT pg_sleep(0.3)")))
+        await asyncio.sleep(0.05)
+        await conn.rollback()
+        await background
+        await conn.execute(text("SELECT 2"))
+        await conn.rollback()
+    assert not driver.is_in_transaction(), (
+        "the pool must get the connection back outside a transaction"
+    )
+    assert driver._top_xact is None, "asyncpg must not still hold a transaction SQLAlchemy dropped"  # pyright: ignore[reportPrivateUsage]
+    _raise_on_leaked_transactions(db_engine.pool, "packages/testing/tests/test_db.py")

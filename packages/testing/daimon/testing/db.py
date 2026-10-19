@@ -58,7 +58,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, cast
@@ -71,6 +71,7 @@ from cryptography.fernet import Fernet
 from daimon.core import platform_names
 from daimon.core._models import Base
 from sqlalchemy import event, text
+from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError, DBAPIError
 from sqlalchemy.ext.asyncio import (
@@ -100,6 +101,59 @@ _TEST_ENGINE_SCHEMAS: WeakKeyDictionary[AsyncEngine, str] = WeakKeyDictionary()
 _OWNED_DATABASE_REFUSAL = (
     "Test hooks require owned local lane engines or registered isolated CI schemas"
 )
+
+
+_DialectConnection = asyncpg_dialect.AsyncAdapt_asyncpg_connection
+
+
+def _end_transactions_under_the_statement_mutex() -> None:
+    """Make COMMIT and ROLLBACK on a shared test connection wait for its running statement.
+
+    Several fixtures hand one ``AsyncConnection`` to more than one task (the test
+    body, a bot's background sweep, a teardown ``rollback``). SQLAlchemy's asyncpg
+    dialect serialises statements with ``_execute_mutex`` but not the commit and
+    rollback that end the transaction. Two tasks ending it together, with a third
+    starting the next one, interleave like this::
+
+        T2: ROLLBACK sent        T1: ROLLBACK -> InterfaceError (operation in progress)
+        T0: BEGIN sent and acknowledged; asyncpg now holds T0's transaction
+        T2: ROLLBACK returns; the dialect clears its ``_transaction`` / ``_started``
+
+    SQLAlchemy has forgotten a transaction asyncpg still holds. The connection
+    goes back to the pool mid-transaction, the pool's rollback is skipped, and
+    the next user's ``COMMIT`` is a ``RELEASE SAVEPOINT`` inside it. Its row and
+    advisory locks stay held, so the sibling pooled connection's next wipe waits
+    on them until the job times out. Production gives each task its own
+    connection, so only tests see this. Taking the statement mutex around both
+    calls removes the interleaving; ``_guard_pooled_transactions`` still reports
+    a connection that comes back mid-transaction for any other reason.
+    """
+    connection_class = _DialectConnection
+    if getattr(connection_class, "_daimon_serialised_transaction_end", False):
+        return
+    for name in ("_rollback_and_discard", "_commit_and_discard"):
+        end_transaction = getattr(connection_class, name, None)
+        if end_transaction is None:
+            raise RuntimeError(
+                f"SQLAlchemy's asyncpg dialect no longer has {name}; revisit "
+                "_end_transactions_under_the_statement_mutex in daimon.testing.db"
+            )
+        setattr(connection_class, name, _under_statement_mutex(end_transaction))
+    connection_class._daimon_serialised_transaction_end = True  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def _under_statement_mutex(
+    end_transaction: Callable[[_DialectConnection], Awaitable[None]],
+) -> Callable[[_DialectConnection], Awaitable[None]]:
+    async def serialised(adapted_connection: _DialectConnection) -> None:
+        async with adapted_connection._execute_mutex:  # pyright: ignore[reportPrivateUsage]
+            await end_transaction(adapted_connection)
+
+    serialised.__name__ = end_transaction.__name__
+    return serialised
+
+
+_end_transactions_under_the_statement_mutex()
 
 
 @dataclass(frozen=True)
@@ -513,6 +567,7 @@ async def db_engine(
         )
         try:
             require_owned_sessionmaker(engine)
+            _guard_pooled_transactions(engine)
             async with engine.connect() as conn:
                 await _require_migrated(conn)
             await sweep_orphan_schemas(engine)
@@ -590,6 +645,7 @@ async def db_committing_pool(
             pool_reset_on_return="rollback",
         )
         _watch_pool(engine)
+        _guard_pooled_transactions(engine)
     try:
         require_owned_sessionmaker(engine)
         await _record_session_baseline(engine, db_schema)
@@ -600,7 +656,7 @@ async def db_committing_pool(
 
 @pytest_asyncio.fixture
 async def db_committing_engine(
-    db_committing_pool: AsyncEngine, db_schema: str
+    db_committing_pool: AsyncEngine, db_schema: str, request: pytest.FixtureRequest
 ) -> AsyncIterator[AsyncEngine]:
     """Pooled engine on the worker schema for tests whose sessions really COMMIT.
 
@@ -630,6 +686,7 @@ async def db_committing_engine(
     _forget_touched_connections(pool)
     yield db_committing_pool
     await _drain_background_tasks()
+    _raise_on_leaked_transactions(pool, _request_item(request).nodeid)
     await _assert_committing_pool_clean(db_committing_pool, pool, baseline, db_schema)
 
 
@@ -719,6 +776,60 @@ def _watch_pool(engine: AsyncEngine) -> None:
                 "its previous user did not roll back"
             )
         touched[id(record)] = record
+
+
+# Pooled connections a pool took back while their server-side transaction was
+# still open, with the state that gave it away. Filled by ``_guard_pooled_transactions``,
+# emptied by ``_raise_on_leaked_transactions``.
+_POOL_TRANSACTION_LEAKS: WeakKeyDictionary[Pool, list[str]] = WeakKeyDictionary()
+
+
+def _guard_pooled_transactions(engine: AsyncEngine) -> None:
+    """Close any connection ``engine``'s pool takes back with a transaction still open.
+
+    ``pool_reset_on_return="rollback"`` rolls back only a transaction SQLAlchemy
+    still tracks. When the asyncpg connection is mid-transaction without SQLAlchemy
+    knowing (a ``BEGIN`` it lost track of, a nested asyncpg transaction left behind
+    by an earlier one), the rollback is skipped and the next user's every ``COMMIT``
+    becomes a ``RELEASE SAVEPOINT`` inside the stale transaction. Its row and
+    advisory locks then stay held, so the sibling pool connection's next wipe waits
+    on them until the job times out. The connection is terminated here, which frees
+    those locks and makes the pool open a fresh one; the test that was running is
+    named by ``_raise_on_leaked_transactions`` at its teardown.
+    """
+    pool = engine.pool
+    if not isinstance(pool, QueuePool):
+        return
+    leaks = _POOL_TRANSACTION_LEAKS.setdefault(pool, [])
+
+    @event.listens_for(engine.sync_engine, "checkin")
+    def _on_checkin(  # pyright: ignore[reportUnusedFunction]
+        dbapi_connection: object, record: ConnectionPoolEntry
+    ) -> None:
+        raw = record.driver_connection
+        if raw is None or raw.is_closed():  # pyright: ignore[reportUnknownMemberType]
+            return
+        in_transaction = raw.is_in_transaction()  # pyright: ignore[reportUnknownMemberType]
+        outer = raw._top_xact  # pyright: ignore[reportUnknownMemberType, reportPrivateUsage]
+        if in_transaction or outer is not None:
+            leaks.append(
+                f"backend pid {raw.get_server_pid()} was returned to the pool "  # pyright: ignore[reportUnknownMemberType]
+                f"with the server transaction {'open' if in_transaction else 'closed'} and "
+                f"asyncpg's transaction {'still registered' if outer is not None else 'cleared'}"
+            )
+            record.invalidate()
+
+
+def _raise_on_leaked_transactions(pool: Pool, nodeid: str) -> None:
+    """Fail the test named ``nodeid`` when it returned a connection mid-transaction."""
+    if (leaks := _POOL_TRANSACTION_LEAKS.get(pool)) and (found := list(leaks)):
+        leaks.clear()
+        raise AssertionError(
+            f"{nodeid} returned a pooled connection to the worker pool inside an open "
+            f"transaction: {'; '.join(found)}. Its locks would have stalled every later "
+            "test on this worker, so the connection was terminated. Find the session, "
+            "connection or task of this test that began a transaction and never ended it."
+        )
 
 
 async def _record_session_baseline(engine: AsyncEngine, schema: str) -> None:
@@ -833,6 +944,7 @@ async def db_clean(
     # A test before this one may have left name writes running, or remembered
     # names the wipe below deletes.
     await _drain_background_tasks()
+    _raise_on_leaked_transactions(db_engine.pool, f"{_last_db_test} (or a test between)")
     if item.get_closest_marker("fresh_schema") is None:
         try:
             async with db_engine.begin() as conn:
@@ -846,6 +958,7 @@ async def db_clean(
     finally:
         await _drain_background_tasks()
         _last_db_test = item.nodeid
+        _raise_on_leaked_transactions(db_engine.pool, item.nodeid)
 
 
 async def _drain_background_tasks() -> None:
