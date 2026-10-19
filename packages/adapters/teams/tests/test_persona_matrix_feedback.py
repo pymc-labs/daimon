@@ -129,7 +129,7 @@ async def test_posted_answer_feedback_persona_matrix(
                 text("SELECT platform_user_id, vote, message_id FROM message_feedback")
             )
         )
-    if actor.name in {"admin", "member"}:
+    if actor.name in {"admin", "member", "guest"}:
         assert len(rows) == 1, result
         assert rows[0].platform_user_id == actor.user_id
         assert rows[0].message_id == answer

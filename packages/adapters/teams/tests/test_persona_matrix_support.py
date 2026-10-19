@@ -118,11 +118,11 @@ async def test_support_persona_matrix(
         count = (await db.execute(text("SELECT count(*) FROM support_escalations"))).scalar_one()
     if route == "ask_open":
         assert count == 0
-        if actor.name in {"admin", "member"}:
+        if actor.name in {"admin", "member", "guest"}:
             assert result["task"]["type"] == "continue", result
         else:
             assert result["task"]["type"] == "message", result
     elif route == "support_send":
-        assert count == (1 if actor.name in {"admin", "member"} else 0), result
+        assert count == (1 if actor.name in {"admin", "member", "guest"} else 0), result
     else:
-        assert count == (1 if actor.name in {"admin", "member"} else 0), result
+        assert count == (1 if actor.name in {"admin", "member", "guest"} else 0), result
