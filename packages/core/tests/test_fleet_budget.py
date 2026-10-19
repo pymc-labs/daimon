@@ -2104,9 +2104,12 @@ async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm,
         await asyncio.gather(task, return_exceptions=True)
 
 
-# The healthy reads after the stalled one must fit inside the read timeout, and
-# BUDGET_READ_TIMEOUT_LIMIT of them in a row fail closed, so 0.1s was a coin flip on a loaded runner.
-SLOW_READ_TIMEOUT_S = 0.5
+# The watch wraps each whole poll (checkout, SET LOCAL, lock wait, read) in its read timeout,
+# and its lock wait is 75% of it, so 25% is the headroom for checkout and round trips.
+# BUDGET_READ_TIMEOUT_LIMIT polls over it in a row fail closed. A loaded CI runner went over
+# 25ms (at 0.1s) and 100ms (at 0.4s); 1s leaves 250ms. No test here depends on the value:
+# the busy limit is measured on a virtual clock or is far longer than any poll.
+READ_TIMEOUT_S = 1.0
 
 
 async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, monkeypatch):
@@ -2143,7 +2146,7 @@ async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, mo
                 cancelled=cancelled,
                 finished=finished,
                 poll_interval=0.01,
-                read_timeout=SLOW_READ_TIMEOUT_S,
+                read_timeout=READ_TIMEOUT_S,
             ),
             10,
         )
@@ -2285,12 +2288,6 @@ async def _tenant_lock_held(sm, parent):
         await holder
 
 
-# A poll's lock wait is 75% of its read timeout, so 25% is its headroom for connection
-# checkout and round trips. 0.1s left 25ms, which a loaded CI runner exceeds three times in
-# a row (the fail-closed count), so the tests use a read timeout with real headroom.
-BUSY_READ_TIMEOUT_S = 0.4
-
-
 async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeypatch):
     # Staging r19 (2026-10-18): budget reads queued behind admissions holding the
     # tenant fleet lock, timed out, and every in-flight dispatch was cancelled.
@@ -2319,7 +2316,7 @@ async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeyp
                 cancelled=cancelled,
                 finished=finished,
                 poll_interval=0.01,
-                read_timeout=BUSY_READ_TIMEOUT_S,
+                read_timeout=READ_TIMEOUT_S,
             )
         )
     )
@@ -2369,7 +2366,7 @@ async def test_run_watch_fails_closed_when_the_tenant_lock_stays_busy(sm, monkey
                     cancelled=cancelled,
                     finished=asyncio.Event(),
                     poll_interval=0.01,
-                    read_timeout=BUSY_READ_TIMEOUT_S,
+                    read_timeout=READ_TIMEOUT_S,
                 )
             )
         )
@@ -2427,7 +2424,7 @@ async def test_run_watch_is_not_starved_by_back_to_back_short_lock_holds(sm, mon
             cancelled=cancelled,
             finished=finished,
             poll_interval=0.05,
-            read_timeout=0.4,
+            read_timeout=READ_TIMEOUT_S,
         )
     )
     try:
