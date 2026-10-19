@@ -412,7 +412,8 @@ async def _github_connect_impl(
             status="delivery_failed",
             message=(
                 "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
-                "Open a chat with me in Teams, then try again."
+                "Open a chat with me in Teams, then try again. Teams opens none "
+                "with people from another organisation."
                 if auth.platform == "teams"
                 else "I couldn't show the GitHub connection button. Try again."
             ),

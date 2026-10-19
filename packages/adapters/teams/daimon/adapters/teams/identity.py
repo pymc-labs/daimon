@@ -498,6 +498,7 @@ def parse_graph_message(
     quoted = "".join(
         describe_quote(_display_name(ref.message_sender), ref.message_preview) for ref in references
     )
+    home = (user.tenant_id or "").strip()
     inbound = TeamsInbound(
         kind="channel",
         entra_tenant_id=tenant,
@@ -518,6 +519,7 @@ def parse_graph_message(
         channel_name=_channel_name(channel.channel_id, channel.team_id, channel.channel_name),
         channel_type=channel.channel_type,
         team_name=channel.team_name,
+        is_foreign=bool(home) and canonical_uuid(home) != tenant,
     )
     return _admitted(inbound, addressed=addressed)
 

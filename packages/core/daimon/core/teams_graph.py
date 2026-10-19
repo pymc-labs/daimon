@@ -73,6 +73,7 @@ class _Model(BaseModel):
 class GraphIdentity(_Model):
     id: str | None = None
     display_name: str | None = None
+    tenant_id: str | None = None
 
 
 class GraphSender(_Model):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -165,6 +166,19 @@ async def test_a_typed_bot_name_on_a_root_post_starts_a_thread_turn(
         TEAM_GROUP_ID,
         SERVICE_URL,
     ), "what Graph does not carry comes from the subscription"
+    assert not inbound.is_foreign, "our own tenant"
+
+
+async def test_a_sender_from_another_tenant_is_marked_foreign(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _switch_on(db_session_factory)
+    routed = Routed(_app(db_session_factory))
+    user = {"id": AAD_OBJECT_ID, "displayName": "Ada", "tenantId": str(uuid.UUID(int=99))}
+    await routed.graph(_graph(ROOT, "<p>@Daimon help</p>", reply_to=None, sender={"user": user}))
+
+    [(path, inbound)] = routed.paths
+    assert path == "turn" and inbound.is_foreign, "commands must not point them to a 1:1 chat"
 
 
 async def test_a_reply_quoting_the_bot_is_addressed_to_it(
