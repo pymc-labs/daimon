@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import (
     PrivateChannelMessagesSettings,
@@ -597,6 +598,25 @@ def patched_turns(
 
     with patched_admission(), patch("daimon.core.turn.run.run_turn", side_effect=fake_run_turn):
         yield turns
+
+
+@pytest.fixture
+def instant_output_settle() -> Iterator[None]:
+    """`TeamsApp` sweeps a turn's outputs on the production poll schedule, minus the waiting.
+
+    The sweep's settle schedule counts the delays it asks `sleep` for, not the clock, so a
+    zero-length sleep walks the same polls (2 s, 4 s) in the same order. For a test about
+    the turn rather than the settle floor.
+    """
+
+    async def no_wait(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    with patch(
+        "daimon.adapters.teams.app.TeamsOutputDelivery",
+        functools.partial(TeamsOutputDelivery, sleep=no_wait),
+    ):
+        yield
 
 
 @pytest.fixture

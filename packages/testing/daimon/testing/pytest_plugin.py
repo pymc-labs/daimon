@@ -5,9 +5,30 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
 
 if TYPE_CHECKING:
     from daimon.testing.db import DatabasePreflight
+
+
+def use_plain_console_tracebacks() -> None:
+    """Render exceptions in structlog's unconfigured console output as plain text.
+
+    Without a configured chain, `log.exception(...)` goes through structlog's default
+    `ConsoleRenderer`, which formats the traceback with `rich` and syntax-highlights every
+    frame's source through pygments: about a second of CPU per logged exception, and many
+    tests exercise a failure path that logs one. The default processors are shared with
+    `structlog.reset_defaults()`, so switching the formatter on that instance also holds
+    after a test resets structlog. Which exceptions are logged, and the event fields that
+    carry them, do not change; only the traceback's text layout does.
+    """
+    for processor in structlog.get_config()["processors"]:
+        if isinstance(processor, structlog.dev.ConsoleRenderer):
+            processor.exception_formatter = structlog.dev.plain_traceback
+
+
+def pytest_configure() -> None:
+    use_plain_console_tracebacks()
 
 
 def _schema_cache_key(request: pytest.FixtureRequest) -> object:

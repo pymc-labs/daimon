@@ -320,6 +320,7 @@ async def test_a_guest_owner_of_the_admin_team_is_an_admin(
 
 
 @pytest.mark.parametrize("requester", PERSONAS, ids=lambda persona: persona.name)
+@pytest.mark.usefixtures("instant_output_settle")
 async def test_tool_confirmation_only_requester_can_answer(
     db_session_factory: async_sessionmaker[AsyncSession],
     requester: Persona,

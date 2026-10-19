@@ -192,6 +192,14 @@ def build_async_anthropic(
         def user_agent(self) -> str:
             return super().user_agent.replace(type(self).__name__, AsyncAnthropic.__name__, 1)
 
+        def _calculate_retry_timeout(  # pyright: ignore[reportIncompatibleMethodOverride]
+            self, *args: object, **kwargs: object
+        ) -> float:
+            # The SDK still retries `max_retries` times (a mock transport that raises or
+            # answers 429/5xx sees every attempt), but backs off for 0 s instead of 0.4-8 s
+            # of idle wall clock per failed call, which a test does not need to observe.
+            return 0.0
+
     return _IsolatedAsyncAnthropic(
         api_key=api_key,
         auth_token=None,
