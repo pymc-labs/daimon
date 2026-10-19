@@ -2107,8 +2107,9 @@ async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm,
 # The watch wraps each whole poll (checkout, SET LOCAL, lock wait, read) in its read timeout,
 # and its lock wait is 75% of it, so 25% is the headroom for checkout and round trips.
 # BUDGET_READ_TIMEOUT_LIMIT polls over it in a row fail closed. A loaded CI runner went over
-# 25ms (at 0.1s) and 100ms (at 0.4s); 1s leaves 250ms. No test here depends on the value:
-# the busy limit is measured on a virtual clock or is far longer than any poll.
+# 25ms (at 0.1s) and 100ms (at 0.4s); 1s leaves 250ms. The lock tests measure the busy
+# limit on a virtual clock; in the back-to-back test the watch queues behind 30ms holds,
+# so it gets the lock well inside its 0.75s wait and the 1s busy limit is never reached.
 READ_TIMEOUT_S = 1.0
 
 
