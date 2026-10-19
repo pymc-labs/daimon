@@ -214,7 +214,8 @@ def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
     Building an app registers the whole tool catalogue (about half a second); a search
     reads that catalogue and nothing else, so the cases share the apps the way requests
     to a running server do. The sessionmaker draws pooled connections only while a request
-    queues its audit row, and the next test's wipe removes whatever was written.
+    queues its audit row; each case still requests ``db_clean``, so it starts from a wiped
+    schema and its teardown checks run as before.
     """
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
     return {
@@ -225,6 +226,7 @@ def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.query)
+@pytest.mark.usefixtures("db_clean")
 async def test_setup_query_ranks_tool_and_siblings(
     search_apps: dict[str, Starlette],
     platform: str,
