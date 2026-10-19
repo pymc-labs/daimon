@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -29,6 +31,34 @@ def use_plain_console_tracebacks() -> None:
 
 def pytest_configure() -> None:
     use_plain_console_tracebacks()
+
+
+@contextmanager
+def restoring_structlog_config() -> Iterator[None]:
+    """Put structlog's global configuration back the way it was on exit.
+
+    Production setup (`configure_logging`, which app factories such as `create_mcp_app`
+    call) swaps in an INFO-filtering, JSON-rendering chain for the whole process. Left in
+    place, it drops the debug events a later test captures with
+    `structlog.testing.capture_logs()`, which replaces only the processors, so whether that
+    test passes depends on what ran before it on the same worker.
+    """
+    was_configured = structlog.is_configured()
+    saved = structlog.get_config()
+    saved["processors"] = list(saved["processors"])
+    try:
+        yield
+    finally:
+        if not was_configured:
+            structlog.reset_defaults()
+        elif structlog.get_config() != saved:
+            structlog.configure(**saved)
+
+
+@pytest.fixture(autouse=True)
+def _restore_structlog_config() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    with restoring_structlog_config():
+        yield
 
 
 def _schema_cache_key(request: pytest.FixtureRequest) -> object:
