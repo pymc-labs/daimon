@@ -122,6 +122,9 @@ jobs:
     env:
       DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      # Temp files (tmp_path, tempfile) on tmpfs: fsync-heavy tests such as the
+      # overrun latch spend most of their time waiting on the runner's disk.
+      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -173,6 +176,9 @@ jobs:
     env:
       DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      # Temp files (tmp_path, tempfile) on tmpfs: fsync-heavy tests such as the
+      # overrun latch spend most of their time waiting on the runner's disk.
+      TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-daimon
