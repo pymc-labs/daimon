@@ -2771,7 +2771,10 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
 
     real_link = run_module.link_replacement
 
+    linking = asyncio.Event()
+
     async def slow_link(*args: object, **kwargs: object) -> None:
+        linking.set()
         await asyncio.sleep(30)  # the ceiling fires here, after the replacement exists
         await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
@@ -2827,6 +2830,7 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
         await engine.dispose()
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert linking.is_set(), "the ceiling must land in link_replacement, not before it"
     live = [(r.ma_session_id, r.replaced_by_id) for r in rows if r.status == "live"]
     assert live == [], f"a replacement survived the rolled-back recovery: {live}"
     assert [r.ma_session_id for r in rows] == ["sess_old"], (
@@ -2867,7 +2871,10 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
 
     real_link = run_module.link_replacement
 
+    linking = asyncio.Event()
+
     async def slow_link(*args: object, **kwargs: object) -> None:
+        linking.set()
         await asyncio.sleep(30)  # the ceiling fires here, after the session exists
         await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
@@ -2923,6 +2930,7 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
         await engine.dispose()
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert linking.is_set(), "the ceiling must land in link_replacement, not before it"
     assert len(session_bodies) == 1, "recovery created one upstream session"
     assert archived == ["sess_1"], (
         "the session the rolled-back recovery created must be archived; "
