@@ -5,7 +5,7 @@ notice carries a button whose data names the agent the channel answers with
 now. A click hands the conversation it sits in to that agent for the verified
 clicker, decided by `daimon.core.thread_handoff` with their admin status and
 the grant-named teams they own, confirmed live. The agent id is only a
-request; a clicker from another organisation is refused.
+request.
 """
 
 from __future__ import annotations
