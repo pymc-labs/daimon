@@ -7,7 +7,9 @@ from `mux.drivers.selfhosted.config` for `selfhosted.environment` version 1.
 Its transport fields are `harness_url`, `auth_mode`, `auth_ref`, optional
 `packages_note`, and `transport` (default `direct`). `foundry_invocations`
 requires `agent_name` and `project_endpoint`. Resource `account_scope_id` is
-the tenant UUID. Full mux specs are persisted as JSONB alongside names,
+the tenant UUID. Foundry agent names are 1–63 ASCII letters, digits, underscores
+or hyphens and must start with a letter or digit. Full mux specs are persisted
+as JSONB alongside names,
 revisions and lifecycle timestamps. Active names are unique within a tenant;
 archived names can be reused, and name/ID resolution excludes archived rows.
 Mutations use account- and resource-kind-scoped keys, with principal ownership.

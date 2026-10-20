@@ -198,3 +198,31 @@ def test_credentialed_mcp_requires_https_except_loopback(url, allowed):
         with pytest.raises(ProviderError) as error:
             validate_resource_spec(spec)
         assert error.value.category == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "name", [".", "..", "agent.name", "_agent", "-agent", "a" * 64, "a/b", "a%2fb", "àgent", ""]
+)
+def test_foundry_agent_names_reject_unsafe_routes_and_invalid_lengths(name):
+    with pytest.raises(ValueError):
+        HarnessConfig(
+            harness_url="https://harness.example",
+            auth_mode="entra",
+            auth_ref="api://audience",
+            transport="foundry_invocations",
+            agent_name=name,
+            project_endpoint="https://foundry.example/api/projects/test",
+        )
+
+
+@pytest.mark.parametrize("name", ["a", "0", "Agent_0-name", "a" * 63])
+def test_foundry_agent_name_boundaries_are_valid(name):
+    config = HarnessConfig(
+        harness_url="https://harness.example",
+        auth_mode="entra",
+        auth_ref="api://audience",
+        transport="foundry_invocations",
+        agent_name=name,
+        project_endpoint="https://foundry.example/api/projects/test",
+    )
+    assert config.agent_name == name

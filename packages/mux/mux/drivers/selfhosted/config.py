@@ -110,12 +110,13 @@ class HarnessConfig(BaseModel):
         else:
             _url(self.auth_ref, audience=True)
         if self.transport == "foundry_invocations":
-            if (
-                not self.agent_name
-                or self.agent_name in (".", "..")
-                or not re.fullmatch(r"[A-Za-z0-9_.-]+", self.agent_name)
+            if not self.agent_name or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", self.agent_name
             ):
-                raise ValueError("Foundry transport requires an agent name without path separators")
+                raise ValueError(
+                    "Foundry agent names require 1–63 ASCII letters, digits, underscores or "
+                    "hyphens, starting with a letter or digit"
+                )
             if not self.project_endpoint:
                 raise ValueError("Foundry transport requires project_endpoint")
             _url(self.project_endpoint)
