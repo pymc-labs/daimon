@@ -16,7 +16,7 @@ from daimon.core.stores.selfhosted_resources import (
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.outcomes import drain_outcomes
-from daimon.testing.factories import make_tenant, make_tenant_config
+from daimon.testing.factories import make_account, make_tenant, make_tenant_config
 from daimon.testing.turn_fakes import deps_for
 from mux import profiles
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -42,6 +42,7 @@ async def test_admits_without_anthropic_key_or_calls(
     monkeypatch.delenv("DAIMON_ANTHROPIC__API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
@@ -63,7 +64,7 @@ async def test_admits_without_anthropic_key_or_calls(
     )
     await mux_state.put_config_revision(db_session, revision)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agent = await SelfHostedAgents(db_session_factory).create(authorized, agent_spec(), key="agent")
     env = await SelfHostedEnvironments(db_session_factory).create(
         authorized, environment_spec(), key="env"
@@ -173,8 +174,9 @@ async def test_bound_responder_is_an_exact_id_never_a_name(db_session, db_sessio
     from daimon.core.turn.selfhosted_records import resolve_records
 
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     await SelfHostedAgents(db_session_factory).create(
         authorized, agent_spec("ag_foreign"), key="namesake"
     )

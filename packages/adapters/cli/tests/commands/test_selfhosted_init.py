@@ -32,7 +32,10 @@ async def test_init_reuses_matching_records_and_refuses_drift(db_session, db_ses
     with pytest.raises(ValueError, match="different configuration"):
         await selfhosted.initialize(db_session_factory, **{**kwargs, "model": "other-deployment"})
     scope = Scope(
-        tenant_id=str(tenant.id), account_id="operator", principal_id="cli", authorization_id="test"
+        tenant_id=str(tenant.id),
+        account_id="operator",
+        principal_id="cli",
+        authorization_id="cli-deployment-operator",
     )
     agent = await SelfHostedAgents(db_session_factory).resolve(scope, first[0])
     assert agent.spec.system == "Help."
@@ -108,7 +111,7 @@ def test_cli_prints_only_ids_without_anthropic(
             tenant_id=str(tenant.id),
             account_id="operator",
             principal_id="cli",
-            authorization_id="test",
+            authorization_id="cli-deployment-operator",
         )
         agent = await SelfHostedAgents(sessions).resolve(scope, ids[0])
         assert agent.spec.system == "Help."
@@ -129,7 +132,10 @@ async def test_init_can_replace_archived_and_deleted_names(db_session, db_sessio
     )
     first = await selfhosted.initialize(db_session_factory, **kwargs)
     scope = Scope(
-        tenant_id=str(tenant.id), account_id="operator", principal_id="cli", authorization_id="test"
+        tenant_id=str(tenant.id),
+        account_id="operator",
+        principal_id="cli",
+        authorization_id="cli-deployment-operator",
     )
     agents = SelfHostedAgents(db_session_factory)
     agent = await agents.resolve(scope, first[0])
@@ -153,7 +159,10 @@ async def test_init_reuses_existing_environment_with_implicit_schema_defaults(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     scope = Scope(
-        tenant_id=str(tenant.id), account_id="operator", principal_id="cli", authorization_id="test"
+        tenant_id=str(tenant.id),
+        account_id="operator",
+        principal_id="cli",
+        authorization_id="cli-deployment-operator",
     )
     env = await SelfHostedEnvironments(db_session_factory).create(
         scope,
