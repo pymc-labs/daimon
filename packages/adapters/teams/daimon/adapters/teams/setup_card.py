@@ -11,6 +11,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
+from daimon.adapters.teams.billing_panel import channel_name_text
 from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core import channel_backend
@@ -163,9 +164,11 @@ def roster_card(
     return _card("Agents", body, actions)
 
 
-def _place(place: AnsweringPlace, *, here: str) -> str:
+def _place(place: AnsweringPlace, *, here: str, names: Mapping[str, str]) -> str:
     if place.tier == "channel" and place.channel_id is not None:
-        return "this chat" if place.channel_id == here else f"channel `{place.channel_id}`"
+        if place.channel_id == here:
+            return "this chat"
+        return channel_name_text(place.channel_id, names)
     return "the organisation default" if place.tier == "tenant" else "the Daimon-wide default"
 
 
@@ -229,15 +232,19 @@ def details_card(
     expanded: DetailListName | None = None,
     backend_options: tuple[Provider, ...] = (),
     backend_selection: Provider | None = None,
+    channel_names: Mapping[str, str] | None = None,
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here.
+
+    `channel_names` names the channels it answers in; one with no name shows a
+    neutral label, never its id.
 
     Add skill and the coding-tool token are admin changes, so only an admin is
     offered them: a member's press could only end in a refusal.
     """
     purpose = details.purpose
     body: list[CardElement] = [_text(clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
-    places = [_place(place, here=here) for place in details.answers_in]
+    places = [_place(place, here=here, names=channel_names or {}) for place in details.answers_in]
     body.append(
         _text(f"**Answers in:** {_answers_in(places)}")
         if places
@@ -335,13 +342,17 @@ def routing_card(
     is_admin: bool,
     request_agent: str | None,
     changes_channels: bool = False,
+    channel_names: Mapping[str, str] | None = None,
 ) -> AdaptiveCard:
     """The whole cascade, so the precedence is visible rather than inferred.
 
     `changes_channels` adds Channel settings, for a server admin or a channel's admin.
+    `channel_names` names the channels listed (`routing_channel_ids`); one with no
+    name shows a neutral label, never its id.
     """
+    names = channel_names or {}
     body: list[CardElement] = [
-        _text(f"Channel `{answer.channel_id}`: **{answer.agent_name}**") for answer in page.items
+        _text(_channel_line(answer.channel_id, answer.agent_name, names)) for answer in page.items
     ] or [_text("No channel has its own setting.", subtle=True)]
     tenant = answering_map.tenant_default
     default = tenant.agent_name if tenant else "Not assigned"
@@ -353,7 +364,7 @@ def routing_card(
         if answering_map.tenant_consumes_fallthrough:
             line += " (not in effect while an organisation default is set)"
         body.append(_text(line))
-    body.append(_text(_environments_text(answering_map)))
+    body.append(_text(_environments_text(answering_map, names)))
     names = [setup_thread_name(ref.target_name) for ref in answering_map.setup_threads]
     if answering_map.setup_threads_truncated:
         names.append("…and more")
@@ -373,11 +384,29 @@ def routing_card(
     return _card("Who answers where", body, actions)
 
 
-def _environments_text(answering_map: AnsweringMap) -> str:
+def _channel_line(channel_id: str, value: str, names: Mapping[str, str]) -> str:
+    """`General → **qa-haiku**`, as Discord and Slack list a channel's setting."""
+    return f"{channel_name_text(channel_id, names)} → **{value}**"
+
+
+def routing_channel_ids(answering_map: AnsweringMap, page: Page[Any]) -> list[str]:
+    """The channels `routing_card` lists on `page`, whose names it needs."""
+    environments = answering_map.channel_environments[:MAX_ENVIRONMENT_LINES]
+    ids = [answer.channel_id for answer in page.items] + [row.channel_id for row in environments]
+    return list(dict.fromkeys(ids))
+
+
+def place_channel_ids(details: AgentDetails, *, here: str) -> list[str]:
+    """The channels `details_card` lists as answering places, whose names it needs."""
+    ids = (place.channel_id for place in details.answers_in if place.tier == "channel")
+    return list(dict.fromkeys(i for i in ids if i is not None and i != here))
+
+
+def _environments_text(answering_map: AnsweringMap, names: Mapping[str, str]) -> str:
     """Each channel's own environment, then the defaults, as Discord and Slack list them."""
     rows = answering_map.channel_environments
     lines = [
-        f"Channel `{row.channel_id}`: **{row.environment_name}**"
+        _channel_line(row.channel_id, row.environment_name, names)
         for row in rows[:MAX_ENVIRONMENT_LINES]
     ]
     if len(rows) > len(lines):

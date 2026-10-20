@@ -302,7 +302,7 @@ def create_teams_http_service(
         roster_name=billing_panel.sdk_roster_name(teams_app),
         team_channels=billing_panel.sdk_team_channels(teams_app),
     )
-    setup = SetupPanel(runtime)
+    setup = SetupPanel(runtime, team_channels=billing_panel.sdk_team_channels(teams_app))
     channel_settings = ChannelSettingsDialog(runtime, channel_names=channel_names)
     commands: dict[str, CommandHandler] = {
         "new": new_command,

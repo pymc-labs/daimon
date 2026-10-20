@@ -17,7 +17,7 @@ from __future__ import annotations
 import functools
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 
 import anthropic
@@ -28,6 +28,7 @@ from daimon.adapters.teams.add_skill import (
     add_previewed_skill,
     skill_change_refusal,
 )
+from daimon.adapters.teams.billing_panel import TeamChannels, named_channels
 from daimon.adapters.teams.card_actions import (
     FAILED,
     SENDING_PANEL_ERRORS,
@@ -86,6 +87,8 @@ from daimon.core.rule_views import load_rule_viewer
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
+from daimon.core.stores.platform_names import get_channel_names
+from daimon.core.stores.teams_installations import list_teams_installations
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -150,8 +153,29 @@ def _models() -> tuple[ModelChoice, ...]:
 class SetupPanel:
     """Handlers for the command, the panel buttons and the two dialogs."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(self, runtime: TeamsRuntime, *, team_channels: TeamChannels | None = None) -> None:
         self._runtime = runtime
+        self._team_channels = team_channels
+
+    async def _channel_names(
+        self, tenant_id: uuid.UUID, channel_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """The cards' channel names: the teams' live listings, else the stored names."""
+        if not channel_ids:
+            return {}
+        async with self._runtime.sessionmaker() as session:
+            teams = await list_teams_installations(session, tenant_id=tenant_id)
+            stored = await get_channel_names(
+                session, tenant_id=tenant_id, platform="teams", channel_ids=channel_ids
+            )
+        return await named_channels(
+            self._runtime.sessionmaker,
+            self._team_channels,
+            tenant_id=tenant_id,
+            team_ids=[team.team_id for team in teams],
+            channel_ids=channel_ids,
+            stored=stored,
+        )
 
     async def command(self, context: CommandContext) -> None:
         await context.send_card(
@@ -438,12 +462,16 @@ class SetupPanel:
         unrouted = (r.name for r in roster.rows if r.answering_tier is None and not r.is_built_in)
         request_agent = next(unrouted, roster.answering.name if roster.answering else None)
         window = paginate(answering_map.channel_overrides, page=page, page_size=cards.PAGE_SIZE)
+        names = await self._channel_names(
+            actor.tenant_id, cards.routing_channel_ids(answering_map, window)
+        )
         return cards.routing_card(
             answering_map,
             window,
             is_admin=actor.is_admin,
             request_agent=request_agent,
             changes_channels=actor.is_admin,
+            channel_names=names,
         )
 
     async def _details(
@@ -485,6 +513,9 @@ class SetupPanel:
                 agent_name=match.name,
             )
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
+        channel_names = await self._channel_names(
+            actor.tenant_id, cards.place_channel_ids(details, here=actor.conversation_id)
+        )
         backend_options: tuple[Provider, ...] = ()
         backend_selection: Provider | None = None
         if actor.is_admin and channel_backend.backend_selection_enabled(
@@ -511,6 +542,7 @@ class SetupPanel:
             expanded=expanded,
             backend_options=backend_options,
             backend_selection=backend_selection,
+            channel_names=channel_names,
         )
 
     async def _act(
