@@ -414,3 +414,101 @@ def test_log_redaction_covers_other_turns_and_exception_tracebacks(caplog):
             logging.getLogger("sdk.failure").exception("response: %s", "Bearer second-secret")
     assert "first-secret" not in caplog.text and "second-secret" not in caplog.text
     assert "ValueError" in caplog.text and "[redacted]" in caplog.text
+
+
+@pytest.mark.parametrize("auth_mode", ["key", "bearer"])
+async def test_sdk_debug_logs_keep_header_filters_and_hide_all_secrets(
+    tmp_path, monkeypatch, caplog, auth_mode
+):
+    import logging
+
+    from daimon_harness import model_adapter
+    from daimon_harness.model_adapter import AzureModelAdapter
+    from daimon_harness.runtime import discard_event
+    from openai import AsyncAzureOpenAI
+
+    key = "synthetic-azure-debug-key-67241"
+    bearer = "synthetic-azure-debug-bearer-67241"
+    harness = "synthetic-harness-debug-token-67241"
+    operator = "synthetic-unused-mcp-debug-secret-67241"
+    client_secret = "synthetic-identity-debug-secret-67241"
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
+    monkeypatch.setenv("HARNESS_TOKEN", harness)
+    monkeypatch.setenv("HARNESS_MCP_CRED_UNUSED", operator)
+    monkeypatch.setenv("AZURE_CLIENT_SECRET", client_secret)
+    if auth_mode == "key":
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", key)
+    else:
+        monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    async def token_provider():
+        return bearer
+
+    monkeypatch.setattr(model_adapter, "get_bearer_token_provider", lambda *args: token_provider)
+    filtered_headers = []
+
+    class AfterSDKFilter(logging.Filter):
+        def filter(self, record):
+            if isinstance(record.args, dict) and "headers" in record.args:
+                filtered_headers.append(record.args["headers"].copy())
+            return True
+
+    probe = AfterSDKFilter()
+    sdk_logger = logging.getLogger("openai._base_client")
+    sdk_logger.addFilter(probe)
+
+    def respond(request):
+        expected = {"api-key": key} if auth_mode == "key" else {"Authorization": f"Bearer {bearer}"}
+        for name, value in expected.items():
+            assert request.headers[name] == value
+        logging.getLogger("sdk.echo").warning(
+            "credentials: %s",
+            [harness, operator, client_secret, key if auth_mode == "key" else bearer],
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "response-debug",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "message-debug",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    def factory(**kwargs):
+        return AsyncAzureOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        )
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", factory)
+    adapter = AzureModelAdapter()
+    try:
+        with caplog.at_level(logging.DEBUG):
+            await adapter.run(
+                TurnContext(TurnRequest.model_validate(turn()), tmp_path, discard_event), []
+            )
+    finally:
+        sdk_logger.removeFilter(probe)
+        if adapter.credential is not None:
+            await adapter.credential.close()
+    assert "Request options:" in caplog.text
+    assert filtered_headers
+    header_name = "api-key" if auth_mode == "key" else "Authorization"
+    assert any(headers.get(header_name) == "<redacted>" for headers in filtered_headers)
+    for secret in (key, bearer, harness, operator, client_secret):
+        assert secret not in caplog.text
+    assert "[redacted]" in caplog.text

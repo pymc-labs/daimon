@@ -7,8 +7,9 @@ import logging
 import os
 import threading
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from typing import cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -160,6 +161,8 @@ def mcp_headers(
 def redact(value: JsonValue, credentials: dict[str, str]) -> JsonValue:
     if isinstance(value, str):
         for secret in credentials.values():
+            if not secret:
+                continue
             value = value.replace(secret, "[redacted]")
             if secret.startswith("Bearer "):
                 value = value.replace(secret[7:], "[redacted]")
@@ -173,8 +176,21 @@ def redact(value: JsonValue, credentials: dict[str, str]) -> JsonValue:
     return value
 
 
-# Concurrent turns share Python loggers. Scrub records against every active turn,
-# before handlers (including SDK-created handlers) or capture tools see the record.
+def process_credentials() -> dict[str, str]:
+    """Capture startup secrets before the process environment is scrubbed."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if value
+        and name != "HARNESS_MCP_CRED_BINDINGS"
+        and (
+            name in {"IDENTITY_HEADER", "MSI_ENDPOINT", "IDENTITY_ENDPOINT"}
+            or name.startswith("HARNESS_MCP_CRED_")
+            or any(marker in name.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
+        )
+    }
+
+
 _LOG_LOCK = threading.RLock()
 _LOG_CREDENTIALS: dict[object, dict[str, str]] = {}
 _log_factory_installed = False
@@ -190,8 +206,47 @@ def _scrub_log_text(value: str) -> str:
     return value
 
 
+def _scrub_log_value(value: object) -> object:
+    if isinstance(value, str):
+        return _scrub_log_text(value)
+    if isinstance(value, tuple):
+        return tuple(_scrub_log_value(item) for item in cast(tuple[object, ...], value))
+    if isinstance(value, dict):
+        return {
+            _scrub_log_value(key): _scrub_log_value(item)
+            for key, item in cast(Mapping[object, object], value).items()
+        }
+    if isinstance(value, list):
+        return [_scrub_log_value(item) for item in cast(list[object], value)]
+    if value is None or isinstance(value, (int, float)):
+        return value
+    return _scrub_log_text(str(value))
+
+
+class CredentialLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Logger filters (notably the SDK's SensitiveHeadersFilter) have already
+        # run. Preserve interpolation arguments for any later handler filters.
+        record.msg = _scrub_log_text(str(record.msg))
+        record.args = cast(tuple[object, ...] | dict[str, object], _scrub_log_value(record.args))
+        if record.exc_info:
+            record.exc_text = _scrub_log_text("".join(traceback.format_exception(*record.exc_info)))
+            record.exc_info = None
+        if record.stack_info:
+            record.stack_info = _scrub_log_text(record.stack_info)
+        return True
+
+
+_log_filter = CredentialLogFilter()
+
+
+def remember_log_secret(credentials: dict[str, str], name: str, value: str) -> None:
+    with _LOG_LOCK:
+        credentials[name] = value
+
+
 @contextmanager
-def credential_log_redaction(credentials: dict[str, str]) -> Iterator[None]:
+def credential_log_redaction(credentials: dict[str, str]) -> Iterator[dict[str, str]]:
     global _log_factory_installed
     key = object()
     with _LOG_LOCK:
@@ -200,22 +255,23 @@ def credential_log_redaction(credentials: dict[str, str]) -> Iterator[None]:
 
             def factory(*args: object, **kwargs: object) -> logging.LogRecord:
                 record = original(*args, **kwargs)
-                record.msg = _scrub_log_text(record.getMessage())
-                record.args = ()
-                if record.exc_info:
-                    record.exc_text = _scrub_log_text(
-                        "".join(traceback.format_exception(*record.exc_info))
-                    )
-                    record.exc_info = None
-                if record.stack_info:
-                    record.stack_info = _scrub_log_text(record.stack_info)
+                # Attach at emission time so newly configured SDK/capture handlers
+                # are covered too. Do not format or change the record here.
+                logger: logging.Logger | None = logging.getLogger(record.name)
+                while logger is not None:
+                    for handler in logger.handlers:
+                        handler.addFilter(_log_filter)
+                    logger = logger.parent if logger.propagate else None
+                if logging.lastResort is not None:
+                    logging.lastResort.addFilter(_log_filter)
                 return record
 
             logging.setLogRecordFactory(factory)
             _log_factory_installed = True
-        _LOG_CREDENTIALS[key] = credentials.copy()
+        values = credentials.copy()
+        _LOG_CREDENTIALS[key] = values
     try:
-        yield
+        yield values
     finally:
         with _LOG_LOCK:
             _LOG_CREDENTIALS.pop(key, None)

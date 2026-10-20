@@ -31,7 +31,13 @@ from mux.drivers.selfhosted.wire import (
 from pydantic import JsonValue, ValidationError
 
 from .auth import Authenticator
-from .credentials import load_bindings, redact, turn_credentials
+from .credentials import (
+    credential_log_redaction,
+    load_bindings,
+    process_credentials,
+    redact,
+    turn_credentials,
+)
 from .errors import HarnessError
 from .isolation import can_switch_uid, prepare_service, protect_process, validate_session_mode
 from .journal import ConflictError, Journal, identifier
@@ -48,7 +54,9 @@ audit_logger.propagate = False
 
 
 class Supervisor:
-    def __init__(self, home: Path, adapter: ModelAdapter, session_mode: str = "single") -> None:
+    def __init__(
+        self, home: Path, adapter: ModelAdapter, session_mode: str = "single", token: str = ""
+    ) -> None:
         self.operator_credentials = {
             name: value
             for name, value in os.environ.items()
@@ -66,6 +74,11 @@ class Supervisor:
                 self.journal.close()
                 self.worker.shutdown(wait=True)
                 raise
+        self.secrets = process_credentials()
+        if token:
+            self.secrets["HARNESS_TOKEN"] = token
+        self.log_redaction = credential_log_redaction(self.secrets)
+        self.log_redaction.__enter__()
         self.home = home
         self.adapter = adapter
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -104,6 +117,7 @@ class Supervisor:
                 self.journal.append(request, "turn_ended", {"outcome": "interrupted"})
 
     async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
+        credentials = self.secrets | credentials
         usage_count = 0
         failure: dict[str, JsonValue] | None = None
 
@@ -177,28 +191,39 @@ class Supervisor:
                     "error", {"kind": kind, "message": "Harness turn failed", "retryable": False}
                 )
         finally:
-            if context is not None:
-                context.stop_processes()
-            original_failure = failure
-            for request_id in await self.io(self.journal.pending_requests, request):
-                await emit(
-                    "error",
-                    {
-                        "kind": "usage_unavailable",
-                        "message": "Model request ended without usage",
-                        "retryable": False,
-                        "request_id": request_id,
-                    },
-                )
-            if original_failure is not None:
-                failure = original_failure
-            data: dict[str, JsonValue] = {"outcome": outcome}
-            if outcome == "errored":
-                data["error"] = failure or {"kind": "harness", "message": "Harness turn failed"}
-            await emit("turn_ended", data)
-            credentials.clear()
-            self.contexts.pop(request.turn_id, None)
-            self.changed.set()
+
+            async def finalize() -> None:
+                nonlocal failure
+                if context is not None:
+                    context.stop_processes()
+                original_failure = failure
+                for request_id in await self.io(self.journal.pending_requests, request):
+                    await emit(
+                        "error",
+                        {
+                            "kind": "usage_unavailable",
+                            "message": "Model request ended without usage",
+                            "retryable": False,
+                            "request_id": request_id,
+                        },
+                    )
+                if original_failure is not None:
+                    failure = original_failure
+                data: dict[str, JsonValue] = {"outcome": outcome}
+                if outcome == "errored":
+                    data["error"] = failure or {"kind": "harness", "message": "Harness turn failed"}
+                await emit("turn_ended", data)
+                credentials.clear()
+                self.contexts.pop(request.turn_id, None)
+                self.changed.set()
+
+            finalization = asyncio.create_task(finalize())
+            while not finalization.done():
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    outcome = "interrupted"
+            await finalization
 
     async def submit(self, request: TurnRequest, mcp_authorization: str | None = None) -> None:
         async with self.submissions:
@@ -246,6 +271,8 @@ class Supervisor:
             await self.adapter.credential.close()
         await self.io(self.journal.close)
         self.worker.shutdown(wait=True)
+        self.log_redaction.__exit__(None, None, None)
+        self.secrets.clear()
 
 
 def create_app(
@@ -281,7 +308,7 @@ def create_app(
         raise RuntimeError("production requires separate service and tool UIDs")
     auth = Authenticator(token)
     session_mode = validate_session_mode()
-    supervisor = Supervisor(root, adapter or AzureModelAdapter(), session_mode)
+    supervisor = Supervisor(root, adapter or AzureModelAdapter(), session_mode, auth.token)
     if not test_mode:
         prepare_service(root)
         protect_process()

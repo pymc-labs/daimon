@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
+
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
 - Refuse shared writable scratch in multi-session harnesses, kill detached tool descendants at completion, and reap orphan processes with tini.
 

@@ -252,3 +252,10 @@ session UID kills all that UID's processes, including detached descendants,
 without relying on procfs visibility. It retries until `ESRCH` or a bounded
 retry deadline (Linux may return success when only inaccessible UIDs remain). Pipe draining and process waits are bounded.
 The container runs tini as PID 1 to reap orphaned descendants.
+
+Log redaction runs at handlers after SDK logger filters, preserving their header
+masking and interpolation arguments. It covers startup secrets (including Azure
+API keys and harness bearer tokens), operator MCP credentials, per-turn MCP
+credentials and acquired Azure bearer tokens. SDK debug logging uses the same
+redaction path. Cancellation waits for protected journal finalization and cleanup
+before acknowledgment, including when it arrives during finalization itself.

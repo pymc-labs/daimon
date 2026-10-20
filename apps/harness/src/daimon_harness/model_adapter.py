@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import Protocol, cast
 from uuid import uuid4
@@ -25,7 +26,12 @@ from openai import AsyncAzureOpenAI, BadRequestError
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import JsonValue, TypeAdapter
 
-from .credentials import credential_log_redaction, mcp_headers
+from .credentials import (
+    credential_log_redaction,
+    mcp_headers,
+    process_credentials,
+    remember_log_secret,
+)
 from .errors import HarnessError
 from .runtime import TurnContext
 
@@ -238,26 +244,39 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
 
 class AzureModelAdapter:
     def __init__(self) -> None:
+        self.log_credentials = process_credentials()
         self.key = os.environ.get("AZURE_OPENAI_API_KEY")
         self.credential = DefaultAzureCredential() if not self.key else None
         self.endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
         self.api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
     async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
-        with credential_log_redaction(context.credentials):
-            return await self._run(context, history)
+        with credential_log_redaction(
+            self.log_credentials | context.credentials
+        ) as log_credentials:
+            return await self._run(context, history, log_credentials)
 
-    async def _run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
+    async def _run(
+        self, context: TurnContext, history: list[JsonValue], log_credentials: dict[str, str]
+    ) -> list[JsonValue]:
         async with AsyncExitStack() as stack:
             key = self.key
-            token_provider = None
+            token_provider: Callable[[], Awaitable[str]] | None = None
             if not key:
                 credential = self.credential
                 assert credential is not None
-                token_provider = get_bearer_token_provider(
+                azure_token_provider = get_bearer_token_provider(
                     credential,
                     "https://cognitiveservices.azure.com/.default",
                 )
+
+                async def azure_bearer_token() -> str:
+                    token = await azure_token_provider()
+                    remember_log_secret(log_credentials, "azure_bearer", token)
+                    return token
+
+                token_provider = azure_bearer_token
+
             client = await stack.enter_async_context(
                 AsyncAzureOpenAI(
                     azure_endpoint=self.endpoint,

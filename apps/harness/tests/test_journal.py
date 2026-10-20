@@ -122,3 +122,51 @@ def test_session_uids_are_stable_distinct_and_bounded(tmp_path):
         )
     finally:
         journal.close()
+
+
+async def test_cancel_during_finalization_finishes_journal_and_accepts_next_turn(
+    tmp_path, monkeypatch
+):
+    app = create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    supervisor = app.state.supervisor
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_io = supervisor.io
+    first = True
+
+    async def gated_io(operation, *args):
+        nonlocal first
+        if operation == supervisor.journal.pending_requests and first:
+            first = False
+            entered.set()
+            await release.wait()
+        return await original_io(operation, *args)
+
+    monkeypatch.setattr(supervisor, "io", gated_io)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test", "Accept": "application/json"},
+        ) as client,
+    ):
+        assert (await client.post("/v0/turns", json=turn())).status_code == 202
+        await asyncio.wait_for(entered.wait(), 5)
+        credentials = supervisor.contexts["turn-1"].credentials
+        cancelling = asyncio.create_task(client.post("/v0/turns/turn-1/cancel"))
+        async with asyncio.timeout(5):
+            while not supervisor.tasks["turn-1"].cancelling():
+                await asyncio.sleep(0)
+            assert not cancelling.done()
+            release.set()
+            assert (await cancelling).json() == {"cancelled": True}
+        response = (await client.get("/v0/sessions/session-1/events")).json()
+        assert response["complete"] is True
+        assert response["events"][-1]["type"] == "turn_ended"
+        assert response["events"][-1]["data"]["outcome"] == "interrupted"
+        assert not credentials
+        assert "turn-1" not in supervisor.contexts
+        assert (
+            await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
+        ).status_code == 202
+        await supervisor.tasks["next"]
