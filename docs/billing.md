@@ -1348,10 +1348,25 @@ operation store. Repeating that admission key retrieves its original snapshot.
 `record_selfhosted_usage` takes that `admission_key`, not live tariff settings.
 The first receipt persists its admission snapshot; all corrections and recovery
 use the same snapshot, even if the deployment is remapped, a rate is edited,
-or a newer tariff takes effect. Native usage payloads are unchanged. Receipts
-may name the admitted deployment or its admitted underlying model. A missing,
+or a newer tariff takes effect. Receipts may name the admitted deployment or
+its admitted underlying model. Accounting uses the admitted underlying model
+for every revision, including unknown usage, so an alias change on recovery
+does not change the accounting identity. The native meter stays untouched;
+the receipt context retains each revision's original model alias for audit.
+The saved admission explicitly includes `deployment`, `underlying_model` and
+`tariff_effective_from`. A missing,
 late or corrupt admission, or an unexpected model, stays pending with a reason;
 current settings cannot retroactively establish what was admitted.
+
+A receipt first recorded without a valid admission key may adopt an existing,
+valid admission once during replay. Its original request timestamps must fit
+that admission; a later correction cannot hide a request made before admission.
+After association, another key cannot replace its tariff. Unsettled accounting
+aliases are normalised during adoption; native meters and source aliases are
+retained. `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S` allows harness clock
+lag (default 5 seconds, configurable from 0 to 60), frozen with the admission.
+The tolerance accepts a harness timestamp 300 ms behind the host without
+creating an admission or consulting current prices.
 
 The recorder requires an explicit `infrastructure_usd` argument: `None` means
 unknown and keeps settlement pending; audited zero means the operator funds

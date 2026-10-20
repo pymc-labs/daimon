@@ -1134,6 +1134,14 @@ secrets. Keep both separate.
 Multiplier applied to raw Anthropic usage cost before billing the tenant. 1.0 = pass-
 through.
 
+### `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S`
+
+`float` · optional · default `5`
+
+Maximum harness clock lag in seconds when associating usage with an existing tariff
+admission. Frozen at admission; default 5, maximum 60. This tolerance never creates an
+admission or selects current prices.
+
 ### `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS`
 
 `dict[str, str]` · optional · default `{}`

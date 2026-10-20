@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
+from typing import cast
 
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.config import SelfhostedBillingSettings, SelfhostedModelPrice
 from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.stores import selfhosted_usage as contexts
 from daimon.core.turn.errors import AdmissionDenied
-from mux.contracts.ids import ResourceRef
+from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -29,18 +30,38 @@ class SelfhostedTariffAdmission(BaseModel):
     session: ResourceRef
     deployment: str
     underlying_model: str
+    tariff_effective_from: date
     tariff: SelfhostedModelPrice
     admitted_at: datetime
+    admission_clock_skew_s: float = Field(default=5, ge=0, le=60, allow_inf_nan=False)
 
-    def price(self, receipt_model: str) -> ProviderPrice:
-        if receipt_model not in (self.deployment, self.underlying_model):
-            raise ValueError("receipt model differs from the admitted tariff")
+    @model_validator(mode="before")
+    @classmethod
+    def restore_saved_identity(cls, value: object) -> object:
+        # Older snapshots already contain this date in their frozen tariff.
+        # Recover only from that evidence, never from current configuration.
+        if isinstance(value, dict):
+            saved = cast(dict[str, object], value)
+            tariff = saved.get("tariff")
+            if "tariff_effective_from" not in saved and isinstance(tariff, dict):
+                rates = cast(dict[str, object], tariff)
+                return {**saved, "tariff_effective_from": rates.get("effective_from")}
+            return saved
+        return value
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> SelfhostedTariffAdmission:
+        if self.tariff_effective_from != self.tariff.effective_from:
+            raise ValueError("admitted tariff identity differs from its rates")
+        return self
+
+    def price(self) -> ProviderPrice:
         # Validity is checked at admission. A response/correction can arrive
         # after a newer tariff takes effect, without changing its admitted cost.
         return ProviderPrice(
             provider="selfhosted",
-            model=receipt_model,
-            checked_on=self.tariff.effective_from,
+            model=self.underlying_model,
+            checked_on=self.tariff_effective_from,
             input=self.tariff.input,
             output=self.tariff.output,
             cache_read=self.tariff.cache_read,
@@ -127,8 +148,10 @@ async def admit_selfhosted_usage(
                 session=session_ref,
                 deployment=deployment,
                 underlying_model=model,
+                tariff_effective_from=rate.effective_from,
                 tariff=rate,
                 admitted_at=now,
+                admission_clock_skew_s=billing.admission_clock_skew_s,
             )
             prior = await contexts.create_context(
                 db,
@@ -162,10 +185,12 @@ async def record_selfhosted_usage(
 ) -> bool:
     """Record receipts using only durable admission, never current configuration.
 
-    The first receipt association freezes the tariff for all corrections.
-    Absent/corrupt pricing context leaves a durable pending reason. Native
-    payloads stay untouched. infrastructure_usd is required: None is unknown,
-    explicit audited zero means the operator funds compute separately.
+    The first valid receipt association freezes the tariff for all corrections;
+    an unassociated receipt may adopt an existing valid admission during replay.
+    Absent/corrupt pricing context leaves a durable pending reason. Accounting
+    uses the admitted underlying model; source aliases are saved separately
+    and native meters stay untouched. infrastructure_usd is required: None is
+    unknown, explicit audited zero means the operator funds compute separately.
     """
     from daimon.core.turn.outcomes import current_outcome
 
@@ -178,6 +203,7 @@ async def record_selfhosted_usage(
     ):
         raise ValueError("selfhosted billing requires incremental model-request usage")
     receipt_key = contexts.context_key("receipt", binding_id, observation.id)
+    billing_observation = observation
     price: ProviderPrice | None = None
     reason: str | None = None
     async with sessionmaker() as db, db.begin():
@@ -186,33 +212,54 @@ async def record_selfhosted_usage(
         )
         try:
             original = await contexts.read_context(
-                db, tenant_id=tenant_id, binding_id=binding_id, key=receipt_key
+                db, tenant_id=tenant_id, binding_id=binding_id, key=receipt_key, lock=True
             )
             if original is None:
-                try:
-                    admitted = (
-                        await contexts.read_context(
-                            db,
-                            tenant_id=tenant_id,
-                            binding_id=binding_id,
-                            key=contexts.context_key("admission", binding_id, admission_key),
-                        )
-                        if admission_key is not None
-                        else None
-                    )
-                except ValueError:
-                    admitted = None
-                    reason = "tariff_context_invalid"
                 original = await contexts.create_context(
                     db,
                     tenant_id=tenant_id,
                     binding_id=binding_id,
                     key=receipt_key,
-                    value={
-                        "admission": admitted,
-                        **({"invalid_context": True} if reason is not None else {}),
-                    },
+                    value={"admission": None},
                 )
+            if (
+                original.get("admission") is None
+                and original.get("invalid_context") is None
+                and admission_key is not None
+            ):
+                candidate = await contexts.read_context(
+                    db,
+                    tenant_id=tenant_id,
+                    binding_id=binding_id,
+                    key=contexts.context_key("admission", binding_id, admission_key),
+                )
+                if candidate is not None:
+                    admitted = SelfhostedTariffAdmission.model_validate(candidate)
+                    if admitted.binding_id != binding_id or admitted.session != observation.session:
+                        reason = "tariff_context_invalid"
+                    elif admitted.admitted_at > observation.observed_at + timedelta(
+                        seconds=admitted.admission_clock_skew_s
+                    ):
+                        reason = "admission_after_request"
+                    elif observation.model is not None and (
+                        observation.model.provider != "selfhosted"
+                        or observation.model.id
+                        not in (admitted.deployment, admitted.underlying_model)
+                    ):
+                        reason = "model_mismatch"
+                    else:
+                        original = await contexts.adopt_admission(
+                            db,
+                            tenant_id=tenant_id,
+                            binding_id=binding_id,
+                            key=receipt_key,
+                            observation_id=observation.id,
+                            admission=candidate,
+                            deployment=admitted.deployment,
+                            model=ModelRef(provider="selfhosted", id=admitted.underlying_model),
+                            earliest_observed_at=admitted.admitted_at
+                            - timedelta(seconds=admitted.admission_clock_skew_s),
+                        )
             if original.get("invalid_context") is not None:
                 raise ValueError("receipt pricing context is corrupt")
             snapshot = original.get("admission")
@@ -222,17 +269,28 @@ async def record_selfhosted_usage(
                 frozen = SelfhostedTariffAdmission.model_validate(snapshot)
                 if frozen.binding_id != binding_id or frozen.session != observation.session:
                     reason = "tariff_context_invalid"
-                elif frozen.admitted_at > observation.observed_at:
-                    reason = "admission_after_request"
-                elif observation.model is None:
-                    reason = "model_unknown"
-                elif observation.model.provider != "selfhosted" or observation.model.id not in (
-                    frozen.deployment,
-                    frozen.underlying_model,
+                elif frozen.admitted_at > observation.observed_at + timedelta(
+                    seconds=frozen.admission_clock_skew_s
                 ):
-                    reason = "model_mismatch"
+                    reason = "admission_after_request"
+                elif observation.model is None or (
+                    observation.model.provider == "selfhosted"
+                    and observation.model.id in (frozen.deployment, frozen.underlying_model)
+                ):
+                    # The admitted model is the accounting identity even when
+                    # replay changes between deployment and model aliases.
+                    # Keep the source alias separately; never alter native meters.
+                    billing_observation = observation.model_copy(
+                        update={
+                            "model": ModelRef(provider="selfhosted", id=frozen.underlying_model)
+                        }
+                    )
+                    if observation.model is None:
+                        reason = "model_unknown"
+                    else:
+                        price = frozen.price()
                 else:
-                    price = frozen.price(observation.model.id)
+                    reason = "model_mismatch"
         except (ValueError, ArithmeticError):
             reason = "tariff_context_invalid"
         if observation.completeness != "measured":
@@ -242,7 +300,9 @@ async def record_selfhosted_usage(
         elif reason is None and price is not None:
             try:
                 if (
-                    provider_cost_of(observation, price, infrastructure_usd=infrastructure_usd)
+                    provider_cost_of(
+                        billing_observation, price, infrastructure_usd=infrastructure_usd
+                    )
                     is None
                 ):
                     reason = "usage_counts_missing"
@@ -254,7 +314,7 @@ async def record_selfhosted_usage(
         settled = await record_observation_usage(
             db,
             binding_id=binding_id,
-            observation=observation,
+            observation=billing_observation,
             tenant_id=tenant_id,
             platform_user_id=platform_user_id,
             pricing=None,
@@ -273,10 +333,11 @@ async def record_selfhosted_usage(
             key=receipt_key,
             revision=observation.revision,
             reason=reason,
+            native_model=observation.model,
         )
     if (outcome := current_outcome.get()) is not None:
         outcome.note_usage(
-            observation,
+            billing_observation,
             metered=True,
             provider_price=price,
             infrastructure_usd=infrastructure_usd,

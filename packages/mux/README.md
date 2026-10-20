@@ -95,6 +95,17 @@ prices or measurements cannot establish actual spend. A native collector must
 prove the scope before delegation is enabled; this API does not register a
 profile or lift the delegation-disabled host restriction.
 
+The host's `daimon.core.selfhosted_usage` consumes selfhosted incremental
+model-request observations through the transactional usage outbox and credit
+ledger. Before model I/O, runtime admission must persist the deployment,
+underlying model and effective tariff; the recorder settles from that snapshot,
+never current deployment mappings. Deployment/model aliases share the admitted
+underlying-model accounting identity across revisions. Native meters stay
+unchanged and receipt context retains the original aliases. Unknown usage and
+pricing gaps remain pending, visible in the paginated `daimon usage pending`
+report. This host API does not enable execution by itself, and mux continues
+to import no Daimon code.
+
 Conformance adapters can declare individual fixtures PENDING with typed capability,
 live-key or dependency reasons. Declarations remain visible and never certify.
 The host can consume durable accounting outbox rows through its existing database

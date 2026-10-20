@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from daimon.core.config import SelfhostedBillingSettings, SelfhostedModelPrice, Settings
 from daimon.core.selfhosted_usage import (
+    SelfhostedTariffAdmission,
     admit_selfhosted_usage,
     record_selfhosted_usage,
     require_selfhosted_price,
@@ -273,6 +274,110 @@ async def test_missing_admission_preserves_receipt_for_reconciliation(sessions):
     assert gaps[0].reason == "admission_missing"
 
 
+@pytest.mark.parametrize("initial_key", [None, "wrong-key"])
+@pytest.mark.parametrize("initial_model", [None, "coke-production", "underlying-model"])
+async def test_unassociated_receipt_adopts_existing_admission_once(
+    sessions, initial_key, initial_model
+):
+    usage = observation(
+        model=ModelRef(provider="selfhosted", id=initial_model) if initial_model else None
+    )
+    assert not await record(sessions, usage, admission_key=initial_key)
+    assert (await pending(sessions))[0].reason == "admission_missing"
+    # Model-less usage needs a measured correction with the recovered identity.
+    repaired = observation(
+        revision=2 if initial_model is None else 1,
+        model=ModelRef(provider="selfhosted", id="coke-production"),
+    )
+    assert await record(sessions, repaired)
+    assert await balance(sessions) == Decimal("-0.004050")
+    expensive = billing()
+    expensive.models["underlying-model"][0] = expensive.models["underlying-model"][0].model_copy(
+        update={"input": Decimal("20"), "output": Decimal("100")}
+    )
+    await admit(sessions, settings=expensive, key="different-admission")
+    correction = repaired.model_copy(
+        update={
+            "revision": repaired.revision + 1,
+            "output_tokens": 200,
+            "model": ModelRef(provider="selfhosted", id="underlying-model"),
+        }
+    )
+    assert await record(sessions, correction, admission_key="different-admission")
+    assert await balance(sessions) == Decimal("-0.005550")
+    assert not await record(sessions, correction)
+    assert await pending(sessions) == []
+    key = contexts.context_key("receipt", "selfhosted-binding", usage.id)
+    async with sessions() as db:
+        saved = await contexts.read_context(
+            db, tenant_id=TENANT, binding_id="selfhosted-binding", key=key
+        )
+    assert saved["admission"]["admission_key"] == "turn-admission-1"
+    assert saved["native_models"]["1"] == (
+        usage.model.model_dump(mode="json") if usage.model else None
+    )
+
+
+@pytest.mark.parametrize("lag_ms, expected", [(300, True), (5000, True), (5001, False)])
+async def test_harness_clock_lag_uses_frozen_tolerance(sessions, lag_ms, expected):
+    usage = observation(observed_at=NOW - timedelta(milliseconds=lag_ms))
+    assert await record(sessions, usage) is expected
+    assert await balance(sessions) == (Decimal("-0.004050") if expected else 0)
+    if not expected:
+        assert (await pending(sessions))[0].reason == "admission_after_request"
+
+
+async def test_clock_tolerance_is_configurable_and_frozen_at_admission(sessions):
+    strict = billing()
+    strict.admission_clock_skew_s = 0
+    admitted = await admit(sessions, settings=strict, key="strict")
+    assert admitted.admission_clock_skew_s == 0
+    assert not await record(
+        sessions,
+        observation(observed_at=NOW - timedelta(milliseconds=300)),
+        admission_key="strict",
+    )
+    assert (await pending(sessions))[0].reason == "admission_after_request"
+    assert (await admit(sessions, key="strict")).admission_clock_skew_s == 0
+
+
+async def test_wrong_existing_admission_does_not_pin_receipt(sessions):
+    other = billing()
+    other.models["other-model"] = other.models["underlying-model"]
+    other.deployments["other-deployment"] = "other-model"
+    await admit(sessions, settings=other, key="wrong-existing", deployment="other-deployment")
+    assert not await record(sessions, observation(), admission_key="wrong-existing")
+    assert (await pending(sessions))[0].reason == "model_mismatch"
+    assert await record(sessions, observation())
+    assert await balance(sessions) == Decimal("-0.004050")
+
+
+async def test_adoption_cannot_hide_original_request_before_admission(sessions):
+    early = observation(observed_at=NOW - timedelta(seconds=10))
+    assert not await record(sessions, early, admission_key=None)
+    # A later correction timestamp cannot validate an admission made too late
+    # for the original request, even if the correction itself is recent.
+    assert not await record(sessions, observation(revision=2))
+    assert await balance(sessions) == 0
+    assert (await pending(sessions))[0].reason == "tariff_context_invalid"
+    key = contexts.context_key("receipt", "selfhosted-binding", early.id)
+    async with sessions() as db:
+        saved = await contexts.read_context(
+            db, tenant_id=TENANT, binding_id="selfhosted-binding", key=key
+        )
+    assert saved["admission"] is None
+
+
+async def test_concurrent_adoption_settles_once(sessions):
+    usage = observation(model=ModelRef(provider="selfhosted", id="coke-production"))
+    assert not await record(sessions, usage, admission_key=None)
+    assert sorted(await asyncio.gather(record(sessions, usage), record(sessions, usage))) == [
+        False,
+        True,
+    ]
+    assert await balance(sessions) == Decimal("-0.004050")
+
+
 async def test_deployment_remap_never_changes_admitted_tariff_or_corrections(sessions):
     original = await admit(sessions)
     settings = billing()
@@ -296,6 +401,97 @@ async def test_deployment_remap_never_changes_admitted_tariff_or_corrections(ses
     assert await record(sessions, usage.model_copy(update={"revision": 2, "output_tokens": 200}))
     assert await balance(sessions) == Decimal("-0.005550")
     assert not await record(sessions, usage)
+
+
+async def test_restarted_recorder_uses_persisted_tariff_not_remapped_deployment(sessions):
+    usage = observation(
+        model=ModelRef(provider="selfhosted", id="coke-production"),
+        input_cached_tokens=0,
+        output_tokens=20,
+        output_reasoning_tokens=0,
+    )
+    assert not await record(sessions, usage, infrastructure_usd=None, markup=Decimal(1))
+    remapped = billing()
+    remapped.models["new-model"] = [
+        SelfhostedModelPrice(
+            effective_from=date(2026, 1, 1), input="10", output="50", cache_read="0"
+        )
+    ]
+    remapped.deployments["coke-production"] = "new-model"
+    assert require_selfhosted_price(remapped, "coke-production").input == 10
+    # Recreate the factory, as recovery does, without retaining an admission object.
+    recovered_sessions = async_sessionmaker(sessions.kw["bind"], expire_on_commit=False)
+    recovered = await admit(recovered_sessions, settings=remapped)
+    assert recovered.underlying_model == "underlying-model"
+    assert recovered.tariff_effective_from == date(2026, 1, 1)
+    # Earlier snapshots hold the same date inside their saved tariff.
+    legacy = recovered.model_dump(mode="json", exclude={"tariff_effective_from"})
+    assert SelfhostedTariffAdmission.model_validate(legacy).price() == recovered.price()
+    key = contexts.context_key("receipt", "selfhosted-binding", usage.id)
+    async with recovered_sessions() as db:
+        saved = await contexts.read_context(
+            db, tenant_id=TENANT, binding_id="selfhosted-binding", key=key
+        )
+    assert saved["admission"]["deployment"] == "coke-production"
+    assert saved["admission"]["underlying_model"] == "underlying-model"
+    assert saved["admission"]["tariff_effective_from"] == "2026-01-01"
+    # The receipt association alone suffices; no live settings or key are needed.
+    assert await record(recovered_sessions, usage, admission_key=None, markup=Decimal(1))
+    assert await balance(recovered_sessions) == Decimal("-0.002200")
+    assert not await record(recovered_sessions, usage, admission_key=None, markup=Decimal(1))
+    assert await balance(recovered_sessions) == Decimal("-0.002200")
+
+
+@pytest.mark.parametrize("completeness", ["unknown", "measured"])
+@pytest.mark.parametrize(
+    ("first_model", "next_model"),
+    [
+        ("coke-production", "underlying-model"),
+        ("underlying-model", "coke-production"),
+        (None, "coke-production"),
+    ],
+)
+async def test_alias_changes_retain_canonical_accounting_identity(
+    sessions, first_model, next_model, completeness
+):
+    from daimon.core._models import AccountingOutbox
+    from mux.state.usage_ledger import OutboxRow
+    from sqlalchemy import select
+
+    first = observation(
+        completeness=completeness,
+        model=ModelRef(provider="selfhosted", id=first_model) if first_model else None,
+    )
+    assert await record(sessions, first) is (completeness == "measured" and first_model is not None)
+    corrected = observation(
+        revision=2,
+        output_tokens=200,
+        model=ModelRef(provider="selfhosted", id=next_model),
+    )
+    assert await record(sessions, corrected)
+    assert await balance(sessions) == Decimal("-0.005550")
+    assert not await record(sessions, corrected)
+    assert not await record(sessions, first)
+    assert await balance(sessions) == Decimal("-0.005550")
+    assert await pending(sessions) == []
+    # Keep source aliases for audit while native token meters stay untouched.
+    key = contexts.context_key("receipt", "selfhosted-binding", first.id)
+    async with sessions() as db:
+        saved = await contexts.read_context(
+            db, tenant_id=TENANT, binding_id="selfhosted-binding", key=key
+        )
+        bodies = await db.scalars(
+            select(AccountingOutbox.row).where(AccountingOutbox.tenant_id == TENANT)
+        )
+        captured = [OutboxRow.model_validate(body).observation for body in bodies]
+    assert len(captured) == 2
+    assert all(value.model.id == "underlying-model" for value in captured)
+    assert all(value.native_meter == first.native_meter for value in captured)
+    assert saved["native_models"]["1"] == (
+        first.model.model_dump(mode="json") if first.model else None
+    )
+    assert saved["native_models"]["2"] == corrected.model.model_dump(mode="json")
+    assert first.native_meter == corrected.native_meter == {"request_id": "request-1"}
 
 
 async def test_rate_change_and_removal_cannot_reprice_pending_receipt(sessions):

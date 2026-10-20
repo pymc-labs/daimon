@@ -1907,6 +1907,23 @@ Streaming status previews and MCP `send_message` remain plain text. Tables insid
 code fences remain literal examples. Other adapters need no renderer changes.
 
 
+### Selfhosted usage reconciliation
+
+Selfhosted billing has a separate transactional path in
+`daimon.core.selfhosted_usage`. The runtime must call its tariff admission API
+before paid model work; this API does not enable the reserved profile by itself.
+Admission saves the deployment, underlying model and effective tariff in the
+operation store. The recorder uses that snapshot for request-level settlement
+and corrections, with one underlying-model accounting identity across native
+deployment/model aliases. Unknown usage or unverified pricing stays pending.
+
+Operators inspect these gaps with `daimon usage pending TENANT_UUID --json`.
+The content-free report includes reasons, tenant-bound cursor pagination and
+an explicit truncation flag; malformed rows are flagged without hiding other
+requests. It is read-only: runtime replay supplies authoritative repairs.
+See [selfhosted billing](billing.md#selfhosted-azure-usage) for admission and
+reconciliation details.
+
 ### Durable turn outcomes
 
 `turn_outcomes` stores one content-free terminal record per logical turn. A UUID

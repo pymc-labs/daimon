@@ -1343,6 +1343,18 @@ class SelfhostedBillingSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    admission_clock_skew_s: float = Field(
+        default=5,
+        ge=0,
+        le=60,
+        allow_inf_nan=False,
+        description=(
+            "Maximum harness clock lag in seconds when associating usage with an existing "
+            "tariff admission. Frozen at admission; default 5, maximum 60. "
+            "This tolerance never creates an admission or selects current prices."
+        ),
+    )
+
     deployments: dict[str, str] = Field(
         default_factory=dict,
         description=(

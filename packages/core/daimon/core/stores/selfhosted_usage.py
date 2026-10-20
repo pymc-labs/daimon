@@ -12,13 +12,20 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from daimon.core._models import JournalSession, MuxOperation, ProviderBinding
-from mux.contracts.ids import ResourceRef
+from daimon.core._models import (
+    AccountingOutbox,
+    JournalSession,
+    MuxOperation,
+    ProviderBinding,
+    UsageObservation,
+)
+from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.receipts import Operation
 from mux.errors import ScopeViolation
 from mux.state.operations import OperationRecord
+from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import JsonValue
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,6 +118,99 @@ async def create_context(
     return result
 
 
+async def adopt_admission(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    binding_id: str,
+    key: str,
+    observation_id: str,
+    admission: dict[str, JsonValue],
+    deployment: str,
+    model: ModelRef,
+    earliest_observed_at: datetime,
+) -> dict[str, JsonValue]:
+    """Associate an unpriced receipt once, before any settlement.
+
+    Only host accounting model aliases in unclaimed rows are normalised. Token
+    counts, native meters and source aliases remain intact. The caller validates
+    the existing admission against the receipt before entering this transition.
+    """
+    original = await read_context(
+        session, tenant_id=tenant_id, binding_id=binding_id, key=key, lock=True
+    )
+    if original is None:
+        raise ValueError("receipt context must exist before admission adoption")
+    if original.get("admission") is not None or original.get("invalid_context") is not None:
+        return original
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"mux.usage\x1f{binding_id}\x1f{observation_id}"},
+    )
+    # Match the accounting producer's lock order before examining its rows.
+    from daimon.core.stores.accounting_outbox import lock_provider_billing
+
+    await lock_provider_billing(session, binding_id)
+    outbox = list(
+        await session.scalars(
+            select(AccountingOutbox).where(
+                AccountingOutbox.tenant_id == tenant_id,
+                AccountingOutbox.binding_id == binding_id,
+                AccountingOutbox.observation_id == observation_id,
+            )
+        )
+    )
+    observations = list(
+        await session.scalars(
+            select(UsageObservation).where(
+                UsageObservation.tenant_id == tenant_id,
+                UsageObservation.binding_id == binding_id,
+                UsageObservation.observation_id == observation_id,
+            )
+        )
+    )
+    saved_outbox = [OutboxRow.model_validate(row.row) for row in outbox]
+    saved_usage = [AppliedUsage.model_validate(row.applied) for row in observations]
+    if any(row.applied_at is not None for row in outbox) or any(
+        value.observation.observed_at < earliest_observed_at
+        or (
+            value.observation.model is not None
+            and value.observation.model
+            not in (model, ModelRef(provider="selfhosted", id=deployment))
+        )
+        for value in [*saved_outbox, *saved_usage]
+    ):
+        raise ValueError("admission cannot replace a settled or unrelated billing identity")
+    for row, value in zip(outbox, saved_outbox, strict=True):
+        row.row = value.model_copy(
+            update={"observation": value.observation.model_copy(update={"model": model})}
+        ).model_dump(mode="json")
+    for usage_row, usage in zip(observations, saved_usage, strict=True):
+        usage_row.applied = usage.model_copy(
+            update={"observation": usage.observation.model_copy(update={"model": model})}
+        ).model_dump(mode="json")
+    body = await session.scalar(
+        select(MuxOperation.record).where(
+            MuxOperation.tenant_id == tenant_id,
+            MuxOperation.account_id == context_account(binding_id),
+            MuxOperation.key == key,
+        )
+    )
+    record = OperationRecord.model_validate(body)
+    result: dict[str, JsonValue] = {**original, "admission": admission}
+    await session.execute(
+        update(MuxOperation)
+        .where(
+            MuxOperation.tenant_id == tenant_id,
+            MuxOperation.account_id == context_account(binding_id),
+            MuxOperation.key == key,
+        )
+        .values(record=record.model_copy(update={"result": result}).model_dump(mode="json"))
+    )
+    await session.flush()
+    return result
+
+
 async def note_pending_reason(
     session: AsyncSession,
     *,
@@ -119,8 +219,9 @@ async def note_pending_reason(
     key: str,
     revision: int,
     reason: str | None,
+    native_model: ModelRef | None,
 ) -> None:
-    """Update operational reasons only; admission and receipt snapshot stay immutable."""
+    """Save revision status and source aliases without replacing the admitted tariff."""
     query = select(MuxOperation.record).where(
         MuxOperation.tenant_id == tenant_id,
         MuxOperation.account_id == context_account(binding_id),
@@ -150,7 +251,16 @@ async def note_pending_reason(
     prior = record.result.get("pending_reasons")
     reasons: dict[str, JsonValue] = dict(prior) if isinstance(prior, dict) else {}
     reasons[str(revision)] = reason
-    result: dict[str, JsonValue] = {**record.result, "pending_reasons": reasons}
+    prior_models = record.result.get("native_models")
+    models: dict[str, JsonValue] = dict(prior_models) if isinstance(prior_models, dict) else {}
+    models.setdefault(
+        str(revision), native_model.model_dump(mode="json") if native_model is not None else None
+    )
+    result: dict[str, JsonValue] = {
+        **record.result,
+        "pending_reasons": reasons,
+        "native_models": models,
+    }
     record = record.model_copy(update={"result": result})
     await session.execute(
         update(MuxOperation)
