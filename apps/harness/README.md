@@ -298,7 +298,8 @@ verify that generically named credential mounts refuse startup.
 The offline `tests/test_interop_driver.py` suite connects the real mux driver to
 uvicorn on an ephemeral loopback port. It covers measured usage, tool writes,
 approval execution, cancellation, cursor recovery after a dropped reader,
-reconstructed-driver idempotent resend, and narrowed built-in/MCP permissions.
+reconstructed-driver idempotent resend, a fresh driver opening a stream before
+the first send, and narrowed built-in/MCP permissions.
 The MCP case uses a local HTTPS server and the real Agents SDK with a synthetic
 Azure response client; it checks the model's tool definitions and deliberately
 requests a denied tool to prove refusal. These tests run in the harness CI job.

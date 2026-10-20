@@ -221,7 +221,17 @@ async def mcp_turn_probe(
             # the driver can configure a credential-free public MCP connection here.
             # Startup captures the same operator binding used by direct SDK coverage.
             request.mcp_servers[0].headers_env = {}
-            async with serve_harness(tmp_path / "http-harness", AzureModelAdapter()) as running:
+            sdk = AzureModelAdapter()
+            monkeypatch.delenv("AZURE_OPENAI_API_KEY")
+            monkeypatch.delenv("HARNESS_MCP_CRED_SAMPLE")
+
+            class FakeResponsesAdapter:
+                # Azure HTTP is replaced above by the owned synthetic-response client.
+                # No service or model credentials are configured in test mode.
+                async def run(self, context, history):
+                    return await sdk.run(context, history)
+
+            async with serve_harness(tmp_path / "http-harness", FakeResponsesAdapter()) as running:
                 client, _, _ = running
                 driver, session = await driver_session(
                     client,
@@ -267,7 +277,12 @@ async def mcp_turn_probe(
                         and event.payload["call_id"] == "denied-call"
                     ]
                     assert len(denied) == 1 and denied[0].payload["is_error"]
+                    assert "denied" in str(denied[0].payload["content"]).lower()
                     assert executed == ["mcp-result"]
+                    usage = await driver.usage.reconcile(SCOPE, session.ref)
+                    assert calls == 2
+                    assert len(usage) == calls
+                    assert all(item.completeness == "measured" for item in usage)
                 finally:
                     await driver.aclose()
         else:
