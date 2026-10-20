@@ -81,16 +81,16 @@ def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, mon
     scratch.mkdir(mode=0o755)
     mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw\n")
     with pytest.raises(RuntimeError, match="hidepid"):
-        isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch)
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
     mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2\n")
     scratch.chmod(0o1777)
-    with pytest.raises(RuntimeError, match="/tmp not writable"):
-        isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch)
+    with pytest.raises(RuntimeError, match="not writable"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
     scratch.chmod(0o755)
-    assert isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch) == "multi"
+    assert isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,)) == "multi"
     monkeypatch.setattr(isolation, "can_switch_uid", lambda: False)
     with pytest.raises(RuntimeError, match="UID switching"):
-        isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch)
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
 
 
 def test_multi_app_refuses_startup_without_verified_isolation(tmp_path, monkeypatch):
@@ -107,3 +107,18 @@ def test_multi_app_refuses_startup_without_verified_isolation(tmp_path, monkeypa
     with pytest.raises(RuntimeError, match="hidepid"):
         create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
     assert not (tmp_path / ".daimon").exists()
+
+
+@pytest.mark.parametrize(
+    "location", ["var/tmp", "dev/shm", "run/lock", "var/lock", "volume/scratch"]
+)
+def test_multi_refuses_every_shared_scratch_directory(tmp_path, location):
+    from daimon_harness.isolation import validate_shared_directories
+
+    scratch = tmp_path / location
+    scratch.mkdir(parents=True)
+    scratch.chmod(0o1777)
+    with pytest.raises(RuntimeError, match="not writable"):
+        validate_shared_directories((tmp_path,))
+    scratch.chmod(0o755)
+    validate_shared_directories((tmp_path,))

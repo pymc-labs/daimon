@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 from mux.drivers.selfhosted.wire import (
@@ -173,38 +173,70 @@ class TurnContext:
             },
         )
         self.process_groups.add(process.pid)
+        tail = bytearray()
+        truncated = False
+
+        async def drain() -> None:
+            nonlocal truncated
+            assert process.stdout is not None
+            while chunk := await process.stdout.read(65_536):
+                tail.extend(chunk)
+                if len(tail) > 262_144:
+                    truncated = True
+                    del tail[:-262_144]
+
+        reader = asyncio.create_task(drain())
         try:
             async with asyncio.timeout(min(300, self.request.limits.deadline_s)):
-                assert process.stdout is not None
-                tail = bytearray()
-                truncated = False
-                while chunk := await process.stdout.read(65_536):
-                    tail.extend(chunk)
-                    if len(tail) > 262_144:
-                        truncated = True
-                        del tail[:-262_144]
-                await process.wait()
-                marker = "[output truncated]\n" if truncated else ""
-                return f"exit_code={process.returncode}\n{marker}{tail.decode(errors='replace')}"
+                # Process.wait() can also wait for inherited stdout pipes. The
+                # return code is set at SIGCHLD independently of pipe closure.
+                while process.returncode is None:
+                    await asyncio.sleep(0.01)
         finally:
-            # Also reap detached background jobs after a successful command.
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.communicate()
-            self.process_groups.discard(process.pid)
+            try:
+                self.stop_processes()
+            finally:
+                # A held stdout must never keep cancellation or completion open.
+                transport = cast(
+                    asyncio.SubprocessTransport,
+                    getattr(cast(object, process), "_transport"),  # noqa: B009 - absent from typeshed
+                )
+                try:
+                    async with asyncio.timeout(2):
+                        await reader
+                except TimeoutError:
+                    pass
+                finally:
+                    transport.close()
+                    reader.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await reader
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(process.communicate(), timeout=2)
+                    self.process_groups.discard(process.pid)
+        marker = "[output truncated]\n" if truncated else ""
+        return f"exit_code={process.returncode}\n{marker}{tail.decode(errors='replace')}"
 
     def stop_processes(self) -> None:
-        for pid in self.process_groups:
-            with suppress(ProcessLookupError):
-                os.killpg(pid, signal.SIGKILL)
         if can_switch_uid():
-            # A child can start a new session and leave its original process group.
-            # The session-specific UID also seals those descendants at turn end.
-            for entry in Path("/proc").iterdir():
-                if entry.name.isdigit():
-                    with suppress(ProcessLookupError, FileNotFoundError):
-                        if entry.stat().st_uid == self.tool_uid:
-                            os.kill(int(entry.name), signal.SIGKILL)
+            # kill(-1) excludes the caller and reaches setsid descendants even
+            # under hidepid. Never run this as the service or test runner UID.
+            subprocess.run(
+                [sys.executable, "-I", str(Path(__file__).with_name("kill_uid.py"))],
+                user=self.tool_uid,
+                group=self.tool_uid,
+                extra_groups=[],
+                env={},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=True,
+            )
+        else:
+            for pid in self.process_groups:
+                with suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
 
     def file_operation(
         self, operation: str, path: str, *, content: str = "", old: str = "", new: str = ""

@@ -27,8 +27,8 @@ custom container, and route every call for that session to its sandbox identifie
 The service takes a process lease to prevent two workers operating on one journal.
 
 `HARNESS_SESSION_MODE=multi` requires a `/proc` mount with `hidepid=2` or
-`hidepid=invisible`, no exempt proc group, UID switching, and a shared `/tmp` that
-is not writable by any tool UID (including ACL grants). Unsafe configurations
+`hidepid=invisible`, no exempt proc group, UID switching, and shared scratch directories that
+are not writable by any tool UID (including ACL grants). Unsafe configurations
 refuse startup. Session UIDs are allocated persistently from 10001 through 60000;
 exhaustion refuses further sessions. Each session has private `work` and `tmp`
 directories: tool HOME and cwd use `work`, and TMPDIR uses `tmp`. A writable global
@@ -242,3 +242,13 @@ origin. Operator bindings require an exact HTTPS origin.
 Tenant UUIDs are checked by the host builder; `["*"]` is for single-tenant installs
 only. Provision host and harness lists from the same operator source. The virtual
 Daimon credential continues to use its separate reserved-URL binding.
+
+Multi-session startup scans writable storage mounts for shared directories
+writable by tool identities (including `/tmp`, `/var/tmp`, `/dev/shm`, and
+`/run/lock`/`/var/lock`). Writable mode bits or ACLs refuse startup; provision
+these locations without shared write access. Tools use their private `TMPDIR`.
+At command and turn completion, cancellation, and timeout, a helper under the
+session UID kills all that UID's processes, including detached descendants,
+without relying on procfs visibility. It retries until `ESRCH` or a bounded
+retry deadline (Linux may return success when only inaccessible UIDs remain). Pipe draining and process waits are bounded.
+The container runs tini as PID 1 to reap orphaned descendants.

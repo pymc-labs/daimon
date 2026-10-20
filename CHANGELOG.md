@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
+- Refuse shared writable scratch in multi-session harnesses, kill detached tool descendants at completion, and reap orphan processes with tini.
 
 - Bind self-hosted MCP credentials to operator-declared HTTPS origins and tenants, cap per-turn tokens at one hour, and recognize built-in skills without source metadata.
 - Bind the self-hosted harness to one session by default; require verified process and temporary-file isolation for multi-session service.

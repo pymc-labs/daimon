@@ -2,8 +2,9 @@
 
 import asyncio
 import os
-import shlex
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from daimon_harness.isolation import validate_session_mode
@@ -19,8 +20,18 @@ async def main() -> None:
     secret = "synthetic-runtime-secret"
     os.environ["HARNESS_TOKEN"] = secret
     os.environ["AZURE_OPENAI_API_KEY"] = secret
+    if os.environ.get("HARNESS_SESSION_MODE") == "multi":
+        for scratch in (Path("/var/tmp"), Path("/dev/shm")):
+            scratch.chmod(0o1777)
+            try:
+                validate_session_mode()
+                raise AssertionError(f"accepted writable {scratch}")
+            except RuntimeError as exc:
+                assert str(scratch) in str(exc), str(exc)
+            finally:
+                scratch.chmod(0o755)
     app = create_app(home=home)
-    mode = validate_session_mode()
+    mode = app.state.supervisor.session_mode
     assert os.geteuid() == 10000
     journal: Journal = app.state.supervisor.journal
     contexts: list[TurnContext] = []
@@ -84,16 +95,17 @@ async def main() -> None:
             "import os,time; from pathlib import Path; "
             'Path(os.environ["TMPDIR"], "ready").write_text(str(os.getpid())); time.sleep(30)'
         )
-        pid_output = await first.bash(
-            f"setsid {shlex.quote(sys.executable)} -c {shlex.quote(sleeper)} "
-            "private-command-marker >/dev/null 2>&1 & "
-            'while [ ! -f "$TMPDIR/ready" ]; do sleep 0.01; done; cat "$TMPDIR/ready"'
+        process = subprocess.Popen(
+            [sys.executable, "-c", sleeper, "private-command-marker"],
+            user=first.tool_uid,
+            group=first.tool_uid,
+            extra_groups=[],
+            env={"TMPDIR": str(first.home / "tmp")},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        pid = int(pid_output.splitlines()[1])
+        pid = process.pid
         try:
-            own = await first.bash(f'cat /proc/{pid}/cmdline; cat "$TMPDIR/report"')
-            assert "private-command-marker" in own, own
-            assert "private-tmp" in own, own
             output = await second.bash(
                 f"cat {first.home}/tmp/report /proc/{pid}/cmdline 2>/dev/null; "
                 "test -w /tmp && echo global-tmp-writable; echo isolated"
@@ -103,7 +115,8 @@ async def main() -> None:
             assert "global-tmp-writable" not in output, output
             assert "isolated" in output, output
         finally:
-            os.kill(pid, 9)
+            process.kill()
+            process.wait(timeout=2)
     # A detached tool process races parent-directory replacement while the service
     # asks the file helper to read/write/edit. The private target is service-owned.
     protected = journal.root / "race-target"
@@ -122,8 +135,14 @@ async def main() -> None:
         " race.unlink()\n"
         " parked.rename(race)\n"
     )
-    await first.bash(
-        f"setsid {shlex.quote(sys.executable)} -c {shlex.quote(race_script)} >/dev/null 2>&1 &"
+    racer = subprocess.Popen(
+        [sys.executable, "-c", race_script],
+        user=first.tool_uid,
+        group=first.tool_uid,
+        extra_groups=[],
+        env={},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         for _ in range(30):
@@ -140,6 +159,54 @@ async def main() -> None:
         assert private.read_text() == "inside-private-journal-secret"
     finally:
         first.stop_processes()
+        racer.wait(timeout=2)
+    # Escaped descendants must die at command end, timeout and cancellation,
+    # with inherited stdout as well as redirected output, in both modes.
+    for redirected in (False, True):
+        for ending in ("success", "timeout", "cancel"):
+            marker = f"child-pid-{redirected}-{ending}"
+            suffix = ">/dev/null 2>&1" if redirected else ""
+            command = f"setsid sleep infinity {suffix} & echo $! > {marker}"
+            if ending != "success":
+                command += "; wait"
+            first.request.limits.deadline_s = 0.2 if ending == "timeout" else 5
+            started = time.monotonic()
+            task = asyncio.create_task(first.bash(command))
+            if ending == "cancel":
+                while True:
+                    try:
+                        first.read(marker)
+                        break
+                    except ValueError:
+                        await asyncio.sleep(0.01)
+                task.cancel()
+            try:
+                await asyncio.wait_for(task, 4)
+                assert ending == "success"
+            except (TimeoutError, asyncio.CancelledError):
+                assert ending != "success"
+            assert time.monotonic() - started < 4
+            pid = int(first.read(marker))
+            # Probe as the owner: hidepid prevents the service from enumerating it.
+            async with asyncio.timeout(1):
+                while True:
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import os,sys; os.kill(int(sys.argv[1]), 0)",
+                            str(pid),
+                        ],
+                        user=first.tool_uid,
+                        group=first.tool_uid,
+                        extra_groups=[],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                    )
+                    if result.returncode != 0:
+                        break
+                    await asyncio.sleep(0.01)
     await app.state.supervisor.close()
 
 

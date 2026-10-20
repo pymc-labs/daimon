@@ -351,7 +351,7 @@ jobs:
             -e HARNESS_SESSION_MODE=multi \
             -v "$PWD/apps/harness/tests/image_probe.py:/tmp/image_probe.py:ro" \
             daimon-harness:test bash -c \
-            'mount -o remount,hidepid=2 /proc && chmod 755 /tmp && exec python /tmp/image_probe.py'
+            'mount -o remount,hidepid=2 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python /tmp/image_probe.py'
 
   # Unique candidate tags are deliberately not the 7-char SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;

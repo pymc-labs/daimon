@@ -52,6 +52,12 @@ The record schema also accepts Foundry routing with
 `--transport foundry_invocations --agent-name <hosted-agent>` and
 `--project-endpoint <project-endpoint>`, with `--auth-mode entra` and
 `--auth-ref <audience>`. Both routing fields are required for that transport.
+The harness image runs tini as PID 1 to reap orphaned tool processes. Custom
+entrypoints must retain that reaper. Multi-session service additionally requires
+all shared scratch directories, including `/var/tmp` and `/dev/shm`, to deny tool
+UID writes; startup scans writable storage mounts and refuses unsafe directories.
+Tools use private per-session temporary directories.
+
 Current deployments use direct transport; the harness refuses unsigned Foundry
 gateway authentication. Direct `/v0/*` requests are the default transport. HTTPS is required outside
 loopback. `--allow-insecure-http` explicitly permits HTTP on internal service

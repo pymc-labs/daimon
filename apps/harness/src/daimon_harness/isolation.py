@@ -27,7 +27,7 @@ def proc_hides_other_users(mountinfo: Path = Path("/proc/self/mountinfo")) -> bo
 
 
 def validate_session_mode(
-    *, mountinfo: Path = Path("/proc/self/mountinfo"), shared_tmp: Path = Path("/tmp")
+    *, mountinfo: Path = Path("/proc/self/mountinfo"), shared_roots: tuple[Path, ...] | None = None
 ) -> Literal["single", "multi"]:
     mode = os.environ.get("HARNESS_SESSION_MODE", "single")
     if mode not in {"single", "multi"}:
@@ -35,15 +35,9 @@ def validate_session_mode(
     if mode == "multi" and os.environ.get("HARNESS_TEST_MODE") != "1":
         if not can_switch_uid() or not proc_hides_other_users(mountinfo):
             raise RuntimeError("multi session mode requires UID switching and hidepid=2 /proc")
-        info = shared_tmp.stat()
-        # Refuse writable global scratch, including ACL grants that mode bits hide.
-        if (
-            info.st_mode & stat.S_IWOTH
-            or TOOL_UID_MIN <= info.st_uid <= TOOL_UID_MAX
-            or (info.st_mode & stat.S_IWGRP and TOOL_UID_MIN <= info.st_gid <= TOOL_UID_MAX)
-            or "system.posix_acl_access" in os.listxattr(shared_tmp)
-        ):
-            raise RuntimeError("multi session mode requires /tmp not writable by tool UIDs")
+        validate_shared_directories(
+            shared_storage_roots(mountinfo) if shared_roots is None else shared_roots
+        )
     return "single" if mode == "single" else "multi"
 
 
@@ -158,3 +152,61 @@ def prepare_service(home: Path) -> None:
         raise OSError(ctypes.get_errno(), "cannot configure service identity capabilities")
     if not can_switch_uid():
         raise RuntimeError("service identity switching unavailable")
+
+
+def _scan_error(error: OSError) -> None:
+    raise RuntimeError("cannot verify shared storage isolation") from error
+
+
+def shared_storage_roots(mountinfo: Path) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for line in mountinfo.read_text().splitlines():
+        mount, _, filesystem = line.partition(" - ")
+        fields, backing = mount.split(), filesystem.split()
+        if "rw" in fields[5].split(",") and backing[0] not in {
+            "proc",
+            "sysfs",
+            "cgroup",
+            "cgroup2",
+            "devpts",
+            "mqueue",
+        }:
+            path = Path(fields[4].replace(r"\040", " ").replace(r"\134", "\\"))
+            if path.is_dir():
+                roots.append(path)
+    return tuple(roots)
+
+
+def validate_shared_directories(roots: tuple[Path, ...]) -> None:
+    """Refuse shared writable storage, including mounted volumes and ACLs."""
+    seen: set[tuple[int, int]] = set()
+    for root in roots:
+        for directory, children, _ in os.walk(root, followlinks=False, onerror=_scan_error):
+            path = Path(directory)
+            # Mounts are scanned separately; never descend into proc/sysfs.
+            children[:] = [name for name in children if not (path / name).is_mount()]
+            info = path.stat()
+            identity = (info.st_dev, info.st_ino)
+            if identity in seen:
+                children.clear()
+                continue
+            seen.add(identity)
+            # A service-owned session boundary grants traversal only to its
+            # assigned group. Its private writable children are not shared.
+            if (
+                not TOOL_UID_MIN <= info.st_uid <= TOOL_UID_MAX
+                and TOOL_UID_MIN <= info.st_gid <= TOOL_UID_MAX
+                and info.st_mode & 0o027 == 0
+                and "system.posix_acl_access" not in os.listxattr(path)
+            ):
+                children.clear()
+                continue
+            if (
+                info.st_mode & stat.S_IWOTH
+                or TOOL_UID_MIN <= info.st_uid <= TOOL_UID_MAX
+                or (info.st_mode & stat.S_IWGRP and TOOL_UID_MIN <= info.st_gid <= TOOL_UID_MAX)
+                or "system.posix_acl_access" in os.listxattr(path)
+            ):
+                raise RuntimeError(
+                    f"multi session mode requires shared directory {path} not writable by tool UIDs"
+                )
